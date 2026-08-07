@@ -175,10 +175,13 @@ The arithmetic operators currently recognized by stapler are:
 
 Multiplication and division bind more tightly than addition and subtraction.
 
-## Lists
+### Lists
 
-Parentheses construct a list. A list plays the role commonly filled by tuples
-in other languages.
+The staple list is its single fixed-size product type. Lists replace tuples,
+structs, records, and fixed-size arrays found in other languages. A list has an
+ordered, fixed number of elements, and its elements may have different types.
+
+Parentheses construct a list:
 
 ```staple
 ()          // a nullary list
@@ -187,6 +190,46 @@ in other languages.
 ```
 
 Parentheses are therefore not grouping syntax in the current design.
+
+#### Named elements
+
+Every list element may optionally have a name. Names are written before the
+element type in a list type:
+
+```staple
+let args: (name: string, int)
+```
+
+Here, `args` is a two-element list. Its first element is named `name` and has
+type `string`; its second element is unnamed and has type `int`.
+
+Names may likewise be supplied when constructing a list value:
+
+```staple
+let args = (name: "staple", 1)
+```
+
+Named and unnamed elements can be mixed in the same list. Whether names must be
+unique and whether a value's element names must exactly match its annotated
+type remain unspecified.
+
+#### Element access
+
+Every element can be accessed by its zero-based index. A named element can also
+be accessed by name:
+
+```staple
+let args: (name: string, int)
+
+args.name // the first element, accessed by name
+args.0    // the first element, accessed by index
+args.1    // the second element, accessed by index
+```
+
+Name and index access refer to the same underlying elements; names do not
+change the order or size of a list. Accessing an absent name or an index outside
+the list's fixed bounds is an error. Whether that error is always detected at
+compile time remains unspecified.
 
 ## Functions
 
@@ -310,6 +353,21 @@ meaning outside foreign declarations is currently unspecified.
 The built-in type set, mutability model for pointers, type inference rules, and
 type compatibility rules remain unspecified.
 
+### Type aliases
+
+`type alias` gives a name to an existing type. It is especially useful for
+named list types which would be structs or records in other languages:
+
+```staple
+type alias person = (
+    name: string,
+    age: i32,
+)
+```
+
+List types and values may have a trailing comma. Whether an alias is purely
+structural or introduces a distinct nominal type remains unspecified.
+
 ## Foreign declarations
 
 An `extern` block declares values supplied by a foreign ABI. The ABI name is a
@@ -336,12 +394,18 @@ extern "c" {
     let printf: (*const c_char, ...) -> i32
 }
 
+type alias person = (
+    name: string,
+    age: i32,
+)
+
 def main: _ -> i32 = () -> {
     printf ("hello, world!\n")
 }
 ```
 
-This program declares the external `printf` value and defines a hoisted `main`
-binding. The binding annotation requires an `i32` result and infers the input
-type. `main` contains a nullary function value whose block body applies `printf`
-to a one-element list and returns the result of that final expression.
+This program declares the external `printf` value, introduces `person` as an
+alias for a named two-element list type, and defines a hoisted `main` binding.
+The binding annotation requires an `i32` result and infers the input type.
+`main` contains a nullary function value whose block body applies `printf` to a
+one-element list and returns the result of that final expression.

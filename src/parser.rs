@@ -34,24 +34,12 @@ impl Grammar {
         Ok(self.node(NodeKind::SourceFile, start, children))
     }
 
-    // `or` at the grammar level: a failed alternative restores the cursor.
-    fn alternative<T>(
-        &mut self,
-        first: impl FnOnce(&mut Self) -> Result<T, ParseError>,
-        second: impl FnOnce(&mut Self) -> Result<T, ParseError>,
-    ) -> Result<T, ParseError> {
-        let checkpoint = self.position;
-        match first(self) {
-            Ok(value) => Ok(value),
-            Err(_) => {
-                self.position = checkpoint;
-                second(self)
-            }
-        }
-    }
-
     fn parse_declaration(&mut self) -> Result<SyntaxNode, ParseError> {
-        self.alternative(Self::parse_extern_block, Self::parse_binding)
+        match self.peek() {
+            Some(TokenKind::Extern) => self.parse_extern_block(),
+            Some(TokenKind::Type) => self.parse_type_alias(),
+            _ => self.parse_binding(),
+        }
     }
 
     fn parse_extern_block(&mut self) -> Result<SyntaxNode, ParseError> {
@@ -68,6 +56,16 @@ impl Grammar {
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
         Ok(self.node(NodeKind::ExternBlock, start, children))
+    }
+
+    fn parse_type_alias(&mut self) -> Result<SyntaxNode, ParseError> {
+        let start = self.position;
+        self.expect(TokenKind::Type, "expected `type`")?;
+        self.expect(TokenKind::Alias, "expected `alias` after `type`")?;
+        self.expect(TokenKind::Identifier, "expected type alias name")?;
+        self.expect(TokenKind::Equals, "expected `=` after type alias name")?;
+        let aliased_type = self.parse_type()?;
+        Ok(self.node(NodeKind::TypeAlias, start, vec![aliased_type]))
     }
 
     fn parse_binding(&mut self) -> Result<SyntaxNode, ParseError> {
@@ -115,7 +113,7 @@ impl Grammar {
                     self.expect(TokenKind::Identifier, "expected parameter name")?;
                     self.expect(TokenKind::Colon, "expected `:` after parameter name")?;
                     children.push(self.parse_atomic_type()?);
-                    if !self.eat(TokenKind::Comma) {
+                    if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                         break;
                     }
                 }
@@ -159,9 +157,15 @@ impl Grammar {
                     if self.eat(TokenKind::Ellipsis) {
                         // A variadic marker must be the final list item.
                     } else {
+                        if self.peek() == Some(TokenKind::Identifier)
+                            && self.peek_n(1) == Some(TokenKind::Colon)
+                        {
+                            self.bump();
+                            self.expect(TokenKind::Colon, "expected `:` after element name")?;
+                        }
                         self.parse_type()?;
                     }
-                    if !self.eat(TokenKind::Comma) {
+                    if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                         break;
                     }
                 }
@@ -195,16 +199,30 @@ impl Grammar {
 
     fn parse_call_expression(&mut self) -> Result<SyntaxNode, ParseError> {
         let start = self.position;
-        let callee = self.parse_atom()?;
+        let callee = self.parse_access_expression()?;
         let mut children = vec![callee];
         while self.starts_atom() {
-            children.push(self.parse_atom()?);
+            children.push(self.parse_access_expression()?);
         }
         if children.len() == 1 {
             Ok(children.pop().expect("one child"))
         } else {
             Ok(self.node(NodeKind::CallExpression, start, children))
         }
+    }
+
+    fn parse_access_expression(&mut self) -> Result<SyntaxNode, ParseError> {
+        let start = self.position;
+        let mut value = self.parse_atom()?;
+        while self.eat(TokenKind::Dot) {
+            let accessor = match self.peek() {
+                Some(TokenKind::Identifier) => self.leaf(NodeKind::NameExpression)?,
+                Some(TokenKind::Integer) => self.leaf(NodeKind::IntegerExpression)?,
+                _ => return Err(self.error("expected a list element name or index after `.`")),
+            };
+            value = self.node(NodeKind::AccessExpression, start, vec![value, accessor]);
+        }
+        Ok(value)
     }
 
     fn parse_atom(&mut self) -> Result<SyntaxNode, ParseError> {
@@ -241,8 +259,22 @@ impl Grammar {
         let mut children = Vec::new();
         if !self.at(TokenKind::RParen) {
             loop {
-                children.push(self.parse_expression()?);
-                if !self.eat(TokenKind::Comma) {
+                let element_start = self.position;
+                if self.peek() == Some(TokenKind::Identifier)
+                    && self.peek_n(1) == Some(TokenKind::Colon)
+                {
+                    self.bump();
+                    self.expect(TokenKind::Colon, "expected `:` after element name")?;
+                    let value = self.parse_expression()?;
+                    children.push(self.node(
+                        NodeKind::NamedListElement,
+                        element_start,
+                        vec![value],
+                    ));
+                } else {
+                    children.push(self.parse_expression()?);
+                }
+                if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                     break;
                 }
             }
@@ -279,9 +311,20 @@ impl Grammar {
     }
 
     fn peek(&self) -> Option<TokenKind> {
-        self.tokens[self.next_non_trivia(self.position)..]
-            .first()
-            .map(|token| token.kind)
+        self.peek_n(0)
+    }
+
+    fn peek_n(&self, n: usize) -> Option<TokenKind> {
+        let mut position = self.position;
+        for index in 0..=n {
+            position = self.next_non_trivia(position);
+            let token = self.tokens.get(position)?;
+            if index == n {
+                return Some(token.kind);
+            }
+            position += 1;
+        }
+        None
     }
 
     fn at(&self, kind: TokenKind) -> bool {

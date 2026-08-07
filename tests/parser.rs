@@ -7,12 +7,13 @@ fn parses_hello_world_losslessly() {
 
     assert_eq!(root.text(), source);
     assert_eq!(root.kind, NodeKind::SourceFile);
-    assert_eq!(root.children.len(), 2);
+    assert_eq!(root.children.len(), 3);
     assert_eq!(root.children[0].kind, NodeKind::ExternBlock);
-    assert_eq!(root.children[1].kind, NodeKind::DefBinding);
+    assert_eq!(root.children[1].kind, NodeKind::TypeAlias);
+    assert_eq!(root.children[2].kind, NodeKind::DefBinding);
 
-    let binding_type = &root.children[1].children[0];
-    let function = &root.children[1].children[1];
+    let binding_type = &root.children[2].children[0];
+    let function = &root.children[2].children[1];
     assert_eq!(binding_type.kind, NodeKind::Type);
     assert!(
         binding_type
@@ -67,4 +68,30 @@ fn arrow_is_always_followed_by_the_function_body() {
     assert_eq!(function.kind, NodeKind::FunctionValue);
     assert_eq!(function.children.len(), 2);
     assert_eq!(function.children[1].kind, NodeKind::CallExpression);
+}
+
+#[test]
+fn parses_named_list_types_values_and_access() {
+    let source = concat!(
+        "let args: (name: string, int)\n",
+        "def value = (name: \"staple\", 1)\n",
+        "def by_name = args.name\n",
+        "def by_index = args.1\n",
+    );
+    let root = parse(source).expect("named list syntax should parse");
+
+    assert_eq!(root.text(), source);
+    assert_eq!(root.children[0].children[0].kind, NodeKind::Type);
+    assert_eq!(
+        root.children[1].children[0].children[0].kind,
+        NodeKind::NamedListElement
+    );
+    assert_eq!(
+        root.children[2].children[0].kind,
+        NodeKind::AccessExpression
+    );
+    assert_eq!(
+        root.children[3].children[0].kind,
+        NodeKind::AccessExpression
+    );
 }
