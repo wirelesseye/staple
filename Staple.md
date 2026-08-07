@@ -363,8 +363,8 @@ staple distinguishes transparent aliases from distinct type definitions.
 with the same runtime representation as its underlying type:
 
 ```staple
-type user_id = int
-type order_id = int
+type UserId = int
+type OrderId = int
 ```
 
 `user_id`, `order_id`, and `int` are distinct types and are not implicitly
@@ -381,7 +381,7 @@ existing type without creating a new type. The alias and its underlying type
 are interchangeable:
 
 ```staple
-type alias person = (
+type alias Person = (
     name: string,
     age: i32,
 )
@@ -416,7 +416,7 @@ extern "c" {
     let printf: (*const c_char, ...) -> i32
 }
 
-type alias person = (
+type alias Person = (
     name: string,
     age: i32,
 )
@@ -426,7 +426,7 @@ def main: _ -> i32 = () -> {
 }
 ```
 
-This program declares the external `printf` value, introduces `person` as an
+This program declares the external `printf` value, introduces `Person` as an
 alias for a named two-element list type, and defines a hoisted `main` binding.
 The binding annotation requires an `i32` result and infers the input type.
 `main` contains a nullary function value whose block body applies `printf` to a
