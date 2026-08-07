@@ -11,6 +11,7 @@ struct Grammar {
     tokens: Vec<SyntaxToken>,
     position: usize,
     source_len: usize,
+    newline_terminates_expression: bool,
 }
 
 impl Grammar {
@@ -19,6 +20,7 @@ impl Grammar {
             tokens,
             position: 0,
             source_len,
+            newline_terminates_expression: false,
         }
     }
 
@@ -36,11 +38,25 @@ impl Grammar {
     }
 
     fn parse_item(&mut self) -> Result<Item, ParseError> {
-        match self.peek() {
+        let previous = self.newline_terminates_expression;
+        self.newline_terminates_expression = true;
+        let item = match self.peek() {
             Some(TokenKind::Extern) => self.parse_extern_block().map(Item::ExternBlock),
             Some(TokenKind::Type) => self.parse_type_declaration().map(Item::TypeDeclaration),
-            _ => self.parse_binding().map(Item::Binding),
-        }
+            Some(TokenKind::Let | TokenKind::Def) => self.parse_binding().map(Item::Binding),
+            _ => self.parse_expression_statement().map(Item::Statement),
+        };
+        self.newline_terminates_expression = previous;
+        item
+    }
+
+    fn parse_expression_statement(&mut self) -> Result<ExpressionStatement, ParseError> {
+        let start = self.position;
+        let expression = self.parse_expression()?;
+        Ok(ExpressionStatement {
+            syntax: self.syntax(start),
+            expression,
+        })
     }
 
     fn parse_extern_block(&mut self) -> Result<ExternBlock, ParseError> {
@@ -395,6 +411,9 @@ impl Grammar {
     }
 
     fn starts_atom(&self) -> bool {
+        if self.newline_terminates_expression && self.has_newline_before_next_token() {
+            return false;
+        }
         matches!(
             self.peek(),
             Some(
@@ -408,6 +427,9 @@ impl Grammar {
     }
 
     fn binary_operator(&self) -> Option<(u8, TokenKind, BinaryOperator)> {
+        if self.newline_terminates_expression && self.has_newline_before_next_token() {
+            return None;
+        }
         match self.peek()? {
             TokenKind::Plus => Some((1, TokenKind::Plus, BinaryOperator::Add)),
             TokenKind::Minus => Some((1, TokenKind::Minus, BinaryOperator::Subtract)),
@@ -475,6 +497,12 @@ impl Grammar {
             position += 1;
         }
         position
+    }
+
+    fn has_newline_before_next_token(&self) -> bool {
+        self.tokens[self.position..self.next_non_trivia(self.position)]
+            .iter()
+            .any(|token| token.kind == TokenKind::Newline)
     }
 
     fn syntax(&self, start: usize) -> Syntax {

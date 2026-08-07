@@ -79,6 +79,13 @@ pub enum Item {
     ExternBlock(ExternBlock),
     TypeDeclaration(TypeDeclaration),
     Binding(Binding),
+    Statement(ExpressionStatement),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpressionStatement {
+    pub syntax: Syntax,
+    pub expression: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

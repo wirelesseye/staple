@@ -79,11 +79,26 @@ The following details remain unspecified:
 
 staple source files use the `.sta` extension.
 
-Whitespace, newlines, and comments are not semantically significant in the
-syntax currently supported by stapler. They are nevertheless preserved by the
-parser, so parsing and reproducing a source file does not change its text.
+Whitespace and comments are preserved by the parser, so parsing and reproducing
+a source file does not change its text. Newlines also separate adjacent
+statements where they would otherwise form a single expression.
 
 Line comments begin with `//` and continue to the end of the line.
+
+### Top-level statements
+
+A source file may contain expression statements alongside bindings, type
+declarations, and foreign declarations:
+
+```staple
+extern "c" {
+    let printf: (*const c_char, ...) -> i32
+}
+
+printf ("hello, world!\n")
+```
+
+There is no distinguished entry-point function. 
 
 ## Bindings
 
@@ -122,13 +137,13 @@ binding is available throughout its containing scope, rather than becoming
 available only after the definition.
 
 ```staple
-def main: _ -> i32 = () -> {
+def greet = () -> {
     printf ("hello, world!\n")
 }
 ```
 
 `def` is not a function-declaration keyword. It can bind any value. In the
-example above, the value assigned to `main` happens to be a function value.
+example above, the value assigned to `greet` happens to be a function value.
 
 The precise behavior of reading a hoisted binding before its initializer is
 evaluated is currently unspecified.
@@ -140,8 +155,8 @@ value. Function result types are declared here rather than inside function-value
 syntax:
 
 ```staple
-def main: _ -> i32 = () -> {
-    0
+def get_number: _ -> i32 = () -> {
+    42
 }
 ```
 
@@ -278,8 +293,8 @@ A binding may constrain the complete type of a function value, including its
 result type:
 
 ```staple
-def main: _ -> i32 = () -> {
-    0
+def get_number: _ -> i32 = () -> {
+    42
 }
 ```
 
@@ -408,26 +423,3 @@ variadic values—to an `i32` result.
 Only the syntax of foreign declarations is currently defined. Linking,
 calling-convention details, supported ABI names, and foreign type layouts are
 unspecified.
-
-## Complete example
-
-```staple
-extern "c" {
-    let printf: (*const c_char, ...) -> i32
-}
-
-type alias Person = (
-    name: string,
-    age: i32,
-)
-
-def main: _ -> i32 = () -> {
-    printf ("hello, world!\n")
-}
-```
-
-This program declares the external `printf` value, introduces `Person` as an
-alias for a named two-element list type, and defines a hoisted `main` binding.
-The binding annotation requires an `i32` result and infers the input type.
-`main` contains a nullary function value whose block body applies `printf` to a
-one-element list and returns the result of that final expression.

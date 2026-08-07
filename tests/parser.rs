@@ -9,37 +9,13 @@ fn parses_hello_world_losslessly() {
     let root = parse(source).expect("hello_world should parse");
 
     assert_eq!(root.text(), source);
-    assert_eq!(root.items.len(), 3);
+    assert_eq!(root.items.len(), 2);
     assert!(matches!(root.items[0], Item::ExternBlock(_)));
     assert!(matches!(
         root.items[1],
-        Item::TypeDeclaration(ref declaration)
-            if declaration.kind == TypeDeclarationKind::Alias
+        Item::Statement(ref statement)
+            if matches!(statement.expression, Expression::Call(_))
     ));
-
-    let Item::Binding(main) = &root.items[2] else {
-        panic!("main should be a binding");
-    };
-    let Type::Function(function_type) = main.annotation.as_ref().expect("main type") else {
-        panic!("main should have a function type");
-    };
-    assert!(matches!(*function_type.parameter, Type::Inferred(_)));
-    assert!(
-        function_type
-            .syntax
-            .tokens
-            .iter()
-            .any(|token| token.kind == TokenKind::Underscore)
-    );
-
-    let Expression::Function(function) = main.value.as_ref().expect("main value") else {
-        panic!("main should contain a function value");
-    };
-    assert!(matches!(function.parameter, Parameter::List(ref list) if list.elements.is_empty()));
-    let Expression::Block(block) = function.body.as_ref() else {
-        panic!("main should have a block body");
-    };
-    assert!(matches!(block.items[0], BlockItem::Expression(_)));
 }
 
 #[test]
@@ -171,4 +147,16 @@ fn block_items_are_typed() {
         panic!("expected block");
     };
     assert!(matches!(block.items[0], BlockItem::Binding(_)));
+}
+
+#[test]
+fn parses_multiple_top_level_statements() {
+    let source = "let greeting = \"hello\"\nprintln greeting\nprintln \"second\"\n";
+    let root = parse(source).expect("top-level statements should parse");
+
+    assert_eq!(root.text(), source);
+    assert_eq!(root.items.len(), 3);
+    assert!(matches!(root.items[0], Item::Binding(_)));
+    assert!(matches!(root.items[1], Item::Statement(_)));
+    assert!(matches!(root.items[2], Item::Statement(_)));
 }
