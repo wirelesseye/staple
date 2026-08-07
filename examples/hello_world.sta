@@ -1,0 +1,12 @@
+extern "c" {
+    let printf: (*const c_char, ...) -> i32
+}
+
+type alias person = (
+    name: string,
+    age: i32,
+)
+
+def main: _ -> i32 = () -> {
+    printf ("hello, world!\n")
+}
