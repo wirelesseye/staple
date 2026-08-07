@@ -37,7 +37,7 @@ impl Grammar {
     fn parse_declaration(&mut self) -> Result<SyntaxNode, ParseError> {
         match self.peek() {
             Some(TokenKind::Extern) => self.parse_extern_block(),
-            Some(TokenKind::Type) => self.parse_type_alias(),
+            Some(TokenKind::Type) => self.parse_type_declaration(),
             _ => self.parse_binding(),
         }
     }
@@ -58,14 +58,18 @@ impl Grammar {
         Ok(self.node(NodeKind::ExternBlock, start, children))
     }
 
-    fn parse_type_alias(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_type_declaration(&mut self) -> Result<SyntaxNode, ParseError> {
         let start = self.position;
         self.expect(TokenKind::Type, "expected `type`")?;
-        self.expect(TokenKind::Alias, "expected `alias` after `type`")?;
-        self.expect(TokenKind::Identifier, "expected type alias name")?;
-        self.expect(TokenKind::Equals, "expected `=` after type alias name")?;
-        let aliased_type = self.parse_type()?;
-        Ok(self.node(NodeKind::TypeAlias, start, vec![aliased_type]))
+        let kind = if self.eat(TokenKind::Alias) {
+            NodeKind::TypeAlias
+        } else {
+            NodeKind::TypeDefinition
+        };
+        self.expect(TokenKind::Identifier, "expected type name")?;
+        self.expect(TokenKind::Equals, "expected `=` after type name")?;
+        let underlying_type = self.parse_type()?;
+        Ok(self.node(kind, start, vec![underlying_type]))
     }
 
     fn parse_binding(&mut self) -> Result<SyntaxNode, ParseError> {

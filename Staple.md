@@ -353,10 +353,32 @@ meaning outside foreign declarations is currently unspecified.
 The built-in type set, mutability model for pointers, type inference rules, and
 type compatibility rules remain unspecified.
 
-### Type aliases
+### Type declarations
 
-`type alias` gives a name to an existing type. It is especially useful for
-named list types which would be structs or records in other languages:
+staple distinguishes transparent aliases from distinct type definitions.
+
+#### `type`
+
+`type` creates a distinct nominal type
+with the same runtime representation as its underlying type:
+
+```staple
+type user_id = int
+type order_id = int
+```
+
+`user_id`, `order_id`, and `int` are distinct types and are not implicitly
+interchangeable, even though they share a representation. This provides type
+safety without adding a runtime wrapper. The syntax for constructing,
+unwrapping, or explicitly converting these types remains unspecified.
+
+List types and values may have a trailing comma.
+
+#### `type alias`
+
+`type alias` gives another name to an
+existing type without creating a new type. The alias and its underlying type
+are interchangeable:
 
 ```staple
 type alias person = (
@@ -365,8 +387,8 @@ type alias person = (
 )
 ```
 
-List types and values may have a trailing comma. Whether an alias is purely
-structural or introduces a distinct nominal type remains unspecified.
+Here, `person` is exactly the named list type on the right-hand side. The alias
+does not create a separate nominal identity.
 
 ## Foreign declarations
 

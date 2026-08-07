@@ -51,6 +51,7 @@ pub enum NodeKind {
     SourceFile,
     ExternBlock,
     TypeAlias,
+    TypeDefinition,
     LetBinding,
     DefBinding,
     FunctionValue,

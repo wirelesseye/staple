@@ -74,6 +74,7 @@ fn arrow_is_always_followed_by_the_function_body() {
 fn parses_named_list_types_values_and_access() {
     let source = concat!(
         "let args: (name: string, int)\n",
+        "type user_id = int\n",
         "def value = (name: \"staple\", 1)\n",
         "def by_name = args.name\n",
         "def by_index = args.1\n",
@@ -82,16 +83,17 @@ fn parses_named_list_types_values_and_access() {
 
     assert_eq!(root.text(), source);
     assert_eq!(root.children[0].children[0].kind, NodeKind::Type);
+    assert_eq!(root.children[1].kind, NodeKind::TypeDefinition);
     assert_eq!(
-        root.children[1].children[0].children[0].kind,
+        root.children[2].children[0].children[0].kind,
         NodeKind::NamedListElement
     );
     assert_eq!(
-        root.children[2].children[0].kind,
+        root.children[3].children[0].kind,
         NodeKind::AccessExpression
     );
     assert_eq!(
-        root.children[3].children[0].kind,
+        root.children[4].children[0].kind,
         NodeKind::AccessExpression
     );
 }
