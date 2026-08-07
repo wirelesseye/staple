@@ -9,5 +9,5 @@ mod combinator;
 mod lexer;
 mod parser;
 
-pub use ast::{NodeKind, ParseError, SyntaxNode, SyntaxToken, TokenKind};
+pub use ast::*;
 pub use parser::parse;

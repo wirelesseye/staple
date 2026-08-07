@@ -1,8 +1,8 @@
-use crate::ast::{NodeKind, ParseError, SyntaxNode, SyntaxToken, TokenKind};
+use crate::ast::*;
 use crate::lexer::lex;
 
 /// Parse a complete staple source file.
-pub fn parse(source: &str) -> Result<SyntaxNode, ParseError> {
+pub fn parse(source: &str) -> Result<SourceFile, ParseError> {
     let tokens = lex(source);
     Grammar::new(tokens, source.len()).parse_source_file()
 }
@@ -22,275 +22,376 @@ impl Grammar {
         }
     }
 
-    fn parse_source_file(mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_source_file(mut self) -> Result<SourceFile, ParseError> {
         let start = self.position;
-        let mut children = Vec::new();
+        let mut items = Vec::new();
         while self.peek().is_some() {
-            children.push(self.parse_declaration()?);
+            items.push(self.parse_item()?);
         }
-        // The final declaration does not own trailing trivia. Keep it on the
-        // source-file node so a complete parse always round-trips byte-for-byte.
         self.position = self.tokens.len();
-        Ok(self.node(NodeKind::SourceFile, start, children))
+        Ok(SourceFile {
+            syntax: self.syntax(start),
+            items,
+        })
     }
 
-    fn parse_declaration(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_item(&mut self) -> Result<Item, ParseError> {
         match self.peek() {
-            Some(TokenKind::Extern) => self.parse_extern_block(),
-            Some(TokenKind::Type) => self.parse_type_declaration(),
-            _ => self.parse_binding(),
+            Some(TokenKind::Extern) => self.parse_extern_block().map(Item::ExternBlock),
+            Some(TokenKind::Type) => self.parse_type_declaration().map(Item::TypeDeclaration),
+            _ => self.parse_binding().map(Item::Binding),
         }
     }
 
-    fn parse_extern_block(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_extern_block(&mut self) -> Result<ExternBlock, ParseError> {
         let start = self.position;
         self.expect(TokenKind::Extern, "expected `extern`")?;
-        self.expect(TokenKind::String, "expected ABI string after `extern`")?;
+        let abi = self
+            .expect(TokenKind::String, "expected ABI string after `extern`")?
+            .text;
         self.expect(TokenKind::LBrace, "expected `{` after extern ABI")?;
-        let mut children = Vec::new();
+        let mut bindings = Vec::new();
         while !self.at(TokenKind::RBrace) {
             if self.peek().is_none() {
                 return Err(self.error("unterminated extern block"));
             }
-            children.push(self.parse_binding()?);
+            bindings.push(self.parse_binding()?);
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
-        Ok(self.node(NodeKind::ExternBlock, start, children))
+        Ok(ExternBlock {
+            syntax: self.syntax(start),
+            abi,
+            bindings,
+        })
     }
 
-    fn parse_type_declaration(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_type_declaration(&mut self) -> Result<TypeDeclaration, ParseError> {
         let start = self.position;
         self.expect(TokenKind::Type, "expected `type`")?;
         let kind = if self.eat(TokenKind::Alias) {
-            NodeKind::TypeAlias
+            TypeDeclarationKind::Alias
         } else {
-            NodeKind::TypeDefinition
+            TypeDeclarationKind::Distinct
         };
-        self.expect(TokenKind::Identifier, "expected type name")?;
+        let name = self
+            .expect(TokenKind::Identifier, "expected type name")?
+            .text;
         self.expect(TokenKind::Equals, "expected `=` after type name")?;
-        let underlying_type = self.parse_type()?;
-        Ok(self.node(kind, start, vec![underlying_type]))
+        let underlying = self.parse_type()?;
+        Ok(TypeDeclaration {
+            syntax: self.syntax(start),
+            kind,
+            name,
+            underlying,
+        })
     }
 
-    fn parse_binding(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_binding(&mut self) -> Result<Binding, ParseError> {
         let start = self.position;
-        let binding_kind = match self.peek() {
-            Some(TokenKind::Let) => NodeKind::LetBinding,
-            Some(TokenKind::Def) => NodeKind::DefBinding,
-            _ => return Err(self.error("expected `let`, `def`, or `extern`")),
+        let kind = match self.peek() {
+            Some(TokenKind::Let) => {
+                self.bump_token();
+                BindingKind::Let
+            }
+            Some(TokenKind::Def) => {
+                self.bump_token();
+                BindingKind::Def
+            }
+            _ => return Err(self.error("expected `let`, `def`, `type`, or `extern`")),
         };
-        self.bump();
-        self.expect(TokenKind::Identifier, "expected binding name")?;
-        let mut children = Vec::new();
-        if self.eat(TokenKind::Colon) {
-            children.push(self.parse_type()?);
-        }
-        if self.eat(TokenKind::Equals) {
-            children.push(self.parse_expression()?);
-        }
-        Ok(self.node(binding_kind, start, children))
+        let name = self
+            .expect(TokenKind::Identifier, "expected binding name")?
+            .text;
+        let annotation = if self.eat(TokenKind::Colon) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        let value = if self.eat(TokenKind::Equals) {
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
+        Ok(Binding {
+            syntax: self.syntax(start),
+            kind,
+            name,
+            annotation,
+            value,
+        })
     }
 
-    fn parse_expression(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_expression(&mut self) -> Result<Expression, ParseError> {
         let checkpoint = self.position;
-        if let Ok(function) = self.parse_function_value() {
-            return Ok(function);
+        if let Ok(function) = self.parse_function_expression() {
+            return Ok(Expression::Function(function));
         }
         self.position = checkpoint;
         self.parse_binary_expression(0)
     }
 
-    fn parse_function_value(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
         let parameter = self.parse_parameter()?;
         self.expect(TokenKind::Arrow, "expected `->` after function parameter")?;
-        let body = self.parse_expression()?;
-        Ok(self.node(NodeKind::FunctionValue, start, vec![parameter, body]))
+        let body = Box::new(self.parse_expression()?);
+        Ok(FunctionExpression {
+            syntax: self.syntax(start),
+            parameter,
+            body,
+        })
     }
 
-    fn parse_parameter(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_parameter(&mut self) -> Result<Parameter, ParseError> {
         let start = self.position;
-        let mut children = Vec::new();
         if self.eat(TokenKind::LParen) {
+            let mut elements = Vec::new();
             if !self.at(TokenKind::RParen) {
                 loop {
-                    self.expect(TokenKind::Identifier, "expected parameter name")?;
-                    self.expect(TokenKind::Colon, "expected `:` after parameter name")?;
-                    children.push(self.parse_atomic_type()?);
+                    elements.push(self.parse_value_parameter()?);
                     if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                         break;
                     }
                 }
             }
             self.expect(TokenKind::RParen, "expected `)` after parameter")?;
+            Ok(Parameter::List(ListParameter {
+                syntax: self.syntax(start),
+                elements,
+            }))
         } else {
-            self.expect(TokenKind::Identifier, "expected function parameter")?;
-            self.expect(TokenKind::Colon, "expected `:` after parameter name")?;
-            children.push(self.parse_atomic_type()?);
+            self.parse_value_parameter().map(Parameter::Value)
         }
-        Ok(self.node(NodeKind::Parameter, start, children))
     }
 
-    fn parse_atomic_type(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_value_parameter(&mut self) -> Result<ValueParameter, ParseError> {
         let start = self.position;
-        self.parse_type_atom()?;
-        Ok(self.node(NodeKind::Type, start, Vec::new()))
+        let name = self
+            .expect(TokenKind::Identifier, "expected parameter name")?
+            .text;
+        self.expect(TokenKind::Colon, "expected `:` after parameter name")?;
+        let ty = self.parse_type_atom()?;
+        Ok(ValueParameter {
+            syntax: self.syntax(start),
+            name,
+            ty,
+        })
     }
 
-    fn parse_type(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_type(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
-        self.parse_type_atom()?;
+        let parameter = self.parse_type_atom()?;
         if self.eat(TokenKind::Arrow) {
-            self.parse_type()?;
+            let result = self.parse_type()?;
+            Ok(Type::Function(FunctionType {
+                syntax: self.syntax(start),
+                parameter: Box::new(parameter),
+                result: Box::new(result),
+            }))
+        } else {
+            Ok(parameter)
         }
-        Ok(self.node(NodeKind::Type, start, Vec::new()))
     }
 
-    fn parse_type_atom(&mut self) -> Result<(), ParseError> {
+    fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
+        let start = self.position;
         if self.eat(TokenKind::Underscore) {
-            return Ok(());
+            return Ok(Type::Inferred(self.syntax(start)));
         }
         if self.eat(TokenKind::Star) {
-            self.eat(TokenKind::Const);
-            self.expect(TokenKind::Identifier, "expected pointee type")?;
-            return Ok(());
+            let is_const = self.eat(TokenKind::Const);
+            let pointee = self.parse_type_atom()?;
+            return Ok(Type::Pointer(PointerType {
+                syntax: self.syntax(start),
+                is_const,
+                pointee: Box::new(pointee),
+            }));
         }
         if self.eat(TokenKind::LParen) {
+            let mut elements = Vec::new();
             if !self.at(TokenKind::RParen) {
                 loop {
-                    if self.eat(TokenKind::Ellipsis) {
-                        // A variadic marker must be the final list item.
+                    let element_start = self.position;
+                    let name = if self.peek() == Some(TokenKind::Identifier)
+                        && self.peek_n(1) == Some(TokenKind::Colon)
+                    {
+                        let name = self.bump_token().expect("peeked identifier").text;
+                        self.expect(TokenKind::Colon, "expected `:` after element name")?;
+                        Some(name)
                     } else {
-                        if self.peek() == Some(TokenKind::Identifier)
-                            && self.peek_n(1) == Some(TokenKind::Colon)
-                        {
-                            self.bump();
-                            self.expect(TokenKind::Colon, "expected `:` after element name")?;
-                        }
-                        self.parse_type()?;
-                    }
+                        None
+                    };
+                    let ty = if self.eat(TokenKind::Ellipsis) {
+                        Type::Variadic(self.syntax(element_start))
+                    } else {
+                        self.parse_type()?
+                    };
+                    elements.push(TypeElement {
+                        syntax: self.syntax(element_start),
+                        name,
+                        ty,
+                    });
                     if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                         break;
                     }
                 }
             }
             self.expect(TokenKind::RParen, "expected `)` in type")?;
-            return Ok(());
+            return Ok(Type::List(ListType {
+                syntax: self.syntax(start),
+                elements,
+            }));
         }
-        self.expect(TokenKind::Identifier, "expected type")?;
-        Ok(())
+        let name = self.expect(TokenKind::Identifier, "expected type")?.text;
+        Ok(Type::Named(NamedType {
+            syntax: self.syntax(start),
+            name,
+        }))
     }
 
     fn parse_binary_expression(
         &mut self,
         minimum_precedence: u8,
-    ) -> Result<SyntaxNode, ParseError> {
+    ) -> Result<Expression, ParseError> {
         let mut left = self.parse_call_expression()?;
-        while let Some((precedence, operator)) = self.binary_operator() {
+        while let Some((precedence, token_kind, operator)) = self.binary_operator() {
             if precedence < minimum_precedence {
                 break;
             }
-            let start = left
-                .tokens
-                .first()
-                .map_or(self.position, |_| self.token_index_at(left.span.start));
-            self.expect(operator, "expected binary operator")?;
+            let start = self.token_index_at(left.syntax().span.start);
+            self.expect(token_kind, "expected binary operator")?;
             let right = self.parse_binary_expression(precedence + 1)?;
-            left = self.node(NodeKind::BinaryExpression, start, vec![left, right]);
+            left = Expression::Binary(BinaryExpression {
+                syntax: self.syntax(start),
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            });
         }
         Ok(left)
     }
 
-    fn parse_call_expression(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_call_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
-        let callee = self.parse_access_expression()?;
-        let mut children = vec![callee];
+        let mut expression = self.parse_access_expression()?;
         while self.starts_atom() {
-            children.push(self.parse_access_expression()?);
+            let argument = self.parse_access_expression()?;
+            expression = Expression::Call(CallExpression {
+                syntax: self.syntax(start),
+                callee: Box::new(expression),
+                argument: Box::new(argument),
+            });
         }
-        if children.len() == 1 {
-            Ok(children.pop().expect("one child"))
-        } else {
-            Ok(self.node(NodeKind::CallExpression, start, children))
-        }
+        Ok(expression)
     }
 
-    fn parse_access_expression(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_access_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
-        let mut value = self.parse_atom()?;
+        let mut expression = self.parse_atom()?;
         while self.eat(TokenKind::Dot) {
             let accessor = match self.peek() {
-                Some(TokenKind::Identifier) => self.leaf(NodeKind::NameExpression)?,
-                Some(TokenKind::Integer) => self.leaf(NodeKind::IntegerExpression)?,
+                Some(TokenKind::Identifier) => {
+                    Accessor::Name(self.bump_token().expect("peeked name").text)
+                }
+                Some(TokenKind::Integer) => {
+                    Accessor::Index(self.bump_token().expect("peeked index").text)
+                }
                 _ => return Err(self.error("expected a list element name or index after `.`")),
             };
-            value = self.node(NodeKind::AccessExpression, start, vec![value, accessor]);
+            expression = Expression::Access(AccessExpression {
+                syntax: self.syntax(start),
+                value: Box::new(expression),
+                accessor,
+            });
         }
-        Ok(value)
+        Ok(expression)
     }
 
-    fn parse_atom(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_atom(&mut self) -> Result<Expression, ParseError> {
         match self.peek() {
-            Some(TokenKind::LBrace) => self.parse_block_expression(),
-            Some(TokenKind::LParen) => self.parse_list_expression(),
-            Some(TokenKind::Identifier) => self.leaf(NodeKind::NameExpression),
-            Some(TokenKind::String) => self.leaf(NodeKind::StringExpression),
-            Some(TokenKind::Integer) => self.leaf(NodeKind::IntegerExpression),
+            Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
+            Some(TokenKind::LParen) => self.parse_list_expression().map(Expression::List),
+            Some(TokenKind::Identifier) => {
+                let start = self.position;
+                let name = self.bump_token().expect("peeked name").text;
+                Ok(Expression::Name(NameExpression {
+                    syntax: self.syntax(start),
+                    name,
+                }))
+            }
+            Some(TokenKind::String) => {
+                let start = self.position;
+                let literal = self.bump_token().expect("peeked string").text;
+                Ok(Expression::String(StringExpression {
+                    syntax: self.syntax(start),
+                    literal,
+                }))
+            }
+            Some(TokenKind::Integer) => {
+                let start = self.position;
+                let literal = self.bump_token().expect("peeked integer").text;
+                Ok(Expression::Integer(IntegerExpression {
+                    syntax: self.syntax(start),
+                    literal,
+                }))
+            }
             _ => Err(self.error("expected expression")),
         }
     }
 
-    fn parse_block_expression(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_block_expression(&mut self) -> Result<BlockExpression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LBrace, "expected `{`")?;
-        let mut children = Vec::new();
+        let mut items = Vec::new();
         while !self.at(TokenKind::RBrace) {
             if self.peek().is_none() {
                 return Err(self.error("unterminated block expression"));
             }
-            children.push(match self.peek() {
-                Some(TokenKind::Let | TokenKind::Def) => self.parse_binding()?,
-                _ => self.parse_expression()?,
-            });
+            if matches!(self.peek(), Some(TokenKind::Let | TokenKind::Def)) {
+                items.push(BlockItem::Binding(self.parse_binding()?));
+            } else {
+                items.push(BlockItem::Expression(self.parse_expression()?));
+            }
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
-        Ok(self.node(NodeKind::BlockExpression, start, children))
+        Ok(BlockExpression {
+            syntax: self.syntax(start),
+            items,
+        })
     }
 
-    fn parse_list_expression(&mut self) -> Result<SyntaxNode, ParseError> {
+    fn parse_list_expression(&mut self) -> Result<ListExpression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LParen, "expected `(`")?;
-        let mut children = Vec::new();
+        let mut elements = Vec::new();
         if !self.at(TokenKind::RParen) {
             loop {
                 let element_start = self.position;
-                if self.peek() == Some(TokenKind::Identifier)
+                let name = if self.peek() == Some(TokenKind::Identifier)
                     && self.peek_n(1) == Some(TokenKind::Colon)
                 {
-                    self.bump();
+                    let name = self.bump_token().expect("peeked element name").text;
                     self.expect(TokenKind::Colon, "expected `:` after element name")?;
-                    let value = self.parse_expression()?;
-                    children.push(self.node(
-                        NodeKind::NamedListElement,
-                        element_start,
-                        vec![value],
-                    ));
+                    Some(name)
                 } else {
-                    children.push(self.parse_expression()?);
-                }
+                    None
+                };
+                let value = self.parse_expression()?;
+                elements.push(ListElement {
+                    syntax: self.syntax(element_start),
+                    name,
+                    value,
+                });
                 if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                     break;
                 }
             }
         }
         self.expect(TokenKind::RParen, "expected `)` after list")?;
-        Ok(self.node(NodeKind::ListExpression, start, children))
-    }
-
-    fn leaf(&mut self, kind: NodeKind) -> Result<SyntaxNode, ParseError> {
-        let start = self.position;
-        self.bump();
-        Ok(self.node(kind, start, Vec::new()))
+        Ok(ListExpression {
+            syntax: self.syntax(start),
+            elements,
+        })
     }
 
     fn starts_atom(&self) -> bool {
@@ -306,10 +407,12 @@ impl Grammar {
         )
     }
 
-    fn binary_operator(&self) -> Option<(u8, TokenKind)> {
+    fn binary_operator(&self) -> Option<(u8, TokenKind, BinaryOperator)> {
         match self.peek()? {
-            TokenKind::Plus | TokenKind::Minus => Some((1, self.peek()?)),
-            TokenKind::Star | TokenKind::Slash => Some((2, self.peek()?)),
+            TokenKind::Plus => Some((1, TokenKind::Plus, BinaryOperator::Add)),
+            TokenKind::Minus => Some((1, TokenKind::Minus, BinaryOperator::Subtract)),
+            TokenKind::Star => Some((2, TokenKind::Star, BinaryOperator::Multiply)),
+            TokenKind::Slash => Some((2, TokenKind::Slash, BinaryOperator::Divide)),
             _ => None,
         }
     }
@@ -337,24 +440,30 @@ impl Grammar {
 
     fn eat(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
-            self.bump();
+            self.bump_token();
             true
         } else {
             false
         }
     }
 
-    fn expect(&mut self, kind: TokenKind, message: &'static str) -> Result<(), ParseError> {
-        self.eat(kind)
-            .then_some(())
-            .ok_or_else(|| self.error(message))
+    fn expect(
+        &mut self,
+        kind: TokenKind,
+        message: &'static str,
+    ) -> Result<SyntaxToken, ParseError> {
+        if self.at(kind) {
+            Ok(self.bump_token().expect("peeked token"))
+        } else {
+            Err(self.error(message))
+        }
     }
 
-    fn bump(&mut self) {
+    fn bump_token(&mut self) -> Option<SyntaxToken> {
         self.position = self.next_non_trivia(self.position);
-        if self.position < self.tokens.len() {
-            self.position += 1;
-        }
+        let token = self.tokens.get(self.position)?.clone();
+        self.position += 1;
+        Some(token)
     }
 
     fn next_non_trivia(&self, mut position: usize) -> usize {
@@ -368,18 +477,15 @@ impl Grammar {
         position
     }
 
-    fn node(&self, kind: NodeKind, start: usize, children: Vec<SyntaxNode>) -> SyntaxNode {
-        let end = self.position;
-        let tokens = self.tokens[start..end].to_vec();
+    fn syntax(&self, start: usize) -> Syntax {
+        let tokens = self.tokens[start..self.position].to_vec();
         let span_start = tokens
             .first()
             .map_or(self.source_len, |token| token.span.start);
         let span_end = tokens.last().map_or(span_start, |token| token.span.end);
-        SyntaxNode {
-            kind,
+        Syntax {
             span: span_start..span_end,
             tokens,
-            children,
         }
     }
 
