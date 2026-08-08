@@ -51,6 +51,7 @@ struct FunctionEnvironment<'context> {
     locals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
+    did_return: bool,
 }
 
 type CodeGenerationResult<T> = Result<T, Diagnostic>;
@@ -373,15 +374,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         };
         self.bind_function_parameters(&mut environment, function, llvm_function)?;
         let value = self.compile_expression(&mut environment, &function.body)?;
-        let return_value = value_as_basic(value).ok_or_else(|| {
-            Diagnostic::new(
-                function.body.syntax().span.clone(),
-                "function result is not a first-class value",
-            )
-        })?;
-        self.builder
-            .build_return(Some(&return_value))
-            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+        if !environment.did_return {
+            let return_value = value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(
+                    function.body.syntax().span.clone(),
+                    "function result is not a first-class value",
+                )
+            })?;
+            self.builder
+                .build_return(Some(&return_value))
+                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+        }
         Ok(())
     }
 
@@ -714,6 +717,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.bind_pattern_value(environment, &binding.pattern, value)?;
                 self.store_pattern_globals(environment, &binding.pattern)
             }
+            Statement::Return(statement) => Err(Diagnostic::new(
+                statement.syntax.span.clone(),
+                "`return` is only allowed inside a function",
+            )),
             Statement::Expression(expression) => {
                 self.compile_expression(environment, expression)?;
                 Ok(())
@@ -768,6 +775,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 if let Some(expression) = &binding.value {
                     let value = self.compile_expression(environment, expression)?;
+                    if environment.did_return {
+                        return Ok(None);
+                    }
                     let symbol =
                         self.typed_module
                             .symbol_for(binding.syntax.id)
@@ -780,6 +790,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Statement::PatternBinding(binding) => {
                 let value = self.compile_expression(environment, &binding.value)?;
+                if environment.did_return {
+                    return Ok(None);
+                }
                 let value = value_as_basic(value).ok_or_else(|| {
                     Diagnostic::new(
                         binding.syntax.span.clone(),
@@ -787,6 +800,23 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     )
                 })?;
                 self.bind_pattern_value(environment, &binding.pattern, value)?;
+                Ok(None)
+            }
+            Statement::Return(statement) => {
+                let value = self.compile_expression(environment, &statement.value)?;
+                if environment.did_return {
+                    return Ok(None);
+                }
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        statement.value.syntax().span.clone(),
+                        "function result is not a first-class value",
+                    )
+                })?;
+                self.builder
+                    .build_return(Some(&value))
+                    .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+                environment.did_return = true;
                 Ok(None)
             }
             Statement::Expression(expression) => {
@@ -840,13 +870,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let mut value = None;
                 for statement in &block.statements {
                     value = self.compile_statement(environment, statement)?;
+                    if environment.did_return {
+                        break;
+                    }
                 }
-                Ok(value.unwrap_or_else(|| {
-                    self.context
-                        .struct_type(&[], false)
-                        .const_zero()
-                        .as_any_value_enum()
-                }))
+                Ok(value.unwrap_or_else(|| self.unit_value()))
             }
             Expression::Product(product) => self.compile_product_expression(environment, product),
             Expression::Call(call) => {
@@ -865,7 +893,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .constructor_type(symbol)
                         .is_some()
                 {
-                    return self.compile_expression(environment, &call.argument);
+                    let value = self.compile_expression(environment, &call.argument)?;
+                    return Ok(if environment.did_return {
+                        self.unit_value()
+                    } else {
+                        value
+                    });
                 }
                 self.compile_call_expression(environment, call)
             }
@@ -879,6 +912,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     );
                 }
                 let value = self.compile_expression(environment, &access.value)?;
+                if environment.did_return {
+                    return Ok(self.unit_value());
+                }
                 let Some(BasicValueEnum::StructValue(value)) = value_as_basic(value) else {
                     return Err(Diagnostic::new(
                         access.value.syntax().span.clone(),
@@ -1002,6 +1038,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .as_any_value_enum())
             }
         }
+    }
+
+    fn unit_value(&self) -> AnyValueEnum<'context> {
+        self.context
+            .struct_type(&[], false)
+            .const_zero()
+            .as_any_value_enum()
     }
 
     fn compile_c_string_macro(
@@ -1133,6 +1176,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let expected_count = function.count_params() as usize - 1;
             let mut arguments =
                 self.compile_arguments(environment, &call.argument, expected_count, false)?;
+            if environment.did_return {
+                return Ok(self.unit_value());
+            }
             let closure_environment = if environment.function_id == Some(function_id) {
                 environment
                     .closure_environment
@@ -1162,6 +1208,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 expected_count,
                 function.get_type().is_var_arg(),
             )?;
+            if environment.did_return {
+                return Ok(self.unit_value());
+            }
             if internal {
                 let closure_environment =
                     if self.function_symbols.get(&symbol).copied() == environment.function_id {
@@ -1184,6 +1233,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
 
         let callee = self.compile_expression(environment, &call.callee)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
         let AnyValueEnum::StructValue(closure) = callee else {
             return Err(Diagnostic::new(
                 call.callee.syntax().span.clone(),
@@ -1203,6 +1255,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .len();
         let mut arguments =
             self.compile_arguments(environment, &call.argument, expected_count, false)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
         let code = self
             .builder
             .build_extract_value(closure, 0, "closure.code")
@@ -1245,6 +1300,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             _ => {}
         }
         let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
         let [
             inkwell::values::BasicMetadataValueEnum::IntValue(left),
             inkwell::values::BasicMetadataValueEnum::IntValue(right),
@@ -1281,6 +1339,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         call: &CallExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let argument = self.compile_expression(environment, &call.argument)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
         let Some(BasicValueEnum::PointerValue(source)) = value_as_basic(argument) else {
             return Err(Diagnostic::new(
                 call.argument.syntax().span.clone(),
@@ -1339,6 +1400,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         call: &CallExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let argument = self.compile_expression(environment, &call.argument)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
         let Some(BasicValueEnum::StructValue(string)) = value_as_basic(argument) else {
             return Err(Diagnostic::new(
                 call.argument.syntax().span.clone(),
@@ -1913,21 +1977,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         product: &ProductExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let values = product
-            .elements
-            .iter()
-            .map(|element| {
-                self.compile_expression(environment, &element.value)
-                    .and_then(|value| {
-                        value_as_basic(value).ok_or_else(|| {
-                            Diagnostic::new(
-                                element.syntax.span.clone(),
-                                "product element is not a first-class value",
-                            )
-                        })
-                    })
-            })
-            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        let mut values = Vec::new();
+        for element in &product.elements {
+            let value = self.compile_expression(environment, &element.value)?;
+            if environment.did_return {
+                return Ok(self.unit_value());
+            }
+            values.push(value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "product element is not a first-class value",
+                )
+            })?);
+        }
         if let [value] = values.as_slice() {
             return Ok(value.as_any_value_enum());
         }
@@ -1961,20 +2023,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .collect(),
             expression => vec![expression],
         };
-        let arguments = expressions
-            .into_iter()
-            .map(|expression| {
-                self.compile_expression(environment, expression)
-                    .and_then(|value| {
-                        value_as_basic(value).ok_or_else(|| {
-                            Diagnostic::new(
-                                expression.syntax().span.clone(),
-                                "argument is not a first-class value",
-                            )
-                        })
-                    })
-            })
-            .collect::<CodeGenerationResult<Vec<BasicValueEnum<'context>>>>()?;
+        let mut arguments = Vec::new();
+        for expression in expressions {
+            let value = self.compile_expression(environment, expression)?;
+            if environment.did_return {
+                return Ok(Vec::new());
+            }
+            arguments.push(value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    "argument is not a first-class value",
+                )
+            })?);
+        }
         if arguments.len() == expected_count || (variadic && arguments.len() >= expected_count) {
             return Ok(arguments.into_iter().map(Into::into).collect());
         }

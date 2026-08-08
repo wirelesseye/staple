@@ -47,7 +47,14 @@ pub enum UseKind {
 pub enum Statement {
     Binding(Binding),
     PatternBinding(PatternBinding),
+    Return(ReturnStatement),
     Expression(Expression),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnStatement {
+    pub syntax: Syntax,
+    pub value: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -922,6 +922,108 @@ fn rejects_polymorphic_recursion() {
 }
 
 #[test]
+fn infers_explicit_returns_and_keeps_trailing_expression_semicolons_value_preserving() {
+    let module = type_check(concat!(
+        "def explicit = () => { return 42; \"unreachable\"; };\n",
+        "def implicit = () => { 42; };\n",
+        "def binding_ended = () => { let value = 42; };\n",
+        "def returned_unit = () => { return (); };\n",
+        "explicit ();\n",
+    ));
+
+    for function in module
+        .functions()
+        .iter()
+        .filter(|function| matches!(function.name.as_str(), "explicit" | "implicit"))
+    {
+        assert_eq!(
+            *module
+                .type_of_function(function.id)
+                .expect("function should have a checked type")
+                .result,
+            CheckedType::I32,
+        );
+    }
+    for function in module
+        .functions()
+        .iter()
+        .filter(|function| matches!(function.name.as_str(), "binding_ended" | "returned_unit"))
+    {
+        assert_eq!(
+            *module
+                .type_of_function(function.id)
+                .expect("function should have a checked type")
+                .result,
+            CheckedType::empty_product(),
+        );
+    }
+}
+
+#[test]
+fn returns_from_nested_expression_blocks() {
+    let module = type_check(concat!(
+        "def identity = (value: I32) => value;\n",
+        "def answer = () => { identity { return 42; }; 0; };\n",
+        "def binding = () => { let unreachable: String = { return 7; }; 0; };\n",
+        "answer ();\n",
+        "binding ();\n",
+    ));
+    let answer = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "answer")
+        .expect("answer should resolve");
+    assert_eq!(
+        *module
+            .type_of_function(answer.id)
+            .expect("answer should be checked")
+            .result,
+        CheckedType::I32,
+    );
+    let binding = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "binding")
+        .expect("binding should resolve");
+    assert_eq!(
+        *module
+            .type_of_function(binding.id)
+            .expect("binding should be checked")
+            .result,
+        CheckedType::I32,
+    );
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("nested return should generate valid LLVM");
+    assert!(llvm.contains("ret i32 42"));
+}
+
+#[test]
+fn rejects_returns_outside_functions_and_incompatible_return_values() {
+    let outside = parse("return 1\n").expect("return statement should parse");
+    let diagnostics = NameResolver::new()
+        .resolve(&outside)
+        .expect_err("top-level return should not resolve");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("only allowed inside a function")
+    }));
+
+    let module = resolve("def invalid = () -> String => { return 42; }\n");
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("return value should match the function result");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `String`, found `I32`")
+    }));
+}
+
+#[test]
 fn emits_a_native_object_file() {
     let module = type_check(include_str!("../examples/hello_world.sta"));
     let context = Context::create();

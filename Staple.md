@@ -85,7 +85,9 @@ staple source files use the `.sta` extension.
 
 Whitespace and comments are preserved by the parser, so parsing and reproducing
 a source file does not change its text. Newlines also separate adjacent
-statements where they would otherwise form a single expression.
+statements where they would otherwise form a single expression. A semicolon may
+be written after any statement or top-level item as an explicit separator,
+including after the last item in a sequence.
 
 Line comments begin with `//` and continue to the end of the line.
 
@@ -558,11 +560,25 @@ Braces construct a block expression:
 }
 ```
 
-A block may contain bindings and expressions. Its final expression is the
-value returned by the block.
+A block may contain bindings, returns, and expressions. Its final statement
+determines the block's value: a final expression supplies its value, while an
+empty block or a block ending in a non-expression supplies `()`. A semicolon
+after the final expression does not discard that value.
 
-The value of an empty block and whether a trailing separator changes a block's
-value are currently unspecified.
+## Return statements
+
+`return` immediately exits the nearest enclosing function with the value of
+its required expression:
+
+```staple
+def answer = () => {
+    return 42
+    0 // unreachable
+}
+```
+
+Here `answer` returns `42`. Returning unit is written explicitly as `return ()`;
+`return` is not permitted outside a function.
 
 ## Types
 

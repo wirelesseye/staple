@@ -213,6 +213,9 @@ pub struct TypeChecker {
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     resolved_named_types: HashMap<TypeId, CheckedType>,
     resolving_named_types: HashSet<TypeId>,
+    return_contexts: Vec<CheckedType>,
+    did_return: bool,
+    return_reachable: bool,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -467,13 +470,26 @@ impl TypeChecker {
             .expect("resolved function ID must be valid");
         let function_type = self.function_types[&function.id].clone();
         self.bind_pattern_types(module, &function.pattern, &function_type.parameter);
+        let outer_did_return = self.did_return;
+        let outer_return_reachable = self.return_reachable;
+        self.did_return = false;
+        self.return_reachable = true;
+        self.return_contexts.push((*function_type.result).clone());
         let body_type =
             self.check_expression_expected(module, &function.body, Some(&function_type.result));
-        let result_type = self.require_compatible(
-            body_type,
-            (*function_type.result).clone(),
-            function.body.syntax().span.clone(),
-        );
+        let returned = self.did_return;
+        let explicit_result = self.return_contexts.pop().expect("function return context");
+        let result_type = if returned {
+            explicit_result
+        } else {
+            self.require_compatible(
+                body_type,
+                explicit_result,
+                function.body.syntax().span.clone(),
+            )
+        };
+        self.did_return = outer_did_return;
+        self.return_reachable = outer_return_reachable;
         let checked_function_type = CheckedFunctionType {
             parameter: function_type.parameter,
             result: Box::new(result_type),
@@ -588,7 +604,29 @@ impl TypeChecker {
             }
             Statement::PatternBinding(binding) => {
                 let value_type = self.check_expression(module, &binding.value);
-                self.bind_pattern_types(module, &binding.pattern, &value_type);
+                if !self.did_return {
+                    self.bind_pattern_types(module, &binding.pattern, &value_type);
+                }
+                CheckedType::empty_product()
+            }
+            Statement::Return(statement) => {
+                let expected = self.return_contexts.last().cloned();
+                let value_type =
+                    self.check_expression_expected(module, &statement.value, expected.as_ref());
+                if !self.did_return && self.return_reachable {
+                    if let Some(expected) = expected {
+                        let result = self.require_compatible(
+                            value_type,
+                            expected,
+                            statement.value.syntax().span.clone(),
+                        );
+                        *self
+                            .return_contexts
+                            .last_mut()
+                            .expect("return was resolved inside a function") = result;
+                    }
+                    self.did_return = true;
+                }
                 CheckedType::empty_product()
             }
             Statement::Expression(expression) => self.check_expression(module, expression),
@@ -618,21 +656,25 @@ impl TypeChecker {
             .as_ref()
             .map(|value| self.check_expression_expected(module, value, declared_type.as_ref()));
 
-        let checked_type = match (value_type, declared_type) {
-            (Some(actual), Some(expected)) => {
-                self.require_compatible(actual, expected, binding.syntax.span.clone())
-            }
-            (Some(actual), None) => actual,
-            (None, Some(expected)) => expected,
-            (None, None) => {
-                self.diagnostics.push(Diagnostic::new(
-                    binding.syntax.span.clone(),
-                    format!(
-                        "cannot infer the type of `{}` without a value",
-                        binding.name
-                    ),
-                ));
-                CheckedType::Error
+        let checked_type = if self.did_return {
+            declared_type.clone().unwrap_or(CheckedType::Error)
+        } else {
+            match (value_type, declared_type) {
+                (Some(actual), Some(expected)) => {
+                    self.require_compatible(actual, expected, binding.syntax.span.clone())
+                }
+                (Some(actual), None) => actual,
+                (None, Some(expected)) => expected,
+                (None, None) => {
+                    self.diagnostics.push(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        format!(
+                            "cannot infer the type of `{}` without a value",
+                            binding.name
+                        ),
+                    ));
+                    CheckedType::Error
+                }
             }
         };
         if !checked_type.is_concrete() && checked_type != CheckedType::Error {
@@ -713,43 +755,61 @@ impl TypeChecker {
             }
             Expression::Block(block) => {
                 let mut result = CheckedType::empty_product();
+                let mut block_returned = false;
                 for (index, statement) in block.statements.iter().enumerate() {
-                    if index + 1 == block.statements.len()
+                    let outer_reachable = self.return_reachable;
+                    if block_returned {
+                        self.return_reachable = false;
+                        self.did_return = false;
+                    }
+                    if !block_returned
+                        && index + 1 == block.statements.len()
                         && let Statement::Expression(expression) = statement
                     {
                         result = self.check_expression_expected(module, expression, expected);
                     } else {
                         result = self.check_statement(module, statement);
                     }
+                    if block_returned {
+                        self.did_return = true;
+                    } else if self.did_return {
+                        block_returned = true;
+                    }
+                    self.return_reachable = outer_reachable;
                 }
                 result
             }
-            Expression::Product(product) => normalize_product_type(
-                product
-                    .elements
-                    .iter()
-                    .enumerate()
-                    .map(|(index, element)| CheckedTypeElement {
+            Expression::Product(product) => {
+                let mut elements = Vec::new();
+                for (index, element) in product.elements.iter().enumerate() {
+                    let value_type = self.check_expression_expected(
+                        module,
+                        &element.value,
+                        match expected {
+                            Some(CheckedType::Product(product)) => product
+                                .elements
+                                .get(index)
+                                .map(|element| &element.value_type),
+                            other if product.elements.len() == 1 => other,
+                            _ => None,
+                        },
+                    );
+                    if self.did_return {
+                        return CheckedType::empty_product();
+                    }
+                    elements.push(CheckedTypeElement {
                         name: element.name.clone(),
-                        value_type: self.check_expression_expected(
-                            module,
-                            &element.value,
-                            match expected {
-                                Some(CheckedType::Product(product)) => product
-                                    .elements
-                                    .get(index)
-                                    .map(|element| &element.value_type),
-                                other if product.elements.len() == 1 => other,
-                                _ => None,
-                            },
-                        ),
-                    })
-                    .collect(),
-                false,
-            ),
+                        value_type,
+                    });
+                }
+                normalize_product_type(elements, false)
+            }
             Expression::Call(call) => {
                 if module.primitive_macro_for(call.syntax.id).is_some() {
                     self.check_expression(module, &call.argument);
+                    if self.did_return {
+                        return CheckedType::empty_product();
+                    }
                     if !matches!(call.argument.as_ref(), Expression::String(_)) {
                         self.diagnostics.push(Diagnostic::new(
                             call.argument.syntax().span.clone(),
@@ -760,6 +820,9 @@ impl TypeChecker {
                     CheckedType::CString
                 } else {
                     let mut raw_callee_type = self.check_expression(module, &call.callee);
+                    if self.did_return {
+                        return CheckedType::empty_product();
+                    }
                     let argument_expected = match &raw_callee_type {
                         CheckedType::Function(function)
                             if !contains_type_parameter(&raw_callee_type) =>
@@ -770,6 +833,9 @@ impl TypeChecker {
                     };
                     let argument_type =
                         self.check_expression_expected(module, &call.argument, argument_expected);
+                    if self.did_return {
+                        return CheckedType::empty_product();
+                    }
                     if let Some(expected_result) = expected {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
                             parameter: Box::new(argument_type.clone()),
@@ -827,6 +893,9 @@ impl TypeChecker {
                     return value_type;
                 }
                 let value_type = self.check_expression(module, &access.value);
+                if self.did_return {
+                    return CheckedType::empty_product();
+                }
                 match value_type {
                     CheckedType::Product(product) => match &access.accessor {
                         Accessor::Index(index) => index

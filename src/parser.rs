@@ -68,6 +68,7 @@ impl Grammar {
         let mut items = Vec::new();
         while self.peek().is_some() {
             items.push(self.parse_item()?);
+            self.eat(TokenKind::Semicolon);
         }
         self.position = self.tokens.len();
         Ok(Module {
@@ -154,6 +155,9 @@ impl Grammar {
     ) -> Result<Statement, ParseError> {
         match self.peek() {
             Some(TokenKind::Let) => self.parse_let_statement(visibility, start),
+            Some(TokenKind::Return) if visibility == Visibility::Private => {
+                self.parse_return_statement(start)
+            }
             Some(TokenKind::Def) => self
                 .parse_binding(visibility, start, start.is_some())
                 .map(Statement::Binding),
@@ -162,6 +166,19 @@ impl Grammar {
             }
             _ => self.parse_expression().map(Statement::Expression),
         }
+    }
+
+    fn parse_return_statement(&mut self, start: Option<usize>) -> Result<Statement, ParseError> {
+        let start = start.unwrap_or(self.position);
+        self.expect(TokenKind::Return, "expected `return`")?;
+        if self.has_newline_before_next_token() {
+            return Err(self.error("expected expression after `return`"));
+        }
+        let value = self.parse_expression()?;
+        Ok(Statement::Return(ReturnStatement {
+            syntax: self.syntax(start),
+            value,
+        }))
     }
 
     fn parse_let_statement(
@@ -263,6 +280,7 @@ impl Grammar {
                 return Err(self.error("external bindings cannot have compile-time parameters"));
             }
             bindings.push(binding);
+            self.eat(TokenKind::Semicolon);
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
         Ok(ExternBlock {
@@ -800,6 +818,7 @@ impl Grammar {
                 return Err(self.error("unterminated block expression"));
             }
             statements.push(self.parse_statement()?);
+            self.eat(TokenKind::Semicolon);
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
         Ok(BlockExpression {

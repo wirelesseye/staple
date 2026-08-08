@@ -549,7 +549,7 @@ impl NameResolver {
                         Statement::PatternBinding(binding) => {
                             self.allocate_pattern_symbols(&binding.pattern);
                         }
-                        Statement::Expression(_) => {}
+                        Statement::Return(_) | Statement::Expression(_) => {}
                     },
                     Item::UseDeclaration(_) => {}
                 }
@@ -811,6 +811,15 @@ impl NameResolver {
                 self.resolve_pattern_types(&binding.pattern);
                 self.resolve_expression(&binding.value, None, None);
                 self.declare_pattern(&binding.pattern);
+            }
+            Statement::Return(statement) => {
+                if self.function_stack.is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        statement.syntax.span.clone(),
+                        "`return` is only allowed inside a function",
+                    ));
+                }
+                self.resolve_expression(&statement.value, None, None);
             }
             Statement::Expression(expression) => self.resolve_expression(expression, None, None),
         }

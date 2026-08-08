@@ -453,3 +453,47 @@ fn parses_multiple_top_level_statements() {
     assert!(matches!(root.items[1], Item::Statement(_)));
     assert!(matches!(root.items[2], Item::Statement(_)));
 }
+
+#[test]
+fn parses_returns_and_semicolon_separated_items_losslessly() {
+    let source = concat!(
+        "use std.core.*;",
+        "type alias Number = I32;",
+        "extern \"c\" { let exit: I32 -> (); };",
+        "def answer = () => { let value = 42; return value; };",
+        "answer ();",
+    );
+    let root = parse(source).expect("semicolon-separated source should parse");
+
+    assert_eq!(root.text(), source);
+    assert_eq!(root.items.len(), 5);
+    let Statement::Binding(answer) = statement(&root.items[3]) else {
+        panic!("expected answer binding");
+    };
+    let Some(Expression::Function(function)) = &answer.value else {
+        panic!("expected function");
+    };
+    let Expression::Block(block) = function.body.as_ref() else {
+        panic!("expected function block");
+    };
+    assert!(matches!(block.statements[1], Statement::Return(_)));
+    assert!(
+        root.syntax
+            .tokens()
+            .iter()
+            .any(|token| token.kind == TokenKind::Return)
+    );
+    assert!(
+        root.syntax
+            .tokens()
+            .iter()
+            .any(|token| token.kind == TokenKind::Semicolon)
+    );
+}
+
+#[test]
+fn rejects_missing_return_values_and_empty_separators() {
+    assert!(parse("def invalid = () => { return; }\n").is_err());
+    assert!(parse("def invalid = () => { return\n42 }\n").is_err());
+    assert!(parse("let value = 1;; value\n").is_err());
+}
