@@ -13,64 +13,94 @@ use crate::{
 
 pub struct CodeGenerator<'context> {
     context: &'context inkwell::context::Context,
-    builder: inkwell::builder::Builder<'context>,
 }
 
-struct ModuleContext<'context> {
+struct ModuleEmitter<'module, 'context> {
+    context: &'context inkwell::context::Context,
+    typed_module: &'module TypedModule,
+    llvm_module: inkwell::module::Module<'context>,
+    builder: inkwell::builder::Builder<'context>,
     functions: HashMap<FunctionId, inkwell::values::FunctionValue<'context>>,
-    values: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
+    globals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
+}
+
+#[derive(Default)]
+struct FunctionEnvironment<'context> {
+    locals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
 }
 
 type CodeGenerationResult<T> = Result<T, Diagnostic>;
 
-impl<'context> CodeGenerator<'context> {
-    pub fn new(context: &'context inkwell::context::Context) -> Self {
+impl<'module, 'context> ModuleEmitter<'module, 'context> {
+    fn new(
+        context: &'context inkwell::context::Context,
+        typed_module: &'module TypedModule,
+    ) -> Self {
         Self {
             context,
+            typed_module,
+            llvm_module: context.create_module("staple"),
             builder: context.create_builder(),
+            functions: HashMap::new(),
+            globals: HashMap::new(),
         }
+    }
+
+    fn lookup_value(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+    ) -> Option<inkwell::values::AnyValueEnum<'context>> {
+        environment
+            .locals
+            .get(&symbol)
+            .or_else(|| self.globals.get(&symbol))
+            .copied()
+    }
+}
+
+impl<'context> CodeGenerator<'context> {
+    pub fn new(context: &'context inkwell::context::Context) -> Self {
+        Self { context }
     }
 
     pub fn compile_module(&self, module: &TypedModule) -> Result<String, Vec<Diagnostic>> {
-        self.compile_module_inner(module)
+        ModuleEmitter::new(self.context, module)
+            .compile()
             .map_err(|diagnostic| vec![diagnostic])
     }
+}
 
-    fn compile_module_inner(&self, module: &TypedModule) -> CodeGenerationResult<String> {
-        let llvm_module = self.context.create_module("staple");
-        let mut module_context = ModuleContext {
-            functions: HashMap::new(),
-            values: HashMap::new(),
-        };
-
-        self.declare_external_functions(&llvm_module, &mut module_context, module)?;
-        self.declare_functions(&llvm_module, &mut module_context, module)?;
-        for function in module.functions() {
-            self.compile_function_body(&llvm_module, &mut module_context, module, function)?;
+impl<'module, 'context> ModuleEmitter<'module, 'context> {
+    fn compile(mut self) -> CodeGenerationResult<String> {
+        self.declare_external_functions()?;
+        self.declare_functions()?;
+        let typed_module = self.typed_module;
+        for function in typed_module.functions() {
+            self.compile_function_body(function)?;
         }
-        self.compile_main_function(&llvm_module, &mut module_context, module)?;
+        self.compile_main_function()?;
 
-        llvm_module.verify().map_err(|message| {
+        self.llvm_module.verify().map_err(|message| {
             Diagnostic::new(Span::Compiler, format!("invalid LLVM module: {message}"))
         })?;
-        Ok(llvm_module.print_to_string().to_string())
+        Ok(self.llvm_module.print_to_string().to_string())
     }
 
-    fn declare_external_functions(
-        &self,
-        llvm_module: &inkwell::module::Module<'context>,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
-    ) -> CodeGenerationResult<()> {
-        for item in &module.syntax().items {
+    fn declare_external_functions(&mut self) -> CodeGenerationResult<()> {
+        for item in &self.typed_module.syntax().items {
             let Item::ExternBlock(block) = item else {
                 continue;
             };
             for binding in &block.bindings {
-                let symbol = module.symbol_for(binding.syntax.id).ok_or_else(|| {
-                    Diagnostic::new(binding.syntax.span.clone(), "unresolved external binding")
-                })?;
-                let Some(CheckedType::Function(function_type)) = module.type_of_symbol(symbol)
+                let symbol = self
+                    .typed_module
+                    .symbol_for(binding.syntax.id)
+                    .ok_or_else(|| {
+                        Diagnostic::new(binding.syntax.span.clone(), "unresolved external binding")
+                    })?;
+                let Some(CheckedType::Function(function_type)) =
+                    self.typed_module.type_of_symbol(symbol)
                 else {
                     return Err(Diagnostic::new(
                         binding.syntax.span.clone(),
@@ -78,48 +108,45 @@ impl<'context> CodeGenerator<'context> {
                     ));
                 };
                 let llvm_type = self.compile_function_type(function_type)?;
-                let function = llvm_module.add_function(&binding.name, llvm_type, None);
-                module_context.values.insert(symbol, function.into());
+                let function = self
+                    .llvm_module
+                    .add_function(&binding.name, llvm_type, None);
+                self.globals.insert(symbol, function.into());
             }
         }
         Ok(())
     }
 
-    fn declare_functions(
-        &self,
-        llvm_module: &inkwell::module::Module<'context>,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
-    ) -> CodeGenerationResult<()> {
-        for function in module.functions() {
-            let function_type = module.type_of_function(function.id).ok_or_else(|| {
-                Diagnostic::new(function.body.syntax().span.clone(), "unchecked function")
-            })?;
+    fn declare_functions(&mut self) -> CodeGenerationResult<()> {
+        for function in self.typed_module.functions() {
+            let function_type =
+                self.typed_module
+                    .type_of_function(function.id)
+                    .ok_or_else(|| {
+                        Diagnostic::new(function.body.syntax().span.clone(), "unchecked function")
+                    })?;
             let llvm_type = self.compile_function_type(function_type)?;
-            let llvm_function = llvm_module.add_function(&function.name, llvm_type, None);
-            module_context.functions.insert(function.id, llvm_function);
+            let llvm_function = self
+                .llvm_module
+                .add_function(&function.name, llvm_type, None);
+            self.functions.insert(function.id, llvm_function);
             if let Some(binding_syntax) = function.binding_syntax
-                && let Some(symbol) = module.symbol_for(binding_syntax)
+                && let Some(symbol) = self.typed_module.symbol_for(binding_syntax)
             {
-                module_context.values.insert(symbol, llvm_function.into());
+                self.globals.insert(symbol, llvm_function.into());
             }
         }
         Ok(())
     }
 
-    fn compile_function_body(
-        &self,
-        llvm_module: &inkwell::module::Module<'context>,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
-        function: &ResolvedFunction,
-    ) -> CodeGenerationResult<()> {
-        let llvm_function = module_context.functions[&function.id];
+    fn compile_function_body(&mut self, function: &ResolvedFunction) -> CodeGenerationResult<()> {
+        let llvm_function = self.functions[&function.id];
         let entry = self.context.append_basic_block(llvm_function, "entry");
         self.builder.position_at_end(entry);
 
-        self.bind_function_parameters(module_context, module, function, llvm_function)?;
-        let value = self.compile_expression(llvm_module, module_context, module, &function.body)?;
+        let mut environment = FunctionEnvironment::default();
+        self.bind_function_parameters(&mut environment, function, llvm_function)?;
+        let value = self.compile_expression(&mut environment, &function.body)?;
         let return_value = value_as_basic(value).ok_or_else(|| {
             Diagnostic::new(
                 function.body.syntax().span.clone(),
@@ -134,8 +161,7 @@ impl<'context> CodeGenerator<'context> {
 
     fn bind_function_parameters(
         &self,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
+        environment: &mut FunctionEnvironment<'context>,
         function: &ResolvedFunction,
         llvm_function: inkwell::values::FunctionValue<'context>,
     ) -> CodeGenerationResult<()> {
@@ -152,34 +178,32 @@ impl<'context> CodeGenerator<'context> {
         }
         for (value, parameter) in parameters.into_iter().zip(syntax_parameters) {
             value.set_name(&parameter.name);
-            let symbol = module.symbol_for(parameter.syntax.id).ok_or_else(|| {
-                Diagnostic::new(
-                    parameter.syntax.span.clone(),
-                    "unresolved function parameter",
-                )
-            })?;
-            module_context
-                .values
-                .insert(symbol, value.as_any_value_enum());
+            let symbol = self
+                .typed_module
+                .symbol_for(parameter.syntax.id)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        parameter.syntax.span.clone(),
+                        "unresolved function parameter",
+                    )
+                })?;
+            environment.locals.insert(symbol, value.as_any_value_enum());
         }
         Ok(())
     }
 
-    fn compile_main_function(
-        &self,
-        llvm_module: &inkwell::module::Module<'context>,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
-    ) -> CodeGenerationResult<()> {
+    fn compile_main_function(&mut self) -> CodeGenerationResult<()> {
         let integer_type = self.context.i32_type();
         let function_type = integer_type.fn_type(&[], false);
-        let function = llvm_module.add_function("main", function_type, None);
+        let function = self.llvm_module.add_function("main", function_type, None);
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        for item in &module.syntax().items {
+        let mut environment = FunctionEnvironment::default();
+        let typed_module = self.typed_module;
+        for item in &typed_module.syntax().items {
             if let Item::Statement(statement) = item {
-                self.compile_statement(llvm_module, module_context, module, statement)?;
+                self.compile_statement(&mut environment, statement)?;
             }
         }
         self.builder
@@ -189,52 +213,52 @@ impl<'context> CodeGenerator<'context> {
     }
 
     fn compile_statement(
-        &self,
-        llvm_module: &inkwell::module::Module<'context>,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
         statement: &Statement,
     ) -> CodeGenerationResult<Option<AnyValueEnum<'context>>> {
         match statement {
             Statement::Binding(binding) => {
                 if let Some(expression) = &binding.value {
-                    let value =
-                        self.compile_expression(llvm_module, module_context, module, expression)?;
-                    let symbol = module.symbol_for(binding.syntax.id).ok_or_else(|| {
-                        Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
-                    })?;
-                    module_context.values.insert(symbol, value);
+                    let value = self.compile_expression(environment, expression)?;
+                    let symbol =
+                        self.typed_module
+                            .symbol_for(binding.syntax.id)
+                            .ok_or_else(|| {
+                                Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
+                            })?;
+                    environment.locals.insert(symbol, value);
                 }
                 Ok(None)
             }
-            Statement::Expression(expression) => self
-                .compile_expression(llvm_module, module_context, module, expression)
-                .map(Some),
+            Statement::Expression(expression) => {
+                self.compile_expression(environment, expression).map(Some)
+            }
         }
     }
 
     fn compile_expression(
-        &self,
-        llvm_module: &inkwell::module::Module<'context>,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
         expression: &Expression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         match expression {
             Expression::Function(function) => {
-                let id = module.function_for(function.syntax.id).ok_or_else(|| {
-                    Diagnostic::new(
-                        function.syntax.span.clone(),
-                        "unresolved function expression",
-                    )
-                })?;
-                Ok(module_context.functions[&id].into())
+                let id = self
+                    .typed_module
+                    .function_for(function.syntax.id)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            function.syntax.span.clone(),
+                            "unresolved function expression",
+                        )
+                    })?;
+                Ok(self.functions[&id].into())
             }
             Expression::Block(block) => {
                 let mut value = None;
                 for statement in &block.statements {
-                    value =
-                        self.compile_statement(llvm_module, module_context, module, statement)?;
+                    value = self.compile_statement(environment, statement)?;
                 }
                 Ok(value.unwrap_or_else(|| {
                     self.context
@@ -244,13 +268,11 @@ impl<'context> CodeGenerator<'context> {
                 }))
             }
             Expression::List(list) => self
-                .compile_list_expression(llvm_module, module_context, module, list)
+                .compile_list_expression(environment, list)
                 .map(AnyValueEnum::from),
             Expression::Call(call) => {
-                let callee =
-                    self.compile_expression(llvm_module, module_context, module, &call.callee)?;
-                let arguments =
-                    self.compile_arguments(llvm_module, module_context, module, &call.argument)?;
+                let callee = self.compile_expression(environment, &call.callee)?;
+                let arguments = self.compile_arguments(environment, &call.argument)?;
                 let AnyValueEnum::FunctionValue(function) = callee else {
                     return Err(Diagnostic::new(
                         call.callee.syntax().span.clone(),
@@ -269,8 +291,7 @@ impl<'context> CodeGenerator<'context> {
                     .as_any_value_enum())
             }
             Expression::Access(access) => {
-                let value =
-                    self.compile_expression(llvm_module, module_context, module, &access.value)?;
+                let value = self.compile_expression(environment, &access.value)?;
                 let Some(BasicValueEnum::StructValue(value)) = value_as_basic(value) else {
                     return Err(Diagnostic::new(
                         access.value.syntax().span.clone(),
@@ -295,14 +316,13 @@ impl<'context> CodeGenerator<'context> {
                     .map(|value| value.as_any_value_enum())
                     .map_err(|error| Diagnostic::new(access.syntax.span.clone(), error.to_string()))
             }
-            Expression::Binary(binary) => {
-                self.compile_binary_expression(llvm_module, module_context, module, binary)
-            }
+            Expression::Binary(binary) => self.compile_binary_expression(environment, binary),
             Expression::Name(name) => {
-                let symbol = module
+                let symbol = self
+                    .typed_module
                     .symbol_for(name.syntax.id)
                     .ok_or_else(|| Diagnostic::new(name.syntax.span.clone(), "unresolved name"))?;
-                module_context.values.get(&symbol).copied().ok_or_else(|| {
+                self.lookup_value(environment, symbol).ok_or_else(|| {
                     Diagnostic::new(
                         name.syntax.span.clone(),
                         format!("value `{}` is not available here", name.name),
@@ -331,22 +351,18 @@ impl<'context> CodeGenerator<'context> {
     }
 
     fn compile_binary_expression(
-        &self,
-        llvm_module: &inkwell::module::Module<'context>,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
         binary: &BinaryExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let AnyValueEnum::IntValue(left) =
-            self.compile_expression(llvm_module, module_context, module, &binary.left)?
+        let AnyValueEnum::IntValue(left) = self.compile_expression(environment, &binary.left)?
         else {
             return Err(Diagnostic::new(
                 binary.left.syntax().span.clone(),
                 "arithmetic operands must be integers",
             ));
         };
-        let AnyValueEnum::IntValue(right) =
-            self.compile_expression(llvm_module, module_context, module, &binary.right)?
+        let AnyValueEnum::IntValue(right) = self.compile_expression(environment, &binary.right)?
         else {
             return Err(Diagnostic::new(
                 binary.right.syntax().span.clone(),
@@ -364,17 +380,15 @@ impl<'context> CodeGenerator<'context> {
     }
 
     fn compile_list_expression(
-        &self,
-        llvm_module: &inkwell::module::Module<'context>,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
         list: &ListExpression,
     ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
         let values = list
             .elements
             .iter()
             .map(|element| {
-                self.compile_expression(llvm_module, module_context, module, &element.value)
+                self.compile_expression(environment, &element.value)
                     .and_then(|value| {
                         value_as_basic(value).ok_or_else(|| {
                             Diagnostic::new(
@@ -401,10 +415,8 @@ impl<'context> CodeGenerator<'context> {
     }
 
     fn compile_arguments(
-        &self,
-        llvm_module: &inkwell::module::Module<'context>,
-        module_context: &mut ModuleContext<'context>,
-        module: &TypedModule,
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
         argument: &Expression,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
         let expressions: Vec<&Expression> = match argument {
@@ -414,7 +426,7 @@ impl<'context> CodeGenerator<'context> {
         expressions
             .into_iter()
             .map(|expression| {
-                self.compile_expression(llvm_module, module_context, module, expression)
+                self.compile_expression(environment, expression)
                     .and_then(|value| {
                         value_as_basic(value).map(Into::into).ok_or_else(|| {
                             Diagnostic::new(

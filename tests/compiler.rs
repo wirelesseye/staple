@@ -144,6 +144,25 @@ fn predeclares_functions_for_recursion() {
 }
 
 #[test]
+fn does_not_leak_locals_between_generated_functions() {
+    let module = type_check(concat!(
+        "let outer = (value: i32) => {\n",
+        "  let inner = () => value\n",
+        "  inner ()\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let diagnostics = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect_err("captured locals require closure lowering");
+
+    assert_eq!(
+        diagnostics[0].message,
+        "value `value` is not available here"
+    );
+}
+
+#[test]
 fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
         "extern \"c\" { let puts: (*const c_char) -> i32 }\n",
