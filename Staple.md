@@ -351,11 +351,20 @@ product patterns.
 explicit result type. Without an explicit result type, stapler infers it from
 the body.
 
-A binding pattern has a name and a type:
+A binding pattern normally has a name and a type:
 
 ```staple
 s: string => printf ("%s\n", s)
 ```
+
+The type may be omitted when a surrounding function type supplies it:
+
+```staple
+def identity: i32 -> i32 = value => value
+```
+
+An omitted parameter type without such a context is an error. Stapler does not
+infer parameter types from operations in the function body.
 
 A nullary product pattern is written as `()`:
 
@@ -418,6 +427,23 @@ printf ("%s\n", s)
 ```
 
 Here, `printf` receives one two-element product.
+
+Function application associates to the left, while function types associate to
+the right. Nested function values can therefore define a curried API:
+
+```staple
+def add = a: i32 => b: i32 => a + b
+def annotated_add: i32 -> i32 -> i32 = a => b => a + b
+
+def add_one = add 1
+add_one 2
+add 1 2
+```
+
+Both calls produce `3`. `add 1` returns a function that captures the value of
+`a`; functions may capture lexical values, escape their defining scope, and be
+stored or passed like other values. Product-parameter functions remain the
+ordinary choice when all arguments should be supplied together.
 
 ## Block expressions
 

@@ -71,10 +71,20 @@ fn parses_hello_world_losslessly() {
     let root = parse(source).expect("hello_world should parse");
 
     assert_eq!(root.text(), source);
-    assert_eq!(root.items.len(), 2);
+    assert_eq!(root.items.len(), 4);
     assert!(matches!(root.items[0], Item::ExternBlock(_)));
     assert!(matches!(
         root.items[1],
+        Item::Statement(ref statement)
+            if matches!(statement.as_ref(), Statement::Binding(_))
+    ));
+    assert!(matches!(
+        root.items[2],
+        Item::Statement(ref statement)
+            if matches!(statement.as_ref(), Statement::Expression(Expression::Call(_)))
+    ));
+    assert!(matches!(
+        root.items[3],
         Item::Statement(ref statement)
             if matches!(statement.as_ref(), Statement::Expression(Expression::Call(_)))
     ));
@@ -115,6 +125,22 @@ fn parses_function_result_annotation_before_body_arrow() {
         function.return_type,
         Some(Type::Primitive(stapler::PrimitiveType::I32(_)))
     ));
+    assert_eq!(root.text(), source);
+}
+
+#[test]
+fn parses_contextually_typed_curried_parameters() {
+    let source = "def add: i32 -> i32 -> i32 = a => b => a + b\n";
+    let root = parse(source).expect("curried function should parse");
+    let Statement::Binding(binding) = statement(&root.items[0]) else {
+        panic!("expected binding");
+    };
+    let Some(Expression::Function(outer)) = &binding.value else {
+        panic!("expected outer function");
+    };
+
+    assert!(matches!(outer.pattern.ty(), Type::Inferred(_)));
+    assert!(matches!(outer.body.as_ref(), Expression::Function(_)));
     assert_eq!(root.text(), source);
 }
 

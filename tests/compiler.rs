@@ -123,8 +123,8 @@ fn treats_singleton_products_as_their_element() {
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("singleton products should compile as their element");
-    assert!(llvm.contains("define i32 @identity(i32 %value)"));
-    assert!(!llvm.contains("define i32 @identity({ i32 }"));
+    assert!(llvm.contains("define i32 @identity(ptr %0, i32 %value)"));
+    assert!(!llvm.contains("define i32 @identity(ptr %0, { i32 }"));
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn destructures_nested_product_patterns() {
         .compile_module(&module)
         .expect("nested product pattern should compile");
 
-    assert!(llvm.contains("define i32 @add_nested(i32 %x, <{ i32, i32 }>"));
+    assert!(llvm.contains("define i32 @add_nested(ptr %0, i32 %x, <{ i32, i32 }>"));
     assert!(llvm.contains("extractvalue <{ i32, i32 }>"));
 }
 
@@ -153,7 +153,7 @@ fn binds_a_product_without_destructuring_it() {
         .compile_module(&module)
         .expect("a product binding pattern should compile");
 
-    assert!(llvm.contains("define i32 @sum(i32 %0, i32 %1)"));
+    assert!(llvm.contains("define i32 @sum(ptr %0, i32 %1, i32 %2)"));
     assert!(llvm.contains("extractvalue <{ i32, i32 }>"));
 }
 
@@ -197,9 +197,9 @@ fn generates_a_named_function_after_predeclaring_it() {
         .compile_module(&module)
         .expect("module should compile");
 
-    assert!(llvm.contains("define i32 @add(i32 %a, i32 %b)"));
+    assert!(llvm.contains("define i32 @add(ptr %0, i32 %a, i32 %b)"));
     assert!(llvm.contains("add i32 %a, %b"));
-    assert!(llvm.contains("call i32 @add(i32 1, i32 2)"));
+    assert!(llvm.contains("call i32 @add(ptr null, i32 1, i32 2)"));
 }
 
 #[test]
@@ -210,11 +210,27 @@ fn predeclares_functions_for_recursion() {
         .compile_module(&module)
         .expect("recursive function should compile");
 
-    assert!(llvm.contains("call i32 @recurse(i32 %n)"));
+    assert!(llvm.contains("call i32 @recurse(ptr %0, i32 %n)"));
 }
 
 #[test]
-fn does_not_leak_locals_between_generated_functions() {
+fn preserves_the_environment_for_recursive_closures() {
+    let module = type_check(concat!(
+        "def outer = value: i32 => {\n",
+        "  def recurse = n: i32 => value + recurse n\n",
+        "  recurse 1\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("recursive closure should compile");
+    assert!(llvm.contains("call i32 @recurse(ptr %0, i32 %n)"));
+    assert!(llvm.contains("load { i32 }"));
+}
+
+#[test]
+fn lowers_captured_locals_into_closure_environments() {
     let module = type_check(concat!(
         "let outer = (value: i32) => {\n",
         "  let inner = () => value\n",
@@ -222,14 +238,99 @@ fn does_not_leak_locals_between_generated_functions() {
         "}\n",
     ));
     let context = Context::create();
-    let diagnostics = CodeGenerator::new(&context)
+    let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect_err("captured locals require closure lowering");
+        .expect("captured locals should use closure lowering");
 
-    assert_eq!(
-        diagnostics[0].message,
-        "value `value` is not available here"
+    assert!(llvm.contains("@malloc"));
+    assert!(llvm.contains("closure.call"));
+    assert!(llvm.contains("load { i32 }"));
+}
+
+#[test]
+fn type_checks_and_generates_curried_functions() {
+    let module = type_check(concat!(
+        "def inferred = a: i32 => b: i32 => a + b\n",
+        "def annotated: i32 -> i32 -> i32 = a => b => a + b\n",
+        "def add_one = annotated 1\n",
+        "inferred 1 2\n",
+        "add_one 2\n",
+    ));
+
+    for name in ["inferred", "annotated"] {
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .expect("curried function should resolve");
+        assert_eq!(
+            module.type_of_function(function.id).expect("checked type"),
+            &stapler::CheckedFunctionType {
+                parameter: Box::new(CheckedType::I32),
+                result: Box::new(CheckedType::Function(stapler::CheckedFunctionType {
+                    parameter: Box::new(CheckedType::I32),
+                    result: Box::new(CheckedType::I32),
+                })),
+            },
+        );
+    }
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("curried functions should compile");
+    assert!(llvm.contains("closure.call"));
+    assert!(llvm.contains("@malloc"));
+}
+
+#[test]
+fn contextually_types_product_parameters() {
+    type_check("def add: (i32, i32) -> i32 = (a, b) => a + b\nadd (1, 2)\n");
+}
+
+#[test]
+fn rejects_untyped_parameters_without_a_function_annotation() {
+    let module = resolve("def identity = value => value\n");
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("an untyped parameter needs context");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("could not fully infer"))
     );
+}
+
+#[test]
+fn lowers_transitive_captures_across_curried_layers() {
+    let module = type_check(concat!(
+        "def sum = a: i32 => b: i32 => c: i32 => a + b + c\n",
+        "def add_one = sum 1\n",
+        "def add_one_two = add_one 2\n",
+        "add_one_two 3\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("transitive captures should compile");
+    assert!(llvm.matches("@malloc").count() >= 3);
+    assert!(llvm.contains("load { i32 }"));
+    assert!(llvm.contains("load { i32, i32 }"));
+}
+
+#[test]
+fn adapts_non_variadic_externs_used_as_function_values() {
+    let module = type_check(concat!(
+        "extern \"c\" { let puts: (*const c_char) -> i32 }\n",
+        "def apply: ((*const c_char) -> i32, *const c_char) -> i32 = (f, value) => f value\n",
+        "apply (puts, \"hello\")\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("external function adapter should compile");
+    assert!(llvm.contains("define internal i32 @__staple_extern_puts"));
+    assert!(llvm.contains("call i32 @puts"));
 }
 
 #[test]

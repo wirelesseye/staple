@@ -164,7 +164,7 @@ fn mangles_a_source_binding_named_main_away_from_the_generated_entry_point() {
     fixture.write("main.sta", "def main = () => 1\nmain ()\n");
 
     let llvm = fixture.compile().expect("source main should compile");
-    assert!(llvm.contains("define i32 @__staple_m0_main()"));
+    assert!(llvm.contains("define i32 @__staple_m0_main(ptr %0)"));
     assert!(llvm.contains("define i32 @main()"));
 }
 

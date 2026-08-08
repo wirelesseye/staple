@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use inkwell::{
@@ -11,9 +11,9 @@ use inkwell::{
 };
 
 use crate::{
-    Accessor, BinaryExpression, BinaryOperator, CheckedFunctionType, CheckedProductType,
-    CheckedType, Diagnostic, Expression, FunctionId, Item, ModuleId, Pattern, ProductExpression,
-    ResolvedFunction, Span, Statement, SymbolId, TypedModule,
+    Accessor, BinaryExpression, BinaryOperator, CallExpression, CheckedFunctionType,
+    CheckedProductType, CheckedType, Diagnostic, Expression, FunctionId, Item, ModuleId, Pattern,
+    ProductExpression, ResolvedFunction, Span, Statement, SymbolId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -26,7 +26,10 @@ struct ModuleEmitter<'module, 'context> {
     llvm_module: inkwell::module::Module<'context>,
     builder: inkwell::builder::Builder<'context>,
     functions: HashMap<FunctionId, inkwell::values::FunctionValue<'context>>,
+    function_symbols: HashMap<SymbolId, FunctionId>,
     globals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
+    closure_codes: HashMap<SymbolId, inkwell::values::FunctionValue<'context>>,
+    external_symbols: HashSet<SymbolId>,
     storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initializers: HashMap<ModuleId, inkwell::values::FunctionValue<'context>>,
 }
@@ -34,6 +37,8 @@ struct ModuleEmitter<'module, 'context> {
 #[derive(Default)]
 struct FunctionEnvironment<'context> {
     locals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
+    function_id: Option<FunctionId>,
+    closure_environment: Option<inkwell::values::PointerValue<'context>>,
 }
 
 type CodeGenerationResult<T> = Result<T, Diagnostic>;
@@ -49,22 +54,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             llvm_module: context.create_module("staple"),
             builder: context.create_builder(),
             functions: HashMap::new(),
+            function_symbols: HashMap::new(),
             globals: HashMap::new(),
+            closure_codes: HashMap::new(),
+            external_symbols: HashSet::new(),
             storage: HashMap::new(),
             initializers: HashMap::new(),
         }
-    }
-
-    fn lookup_value(
-        &self,
-        environment: &FunctionEnvironment<'context>,
-        symbol: SymbolId,
-    ) -> Option<inkwell::values::AnyValueEnum<'context>> {
-        environment
-            .locals
-            .get(&symbol)
-            .or_else(|| self.globals.get(&symbol))
-            .copied()
     }
 }
 
@@ -167,11 +163,43 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             "external bindings must have a function type",
                         ));
                     };
-                    let llvm_type = self.compile_function_type(function_type)?;
+                    let llvm_type = self.compile_native_function_type(function_type)?;
                     let function = self
                         .llvm_module
                         .add_function(&binding.name, llvm_type, None);
                     self.globals.insert(symbol, function.into());
+                    self.external_symbols.insert(symbol);
+
+                    if !matches!(
+                        &*function_type.parameter,
+                        CheckedType::Product(product) if product.variadic
+                    ) {
+                        let adapter_type = self.compile_closure_function_type(function_type)?;
+                        let adapter = self.llvm_module.add_function(
+                            &format!("__staple_extern_{}", binding.name),
+                            adapter_type,
+                            Some(inkwell::module::Linkage::Internal),
+                        );
+                        let entry = self.context.append_basic_block(adapter, "entry");
+                        self.builder.position_at_end(entry);
+                        let arguments = adapter
+                            .get_params()
+                            .into_iter()
+                            .skip(1)
+                            .map(Into::into)
+                            .collect::<Vec<_>>();
+                        let call = self
+                            .builder
+                            .build_direct_call(function, &arguments, "extern.call")
+                            .map_err(|error| {
+                                Diagnostic::new(binding.syntax.span.clone(), error.to_string())
+                            })?;
+                        let result = call.try_as_basic_value().unwrap_basic();
+                        self.builder
+                            .build_return(Some(&result))
+                            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+                        self.closure_codes.insert(symbol, adapter);
+                    }
                 }
             }
         }
@@ -228,7 +256,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(function.body.syntax().span.clone(), "unchecked function")
                     })?;
-            let llvm_type = self.compile_function_type(function_type)?;
+            let llvm_type = self.compile_closure_function_type(function_type)?;
             let llvm_function = self
                 .llvm_module
                 .add_function(&function.name, llvm_type, None);
@@ -237,6 +265,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 && let Some(symbol) = self.typed_module.symbol_for(binding_syntax)
             {
                 self.globals.insert(symbol, llvm_function.into());
+                self.closure_codes.insert(symbol, llvm_function);
+                self.function_symbols.insert(symbol, function.id);
             }
         }
         Ok(())
@@ -247,7 +277,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let entry = self.context.append_basic_block(llvm_function, "entry");
         self.builder.position_at_end(entry);
 
-        let mut environment = FunctionEnvironment::default();
+        let mut environment = FunctionEnvironment {
+            function_id: Some(function.id),
+            ..FunctionEnvironment::default()
+        };
         self.bind_function_parameters(&mut environment, function, llvm_function)?;
         let value = self.compile_expression(&mut environment, &function.body)?;
         let return_value = value_as_basic(value).ok_or_else(|| {
@@ -269,7 +302,28 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         llvm_function: inkwell::values::FunctionValue<'context>,
     ) -> CodeGenerationResult<()> {
         let parameters = llvm_function.get_params();
-        self.bind_top_level_pattern(environment, &function.pattern, &parameters)
+        let environment_pointer = parameters
+            .first()
+            .copied()
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing closure environment"))?
+            .into_pointer_value();
+        environment.closure_environment = Some(environment_pointer);
+        if !function.captures.is_empty() {
+            let environment_type = self.compile_capture_type(function)?;
+            let environment_value = self
+                .builder
+                .build_load(environment_type, environment_pointer, "closure.environment")
+                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?
+                .into_struct_value();
+            for (index, symbol) in function.captures.iter().copied().enumerate() {
+                let value = self
+                    .builder
+                    .build_extract_value(environment_value, index as u32, "capture")
+                    .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+                environment.locals.insert(symbol, value.as_any_value_enum());
+            }
+        }
+        self.bind_top_level_pattern(environment, &function.pattern, &parameters[1..])
     }
 
     fn bind_top_level_pattern(
@@ -469,7 +523,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             "unresolved function expression",
                         )
                     })?;
-                Ok(self.functions[&id].into())
+                self.build_closure(environment, id, function.syntax.span.clone())
+                    .map(|closure| closure.as_any_value_enum())
             }
             Expression::Block(block) => {
                 let mut value = None;
@@ -484,30 +539,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }))
             }
             Expression::Product(product) => self.compile_product_expression(environment, product),
-            Expression::Call(call) => {
-                let callee = self.compile_expression(environment, &call.callee)?;
-                let AnyValueEnum::FunctionValue(function) = callee else {
-                    return Err(Diagnostic::new(
-                        call.callee.syntax().span.clone(),
-                        "expression is not directly callable",
-                    ));
-                };
-                let arguments = self.compile_arguments(
-                    environment,
-                    &call.argument,
-                    function.count_params() as usize,
-                )?;
-                let call_site = self
-                    .builder
-                    .build_direct_call(function, &arguments, "call")
-                    .map_err(|error| {
-                        Diagnostic::new(call.syntax.span.clone(), error.to_string())
-                    })?;
-                Ok(call_site
-                    .try_as_basic_value()
-                    .unwrap_basic()
-                    .as_any_value_enum())
-            }
+            Expression::Call(call) => self.compile_call_expression(environment, call),
             Expression::Access(access) => {
                 if let Some(symbol) = self.typed_module.symbol_for(access.syntax.id) {
                     return self.compile_symbol_value(
@@ -583,8 +615,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         span: Span,
         unavailable: String,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        if let Some(value) = self.lookup_value(environment, symbol) {
+        if let Some(value) = environment.locals.get(&symbol).copied() {
             return Ok(value);
+        }
+        if let Some(code) = self.closure_codes.get(&symbol).copied() {
+            let closure_environment =
+                if self.function_symbols.get(&symbol).copied() == environment.function_id {
+                    environment.closure_environment.unwrap_or_else(|| {
+                        self.context.ptr_type(AddressSpace::default()).const_null()
+                    })
+                } else {
+                    self.context.ptr_type(AddressSpace::default()).const_null()
+                };
+            return self
+                .build_closure_value(code, closure_environment)
+                .map(|value| value.as_any_value_enum());
+        }
+        if self.external_symbols.contains(&symbol) {
+            return Err(Diagnostic::new(
+                span,
+                "variadic external functions cannot be used as first-class values",
+            ));
         }
         if let Some(global) = self.storage.get(&symbol) {
             let value_type = self
@@ -599,6 +650,176 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(|error| Diagnostic::new(span, error.to_string()));
         }
         Err(Diagnostic::new(span, unavailable))
+    }
+
+    fn compile_call_expression(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let Some(symbol) = self.typed_module.symbol_for(call.callee.syntax().id)
+            && !environment.locals.contains_key(&symbol)
+            && let Some(AnyValueEnum::FunctionValue(function)) = self.globals.get(&symbol).copied()
+        {
+            let internal = !self.external_symbols.contains(&symbol);
+            let expected_count = function.count_params() as usize - usize::from(internal);
+            let mut arguments = self.compile_arguments(
+                environment,
+                &call.argument,
+                expected_count,
+                function.get_type().is_var_arg(),
+            )?;
+            if internal {
+                let closure_environment =
+                    if self.function_symbols.get(&symbol).copied() == environment.function_id {
+                        environment.closure_environment.unwrap_or_else(|| {
+                            self.context.ptr_type(AddressSpace::default()).const_null()
+                        })
+                    } else {
+                        self.context.ptr_type(AddressSpace::default()).const_null()
+                    };
+                arguments.insert(0, closure_environment.into());
+            }
+            let call_site = self
+                .builder
+                .build_direct_call(function, &arguments, "call")
+                .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+            return Ok(call_site
+                .try_as_basic_value()
+                .unwrap_basic()
+                .as_any_value_enum());
+        }
+
+        let callee = self.compile_expression(environment, &call.callee)?;
+        let AnyValueEnum::StructValue(closure) = callee else {
+            return Err(Diagnostic::new(
+                call.callee.syntax().span.clone(),
+                "expression is not a closure",
+            ));
+        };
+        let Some(CheckedType::Function(function_type)) = self
+            .typed_module
+            .type_of_expression(call.callee.syntax().id)
+        else {
+            return Err(Diagnostic::new(
+                call.callee.syntax().span.clone(),
+                "called expression has no function type",
+            ));
+        };
+        let expected_count = self
+            .compile_parameter_types(&function_type.parameter)?
+            .len();
+        let mut arguments =
+            self.compile_arguments(environment, &call.argument, expected_count, false)?;
+        let code = self
+            .builder
+            .build_extract_value(closure, 0, "closure.code")
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
+            .into_pointer_value();
+        let closure_environment = self
+            .builder
+            .build_extract_value(closure, 1, "closure.environment")
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
+            .into_pointer_value();
+        arguments.insert(0, closure_environment.into());
+        let call_site = self
+            .builder
+            .build_indirect_call(
+                self.compile_closure_function_type(function_type)?,
+                code,
+                &arguments,
+                "closure.call",
+            )
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        Ok(call_site
+            .try_as_basic_value()
+            .unwrap_basic()
+            .as_any_value_enum())
+    }
+
+    fn build_closure(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        function_id: FunctionId,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let function = self
+            .typed_module
+            .functions()
+            .iter()
+            .find(|function| function.id == function_id)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "unknown function"))?;
+        let environment_pointer = if function.captures.is_empty() {
+            self.context.ptr_type(AddressSpace::default()).const_null()
+        } else {
+            let environment_type = self.compile_capture_type(&function)?;
+            let mut environment_value = environment_type.const_zero();
+            for (index, symbol) in function.captures.iter().copied().enumerate() {
+                let value = self.compile_symbol_value(
+                    environment,
+                    symbol,
+                    span.clone(),
+                    "captured value is not available here".to_owned(),
+                )?;
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "captured value is not first-class")
+                })?;
+                environment_value = self
+                    .builder
+                    .build_insert_value(environment_value, value, index as u32, "capture")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+                    .into_struct_value();
+            }
+            let pointer = self
+                .builder
+                .build_malloc(environment_type, "closure.environment")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            self.builder
+                .build_store(pointer, environment_value)
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            pointer
+        };
+        self.build_closure_value(self.functions[&function_id], environment_pointer)
+    }
+
+    fn build_closure_value(
+        &mut self,
+        code: inkwell::values::FunctionValue<'context>,
+        environment: inkwell::values::PointerValue<'context>,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let mut closure = self.closure_type().const_zero();
+        closure = self
+            .builder
+            .build_insert_value(
+                closure,
+                code.as_global_value().as_pointer_value(),
+                0,
+                "closure.code",
+            )
+            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?
+            .into_struct_value();
+        self.builder
+            .build_insert_value(closure, environment, 1, "closure.environment")
+            .map(|value| value.into_struct_value())
+            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))
+    }
+
+    fn compile_capture_type(
+        &self,
+        function: &ResolvedFunction,
+    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
+        let fields = function
+            .captures
+            .iter()
+            .map(|symbol| {
+                self.typed_module
+                    .type_of_symbol(*symbol)
+                    .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked capture"))
+                    .and_then(|ty| self.compile_type(ty))
+            })
+            .collect::<CodeGenerationResult<Vec<_>>>()?;
+        Ok(self.context.struct_type(&fields, false))
     }
 
     fn compile_binary_expression(
@@ -673,6 +894,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         argument: &Expression,
         expected_count: usize,
+        variadic: bool,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
         let expressions: Vec<&Expression> = match argument {
             Expression::Product(product) => product
@@ -696,7 +918,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     })
             })
             .collect::<CodeGenerationResult<Vec<BasicValueEnum<'context>>>>()?;
-        if arguments.len() == expected_count {
+        if arguments.len() == expected_count || (variadic && arguments.len() >= expected_count) {
             return Ok(arguments.into_iter().map(Into::into).collect());
         }
         if let [BasicValueEnum::StructValue(product)] = arguments.as_slice()
@@ -742,7 +964,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(product.into())
     }
 
-    fn compile_function_type(
+    fn compile_native_function_type(
         &self,
         function_type: &CheckedFunctionType,
     ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
@@ -767,6 +989,37 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             inkwell::types::BasicTypeEnum::StructType(value) => {
                 value.fn_type(&parameter_types, variadic)
+            }
+            inkwell::types::BasicTypeEnum::VectorType(_)
+            | inkwell::types::BasicTypeEnum::ScalableVectorType(_) => {
+                return Err(Diagnostic::new(
+                    Span::Compiler,
+                    "vector return types are not supported",
+                ));
+            }
+        })
+    }
+
+    fn compile_closure_function_type(
+        &self,
+        function_type: &CheckedFunctionType,
+    ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
+        let return_type = self.compile_type(&function_type.result)?;
+        let mut parameter_types = vec![self.context.ptr_type(AddressSpace::default()).into()];
+        parameter_types.extend(self.compile_parameter_types(&function_type.parameter)?);
+        Ok(match return_type {
+            inkwell::types::BasicTypeEnum::ArrayType(value) => {
+                value.fn_type(&parameter_types, false)
+            }
+            inkwell::types::BasicTypeEnum::FloatType(value) => {
+                value.fn_type(&parameter_types, false)
+            }
+            inkwell::types::BasicTypeEnum::IntType(value) => value.fn_type(&parameter_types, false),
+            inkwell::types::BasicTypeEnum::PointerType(value) => {
+                value.fn_type(&parameter_types, false)
+            }
+            inkwell::types::BasicTypeEnum::StructType(value) => {
+                value.fn_type(&parameter_types, false)
             }
             inkwell::types::BasicTypeEnum::VectorType(_)
             | inkwell::types::BasicTypeEnum::ScalableVectorType(_) => {
@@ -807,14 +1060,21 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )),
             CheckedType::CChar => Ok(self.context.i8_type().into()),
             CheckedType::String => Ok(self.context.ptr_type(AddressSpace::default()).into()),
-            CheckedType::Pointer { .. } | CheckedType::Function(_) => {
+            CheckedType::Pointer { .. } => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
+            CheckedType::Function(_) => Ok(self.closure_type().into()),
             CheckedType::Product(product) => self.compile_product_type(product).map(Into::into),
             CheckedType::I32 => Ok(self.context.i32_type().into()),
             CheckedType::Bool => Ok(self.context.bool_type().into()),
             CheckedType::Distinct { representation, .. } => self.compile_type(representation),
         }
+    }
+
+    fn closure_type(&self) -> inkwell::types::StructType<'context> {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        self.context
+            .struct_type(&[pointer.into(), pointer.into()], false)
     }
 
     fn compile_product_type(

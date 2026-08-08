@@ -340,14 +340,19 @@ impl Grammar {
         }
     }
 
-    /// Parses a named, type-annotated binding pattern.
+    /// Parses a named binding pattern whose type may be supplied contextually.
     fn parse_binding_pattern(&mut self) -> Result<BindingPattern, ParseError> {
         let start = self.position;
         let name = self
             .expect(TokenKind::Identifier, "expected parameter name")?
             .text;
-        self.expect(TokenKind::Colon, "expected `:` after parameter name")?;
-        let ty = self.parse_type_atom()?;
+        let ty = if self.eat(TokenKind::Colon) {
+            self.parse_type_atom()?
+        } else {
+            Type::Inferred(InferredType {
+                syntax: self.syntax(start),
+            })
+        };
         Ok(BindingPattern {
             syntax: self.syntax(start),
             name,

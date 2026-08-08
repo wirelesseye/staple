@@ -22,6 +22,7 @@ pub struct ResolvedFunction {
     pub pattern: Pattern,
     pub return_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
+    pub captures: Vec<SymbolId>,
     pub body: Expression,
 }
 
@@ -88,6 +89,10 @@ pub struct NameResolver {
     imported_types: HashMap<String, TypeId>,
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
+    symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
+    function_parents: HashMap<FunctionId, Option<FunctionId>>,
+    function_captures: HashMap<FunctionId, Vec<SymbolId>>,
+    function_stack: Vec<FunctionId>,
     functions: Vec<ResolvedFunction>,
     named_types: HashMap<SyntaxId, TypeId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
@@ -216,6 +221,7 @@ impl NameResolver {
         self.next_symbol_id += 1;
         self.declared_symbols.insert(binding.syntax.id, symbol);
         self.symbols.insert(binding.syntax.id, symbol);
+        self.symbol_owners.insert(symbol, None);
         symbol
     }
 
@@ -389,14 +395,24 @@ impl NameResolver {
                 self.next_function_id += 1;
                 self.function_expressions
                     .insert(function.syntax.id, function_id);
+                self.function_parents
+                    .insert(function_id, self.function_stack.last().copied());
                 self.resolve_type(&function.pattern.ty());
                 if let Some(ty) = &function.return_type {
                     self.resolve_type(ty);
                 }
+                self.function_stack.push(function_id);
                 self.push_scope();
                 self.declare_pattern(&function.pattern);
-                self.resolve_expression(&function.body, None, None);
+                let expected_result = function.return_type.as_ref().or_else(|| {
+                    let Type::Function(function_type) = expected_type? else {
+                        return None;
+                    };
+                    Some(function_type.result.as_ref())
+                });
+                self.resolve_expression(&function.body, expected_result, None);
                 self.pop_scope();
+                self.function_stack.pop();
                 let base_name = suggested_function
                     .map(|(name, _)| name.to_owned())
                     .unwrap_or_else(|| format!("function.{}", function_id.0));
@@ -405,6 +421,15 @@ impl NameResolver {
                 } else {
                     base_name
                 };
+                let mut captures = self
+                    .function_captures
+                    .remove(&function_id)
+                    .unwrap_or_default();
+                if let Some((_, binding_syntax)) = suggested_function
+                    && let Some(self_symbol) = self.symbols.get(&binding_syntax)
+                {
+                    captures.retain(|capture| capture != self_symbol);
+                }
                 self.functions.push(ResolvedFunction {
                     id: function_id,
                     name,
@@ -412,6 +437,7 @@ impl NameResolver {
                     pattern: function.pattern.clone(),
                     return_annotation: function.return_type.clone(),
                     binding_annotation: expected_type.cloned(),
+                    captures,
                     body: (*function.body).clone(),
                 });
             }
@@ -452,6 +478,7 @@ impl NameResolver {
             Expression::Name(name) => match self.lookup(&name.name) {
                 Some(symbol) => {
                     self.symbols.insert(name.syntax.id, symbol);
+                    self.record_capture(symbol);
                 }
                 None if self.namespaces.contains_key(&name.name) => {
                     self.diagnostics.push(Diagnostic::new(
@@ -559,7 +586,28 @@ impl NameResolver {
     fn declare_fresh_name(&mut self, name: &str, syntax: SyntaxId, span: Span) {
         let symbol = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
+        self.symbol_owners
+            .insert(symbol, self.function_stack.last().copied());
         self.declare_symbol(name, syntax, span, symbol);
+    }
+
+    fn record_capture(&mut self, symbol: SymbolId) {
+        let Some(mut function) = self.function_stack.last().copied() else {
+            return;
+        };
+        let Some(owner) = self.symbol_owners.get(&symbol).copied().flatten() else {
+            return;
+        };
+        while function != owner {
+            let captures = self.function_captures.entry(function).or_default();
+            if !captures.contains(&symbol) {
+                captures.push(symbol);
+            }
+            let Some(Some(parent)) = self.function_parents.get(&function).copied() else {
+                break;
+            };
+            function = parent;
+        }
     }
 
     fn declare_symbol(&mut self, name: &str, syntax: SyntaxId, span: Span, symbol: SymbolId) {
