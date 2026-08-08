@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use crate::{
     AccessExpression, Accessor, Associativity, Binding, BindingKind, BlockExpression,
     CallExpression, Diagnostic, Expression, Fixity, InfixExpression, InfixOperator, Item, Module,
-    ModuleId, NameExpression, Pattern, Program, Span, Statement, Syntax, SyntaxId, Type,
-    TypeDeclaration, TypeParameterPattern, UseKind, Visibility,
+    ModuleId, NameExpression, Pattern, PatternBindingKind, Program, Span, Statement, Syntax,
+    SyntaxId, Type, TypeDeclaration, TypeParameterPattern, UseKind, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1174,6 +1174,20 @@ impl NameResolver {
         match statement {
             Statement::Binding(binding) => self.resolve_binding(binding),
             Statement::PatternBinding(binding) => {
+                if binding.kind == PatternBindingKind::Propagating {
+                    if self.function_stack.is_empty() {
+                        self.diagnostics.push(Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            "propagating bindings are only allowed inside a function",
+                        ));
+                    }
+                    if !matches!(binding.pattern, Pattern::Nominal(_)) {
+                        self.diagnostics.push(Diagnostic::new(
+                            binding.pattern.syntax().span.clone(),
+                            "a propagating binding requires a nominal pattern",
+                        ));
+                    }
+                }
                 self.resolve_pattern_types(&binding.pattern);
                 self.resolve_expression(&binding.value, None, None);
                 self.declare_pattern(&binding.pattern);
@@ -1470,6 +1484,11 @@ impl NameResolver {
                     self.resolve_type(&element.ty);
                 }
             }
+            Type::Sum(sum) => {
+                for alternative in &sum.alternatives {
+                    self.resolve_type(alternative);
+                }
+            }
             Type::Function(function) => {
                 self.resolve_type(&function.parameter);
                 self.resolve_type(&function.result);
@@ -1569,6 +1588,11 @@ impl NameResolver {
             Type::Product(product) => {
                 for element in &product.elements {
                     self.validate_public_representation(&element.ty);
+                }
+            }
+            Type::Sum(sum) => {
+                for alternative in &sum.alternatives {
+                    self.validate_public_representation(alternative);
                 }
             }
             Type::Function(function) => {

@@ -91,8 +91,15 @@ pub struct TypeDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PatternBinding {
     pub syntax: Syntax,
+    pub kind: PatternBindingKind,
     pub pattern: super::Pattern,
     pub value: Expression,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatternBindingKind {
+    Irrefutable,
+    Propagating,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

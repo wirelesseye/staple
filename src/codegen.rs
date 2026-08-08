@@ -6,9 +6,11 @@ use std::path::Path;
 use inkwell::{
     AddressSpace, OptimizationLevel,
     module::Module as LlvmModule,
+    targets::TargetData,
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
     },
+    types::BasicType,
     values::{AnyValue, AnyValueEnum, BasicValueEnum},
 };
 
@@ -16,8 +18,8 @@ use crate::typecheck::{contains_type_parameter, infer_type_parameters, substitut
 use crate::{
     Accessor, CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic,
     Expression, FunctionId, IntegerBinaryOperation, IntegerType, IntrinsicFunction, Item, ModuleId,
-    Pattern, ProductExpression, ResolvedFunction, Span, Statement, SymbolId, TypeParameterId,
-    TypedModule,
+    Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, Span, Statement, SymbolId,
+    TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -45,6 +47,7 @@ struct ModuleEmitter<'module, 'context> {
     storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initializers: HashMap<ModuleId, inkwell::values::FunctionValue<'context>>,
     size_type: inkwell::types::IntType<'context>,
+    target_data: TargetData,
 }
 
 #[derive(Default)]
@@ -80,6 +83,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             storage: HashMap::new(),
             initializers: HashMap::new(),
             size_type: context.ptr_sized_int_type(&target_machine.get_target_data(), None),
+            target_data: target_machine.get_target_data(),
         }
     }
 }
@@ -390,7 +394,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     }
 
     fn specialization_key(function_type: &CheckedFunctionType) -> String {
-        format!("{} -> {}", function_type.parameter, function_type.result)
+        format!("{function_type:?}")
     }
 
     fn ensure_function_specialization(
@@ -800,7 +804,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "destructured value is not first-class",
                     )
                 })?;
-                self.bind_pattern_value(environment, &binding.pattern, value)?;
+                if binding.kind == PatternBindingKind::Propagating {
+                    self.compile_propagating_binding(environment, binding, value)?;
+                } else {
+                    self.bind_pattern_value(environment, &binding.pattern, value)?;
+                }
                 Ok(None)
             }
             Statement::Return(statement) => {
@@ -826,7 +834,136 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
     }
 
+    fn compile_propagating_binding(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        binding: &crate::PatternBinding,
+        value: BasicValueEnum<'context>,
+    ) -> CodeGenerationResult<()> {
+        let propagation = self
+            .typed_module
+            .propagation_for(binding.syntax.id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(binding.syntax.span.clone(), "missing checked propagation")
+            })?;
+        let source = substitute_type(propagation.source, &self.active_type_substitutions);
+        let result = substitute_type(propagation.result, &self.active_type_substitutions);
+        let CheckedType::Sum(source_sum) = &source else {
+            return Err(Diagnostic::new(
+                binding.syntax.span.clone(),
+                "propagation source is not a sum",
+            ));
+        };
+        let BasicValueEnum::StructValue(sum_value) = value else {
+            return Err(Diagnostic::new(
+                binding.syntax.span.clone(),
+                "propagation source has an invalid representation",
+            ));
+        };
+        let tag = self
+            .builder
+            .build_extract_value(sum_value, 0, "propagate.tag")
+            .map_err(|error| Diagnostic::new(binding.syntax.span.clone(), error.to_string()))?
+            .into_int_value();
+        let success = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                self.context
+                    .i32_type()
+                    .const_int(propagation.success_index as u64, false),
+                "propagate.success",
+            )
+            .map_err(|error| Diagnostic::new(binding.syntax.span.clone(), error.to_string()))?;
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    binding.syntax.span.clone(),
+                    "propagation is not inside a function",
+                )
+            })?;
+        let success_block = self.context.append_basic_block(function, "propagate.ok");
+        let failure_block = self
+            .context
+            .append_basic_block(function, "propagate.return");
+        self.builder
+            .build_conditional_branch(success, success_block, failure_block)
+            .map_err(|error| Diagnostic::new(binding.syntax.span.clone(), error.to_string()))?;
+
+        self.builder.position_at_end(failure_block);
+        let failure_value = if source == result {
+            sum_value.as_any_value_enum()
+        } else if let CheckedType::Sum(_) = result {
+            self.coerce_sum_value(
+                sum_value.as_any_value_enum(),
+                &source,
+                &result,
+                binding.syntax.span.clone(),
+            )?
+        } else {
+            let index = source_sum
+                .alternatives
+                .iter()
+                .position(|alternative| alternative == &result)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        "propagated result is missing its residual variant",
+                    )
+                })?;
+            self.extract_sum_alternative(sum_value, source_sum, index, binding.syntax.span.clone())?
+                .as_any_value_enum()
+        };
+        let failure_value = value_as_basic(failure_value).ok_or_else(|| {
+            Diagnostic::new(
+                binding.syntax.span.clone(),
+                "propagated result is not first-class",
+            )
+        })?;
+        self.builder
+            .build_return(Some(&failure_value))
+            .map_err(|error| Diagnostic::new(binding.syntax.span.clone(), error.to_string()))?;
+
+        self.builder.position_at_end(success_block);
+        let success_value = self.extract_sum_alternative(
+            sum_value,
+            source_sum,
+            propagation.success_index,
+            binding.syntax.span.clone(),
+        )?;
+        let Pattern::Nominal(pattern) = &binding.pattern else {
+            unreachable!("checked propagating pattern is nominal");
+        };
+        self.bind_pattern_value(environment, &pattern.argument, success_value)
+    }
+
     fn compile_expression(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        expression: &Expression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let value = self.compile_expression_uncoerced(environment, expression)?;
+        if environment.did_return {
+            return Ok(value);
+        }
+        let Some(coercion) = self
+            .typed_module
+            .coercion_for(expression.syntax().id)
+            .cloned()
+        else {
+            return Ok(value);
+        };
+        let source = substitute_type(coercion.source, &self.active_type_substitutions);
+        let target = substitute_type(coercion.target, &self.active_type_substitutions);
+        self.coerce_sum_value(value, &source, &target, expression.syntax().span.clone())
+    }
+
+    fn compile_expression_uncoerced(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
         expression: &Expression,
@@ -1094,6 +1231,210 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .struct_type(&[], false)
             .const_zero()
             .as_any_value_enum()
+    }
+
+    fn coerce_sum_value(
+        &mut self,
+        value: AnyValueEnum<'context>,
+        source: &CheckedType,
+        target: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let CheckedType::Sum(target_sum) = target else {
+            return Err(Diagnostic::new(span, "invalid sum coercion target"));
+        };
+        let target_type = self.compile_sum_type(target_sum)?;
+        let target_slot = self
+            .builder
+            .build_alloca(target_type, "sum.target")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_store(target_slot, target_type.const_zero())
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let target_tag = self
+            .builder
+            .build_struct_gep(target_type, target_slot, 0, "sum.target.tag")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let target_payload = self
+            .builder
+            .build_struct_gep(target_type, target_slot, 1, "sum.target.payload")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let target_payload_type = target_type
+            .get_field_type_at_index(1)
+            .expect("sum payload field");
+        let target_alignment = self.target_data.get_abi_alignment(&target_payload_type);
+
+        match source {
+            CheckedType::Distinct { .. } => {
+                let index = target_sum
+                    .alternatives
+                    .iter()
+                    .position(|alternative| alternative == source)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            span.clone(),
+                            "sum injection target is missing its source alternative",
+                        )
+                    })?;
+                self.builder
+                    .build_store(
+                        target_tag,
+                        self.context.i32_type().const_int(index as u64, false),
+                    )
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                let source_type = self.compile_type(source)?;
+                let source_value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "sum alternative is not a first-class value")
+                })?;
+                let source_slot = self
+                    .builder
+                    .build_alloca(source_type, "sum.source")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                self.builder
+                    .build_store(source_slot, source_value)
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                let size = self
+                    .size_type
+                    .const_int(self.target_data.get_store_size(&source_type), false);
+                self.builder
+                    .build_memcpy(
+                        target_payload,
+                        target_alignment,
+                        source_slot,
+                        self.target_data.get_abi_alignment(&source_type),
+                        size,
+                    )
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            }
+            CheckedType::Sum(source_sum) => {
+                let source_type = self.compile_sum_type(source_sum)?;
+                let source_value = value_as_basic(value)
+                    .and_then(|value| match value {
+                        BasicValueEnum::StructValue(value) => Some(value),
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "sum value has an invalid representation")
+                    })?;
+                let source_slot = self
+                    .builder
+                    .build_alloca(source_type, "sum.source")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                self.builder
+                    .build_store(source_slot, source_value)
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                let source_payload = self
+                    .builder
+                    .build_struct_gep(source_type, source_slot, 1, "sum.source.payload")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                let source_payload_type = source_type
+                    .get_field_type_at_index(1)
+                    .expect("sum payload field");
+                let source_tag = self
+                    .builder
+                    .build_extract_value(source_value, 0, "sum.source.tag")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+                    .into_int_value();
+                let mut translated = self.context.i32_type().const_zero();
+                for (source_index, alternative) in source_sum.alternatives.iter().enumerate() {
+                    let Some(target_index) = target_sum
+                        .alternatives
+                        .iter()
+                        .position(|candidate| candidate == alternative)
+                    else {
+                        continue;
+                    };
+                    let matches = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            source_tag,
+                            self.context
+                                .i32_type()
+                                .const_int(source_index as u64, false),
+                            "sum.tag.matches",
+                        )
+                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                    translated = self
+                        .builder
+                        .build_select(
+                            matches,
+                            self.context
+                                .i32_type()
+                                .const_int(target_index as u64, false),
+                            translated,
+                            "sum.tag.translate",
+                        )
+                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+                        .into_int_value();
+                }
+                self.builder
+                    .build_store(target_tag, translated)
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                self.builder
+                    .build_memcpy(
+                        target_payload,
+                        target_alignment,
+                        source_payload,
+                        self.target_data.get_abi_alignment(&source_payload_type),
+                        self.size_type.const_int(
+                            self.target_data.get_store_size(&source_payload_type),
+                            false,
+                        ),
+                    )
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            }
+            _ => return Err(Diagnostic::new(span, "invalid sum coercion source")),
+        }
+        self.builder
+            .build_load(target_type, target_slot, "sum.value")
+            .map(|value| value.as_any_value_enum())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    fn extract_sum_alternative(
+        &mut self,
+        value: inkwell::values::StructValue<'context>,
+        sum: &crate::CheckedSumType,
+        index: usize,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let sum_type = self.compile_sum_type(sum)?;
+        let sum_slot = self
+            .builder
+            .build_alloca(sum_type, "sum.extract.source")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_store(sum_slot, value)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let payload = self
+            .builder
+            .build_struct_gep(sum_type, sum_slot, 1, "sum.extract.payload")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let payload_type = sum_type
+            .get_field_type_at_index(1)
+            .expect("sum payload field");
+        let alternative = sum.alternatives.get(index).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "sum alternative index is out of bounds")
+        })?;
+        let alternative_type = self.compile_type(alternative)?;
+        let alternative_slot = self
+            .builder
+            .build_alloca(alternative_type, "sum.extract.value")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_memcpy(
+                alternative_slot,
+                self.target_data.get_abi_alignment(&alternative_type),
+                payload,
+                self.target_data.get_abi_alignment(&payload_type),
+                self.size_type
+                    .const_int(self.target_data.get_store_size(&alternative_type), false),
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_load(alternative_type, alternative_slot, "sum.extract.result")
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
     fn compile_c_string_macro(
@@ -2317,6 +2658,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             CheckedType::Function(_) => Ok(self.closure_type().into()),
             CheckedType::Product(product) => self.compile_product_type(product).map(Into::into),
+            CheckedType::Sum(sum) => self.compile_sum_type(sum).map(Into::into),
             CheckedType::I8 => Ok(self.compile_integer_type(IntegerType::I8).into()),
             CheckedType::I16 => Ok(self.compile_integer_type(IntegerType::I16).into()),
             CheckedType::I32 => Ok(self.compile_integer_type(IntegerType::I32).into()),
@@ -2369,6 +2711,31 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map(|element| self.compile_type(&element.value_type))
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         Ok(self.context.struct_type(&fields, true))
+    }
+
+    fn compile_sum_type(
+        &self,
+        sum: &crate::CheckedSumType,
+    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
+        let mut maximum_size = 0;
+        let mut carrier = self.context.i8_type().into();
+        let mut maximum_alignment = 1;
+        for alternative in &sum.alternatives {
+            let alternative_type = self.compile_type(alternative)?;
+            let size = self.target_data.get_store_size(&alternative_type);
+            let alignment = self.target_data.get_abi_alignment(&alternative_type);
+            maximum_size = maximum_size.max(size);
+            if alignment > maximum_alignment {
+                maximum_alignment = alignment;
+                carrier = alternative_type;
+            }
+        }
+        let carrier_size = self.target_data.get_store_size(&carrier).max(1);
+        let length = maximum_size.max(1).div_ceil(carrier_size) as u32;
+        let payload = carrier.array_type(length);
+        Ok(self
+            .context
+            .struct_type(&[self.context.i32_type().into(), payload.into()], false))
     }
 }
 

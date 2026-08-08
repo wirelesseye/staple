@@ -808,6 +808,70 @@ type alias Person = (
 Here, `person` is exactly the named product type on the right-hand side. The alias
 does not create a separate nominal identity.
 
+### Open sum types
+
+A sum type lists the nominal variants which a value may contain:
+
+```staple
+Ok Tree | IOError | ParseError
+```
+
+Variants do not share a declaration. Modules may define represented nominal
+types independently and combine them wherever a type is accepted. `Ok` is a
+public represented type from `std.core`:
+
+```staple
+pub(repr) type Ok = T => T
+```
+
+Every alternative must currently be a fully applied represented nominal type.
+Primitive, product, function, opaque, and partially applied types cannot be
+alternatives. A transparent alias may name a sum or nominal alternative, but
+does not introduce another variant identity.
+
+Sums are unordered, flattened, and duplicate-free. Consequently `A | B` and
+`B | A` are the same type, nested sums are flattened, and `A | A` is `A`.
+Different applications of one constructor, such as `Ok I32 | Ok String`, may
+not occur in one sum because a nominal pattern would not distinguish them.
+
+Type application binds more tightly than `|`, and `|` binds more tightly than
+the function arrow. Thus `String -> Ok Tree | IOError` is a function returning
+the sum.
+
+A nominal value is injected implicitly when a sum is expected. A smaller sum
+is likewise widened implicitly to a sum containing all of its alternatives.
+Sums cannot be narrowed implicitly. Standalone nominal values retain their
+zero-cost representation; a value acquires a runtime tag only while stored in
+a sum.
+
+#### Propagating bindings
+
+A `?` after a nominal destructuring pattern selects its success alternative
+and returns every other alternative from the enclosing function:
+
+```staple
+def load = (path: String) => {
+    let Ok(file)? = read_file(path)
+    let Ok(tree)? = parse_tree_from_file(file)
+    Ok(tree)
+}
+```
+
+The right-hand expression must have a sum type containing exactly one
+alternative with the pattern's nominal constructor. It is evaluated once. On
+the selected tag, the payload is destructured and execution continues. Any
+other tag returns immediately and is widened into the enclosing result type.
+The selected representation must be visible under the ordinary `pub(repr)`
+rules.
+
+When the function result is omitted, Stapler joins its trailing value, reachable
+explicit returns, and every propagated alternative. The example therefore
+infers `Ok Tree | IOError | ParseError`. With an explicit result annotation,
+every normal and propagated result must be contained in that annotation.
+
+Sum types use Staple's internal tagged inline representation and may not appear
+anywhere inside an `extern` binding type.
+
 ## Foreign declarations
 
 An `extern` block declares values supplied by a foreign ABI. The ABI name is a

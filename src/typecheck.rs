@@ -3,9 +3,9 @@ use std::fmt;
 
 use crate::{
     Accessor, Binding, BuiltinType, Diagnostic, Expression, FunctionId, IntegerType, Item, Module,
-    Pattern, ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId,
-    TraitId, TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId,
-    TypeParameterPattern,
+    Pattern, PatternBindingKind, ProductType, ResolvedFunction, ResolvedModule, Span, Statement,
+    SymbolId, SyntaxId, TraitId, TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId,
+    TypeParameterId, TypeParameterPattern,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,26 @@ pub struct CheckedTraitBound {
 pub struct CheckedTraitDispatch {
     pub method: TraitMethodId,
     pub target: CheckedType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedCoercion {
+    pub source: CheckedType,
+    pub target: CheckedType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedPropagation {
+    pub source: CheckedType,
+    pub success_index: usize,
+    pub result: CheckedType,
+}
+
+#[derive(Debug, Clone)]
+struct ReturnContribution {
+    syntax: Option<SyntaxId>,
+    span: Span,
+    value_type: CheckedType,
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +83,7 @@ pub enum CheckedType {
         pointee: Box<CheckedType>,
     },
     Product(CheckedProductType),
+    Sum(CheckedSumType),
     Function(CheckedFunctionType),
     Distinct {
         id: TypeId,
@@ -82,6 +103,11 @@ pub struct CheckedProductType {
 pub struct CheckedTypeElement {
     pub name: Option<String>,
     pub value_type: CheckedType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedSumType {
+    pub alternatives: Vec<CheckedType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -137,6 +163,7 @@ impl CheckedType {
                 .elements
                 .iter()
                 .all(|element| element.value_type.is_concrete()),
+            Self::Sum(sum) => sum.alternatives.iter().all(CheckedType::is_concrete),
             Self::Function(function) => {
                 function.parameter.is_concrete() && function.result.is_concrete()
             }
@@ -186,7 +213,7 @@ impl fmt::Display for CheckedType {
             } => {
                 formatter.write_str(name)?;
                 for argument in arguments {
-                    write!(formatter, " {argument}")?;
+                    format_type_argument(formatter, argument)?;
                 }
                 Ok(())
             }
@@ -195,7 +222,7 @@ impl fmt::Display for CheckedType {
             } => {
                 formatter.write_str(name)?;
                 for argument in arguments {
-                    write!(formatter, " {argument}")?;
+                    format_type_argument(formatter, argument)?;
                 }
                 Ok(())
             }
@@ -219,6 +246,15 @@ impl fmt::Display for CheckedType {
                 }
                 formatter.write_str(")")
             }
+            Self::Sum(sum) => {
+                for (index, alternative) in sum.alternatives.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(" | ")?;
+                    }
+                    write!(formatter, "{alternative}")?;
+                }
+                Ok(())
+            }
             Self::Function(function) => {
                 write!(formatter, "{} -> {}", function.parameter, function.result)
             }
@@ -227,11 +263,19 @@ impl fmt::Display for CheckedType {
             } => {
                 formatter.write_str(name)?;
                 for argument in arguments {
-                    write!(formatter, " {argument}")?;
+                    format_type_argument(formatter, argument)?;
                 }
                 Ok(())
             }
         }
+    }
+}
+
+fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &CheckedType) -> fmt::Result {
+    if matches!(argument, CheckedType::Sum(_) | CheckedType::Function(_)) {
+        write!(formatter, " ({argument})")
+    } else {
+        write!(formatter, " {argument}")
     }
 }
 
@@ -244,6 +288,8 @@ pub struct TypedModule {
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
     trait_implementations: Vec<CheckedTraitImplementation>,
+    expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
+    propagations: HashMap<SyntaxId, CheckedPropagation>,
 }
 
 impl TypedModule {
@@ -269,6 +315,14 @@ impl TypedModule {
 
     pub fn type_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.expression_types.get(&syntax_id)
+    }
+
+    pub fn coercion_for(&self, syntax_id: SyntaxId) -> Option<&CheckedCoercion> {
+        self.expression_coercions.get(&syntax_id)
+    }
+
+    pub fn propagation_for(&self, syntax_id: SyntaxId) -> Option<&CheckedPropagation> {
+        self.propagations.get(&syntax_id)
     }
 
     pub fn type_of_symbol(&self, symbol: SymbolId) -> Option<&CheckedType> {
@@ -315,6 +369,8 @@ pub struct TypeChecker {
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
     trait_implementations: Vec<CheckedTraitImplementation>,
     impl_function_types: HashMap<FunctionId, CheckedFunctionType>,
+    expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
+    propagations: HashMap<SyntaxId, CheckedPropagation>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     top_level_bindings: HashMap<SymbolId, Binding>,
@@ -326,6 +382,8 @@ pub struct TypeChecker {
     resolved_named_types: HashMap<TypeId, CheckedType>,
     resolving_named_types: HashSet<TypeId>,
     return_contexts: Vec<CheckedType>,
+    return_contributions: Vec<Vec<ReturnContribution>>,
+    pending_propagations: Vec<Vec<(SyntaxId, CheckedType, usize, Span)>>,
     did_return: bool,
     return_reachable: bool,
     diagnostics: Vec<Diagnostic>,
@@ -373,6 +431,8 @@ impl TypeChecker {
             function_bounds: self.function_bounds,
             trait_dispatches: self.trait_dispatches,
             trait_implementations: self.trait_implementations,
+            expression_coercions: self.expression_coercions,
+            propagations: self.propagations,
         })
     }
 
@@ -695,19 +755,61 @@ impl TypeChecker {
         self.did_return = false;
         self.return_reachable = true;
         self.return_contexts.push((*function_type.result).clone());
-        let body_type =
-            self.check_expression_expected(module, &function.body, Some(&function_type.result));
+        self.return_contributions.push(Vec::new());
+        self.pending_propagations.push(Vec::new());
+        let body_expected = (!matches!(*function_type.result, CheckedType::Inferred))
+            .then_some(function_type.result.as_ref());
+        let body_type = self.check_expression_expected(module, &function.body, body_expected);
         let returned = self.did_return;
-        let explicit_result = self.return_contexts.pop().expect("function return context");
-        let result_type = if returned {
-            explicit_result
+        let declared_result = self.return_contexts.pop().expect("function return context");
+        let mut contributions = self
+            .return_contributions
+            .pop()
+            .expect("function return contributions");
+        if !returned {
+            contributions.push(ReturnContribution {
+                syntax: Some(function.body.syntax().id),
+                span: function.body.syntax().span.clone(),
+                value_type: body_type,
+            });
+        }
+        let result_type = if declared_result == CheckedType::Inferred {
+            self.join_return_contributions(&contributions, function.body.syntax().span.clone())
         } else {
-            self.require_compatible(
-                body_type,
-                explicit_result,
-                function.body.syntax().span.clone(),
-            )
+            declared_result
         };
+        for contribution in contributions {
+            if let Some(syntax) = contribution.syntax {
+                self.coerce_expression_type(
+                    syntax,
+                    contribution.value_type,
+                    &result_type,
+                    contribution.span,
+                );
+            } else if !can_coerce_type(&contribution.value_type, &result_type) {
+                self.diagnostics.push(Diagnostic::new(
+                    contribution.span,
+                    format!(
+                        "propagated variant `{}` is not contained in function result `{result_type}`",
+                        contribution.value_type
+                    ),
+                ));
+            }
+        }
+        let pending = self
+            .pending_propagations
+            .pop()
+            .expect("function propagations");
+        for (syntax, source, success_index, _) in pending {
+            self.propagations.insert(
+                syntax,
+                CheckedPropagation {
+                    source,
+                    success_index,
+                    result: result_type.clone(),
+                },
+            );
+        }
         self.did_return = outer_did_return;
         self.return_reachable = outer_return_reachable;
         let checked_function_type = CheckedFunctionType {
@@ -725,6 +827,25 @@ impl TypeChecker {
         self.checking_functions.remove(&function_id);
         self.checked_functions.insert(function_id);
         self.active_function_bounds.pop();
+    }
+
+    fn join_return_contributions(
+        &mut self,
+        contributions: &[ReturnContribution],
+        span: Span,
+    ) -> CheckedType {
+        let mut values = contributions
+            .iter()
+            .map(|contribution| contribution.value_type.clone())
+            .filter(|value_type| *value_type != CheckedType::Error)
+            .collect::<Vec<_>>();
+        if values.is_empty() {
+            return CheckedType::empty_product();
+        }
+        if values.iter().all(|value_type| value_type == &values[0]) {
+            return values.remove(0);
+        }
+        self.normalize_sum_type(values, span)
     }
 
     fn bind_pattern_types(
@@ -807,6 +928,18 @@ impl TypeChecker {
                             "external bindings cannot have compile-time parameters",
                         ));
                     }
+                    if binding
+                        .annotation
+                        .as_ref()
+                        .map(|annotation| self.resolve_source_type(module, annotation))
+                        .as_ref()
+                        .is_some_and(checked_type_contains_sum)
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            "external binding types cannot contain sums",
+                        ));
+                    }
                     self.check_binding(module, binding);
                 }
             }
@@ -830,32 +963,98 @@ impl TypeChecker {
             Statement::PatternBinding(binding) => {
                 let value_type = self.check_expression(module, &binding.value);
                 if !self.did_return {
-                    self.bind_pattern_types(module, &binding.pattern, &value_type);
+                    if binding.kind == PatternBindingKind::Propagating {
+                        self.check_propagating_binding(module, binding, &value_type);
+                    } else {
+                        self.bind_pattern_types(module, &binding.pattern, &value_type);
+                    }
                 }
                 CheckedType::empty_product()
             }
             Statement::Return(statement) => {
                 let expected = self.return_contexts.last().cloned();
+                let concrete_expected = expected
+                    .as_ref()
+                    .filter(|value_type| **value_type != CheckedType::Inferred);
                 let value_type =
-                    self.check_expression_expected(module, &statement.value, expected.as_ref());
+                    self.check_expression_expected(module, &statement.value, concrete_expected);
                 if !self.did_return && self.return_reachable {
-                    if let Some(expected) = expected {
-                        let result = self.require_compatible(
+                    self.return_contributions
+                        .last_mut()
+                        .expect("return contribution inside function")
+                        .push(ReturnContribution {
+                            syntax: Some(statement.value.syntax().id),
+                            span: statement.value.syntax().span.clone(),
                             value_type,
-                            expected,
-                            statement.value.syntax().span.clone(),
-                        );
-                        *self
-                            .return_contexts
-                            .last_mut()
-                            .expect("return was resolved inside a function") = result;
-                    }
+                        });
                     self.did_return = true;
                 }
                 CheckedType::empty_product()
             }
             Statement::Expression(expression) => self.check_expression(module, expression),
         }
+    }
+
+    fn check_propagating_binding(
+        &mut self,
+        module: &ResolvedModule,
+        binding: &crate::PatternBinding,
+        value_type: &CheckedType,
+    ) {
+        let Pattern::Nominal(pattern) = &binding.pattern else {
+            return;
+        };
+        let CheckedType::Sum(sum) = value_type else {
+            if *value_type != CheckedType::Error {
+                self.diagnostics.push(Diagnostic::new(
+                    binding.value.syntax().span.clone(),
+                    format!("a propagating binding requires a sum value, found `{value_type}`"),
+                ));
+            }
+            return;
+        };
+        let Some(expected_id) = module.type_for_pattern(pattern.syntax.id) else {
+            return;
+        };
+        let matches = sum
+            .alternatives
+            .iter()
+            .enumerate()
+            .filter(|(_, alternative)| {
+                matches!(alternative, CheckedType::Distinct { id, .. } if *id == expected_id)
+            })
+            .collect::<Vec<_>>();
+        let [(success_index, CheckedType::Distinct { representation, .. })] = matches.as_slice()
+        else {
+            self.diagnostics.push(Diagnostic::new(
+                pattern.syntax.span.clone(),
+                format!("nominal pattern `{}` does not select exactly one alternative of `{value_type}`", pattern.name),
+            ));
+            return;
+        };
+        self.bind_pattern_types(module, &pattern.argument, representation);
+        let contributions = self
+            .return_contributions
+            .last_mut()
+            .expect("propagation inside function");
+        for (index, alternative) in sum.alternatives.iter().enumerate() {
+            if index != *success_index {
+                contributions.push(ReturnContribution {
+                    syntax: None,
+                    span: binding.syntax.span.clone(),
+                    value_type: alternative.clone(),
+                });
+            }
+        }
+        self.pending_propagations
+            .last_mut()
+            .expect("propagation inside function")
+            .push((
+                binding.syntax.id,
+                value_type.clone(),
+                *success_index,
+                binding.syntax.span.clone(),
+            ));
     }
 
     fn check_binding(&mut self, module: &ResolvedModule, binding: &Binding) {
@@ -976,11 +1175,9 @@ impl TypeChecker {
                 expected,
                 expression.syntax().span.clone(),
             );
-            self.expression_types
-                .insert(expression.syntax().id, value_type.clone());
-            return value_type;
+            return self.finish_expression_type(expression, value_type, expected);
         }
-        let value_type = match expression {
+        let natural_type = match expression {
             Expression::Function(function) => {
                 let Some(function_id) = module.function_for(function.syntax.id) else {
                     return CheckedType::Error;
@@ -1096,8 +1293,7 @@ impl TypeChecker {
                             }
                             other => other,
                         };
-                        self.expression_types.insert(call.syntax.id, result.clone());
-                        return result;
+                        return self.finish_expression_type(expression, result, expected);
                     }
                     let mut raw_callee_type = self.check_expression(module, &call.callee);
                     if self.did_return {
@@ -1116,7 +1312,9 @@ impl TypeChecker {
                     if self.did_return {
                         return CheckedType::empty_product();
                     }
-                    if let Some(expected_result) = expected {
+                    if let Some(expected_result) = expected
+                        && !matches!(expected_result, CheckedType::Sum(_))
+                    {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
                             parameter: Box::new(argument_type.clone()),
                             result: Box::new(expected_result.clone()),
@@ -1175,16 +1373,20 @@ impl TypeChecker {
                     if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
                         self.ensure_function_checked(module, function_id);
                     }
-                    let value_type = self.symbol_types.get(&symbol).cloned().unwrap_or_else(|| {
+                    let raw_type = self.symbol_types.get(&symbol).cloned().unwrap_or_else(|| {
                         self.diagnostics.push(Diagnostic::new(
                             access.syntax.span.clone(),
                             "the type of the imported value is not available here",
                         ));
                         CheckedType::Error
                     });
-                    self.expression_types
-                        .insert(access.syntax.id, value_type.clone());
-                    return value_type;
+                    let value_type = self.instantiate_function_use(
+                        raw_type,
+                        None,
+                        expected,
+                        access.syntax.span.clone(),
+                    );
+                    return self.finish_expression_type(expression, value_type, expected);
                 }
                 let value_type = self.check_expression(module, &access.value);
                 if self.did_return {
@@ -1297,9 +1499,67 @@ impl TypeChecker {
                 CheckedType::integer(integer_type)
             }
         };
+        self.finish_expression_type(expression, natural_type, expected)
+    }
+
+    fn finish_expression_type(
+        &mut self,
+        expression: &Expression,
+        natural_type: CheckedType,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        let value_type = match expected {
+            _ if self.did_return => natural_type,
+            Some(CheckedType::Product(product)) if product.variadic => natural_type,
+            Some(expected) => self.coerce_expression_type(
+                expression.syntax().id,
+                natural_type,
+                expected,
+                expression.syntax().span.clone(),
+            ),
+            None => natural_type,
+        };
         self.expression_types
             .insert(expression.syntax().id, value_type.clone());
         value_type
+    }
+
+    fn coerce_expression_type(
+        &mut self,
+        syntax: SyntaxId,
+        actual: CheckedType,
+        expected: &CheckedType,
+        span: Span,
+    ) -> CheckedType {
+        if let Some(merged) = merge_types(actual.clone(), expected.clone()) {
+            return merged;
+        }
+        let allowed = match (&actual, expected) {
+            (CheckedType::Distinct { .. }, CheckedType::Sum(sum)) => {
+                sum.alternatives.contains(&actual)
+            }
+            (CheckedType::Sum(actual), CheckedType::Sum(expected)) => actual
+                .alternatives
+                .iter()
+                .all(|alternative| expected.alternatives.contains(alternative)),
+            _ => false,
+        };
+        if allowed {
+            self.expression_coercions.insert(
+                syntax,
+                CheckedCoercion {
+                    source: actual,
+                    target: expected.clone(),
+                },
+            );
+            expected.clone()
+        } else {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("expected `{expected}`, found `{actual}`"),
+            ));
+            CheckedType::Error
+        }
     }
 
     fn resolve_trait_method_use(
@@ -1464,7 +1724,7 @@ impl TypeChecker {
             } else {
                 &value_type
             };
-            if !infer_type_parameters(template, expected, &mut substitutions) {
+            if !infer_type_parameters_for_expected(template, expected, &mut substitutions) {
                 let polymorphic_recursion = declared_parameters.iter().any(|id| {
                     substitutions.get(id).is_some_and(|replacement| {
                         type_contains_parameter(replacement, *id)
@@ -1577,6 +1837,14 @@ impl TypeChecker {
                 let product = self.resolve_product_type(module, product);
                 normalize_product_type(product.elements, product.variadic)
             }
+            Type::Sum(sum) => {
+                let alternatives = sum
+                    .alternatives
+                    .iter()
+                    .map(|alternative| self.resolve_source_type(module, alternative))
+                    .collect();
+                self.normalize_sum_type(alternatives, sum.syntax.span.clone())
+            }
             Type::Function(function) => CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(self.resolve_source_type(module, &function.parameter)),
                 result: Box::new(self.resolve_source_type(module, &function.result)),
@@ -1586,6 +1854,45 @@ impl TypeChecker {
                 let argument = self.resolve_source_type(module, &application.argument);
                 self.apply_type_argument(module, callee, argument, application.syntax.span.clone())
             }
+        }
+    }
+
+    fn normalize_sum_type(&mut self, alternatives: Vec<CheckedType>, span: Span) -> CheckedType {
+        let mut flattened = Vec::new();
+        for alternative in alternatives {
+            match alternative {
+                CheckedType::Sum(sum) => flattened.extend(sum.alternatives),
+                other => flattened.push(other),
+            }
+        }
+        flattened.retain(|alternative| *alternative != CheckedType::Error);
+        flattened.sort_by_key(checked_type_sort_key);
+        flattened.dedup();
+        let mut heads = HashMap::<TypeId, CheckedType>::new();
+        for alternative in &flattened {
+            let CheckedType::Distinct { id, .. } = alternative else {
+                self.diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    format!("sum alternative `{alternative}` is not a represented nominal type"),
+                ));
+                return CheckedType::Error;
+            };
+            if let Some(previous) = heads.insert(*id, alternative.clone())
+                && previous != *alternative
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    format!("sum contains multiple applications of the same nominal type: `{previous}` and `{alternative}`"),
+                ));
+                return CheckedType::Error;
+            }
+        }
+        match flattened.len() {
+            0 => CheckedType::Error,
+            1 => flattened.pop().expect("one alternative"),
+            _ => CheckedType::Sum(CheckedSumType {
+                alternatives: flattened,
+            }),
         }
     }
 
@@ -1904,6 +2211,17 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
                 result: Box::new(merge_types(*actual.result, *expected.result)?),
             }))
         }
+        (CheckedType::Sum(actual), CheckedType::Sum(expected))
+            if actual.alternatives.len() == expected.alternatives.len() =>
+        {
+            let alternatives = actual
+                .alternatives
+                .into_iter()
+                .zip(expected.alternatives)
+                .map(|(actual, expected)| merge_types(actual, expected))
+                .collect::<Option<Vec<_>>>()?;
+            Some(CheckedType::Sum(CheckedSumType { alternatives }))
+        }
         (
             CheckedType::Distinct {
                 id: actual_id,
@@ -1929,6 +2247,20 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             })
         }
         _ => None,
+    }
+}
+
+fn can_coerce_type(actual: &CheckedType, expected: &CheckedType) -> bool {
+    if merge_types(actual.clone(), expected.clone()).is_some() {
+        return true;
+    }
+    match (actual, expected) {
+        (CheckedType::Distinct { .. }, CheckedType::Sum(sum)) => sum.alternatives.contains(actual),
+        (CheckedType::Sum(actual), CheckedType::Sum(expected)) => actual
+            .alternatives
+            .iter()
+            .all(|alternative| expected.alternatives.contains(alternative)),
+        _ => false,
     }
 }
 
@@ -1970,6 +2302,13 @@ pub(crate) fn substitute_type(
         CheckedType::Function(function) => CheckedType::Function(CheckedFunctionType {
             parameter: Box::new(substitute_type(*function.parameter, substitutions)),
             result: Box::new(substitute_type(*function.result, substitutions)),
+        }),
+        CheckedType::Sum(sum) => CheckedType::Sum(CheckedSumType {
+            alternatives: sum
+                .alternatives
+                .into_iter()
+                .map(|alternative| substitute_type(alternative, substitutions))
+                .collect(),
         }),
         CheckedType::Distinct {
             id,
@@ -2014,6 +2353,7 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
             contains_type_parameter(&function.parameter)
                 || contains_type_parameter(&function.result)
         }
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_type_parameter),
         CheckedType::Distinct {
             arguments,
             representation,
@@ -2044,6 +2384,7 @@ fn contains_inferred_type(value_type: &CheckedType) -> bool {
         CheckedType::Function(function) => {
             contains_inferred_type(&function.parameter) || contains_inferred_type(&function.result)
         }
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_inferred_type),
         CheckedType::Distinct {
             arguments,
             representation,
@@ -2073,6 +2414,11 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
             CheckedType::Function(function) => {
                 collect(&function.parameter, ids);
                 collect(&function.result, ids);
+            }
+            CheckedType::Sum(sum) => {
+                for alternative in &sum.alternatives {
+                    collect(alternative, ids);
+                }
             }
             CheckedType::Distinct {
                 arguments,
@@ -2161,6 +2507,15 @@ pub(crate) fn infer_type_parameters(
             infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
                 && infer_type_parameters(&template.result, &actual.result, substitutions)
         }
+        CheckedType::Sum(template) => {
+            let CheckedType::Sum(actual) = actual else {
+                return false;
+            };
+            template.alternatives.len() == actual.alternatives.len()
+                && template.alternatives.iter().zip(&actual.alternatives).all(
+                    |(template, actual)| infer_type_parameters(template, actual, substitutions),
+                )
+        }
         CheckedType::Distinct { id, arguments, .. } => {
             let CheckedType::Distinct {
                 id: actual_id,
@@ -2183,10 +2538,80 @@ pub(crate) fn infer_type_parameters(
     }
 }
 
+fn infer_type_parameters_for_expected(
+    template: &CheckedType,
+    expected: &CheckedType,
+    substitutions: &mut HashMap<TypeParameterId, CheckedType>,
+) -> bool {
+    if let (CheckedType::Function(template), CheckedType::Function(expected)) = (template, expected)
+    {
+        return infer_type_parameters(&template.parameter, &expected.parameter, substitutions)
+            && infer_type_parameters_for_expected(
+                &template.result,
+                &expected.result,
+                substitutions,
+            );
+    }
+    if !matches!(template, CheckedType::Sum(_))
+        && let CheckedType::Sum(sum) = expected
+    {
+        let matches = sum
+            .alternatives
+            .iter()
+            .filter_map(|alternative| {
+                let mut candidate = substitutions.clone();
+                infer_type_parameters(template, alternative, &mut candidate).then_some(candidate)
+            })
+            .collect::<Vec<_>>();
+        if let [candidate] = matches.as_slice() {
+            *substitutions = candidate.clone();
+            return true;
+        }
+        return false;
+    }
+    infer_type_parameters(template, expected, substitutions)
+}
+
 fn normalize_product_type(elements: Vec<CheckedTypeElement>, variadic: bool) -> CheckedType {
     if !variadic && elements.len() == 1 {
         elements.into_iter().next().unwrap().value_type
     } else {
         CheckedType::Product(CheckedProductType { elements, variadic })
+    }
+}
+
+fn checked_type_sort_key(value_type: &CheckedType) -> String {
+    match value_type {
+        CheckedType::Distinct { id, arguments, .. } => {
+            format!("{:020}:{arguments:?}", id.0)
+        }
+        other => format!("{other:?}"),
+    }
+}
+
+fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
+    match value_type {
+        CheckedType::Sum(_) => true,
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| checked_type_contains_sum(&element.value_type)),
+        CheckedType::Function(function) => {
+            checked_type_contains_sum(&function.parameter)
+                || checked_type_contains_sum(&function.result)
+        }
+        CheckedType::CPointer { pointee } => checked_type_contains_sum(pointee),
+        CheckedType::Distinct {
+            arguments,
+            representation,
+            ..
+        } => {
+            arguments.iter().any(checked_type_contains_sum)
+                || checked_type_contains_sum(representation)
+        }
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
+            arguments.iter().any(checked_type_contains_sum)
+        }
+        _ => false,
     }
 }

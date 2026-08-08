@@ -85,6 +85,191 @@ fn infers_and_checks_function_return_types() {
 }
 
 #[test]
+fn infers_and_lowers_nominal_sums_with_propagation() {
+    let module = type_check(concat!(
+        "pub(repr) type Ok = T => T\n",
+        "pub(repr) type IOError = String\n",
+        "def read: String -> Ok String | IOError = path => Ok(path)\n",
+        "def parse = (path: String) => { let Ok(file)? = read(path); Ok(file) }\n",
+        "parse \"input\"\n",
+    ));
+    let parse = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "parse")
+        .expect("parse function");
+    let result = &module
+        .type_of_function(parse.id)
+        .expect("parse type")
+        .result;
+    let CheckedType::Sum(sum) = result.as_ref() else {
+        panic!("expected inferred sum, found {result}");
+    };
+    assert_eq!(sum.alternatives.len(), 2);
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("sum propagation should generate LLVM");
+    assert!(llvm.contains("propagate.ok"));
+    assert!(llvm.contains("propagate.return"));
+}
+
+#[test]
+fn injects_and_widens_sum_values() {
+    let module = type_check(concat!(
+        "pub(repr) type IOError = String\n",
+        "pub(repr) type ParseError = String\n",
+        "type alias Result = T => Ok T | IOError\n",
+        "def small: () -> Ok I32 | IOError = () => Ok(1)\n",
+        "let reordered: IOError | Ok I32 = small()\n",
+        "let aliased: Result I32 = reordered\n",
+        "let duplicate: Ok I32 | Ok I32 = Ok(3)\n",
+        "let pair: (Result I32, I32) = (aliased, 2)\n",
+        "def captured = () => { let local: Result I32 = pair.0; let inner = () => local; inner() }\n",
+        "def wide: () -> Ok I32 | IOError | ParseError = () => small()\n",
+        "captured()\n",
+        "wide()\n",
+    ));
+    let context = Context::create();
+    let generator = CodeGenerator::new(&context);
+    generator
+        .compile_module(&module)
+        .expect("sum injection and widening should generate valid LLVM");
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should follow the Unix epoch")
+        .as_nanos();
+    let output = std::env::temp_dir().join(format!("stapler-sum-test-{nonce}.o"));
+    generator
+        .emit_object(&module, &output, None)
+        .expect("sum values should emit a native object");
+    std::fs::remove_file(output).expect("temporary sum object should be removable");
+}
+
+#[test]
+fn propagates_each_residual_variant_and_joins_explicit_returns() {
+    let module = type_check(concat!(
+        "pub(repr) type IOError = String\n",
+        "pub(repr) type ParseError = String\n",
+        "def fail: () -> Ok I32 | IOError = () => IOError(\"io\")\n",
+        "def parse = () => { let Ok(value)? = fail(); return ParseError(\"parse\"); }\n",
+        "parse()\n",
+    ));
+    let parse = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "parse")
+        .expect("parse function");
+    let CheckedType::Sum(sum) = module
+        .type_of_function(parse.id)
+        .expect("parse type")
+        .result
+        .as_ref()
+    else {
+        panic!("expected inferred sum");
+    };
+    assert_eq!(sum.alternatives.len(), 2);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("residual-only propagation widening should generate LLVM");
+}
+
+#[test]
+fn rejects_invalid_sum_alternatives_and_ambiguous_nominal_heads() {
+    for (source, expected) in [
+        (
+            "let value: I32 | Ok I32\n",
+            "not a represented nominal type",
+        ),
+        (
+            "let value: Ok I32 | Ok String\n",
+            "multiple applications of the same nominal type",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err("invalid sum should be rejected");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "{diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn rejects_invalid_propagation_and_sum_ffi() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "pub(repr) type IOError = String\n",
+            "def invalid = () => { let Ok(value)? = Ok(1); Ok(value) }\n",
+        )))
+        .expect_err("propagation requires a sum");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("propagating binding requires a sum value")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "pub(repr) type IOError = String\n",
+            "def read: () -> Ok I32 | IOError = () => Ok(1)\n",
+            "def invalid: () -> Ok I32 = () => { let Ok(value)? = read(); Ok(value) }\n",
+        )))
+        .expect_err("explicit result should contain propagated variants");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("propagated variant `IOError` is not contained")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "pub(repr) type IOError = String\n",
+            "extern \"c\" { let invalid: () -> Ok I32 | IOError }\n",
+        )))
+        .expect_err("sum ABI should remain internal");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("external binding types cannot contain sums")
+    }));
+}
+
+#[test]
+fn rejects_propagation_outside_functions_and_non_nominal_roots() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "pub(repr) type IOError = String\n",
+                "let Ok(value)? = Ok(1)\n",
+                "def invalid = () => { let (Ok(value), other)? = (Ok(1), 2); Ok(value) }\n",
+            ),
+            root,
+        )
+        .expect("source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("invalid propagation contexts should not resolve");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("only allowed inside a function")
+    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("requires a nominal pattern") })
+    );
+}
+
+#[test]
 fn infers_return_types_through_forward_function_references() {
     let module = type_check(concat!(
         "def first = () => second ()\n",

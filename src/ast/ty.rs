@@ -5,6 +5,7 @@ pub enum Type {
     Inferred(InferredType),
     Named(NamedType),
     Product(ProductType),
+    Sum(SumType),
     Function(FunctionType),
     Application(TypeApplication),
 }
@@ -15,10 +16,17 @@ impl Type {
             Self::Inferred(ty) => &ty.syntax,
             Self::Named(ty) => &ty.syntax,
             Self::Product(ty) => &ty.syntax,
+            Self::Sum(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
             Self::Application(ty) => &ty.syntax,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SumType {
+    pub syntax: Syntax,
+    pub alternatives: Vec<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

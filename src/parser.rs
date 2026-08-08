@@ -315,6 +315,7 @@ impl Grammar {
         let pattern_start = start.unwrap_or(self.position);
         self.expect(TokenKind::Let, "expected `let`")?;
         let pattern = self.parse_pattern()?;
+        let propagating = self.eat_operator("?");
         if !matches!(pattern, Pattern::Binding(_)) {
             if visibility == Visibility::Public {
                 return Err(self.error("destructuring `let` bindings cannot be public"));
@@ -326,9 +327,17 @@ impl Grammar {
             let value = self.parse_expression()?;
             return Ok(Statement::PatternBinding(PatternBinding {
                 syntax: self.syntax(pattern_start),
+                kind: if propagating {
+                    PatternBindingKind::Propagating
+                } else {
+                    PatternBindingKind::Irrefutable
+                },
                 pattern,
                 value,
             }));
+        }
+        if propagating {
+            return Err(self.error("`?` requires a destructuring pattern"));
         }
         self.position = checkpoint;
         self.parse_binding(visibility, start, start.is_some())
@@ -590,7 +599,7 @@ impl Grammar {
                 self.position = checkpoint;
                 break;
             }
-            let argument = self.parse_type_application()?;
+            let argument = self.parse_type_union()?;
             if !self.eat(TokenKind::FatArrow) {
                 self.position = checkpoint;
                 break;
@@ -726,7 +735,7 @@ impl Grammar {
             }));
         }
         let ty = if self.eat(TokenKind::Colon) {
-            self.parse_type_application()?
+            self.parse_type_union()?
         } else {
             Type::Inferred(InferredType {
                 syntax: self.syntax(start),
@@ -742,7 +751,7 @@ impl Grammar {
     /// Parses a type, treating function arrows as right-associative.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
-        let parameter = self.parse_type_application()?;
+        let parameter = self.parse_type_union()?;
         if self.eat(TokenKind::Arrow) {
             let result = self.parse_type()?;
             Ok(Type::Function(FunctionType {
@@ -753,6 +762,23 @@ impl Grammar {
         } else {
             Ok(parameter)
         }
+    }
+
+    /// Parses an unordered structural sum, tighter than a function arrow.
+    fn parse_type_union(&mut self) -> Result<Type, ParseError> {
+        let start = self.position;
+        let first = self.parse_type_application()?;
+        if !self.eat_operator("|") {
+            return Ok(first);
+        }
+        let mut alternatives = vec![first, self.parse_type_application()?];
+        while self.eat_operator("|") {
+            alternatives.push(self.parse_type_application()?);
+        }
+        Ok(Type::Sum(SumType {
+            syntax: self.syntax(start),
+            alternatives,
+        }))
     }
 
     fn parse_type_application(&mut self) -> Result<Type, ParseError> {
@@ -1161,6 +1187,20 @@ impl Grammar {
     fn eat(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
             self.bump_token();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn eat_operator(&mut self, expected: &str) -> bool {
+        let position = self.next_non_trivia(self.position);
+        if self
+            .tokens
+            .get(position)
+            .is_some_and(|token| token.kind == TokenKind::Operator && token.text == expected)
+        {
+            self.position = position + 1;
             true
         } else {
             false

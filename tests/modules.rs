@@ -254,6 +254,30 @@ fn exports_constructors_and_destructors_for_public_representations() {
 }
 
 #[test]
+fn composes_sum_variants_across_modules() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "errors.sta",
+        concat!(
+            "pub(repr) type IOError = String\n",
+            "pub(repr) type ParseError = String\n",
+            "pub def read: String -> Ok String | IOError = path => Ok(path)\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use errors.*\n",
+            "def parse = (path: String) => { let Ok(file)? = read(path); Ok(file) }\n",
+            "let result: Ok String | IOError | ParseError = parse(\"input\")\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("sum alternatives should compose across module boundaries");
+}
+
+#[test]
 fn rejects_private_components_of_public_representations() {
     let fixture = Fixture::new();
     fixture.write(

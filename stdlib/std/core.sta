@@ -11,6 +11,8 @@ pub type USize
 pub type Bool
 pub type String
 
+pub(repr) type Ok = T => T
+
 pub trait Add = T => {
     add: T -> T -> T
 }

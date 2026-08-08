@@ -532,3 +532,33 @@ fn rejects_missing_return_values_and_empty_separators() {
     assert!(parse("def invalid = () => { return\n42 }\n").is_err());
     assert!(parse("let value = 1;; value\n").is_err());
 }
+
+#[test]
+fn parses_sum_types_and_propagating_patterns_losslessly() {
+    let source = concat!(
+        "def read: String -> Ok String | IOError = path => Ok(path)\n",
+        "def parse = (path: String) => { let Ok(file)? = read(path); Ok(file) }\n",
+    );
+    let root = parse(source).expect("sum and propagation syntax should parse");
+    assert_eq!(root.text(), source);
+    let Statement::Binding(read) = statement(&root.items[0]) else {
+        panic!("expected read binding");
+    };
+    assert!(
+        matches!(read.annotation, Some(Type::Function(ref function)) if matches!(function.result.as_ref(), Type::Sum(_)))
+    );
+    let Statement::Binding(parse_binding) = statement(&root.items[1]) else {
+        panic!("expected parse binding");
+    };
+    let Some(Expression::Function(function)) = &parse_binding.value else {
+        panic!("expected function");
+    };
+    let Expression::Block(block) = function.body.as_ref() else {
+        panic!("expected block");
+    };
+    assert!(matches!(
+        block.statements[0],
+        Statement::PatternBinding(ref binding)
+            if binding.kind == stapler::PatternBindingKind::Propagating
+    ));
+}
