@@ -45,6 +45,7 @@ impl Default for InferredType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedType {
     pub syntax: Syntax,
+    pub namespace: Option<String>,
     pub name: String,
 }
 

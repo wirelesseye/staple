@@ -4,7 +4,7 @@ use std::fmt;
 use crate::{
     Accessor, Binding, Diagnostic, Expression, FunctionId, Item, Module, Pattern, PrimitiveType,
     ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, Type,
-    TypeDeclaration, TypeDeclarationKind,
+    TypeDeclaration, TypeDeclarationKind, TypeId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,11 +161,14 @@ pub struct TypeChecker {
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
+    top_level_bindings: HashMap<SymbolId, Binding>,
+    checking_bindings: HashSet<SymbolId>,
+    checked_bindings: HashSet<SymbolId>,
     checking_functions: HashSet<FunctionId>,
     checked_functions: HashSet<FunctionId>,
-    type_declarations: HashMap<String, TypeDeclaration>,
-    resolved_named_types: HashMap<String, CheckedType>,
-    resolving_named_types: HashSet<String>,
+    type_declarations: HashMap<TypeId, TypeDeclaration>,
+    resolved_named_types: HashMap<TypeId, CheckedType>,
+    resolving_named_types: HashSet<TypeId>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -175,10 +178,17 @@ impl TypeChecker {
     }
 
     pub fn check(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
-        self.collect_type_declarations(module.syntax());
+        self.collect_type_declarations(&module);
+        self.collect_top_level_bindings(&module);
         self.seed_declared_bindings(&module);
         self.seed_function_types(&module);
 
+        let module_order = module.program().initialization_order().to_vec();
+        for module_id in module_order {
+            for item in &module.program().module(module_id).syntax.items {
+                self.check_item(&module, item);
+            }
+        }
         let function_ids = module
             .functions()
             .iter()
@@ -186,9 +196,6 @@ impl TypeChecker {
             .collect::<Vec<_>>();
         for function_id in function_ids {
             self.ensure_function_checked(&module, function_id);
-        }
-        for item in &module.syntax().items {
-            self.check_item(&module, item);
         }
 
         if !self.diagnostics.is_empty() {
@@ -203,36 +210,39 @@ impl TypeChecker {
         })
     }
 
-    fn collect_type_declarations(&mut self, module: &Module) {
-        for item in &module.items {
-            if let Item::TypeDeclaration(declaration) = item
-                && self
-                    .type_declarations
-                    .insert(declaration.name.clone(), declaration.clone())
-                    .is_some()
-            {
-                self.diagnostics.push(Diagnostic::new(
-                    declaration.syntax.span.clone(),
-                    format!("duplicate type definition of `{}`", declaration.name),
-                ));
+    fn collect_type_declarations(&mut self, module: &ResolvedModule) {
+        self.type_declarations = module.type_declarations().clone();
+    }
+
+    fn collect_top_level_bindings(&mut self, module: &ResolvedModule) {
+        for source_module in module.program().modules() {
+            for item in &source_module.syntax.items {
+                if let Item::Statement(statement) = item
+                    && let Statement::Binding(binding) = statement.as_ref()
+                    && let Some(symbol) = module.symbol_for(binding.syntax.id)
+                {
+                    self.top_level_bindings.insert(symbol, binding.clone());
+                }
             }
         }
     }
 
     fn seed_declared_bindings(&mut self, module: &ResolvedModule) {
-        for item in &module.syntax().items {
-            match item {
-                Item::ExternBlock(block) => {
-                    for binding in &block.bindings {
-                        self.seed_binding_annotation(module, binding);
+        for source_module in module.program().modules() {
+            for item in &source_module.syntax.items {
+                match item {
+                    Item::ExternBlock(block) => {
+                        for binding in &block.bindings {
+                            self.seed_binding_annotation(module, binding);
+                        }
                     }
-                }
-                Item::Statement(statement) => {
-                    if let Statement::Binding(binding) = statement.as_ref() {
-                        self.seed_binding_annotation(module, binding);
+                    Item::Statement(statement) => {
+                        if let Statement::Binding(binding) = statement.as_ref() {
+                            self.seed_binding_annotation(module, binding);
+                        }
                     }
+                    Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
                 }
-                Item::TypeDeclaration(_) => {}
             }
         }
     }
@@ -241,7 +251,7 @@ impl TypeChecker {
         let Some(annotation) = &binding.annotation else {
             return;
         };
-        let value_type = self.resolve_source_type(annotation);
+        let value_type = self.resolve_source_type(module, annotation);
         if let Some(symbol) = module.symbol_for(binding.syntax.id) {
             self.symbol_types.insert(symbol, value_type);
         }
@@ -249,15 +259,15 @@ impl TypeChecker {
 
     fn seed_function_types(&mut self, module: &ResolvedModule) {
         for function in module.functions() {
-            let parameter = self.resolve_source_type(&function.pattern.ty());
+            let parameter = self.resolve_source_type(module, &function.pattern.ty());
             let result = function
                 .return_annotation
                 .as_ref()
-                .map(|value_type| self.resolve_source_type(value_type))
+                .map(|value_type| self.resolve_source_type(module, value_type))
                 .or_else(|| {
                     function.binding_annotation.as_ref().and_then(|annotation| {
                         let CheckedType::Function(function_type) =
-                            self.resolve_source_type(annotation)
+                            self.resolve_source_type(module, annotation)
                         else {
                             return None;
                         };
@@ -271,7 +281,7 @@ impl TypeChecker {
             };
 
             if let Some(annotation) = &function.binding_annotation {
-                let binding_type = self.resolve_source_type(annotation);
+                let binding_type = self.resolve_source_type(module, annotation);
                 let actual = CheckedType::Function(function_type.clone());
                 let merged =
                     self.require_compatible(actual, binding_type, annotation.syntax().span.clone());
@@ -363,7 +373,7 @@ impl TypeChecker {
             Item::Statement(statement) => {
                 self.check_statement(module, statement);
             }
-            Item::TypeDeclaration(_) => {}
+            Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
         }
     }
 
@@ -379,10 +389,20 @@ impl TypeChecker {
 
     fn check_binding(&mut self, module: &ResolvedModule, binding: &Binding) {
         let symbol = module.symbol_for(binding.syntax.id);
+        if let Some(symbol) = symbol {
+            if self.checked_bindings.contains(&symbol) {
+                return;
+            }
+            if self.top_level_bindings.contains_key(&symbol)
+                && !self.checking_bindings.insert(symbol)
+            {
+                return;
+            }
+        }
         let declared_type = binding
             .annotation
             .as_ref()
-            .map(|annotation| self.resolve_source_type(annotation));
+            .map(|annotation| self.resolve_source_type(module, annotation));
         let value_type = binding
             .value
             .as_ref()
@@ -413,6 +433,19 @@ impl TypeChecker {
         }
         if let Some(symbol) = symbol {
             self.symbol_types.insert(symbol, checked_type);
+            if self.top_level_bindings.contains_key(&symbol) {
+                self.checking_bindings.remove(&symbol);
+                self.checked_bindings.insert(symbol);
+            }
+        }
+    }
+
+    fn ensure_binding_checked(&mut self, module: &ResolvedModule, symbol: SymbolId) {
+        if self.symbol_types.contains_key(&symbol) || self.checking_bindings.contains(&symbol) {
+            return;
+        }
+        if let Some(binding) = self.top_level_bindings.get(&symbol).cloned() {
+            self.check_binding(module, &binding);
         }
     }
 
@@ -474,6 +507,22 @@ impl TypeChecker {
                 }
             }
             Expression::Access(access) => {
+                if let Some(symbol) = module.symbol_for(access.syntax.id) {
+                    self.ensure_binding_checked(module, symbol);
+                    if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
+                        self.ensure_function_checked(module, function_id);
+                    }
+                    let value_type = self.symbol_types.get(&symbol).cloned().unwrap_or_else(|| {
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            "the type of the imported value is not available here",
+                        ));
+                        CheckedType::Error
+                    });
+                    self.expression_types
+                        .insert(access.syntax.id, value_type.clone());
+                    return value_type;
+                }
                 let value_type = self.check_expression(module, &access.value);
                 match value_type {
                     CheckedType::Product(product) => match &access.accessor {
@@ -525,6 +574,9 @@ impl TypeChecker {
             }
             Expression::Name(name) => {
                 let symbol = module.symbol_for(name.syntax.id);
+                if let Some(symbol) = symbol {
+                    self.ensure_binding_checked(module, symbol);
+                }
                 if let Some(function_id) =
                     symbol.and_then(|symbol| self.function_symbols.get(&symbol).copied())
                 {
@@ -599,74 +651,81 @@ impl TypeChecker {
         }
     }
 
-    fn resolve_source_type(&mut self, source_type: &Type) -> CheckedType {
+    fn resolve_source_type(&mut self, module: &ResolvedModule, source_type: &Type) -> CheckedType {
         match source_type {
             Type::Inferred(_) => CheckedType::Inferred,
-            Type::Named(named) => self.resolve_named_type(&named.name, named.syntax.span.clone()),
+            Type::Named(named) => self.resolve_named_type(module, named),
             Type::Pointer(pointer) => CheckedType::Pointer {
                 is_const: pointer.is_const,
-                pointee: Box::new(self.resolve_source_type(&pointer.pointee)),
+                pointee: Box::new(self.resolve_source_type(module, &pointer.pointee)),
             },
             Type::Product(product) => {
-                let product = self.resolve_product_type(product);
+                let product = self.resolve_product_type(module, product);
                 normalize_product_type(product.elements, product.variadic)
             }
             Type::Function(function) => CheckedType::Function(CheckedFunctionType {
-                parameter: Box::new(self.resolve_source_type(&function.parameter)),
-                result: Box::new(self.resolve_source_type(&function.result)),
+                parameter: Box::new(self.resolve_source_type(module, &function.parameter)),
+                result: Box::new(self.resolve_source_type(module, &function.result)),
             }),
             Type::Primitive(PrimitiveType::I32(_)) => CheckedType::I32,
             Type::Primitive(PrimitiveType::Bool(_)) => CheckedType::Bool,
         }
     }
 
-    fn resolve_product_type(&mut self, product: &ProductType) -> CheckedProductType {
+    fn resolve_product_type(
+        &mut self,
+        module: &ResolvedModule,
+        product: &ProductType,
+    ) -> CheckedProductType {
         CheckedProductType {
             elements: product
                 .elements
                 .iter()
                 .map(|element| CheckedTypeElement {
                     name: element.name.clone(),
-                    value_type: self.resolve_source_type(&element.ty),
+                    value_type: self.resolve_source_type(module, &element.ty),
                 })
                 .collect(),
             variadic: product.variadic,
         }
     }
 
-    fn resolve_named_type(&mut self, name: &str, span: Span) -> CheckedType {
-        match name {
+    fn resolve_named_type(
+        &mut self,
+        module: &ResolvedModule,
+        named: &crate::NamedType,
+    ) -> CheckedType {
+        match named.name.as_str() {
             "int" => return CheckedType::I32,
             "string" => return CheckedType::String,
             "c_char" => return CheckedType::CChar,
             _ => {}
         }
-        if let Some(value_type) = self.resolved_named_types.get(name) {
-            return value_type.clone();
-        }
-        let Some(declaration) = self.type_declarations.get(name).cloned() else {
-            self.diagnostics
-                .push(Diagnostic::new(span, format!("unknown type `{name}`")));
+        let Some(id) = module.type_for(named.syntax.id) else {
             return CheckedType::Error;
         };
-        if !self.resolving_named_types.insert(name.to_owned()) {
+        if let Some(value_type) = self.resolved_named_types.get(&id) {
+            return value_type.clone();
+        }
+        let declaration = self.type_declarations[&id].clone();
+        let display_name = module.type_name(id).unwrap_or(&declaration.name).to_owned();
+        if !self.resolving_named_types.insert(id) {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
-                format!("cyclic type definition involving `{name}`"),
+                format!("cyclic type definition involving `{display_name}`"),
             ));
             return CheckedType::Error;
         }
-        let representation = self.resolve_source_type(&declaration.underlying);
-        self.resolving_named_types.remove(name);
+        let representation = self.resolve_source_type(module, &declaration.underlying);
+        self.resolving_named_types.remove(&id);
         let value_type = match declaration.kind {
             TypeDeclarationKind::Alias => representation,
             TypeDeclarationKind::Distinct => CheckedType::Distinct {
-                name: name.to_owned(),
+                name: display_name,
                 representation: Box::new(representation),
             },
         };
-        self.resolved_named_types
-            .insert(name.to_owned(), value_type.clone());
+        self.resolved_named_types.insert(id, value_type.clone());
         value_type
     }
 }

@@ -5,7 +5,24 @@ use std::sync::Arc;
 /// Parse a complete staple source file.
 pub fn parse(source: &str) -> Result<Module, ParseError> {
     let tokens = Arc::from(lex(source));
-    Grammar::new(tokens, source.len()).parse_source_file()
+    Grammar::new(tokens, source.len(), 0, None).parse_source_file()
+}
+
+pub(crate) fn parse_with_syntax_ids(
+    source: &str,
+    next_syntax_id: &mut usize,
+    source_name: &str,
+) -> Result<Module, ParseError> {
+    let tokens = Arc::from(lex(source));
+    let module = Grammar::new(
+        tokens,
+        source.len(),
+        *next_syntax_id,
+        Some(Arc::from(source_name)),
+    )
+    .parse_source_file()?;
+    *next_syntax_id = module.syntax.id.0 + 1;
+    Ok(module)
 }
 
 struct Grammar {
@@ -14,16 +31,23 @@ struct Grammar {
     source_len: usize,
     next_syntax_id: usize,
     newline_terminates_expression: bool,
+    source_name: Option<Arc<str>>,
 }
 
 impl Grammar {
-    fn new(tokens: Arc<[SyntaxToken]>, source_len: usize) -> Self {
+    fn new(
+        tokens: Arc<[SyntaxToken]>,
+        source_len: usize,
+        next_syntax_id: usize,
+        source_name: Option<Arc<str>>,
+    ) -> Self {
         Self {
             tokens,
             position: 0,
             source_len,
-            next_syntax_id: 0,
+            next_syntax_id,
             newline_terminates_expression: false,
+            source_name,
         }
     }
 
@@ -43,11 +67,25 @@ impl Grammar {
     fn parse_item(&mut self) -> Result<Item, ParseError> {
         let previous = self.newline_terminates_expression;
         self.newline_terminates_expression = true;
+        let item_start = self.position;
+        let visibility = if self.eat(TokenKind::Pub) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
         let item = match self.peek() {
-            Some(TokenKind::Extern) => self.parse_extern_block().map(Item::ExternBlock),
-            Some(TokenKind::Type) => self.parse_type_declaration().map(Item::TypeDeclaration),
+            Some(TokenKind::Use) if visibility == Visibility::Private => {
+                self.parse_use_declaration().map(Item::UseDeclaration)
+            }
+            Some(TokenKind::Use) => Err(self.error("`use` declarations cannot be public")),
+            Some(TokenKind::Extern) => self
+                .parse_extern_block(visibility, item_start)
+                .map(Item::ExternBlock),
+            Some(TokenKind::Type) => self
+                .parse_type_declaration(visibility, item_start)
+                .map(Item::TypeDeclaration),
             _ => self
-                .parse_statement()
+                .parse_statement_with_visibility(visibility, Some(item_start))
                 .map(|statement| Item::Statement(Box::new(statement))),
         };
         self.newline_terminates_expression = previous;
@@ -55,14 +93,88 @@ impl Grammar {
     }
 
     fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+        self.parse_statement_with_visibility(Visibility::Private, None)
+    }
+
+    fn parse_statement_with_visibility(
+        &mut self,
+        visibility: Visibility,
+        start: Option<usize>,
+    ) -> Result<Statement, ParseError> {
         match self.peek() {
-            Some(TokenKind::Let | TokenKind::Def) => self.parse_binding().map(Statement::Binding),
+            Some(TokenKind::Let | TokenKind::Def) => self
+                .parse_binding(visibility, start)
+                .map(Statement::Binding),
+            _ if visibility == Visibility::Public => {
+                Err(self.error("`pub` must modify a declaration"))
+            }
             _ => self.parse_expression().map(Statement::Expression),
         }
     }
 
-    fn parse_extern_block(&mut self) -> Result<ExternBlock, ParseError> {
+    fn parse_use_declaration(&mut self) -> Result<UseDeclaration, ParseError> {
         let start = self.position;
+        self.expect(TokenKind::Use, "expected `use`")?;
+        let mut path = vec![
+            self.expect(TokenKind::Identifier, "expected module path after `use`")?
+                .text,
+        ];
+        let kind = loop {
+            if self.eat(TokenKind::As) {
+                if path.len() < 2 {
+                    return Err(self.error("renamed imports require a module path and item"));
+                }
+                let item = path.pop().expect("checked path length");
+                let alias = self
+                    .expect(TokenKind::Identifier, "expected import alias after `as`")?
+                    .text;
+                break UseKind::Renamed { item, alias };
+            }
+            if !self.eat(TokenKind::Dot) {
+                break UseKind::Namespace;
+            }
+            if self.eat(TokenKind::Star) {
+                break UseKind::Glob;
+            }
+            if self.eat(TokenKind::LParen) {
+                let mut names = Vec::new();
+                if !self.at(TokenKind::RParen) {
+                    loop {
+                        names.push(
+                            self.expect(TokenKind::Identifier, "expected imported item name")?
+                                .text,
+                        );
+                        if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
+                            break;
+                        }
+                    }
+                }
+                if names.is_empty() {
+                    return Err(self.error("selected imports require at least one item"));
+                }
+                self.expect(TokenKind::RParen, "expected `)` after imported items")?;
+                break UseKind::Selected(names);
+            }
+            path.push(
+                self.expect(
+                    TokenKind::Identifier,
+                    "expected module path component after `.`",
+                )?
+                .text,
+            );
+        };
+        Ok(UseDeclaration {
+            syntax: self.syntax(start),
+            path,
+            kind,
+        })
+    }
+
+    fn parse_extern_block(
+        &mut self,
+        visibility: Visibility,
+        start: usize,
+    ) -> Result<ExternBlock, ParseError> {
         self.expect(TokenKind::Extern, "expected `extern`")?;
         let abi = self
             .expect(TokenKind::String, "expected ABI string after `extern`")?
@@ -73,18 +185,22 @@ impl Grammar {
             if self.peek().is_none() {
                 return Err(self.error("unterminated extern block"));
             }
-            bindings.push(self.parse_binding()?);
+            bindings.push(self.parse_binding(Visibility::Private, None)?);
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
         Ok(ExternBlock {
             syntax: self.syntax(start),
+            visibility,
             abi,
             bindings,
         })
     }
 
-    fn parse_type_declaration(&mut self) -> Result<TypeDeclaration, ParseError> {
-        let start = self.position;
+    fn parse_type_declaration(
+        &mut self,
+        visibility: Visibility,
+        start: usize,
+    ) -> Result<TypeDeclaration, ParseError> {
         self.expect(TokenKind::Type, "expected `type`")?;
         let kind = if self.eat(TokenKind::Alias) {
             TypeDeclarationKind::Alias
@@ -98,14 +214,19 @@ impl Grammar {
         let underlying = self.parse_type()?;
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
+            visibility,
             kind,
             name,
             underlying,
         })
     }
 
-    fn parse_binding(&mut self) -> Result<Binding, ParseError> {
-        let start = self.position;
+    fn parse_binding(
+        &mut self,
+        visibility: Visibility,
+        start: Option<usize>,
+    ) -> Result<Binding, ParseError> {
+        let start = start.unwrap_or(self.position);
         let kind = match self.peek() {
             Some(TokenKind::Let) => {
                 self.bump_token();
@@ -132,6 +253,7 @@ impl Grammar {
         };
         Ok(Binding {
             syntax: self.syntax(start),
+            visibility,
             kind,
             name,
             annotation,
@@ -283,9 +405,18 @@ impl Grammar {
                 variadic,
             }));
         }
-        let name = self.expect(TokenKind::Identifier, "expected type")?.text;
+        let first = self.expect(TokenKind::Identifier, "expected type")?.text;
+        let (namespace, name) = if self.eat(TokenKind::Dot) {
+            let name = self
+                .expect(TokenKind::Identifier, "expected type name after namespace")?
+                .text;
+            (Some(first), name)
+        } else {
+            (None, first)
+        };
         Ok(Type::Named(NamedType {
             syntax: self.syntax(start),
+            namespace,
             name,
         }))
     }
@@ -536,7 +667,10 @@ impl Grammar {
         self.next_syntax_id += 1;
         Syntax {
             id,
-            span: (span_start..span_end).into(),
+            span: Span::User {
+                source: self.source_name.clone(),
+                range: span_start..span_end,
+            },
             tokens: Arc::clone(&self.tokens),
             token_range: start..self.position,
         }

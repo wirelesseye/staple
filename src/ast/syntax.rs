@@ -10,6 +10,9 @@ impl SyntaxId {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
+    Use,
+    As,
+    Pub,
     Let,
     Def,
     Extern,
@@ -51,14 +54,17 @@ impl TokenKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Span {
-    User(Range<usize>),
+    User {
+        source: Option<Arc<str>>,
+        range: Range<usize>,
+    },
     Compiler,
 }
 
 impl Span {
     pub fn to_range(&self) -> Range<usize> {
         match self {
-            Span::User(range) => range.clone(),
+            Span::User { range, .. } => range.clone(),
             Span::Compiler => unreachable!(),
         }
     }
@@ -66,7 +72,10 @@ impl Span {
 
 impl From<Range<usize>> for Span {
     fn from(value: Range<usize>) -> Self {
-        Self::User(value)
+        Self::User {
+            source: None,
+            range: value,
+        }
     }
 }
 

@@ -1,6 +1,6 @@
 use stapler::{
     Accessor, BinaryOperator, Expression, Item, Pattern, Statement, TokenKind, Type,
-    TypeDeclarationKind, parse,
+    TypeDeclarationKind, UseKind, Visibility, parse,
 };
 
 fn statement(item: &Item) -> &Statement {
@@ -8,6 +8,61 @@ fn statement(item: &Item) -> &Statement {
         panic!("expected statement");
     };
     statement
+}
+
+#[test]
+fn parses_use_declarations_and_public_items_losslessly() {
+    let source = concat!(
+        "use path.to.another_module\n",
+        "use path.to.another_module.*\n",
+        "use path.to.another_module.(func, MyType)\n",
+        "use path.to.another_module.func as my_func\n",
+        "pub type alias PublicType = i32\n",
+        "pub def public_value = 1\n",
+    );
+    let root = parse(source).expect("module syntax should parse");
+
+    assert_eq!(root.text(), source);
+    assert!(
+        matches!(root.items[0], Item::UseDeclaration(ref use_) if use_.kind == UseKind::Namespace)
+    );
+    assert!(matches!(root.items[1], Item::UseDeclaration(ref use_) if use_.kind == UseKind::Glob));
+    assert!(
+        matches!(root.items[2], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Selected(names) if names == &["func", "MyType"]))
+    );
+    assert!(
+        matches!(root.items[3], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Renamed { item, alias } if item == "func" && alias == "my_func"))
+    );
+    assert!(
+        matches!(root.items[4], Item::TypeDeclaration(ref declaration) if declaration.visibility == Visibility::Public)
+    );
+    let Item::TypeDeclaration(declaration) = &root.items[4] else {
+        panic!("expected type declaration")
+    };
+    assert!(
+        declaration
+            .syntax
+            .text()
+            .ends_with("pub type alias PublicType = i32")
+    );
+    let Statement::Binding(binding) = statement(&root.items[5]) else {
+        panic!("expected binding")
+    };
+    assert_eq!(binding.visibility, Visibility::Public);
+    assert!(binding.syntax.text().ends_with("pub def public_value = 1"));
+}
+
+#[test]
+fn parses_namespace_qualified_types() {
+    let root = parse("let value: types.Number = 1\n").expect("qualified type should parse");
+    let Statement::Binding(binding) = statement(&root.items[0]) else {
+        panic!("expected binding")
+    };
+    let Some(Type::Named(named)) = &binding.annotation else {
+        panic!("expected named type")
+    };
+    assert_eq!(named.namespace.as_deref(), Some("types"));
+    assert_eq!(named.name, "Number");
 }
 
 #[test]

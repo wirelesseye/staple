@@ -12,7 +12,7 @@ use inkwell::{
 
 use crate::{
     Accessor, BinaryExpression, BinaryOperator, CheckedFunctionType, CheckedProductType,
-    CheckedType, Diagnostic, Expression, FunctionId, Item, Pattern, ProductExpression,
+    CheckedType, Diagnostic, Expression, FunctionId, Item, ModuleId, Pattern, ProductExpression,
     ResolvedFunction, Span, Statement, SymbolId, TypedModule,
 };
 
@@ -27,6 +27,8 @@ struct ModuleEmitter<'module, 'context> {
     builder: inkwell::builder::Builder<'context>,
     functions: HashMap<FunctionId, inkwell::values::FunctionValue<'context>>,
     globals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
+    storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
+    initializers: HashMap<ModuleId, inkwell::values::FunctionValue<'context>>,
 }
 
 #[derive(Default)]
@@ -48,6 +50,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             builder: context.create_builder(),
             functions: HashMap::new(),
             globals: HashMap::new(),
+            storage: HashMap::new(),
+            initializers: HashMap::new(),
         }
     }
 
@@ -124,10 +128,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .set_data_layout(&target_machine.get_target_data().get_data_layout());
         self.declare_external_functions()?;
         self.declare_functions()?;
+        self.declare_top_level_storage()?;
+        self.declare_initializers();
         let typed_module = self.typed_module;
         for function in typed_module.functions() {
             self.compile_function_body(function)?;
         }
+        self.compile_module_initializers()?;
         self.compile_main_function()?;
 
         self.llvm_module.verify().map_err(|message| {
@@ -137,33 +144,80 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     }
 
     fn declare_external_functions(&mut self) -> CodeGenerationResult<()> {
-        for item in &self.typed_module.syntax().items {
-            let Item::ExternBlock(block) = item else {
-                continue;
-            };
-            for binding in &block.bindings {
-                let symbol = self
-                    .typed_module
-                    .symbol_for(binding.syntax.id)
-                    .ok_or_else(|| {
-                        Diagnostic::new(binding.syntax.span.clone(), "unresolved external binding")
-                    })?;
-                let Some(CheckedType::Function(function_type)) =
-                    self.typed_module.type_of_symbol(symbol)
-                else {
-                    return Err(Diagnostic::new(
-                        binding.syntax.span.clone(),
-                        "external bindings must have a function type",
-                    ));
+        for source_module in self.typed_module.resolved().program().modules() {
+            for item in &source_module.syntax.items {
+                let Item::ExternBlock(block) = item else {
+                    continue;
                 };
-                let llvm_type = self.compile_function_type(function_type)?;
-                let function = self
-                    .llvm_module
-                    .add_function(&binding.name, llvm_type, None);
-                self.globals.insert(symbol, function.into());
+                for binding in &block.bindings {
+                    let symbol =
+                        self.typed_module
+                            .symbol_for(binding.syntax.id)
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    binding.syntax.span.clone(),
+                                    "unresolved external binding",
+                                )
+                            })?;
+                    let Some(CheckedType::Function(function_type)) =
+                        self.typed_module.type_of_symbol(symbol)
+                    else {
+                        return Err(Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            "external bindings must have a function type",
+                        ));
+                    };
+                    let llvm_type = self.compile_function_type(function_type)?;
+                    let function = self
+                        .llvm_module
+                        .add_function(&binding.name, llvm_type, None);
+                    self.globals.insert(symbol, function.into());
+                }
             }
         }
         Ok(())
+    }
+
+    fn declare_top_level_storage(&mut self) -> CodeGenerationResult<()> {
+        for source_module in self.typed_module.resolved().program().modules() {
+            for item in &source_module.syntax.items {
+                let Item::Statement(statement) = item else {
+                    continue;
+                };
+                let Statement::Binding(binding) = statement.as_ref() else {
+                    continue;
+                };
+                let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
+                    continue;
+                };
+                if self.globals.contains_key(&symbol) {
+                    continue;
+                }
+                let Some(value_type) = self.typed_module.type_of_symbol(symbol) else {
+                    continue;
+                };
+                let llvm_type = self.compile_type(value_type)?;
+                let name = format!("__staple_m{}_{}", source_module.id.0, binding.name);
+                let global = self.llvm_module.add_global(llvm_type, None, &name);
+                let zero = llvm_type.const_zero();
+                global.set_initializer(&zero);
+                global.set_linkage(inkwell::module::Linkage::Internal);
+                self.storage.insert(symbol, global);
+            }
+        }
+        Ok(())
+    }
+
+    fn declare_initializers(&mut self) {
+        let function_type = self.context.void_type().fn_type(&[], false);
+        for source_module in self.typed_module.resolved().program().modules() {
+            let function = self.llvm_module.add_function(
+                &format!("__staple_init_m{}", source_module.id.0),
+                function_type,
+                Some(inkwell::module::Linkage::Internal),
+            );
+            self.initializers.insert(source_module.id, function);
+        }
     }
 
     fn declare_functions(&mut self) -> CodeGenerationResult<()> {
@@ -295,17 +349,83 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
 
-        let mut environment = FunctionEnvironment::default();
-        let typed_module = self.typed_module;
-        for item in &typed_module.syntax().items {
-            if let Item::Statement(statement) = item {
-                self.compile_statement(&mut environment, statement)?;
-            }
+        for module in self
+            .typed_module
+            .resolved()
+            .program()
+            .initialization_order()
+        {
+            self.builder
+                .build_call(self.initializers[module], &[], "initialize")
+                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         }
         self.builder
             .build_return(Some(&integer_type.const_zero()))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         Ok(())
+    }
+
+    fn compile_module_initializers(&mut self) -> CodeGenerationResult<()> {
+        let modules = self
+            .typed_module
+            .resolved()
+            .program()
+            .modules()
+            .iter()
+            .map(|module| (module.id, module.syntax.items.clone()))
+            .collect::<Vec<_>>();
+        for (module_id, items) in modules {
+            let function = self.initializers[&module_id];
+            let entry = self.context.append_basic_block(function, "entry");
+            self.builder.position_at_end(entry);
+            let mut environment = FunctionEnvironment::default();
+            for item in &items {
+                if let Item::Statement(statement) = item {
+                    self.compile_top_level_statement(&mut environment, statement)?;
+                }
+            }
+            self.builder
+                .build_return(None)
+                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    fn compile_top_level_statement(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        statement: &Statement,
+    ) -> CodeGenerationResult<()> {
+        match statement {
+            Statement::Binding(binding) => {
+                let Some(expression) = &binding.value else {
+                    return Ok(());
+                };
+                let value = self.compile_expression(environment, expression)?;
+                let symbol = self
+                    .typed_module
+                    .symbol_for(binding.syntax.id)
+                    .ok_or_else(|| {
+                        Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
+                    })?;
+                if let Some(global) = self.storage.get(&symbol) {
+                    let value = value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            "top-level value is not storable",
+                        )
+                    })?;
+                    self.builder
+                        .build_store(global.as_pointer_value(), value)
+                        .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+                }
+                Ok(())
+            }
+            Statement::Expression(expression) => {
+                self.compile_expression(environment, expression)?;
+                Ok(())
+            }
+        }
     }
 
     fn compile_statement(
@@ -389,6 +509,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .as_any_value_enum())
             }
             Expression::Access(access) => {
+                if let Some(symbol) = self.typed_module.symbol_for(access.syntax.id) {
+                    return self.compile_symbol_value(
+                        environment,
+                        symbol,
+                        access.syntax.span.clone(),
+                        "value is not available here".to_owned(),
+                    );
+                }
                 let value = self.compile_expression(environment, &access.value)?;
                 let Some(BasicValueEnum::StructValue(value)) = value_as_basic(value) else {
                     return Err(Diagnostic::new(
@@ -420,12 +548,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .symbol_for(name.syntax.id)
                     .ok_or_else(|| Diagnostic::new(name.syntax.span.clone(), "unresolved name"))?;
-                self.lookup_value(environment, symbol).ok_or_else(|| {
-                    Diagnostic::new(
-                        name.syntax.span.clone(),
-                        format!("value `{}` is not available here", name.name),
-                    )
-                })
+                self.compile_symbol_value(
+                    environment,
+                    symbol,
+                    name.syntax.span.clone(),
+                    format!("value `{}` is not available here", name.name),
+                )
             }
             Expression::String(string) => {
                 let value = decode_string_literal(&string.literal)
@@ -446,6 +574,31 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .as_any_value_enum())
             }
         }
+    }
+
+    fn compile_symbol_value(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        span: Span,
+        unavailable: String,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let Some(value) = self.lookup_value(environment, symbol) {
+            return Ok(value);
+        }
+        if let Some(global) = self.storage.get(&symbol) {
+            let value_type = self
+                .typed_module
+                .type_of_symbol(symbol)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "unchecked global value"))?;
+            let llvm_type = self.compile_type(value_type)?;
+            return self
+                .builder
+                .build_load(llvm_type, global.as_pointer_value(), "global")
+                .map(|value| value.as_any_value_enum())
+                .map_err(|error| Diagnostic::new(span, error.to_string()));
+        }
+        Err(Diagnostic::new(span, unavailable))
     }
 
     fn compile_binary_expression(

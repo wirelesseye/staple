@@ -122,7 +122,63 @@ extern "c" {
 printf ("hello, world!\n")
 ```
 
-There is no distinguished entry-point function. 
+There is no distinguished source-level entry-point function. Stapler generates
+one native `main` function for the entry source file and the modules reachable
+from it.
+
+### Modules and `use`
+
+Every `.sta` file is a module. A dotted module path is resolved from the entry
+file's directory by replacing dots with path separators and adding `.sta`:
+
+```staple
+use tools.format
+// loads tools/format.sta
+```
+
+When the entry program is read from standard input, module paths are resolved
+from stapler's current working directory. Only modules reachable from the entry
+module are compiled. A source file is loaded once even when several modules use
+it, and mutually recursive module dependencies are allowed.
+
+A module can be brought into scope as a namespace. The namespace name is the
+last component of its path:
+
+```staple
+use path.to.another_module
+another_module.func ()
+let value: another_module.MyType
+```
+
+Public items can instead be imported directly:
+
+```staple
+use path.to.another_module.*
+use path.to.another_module.(func, MyType)
+use path.to.another_module.func as my_func
+```
+
+The wildcard form imports every public named item. The parenthesized form
+imports only the listed items. The `as` form imports one item under a different
+local name. Imports are hoisted, apply throughout their module, and are not
+re-exported. Importing two items under the same name, or colliding with a local
+declaration, is an error.
+
+Top-level declarations are private by default. `pub` exports a binding or type:
+
+```staple
+pub def format = (value: i32) => value
+pub type alias Number = i32
+```
+
+`pub extern` exports every binding declared by that external block. `pub use`
+is not supported.
+
+Every reachable module's top-level statements execute exactly once. Dependencies
+are initialized before modules which use them. Mutually recursive groups are
+initialized in canonical file-path order, and statements within one module keep
+source order. Reading a top-level value from a module that has not yet run its
+initializer observes that value's default representation.
 
 ## Bindings
 

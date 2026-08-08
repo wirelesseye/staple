@@ -4,7 +4,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use stapler::{CodeGenerator, Diagnostic, NameResolver, TypeChecker, TypedModule};
+use stapler::{
+    CodeGenerator, Diagnostic, NameResolver, Program, ProgramLoader, TypeChecker, TypedModule,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitKind {
@@ -44,8 +46,16 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Option<String>, 
         return Ok(Some(format!("{}\n", usage())));
     }
     let options = parse_options(arguments)?;
-    let source = read_source(&options.input)?;
-    let module = compile(&source)?;
+    let module = if options.input == "-" {
+        let source = read_source(&options.input)?;
+        let root = std::env::current_dir()
+            .map_err(|error| format!("could not determine current directory: {error}"))?;
+        let program = ProgramLoader::new().load_source(&source, &root)?;
+        compile_program(program)?
+    } else {
+        let program = ProgramLoader::new().load_path(Path::new(&options.input))?;
+        compile_program(program)?
+    };
     let context = inkwell::context::Context::create();
     let generator = CodeGenerator::new(&context);
 
@@ -206,10 +216,18 @@ fn read_source(input: &OsStr) -> Result<String, String> {
         .map_err(|error| format!("could not read `{}`: {error}", path.display()))
 }
 
+#[cfg(test)]
 fn compile(source: &str) -> Result<TypedModule, String> {
     let module = stapler::parse(source).map_err(|error| error.to_string())?;
     let module = NameResolver::new()
         .resolve(&module)
+        .map_err(format_diagnostics)?;
+    TypeChecker::new().check(module).map_err(format_diagnostics)
+}
+
+fn compile_program(program: Program) -> Result<TypedModule, String> {
+    let module = NameResolver::new()
+        .resolve_program(program)
         .map_err(format_diagnostics)?;
     TypeChecker::new().check(module).map_err(format_diagnostics)
 }

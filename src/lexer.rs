@@ -51,6 +51,9 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
         let text = &source[start..end];
         if kind == TokenKind::Identifier {
             kind = match text {
+                "use" => TokenKind::Use,
+                "as" => TokenKind::As,
+                "pub" => TokenKind::Pub,
                 "let" => TokenKind::Let,
                 "def" => TokenKind::Def,
                 "extern" => TokenKind::Extern,
