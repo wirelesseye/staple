@@ -176,7 +176,7 @@ pub enum Type {
     Inferred(InferredType),
     Named(NamedType),
     Pointer(PointerType),
-    List(ListType),
+    Product(ProductType),
     Function(FunctionType),
     Primitive(PrimitiveType),
 }
@@ -187,7 +187,7 @@ impl Type {
             Self::Inferred(ty) => &ty.syntax,
             Self::Named(ty) => &ty.syntax,
             Self::Pointer(ty) => &ty.syntax,
-            Self::List(ty) => &ty.syntax,
+            Self::Product(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
             Self::Primitive(ty) => ty.syntax(),
         }
@@ -227,7 +227,7 @@ pub struct PointerType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListType {
+pub struct ProductType {
     pub syntax: Syntax,
     pub elements: Vec<TypeElement>,
     pub variadic: bool,
@@ -266,7 +266,7 @@ impl PrimitiveType {
 pub enum Expression {
     Function(Box<FunctionExpression>),
     Block(BlockExpression),
-    List(ListExpression),
+    Product(ProductExpression),
     Call(CallExpression),
     Access(AccessExpression),
     Binary(BinaryExpression),
@@ -280,7 +280,7 @@ impl Expression {
         match self {
             Self::Function(expression) => &expression.syntax,
             Self::Block(expression) => &expression.syntax,
-            Self::List(expression) => &expression.syntax,
+            Self::Product(expression) => &expression.syntax,
             Self::Call(expression) => &expression.syntax,
             Self::Access(expression) => &expression.syntax,
             Self::Binary(expression) => &expression.syntax,
@@ -302,21 +302,21 @@ pub struct FunctionExpression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Parameter {
     Value(ValueParameter),
-    List(ListParameter),
+    Product(ProductParameter),
 }
 
 impl Parameter {
     pub fn ty(&self) -> Type {
         match self {
             Parameter::Value(value_parameter) => value_parameter.ty.clone(),
-            Parameter::List(list_parameter) => {
-                let elements = list_parameter
+            Parameter::Product(product_parameter) => {
+                let elements = product_parameter
                     .elements
                     .iter()
                     .map(|param| param.type_element())
                     .collect();
-                Type::List(ListType {
-                    syntax: list_parameter.syntax.clone(),
+                Type::Product(ProductType {
+                    syntax: product_parameter.syntax.clone(),
                     elements,
                     variadic: false,
                 })
@@ -343,7 +343,7 @@ impl ValueParameter {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListParameter {
+pub struct ProductParameter {
     pub syntax: Syntax,
     pub elements: Vec<ValueParameter>,
 }
@@ -355,12 +355,12 @@ pub struct BlockExpression {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListExpression {
+pub struct ProductExpression {
     pub syntax: Syntax,
-    pub elements: Vec<ListElement>,
+    pub elements: Vec<ProductElement>,
 }
 
-impl ListExpression {
+impl ProductExpression {
     pub fn empty() -> Self {
         Self {
             syntax: Syntax::compiler(),
@@ -370,7 +370,7 @@ impl ListExpression {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ListElement {
+pub struct ProductElement {
     pub syntax: Syntax,
     pub name: Option<String>,
     pub value: Expression,

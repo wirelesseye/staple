@@ -184,7 +184,7 @@ impl Grammar {
                 }
             }
             self.expect(TokenKind::RParen, "expected `)` after parameter")?;
-            Ok(Parameter::List(ListParameter {
+            Ok(Parameter::Product(ProductParameter {
                 syntax: self.syntax(start),
                 elements,
             }))
@@ -277,7 +277,7 @@ impl Grammar {
                 }
             }
             self.expect(TokenKind::RParen, "expected `)` in type")?;
-            return Ok(Type::List(ListType {
+            return Ok(Type::Product(ProductType {
                 syntax: self.syntax(start),
                 elements,
                 variadic,
@@ -337,7 +337,7 @@ impl Grammar {
                 Some(TokenKind::Integer) => {
                     Accessor::Index(self.bump_token().expect("peeked index").text)
                 }
-                _ => return Err(self.error("expected a list element name or index after `.`")),
+                _ => return Err(self.error("expected a product element name or index after `.`")),
             };
             expression = Expression::Access(AccessExpression {
                 syntax: self.syntax(start),
@@ -351,7 +351,7 @@ impl Grammar {
     fn parse_atom(&mut self) -> Result<Expression, ParseError> {
         match self.peek() {
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
-            Some(TokenKind::LParen) => self.parse_list_expression().map(Expression::List),
+            Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
             Some(TokenKind::Identifier) => {
                 let start = self.position;
                 let name = self.bump_token().expect("peeked name").text;
@@ -397,7 +397,7 @@ impl Grammar {
         })
     }
 
-    fn parse_list_expression(&mut self) -> Result<ListExpression, ParseError> {
+    fn parse_product_expression(&mut self) -> Result<ProductExpression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LParen, "expected `(`")?;
         let mut elements = Vec::new();
@@ -414,7 +414,7 @@ impl Grammar {
                     None
                 };
                 let value = self.parse_expression()?;
-                elements.push(ListElement {
+                elements.push(ProductElement {
                     syntax: self.syntax(element_start),
                     name,
                     value,
@@ -424,8 +424,8 @@ impl Grammar {
                 }
             }
         }
-        self.expect(TokenKind::RParen, "expected `)` after list")?;
-        Ok(ListExpression {
+        self.expect(TokenKind::RParen, "expected `)` after product")?;
+        Ok(ProductExpression {
             syntax: self.syntax(start),
             elements,
         })

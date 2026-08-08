@@ -6,9 +6,9 @@ use inkwell::{
 };
 
 use crate::{
-    Accessor, BinaryExpression, BinaryOperator, CheckedFunctionType, CheckedListType, CheckedType,
-    Diagnostic, Expression, FunctionId, Item, ListExpression, Parameter, ResolvedFunction, Span,
-    Statement, SymbolId, TypedModule,
+    Accessor, BinaryExpression, BinaryOperator, CheckedFunctionType, CheckedProductType,
+    CheckedType, Diagnostic, Expression, FunctionId, Item, Parameter, ProductExpression,
+    ResolvedFunction, Span, Statement, SymbolId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -168,7 +168,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let parameters = llvm_function.get_params();
         let syntax_parameters = match &function.parameter {
             Parameter::Value(value) => vec![value],
-            Parameter::List(list) => list.elements.iter().collect(),
+            Parameter::Product(product) => product.elements.iter().collect(),
         };
         if parameters.len() != syntax_parameters.len() {
             return Err(Diagnostic::new(
@@ -267,8 +267,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .as_any_value_enum()
                 }))
             }
-            Expression::List(list) => self
-                .compile_list_expression(environment, list)
+            Expression::Product(product) => self
+                .compile_product_expression(environment, product)
                 .map(AnyValueEnum::from),
             Expression::Call(call) => {
                 let callee = self.compile_expression(environment, &call.callee)?;
@@ -295,18 +295,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let Some(BasicValueEnum::StructValue(value)) = value_as_basic(value) else {
                     return Err(Diagnostic::new(
                         access.value.syntax().span.clone(),
-                        "element access requires a list value",
+                        "element access requires a product value",
                     ));
                 };
                 let index = match &access.accessor {
                     Accessor::Index(index) => index.parse::<u32>().map_err(|_| {
-                        Diagnostic::new(access.syntax.span.clone(), "invalid list index")
+                        Diagnostic::new(access.syntax.span.clone(), "invalid product index")
                     })?,
                     Accessor::Name(name) => {
-                        list_element_index(&access.value, name).ok_or_else(|| {
+                        product_element_index(&access.value, name).ok_or_else(|| {
                             Diagnostic::new(
                                 access.syntax.span.clone(),
-                                format!("cannot determine index of list element `{name}`"),
+                                format!("cannot determine index of product element `{name}`"),
                             )
                         })?
                     }
@@ -379,12 +379,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(result.as_any_value_enum())
     }
 
-    fn compile_list_expression(
+    fn compile_product_expression(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        list: &ListExpression,
+        product: &ProductExpression,
     ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
-        let values = list
+        let values = product
             .elements
             .iter()
             .map(|element| {
@@ -393,7 +393,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         value_as_basic(value).ok_or_else(|| {
                             Diagnostic::new(
                                 element.syntax.span.clone(),
-                                "list element is not a first-class value",
+                                "product element is not a first-class value",
                             )
                         })
                     })
@@ -403,15 +403,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .iter()
             .map(BasicValueEnum::get_type)
             .collect::<Vec<_>>();
-        let mut list_value = self.context.struct_type(&types, true).const_zero();
+        let mut product_value = self.context.struct_type(&types, true).const_zero();
         for (index, element) in values.into_iter().enumerate() {
-            list_value = self
+            product_value = self
                 .builder
-                .build_insert_value(list_value, element, index as u32, "list.element")
-                .map_err(|error| Diagnostic::new(list.syntax.span.clone(), error.to_string()))?
+                .build_insert_value(product_value, element, index as u32, "product.element")
+                .map_err(|error| Diagnostic::new(product.syntax.span.clone(), error.to_string()))?
                 .into_struct_value();
         }
-        Ok(list_value)
+        Ok(product_value)
     }
 
     fn compile_arguments(
@@ -420,7 +420,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         argument: &Expression,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
         let expressions: Vec<&Expression> = match argument {
-            Expression::List(list) => list.elements.iter().map(|element| &element.value).collect(),
+            Expression::Product(product) => product
+                .elements
+                .iter()
+                .map(|element| &element.value)
+                .collect(),
             expression => vec![expression],
         };
         expressions
@@ -447,7 +451,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let parameter_types = self.compile_parameter_types(&function_type.parameter)?;
         let variadic = matches!(
             &*function_type.parameter,
-            CheckedType::List(list) if list.variadic
+            CheckedType::Product(product) if product.variadic
         );
         Ok(match return_type {
             inkwell::types::BasicTypeEnum::ArrayType(value) => {
@@ -480,7 +484,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         parameter_type: &CheckedType,
     ) -> CodeGenerationResult<Vec<inkwell::types::BasicMetadataTypeEnum<'context>>> {
         match parameter_type {
-            CheckedType::List(list) => list
+            CheckedType::Product(product) => product
                 .elements
                 .iter()
                 .map(|element| self.compile_type(&element.value_type).map(Into::into))
@@ -507,18 +511,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             CheckedType::Pointer { .. } | CheckedType::Function(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
-            CheckedType::List(list) => self.compile_list_type(list).map(Into::into),
+            CheckedType::Product(product) => self.compile_product_type(product).map(Into::into),
             CheckedType::I32 => Ok(self.context.i32_type().into()),
             CheckedType::Bool => Ok(self.context.bool_type().into()),
             CheckedType::Distinct { representation, .. } => self.compile_type(representation),
         }
     }
 
-    fn compile_list_type(
+    fn compile_product_type(
         &self,
-        list: &CheckedListType,
+        product: &CheckedProductType,
     ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
-        let fields = list
+        let fields = product
             .elements
             .iter()
             .map(|element| self.compile_type(&element.value_type))
@@ -542,11 +546,12 @@ fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {
     }
 }
 
-fn list_element_index(expression: &Expression, name: &str) -> Option<u32> {
-    let Expression::List(list) = expression else {
+fn product_element_index(expression: &Expression, name: &str) -> Option<u32> {
+    let Expression::Product(product) = expression else {
         return None;
     };
-    list.elements
+    product
+        .elements
         .iter()
         .position(|element| element.name.as_deref() == Some(name))
         .and_then(|index| u32::try_from(index).ok())

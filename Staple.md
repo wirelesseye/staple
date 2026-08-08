@@ -166,7 +166,7 @@ Inferred placeholders may appear wherever a type is expected.
 
 ## Values and expressions
 
-staple is expression-oriented. Function values, function applications, lists,
+staple is expression-oriented. Function values, function applications, products,
 and blocks are all expressions.
 
 The syntax currently recognized for literal values includes strings and
@@ -190,41 +190,41 @@ The arithmetic operators currently recognized by stapler are:
 
 Multiplication and division bind more tightly than addition and subtraction.
 
-### Lists
+### Products
 
-The staple list is its single fixed-size product type. Lists replace tuples,
-structs, records, and fixed-size arrays found in other languages. A list has an
-ordered, fixed number of elements, and its elements may have different types.
+Products are staple's single fixed-size aggregate form. They replace tuples,
+structs, records, and fixed-size arrays found in other languages. A product has
+an ordered, fixed number of elements, and its elements may have different types.
 
-Parentheses construct a list:
+Parentheses construct a product:
 
 ```staple
-()          // a nullary list
-(value)     // a list containing one value
-(a, b)      // a list containing two values
+()          // a nullary product
+(value)     // a product containing one value
+(a, b)      // a product containing two values
 ```
 
 Parentheses are therefore not grouping syntax in the current design.
 
 #### Named elements
 
-Every list element may optionally have a name. Names are written before the
-element type in a list type:
+Every product element may optionally have a name. Names are written before the
+element type in a product type:
 
 ```staple
 let args: (name: string, int)
 ```
 
-Here, `args` is a two-element list. Its first element is named `name` and has
+Here, `args` is a two-element product. Its first element is named `name` and has
 type `string`; its second element is unnamed and has type `int`.
 
-Names may likewise be supplied when constructing a list value:
+Names may likewise be supplied when constructing a product value:
 
 ```staple
 let args = (name: "staple", 1)
 ```
 
-Named and unnamed elements can be mixed in the same list. Whether names must be
+Named and unnamed elements can be mixed in the same product. Whether names must be
 unique and whether a value's element names must exactly match its annotated
 type remain unspecified.
 
@@ -242,8 +242,8 @@ args.1    // the second element, accessed by index
 ```
 
 Name and index access refer to the same underlying elements; names do not
-change the order or size of a list. Accessing an absent name or an index outside
-the list's fixed bounds is an error. Whether that error is always detected at
+change the order or size of a product. Accessing an absent name or an index outside
+the product's fixed bounds is an error. Whether that error is always detected at
 compile time remains unspecified.
 
 ## Functions
@@ -261,8 +261,8 @@ lambda. Both are function values and use the same syntax.
 Every function takes exactly one parameter. That parameter can represent:
 
 - an ordinary value;
-- a nullary list; or
-- a list containing one or more values.
+- a nullary product; or
+- a product containing one or more values.
 
 `=>` introduces the body of the abstraction. `->`, when present, introduces an
 explicit result type. Without an explicit result type, stapler infers it from
@@ -274,13 +274,13 @@ An ordinary parameter has a name and a type:
 s: string => printf ("%s\n", s)
 ```
 
-A nullary-list parameter is written as `()`:
+A nullary-product parameter is written as `()`:
 
 ```staple
 () => 42
 ```
 
-A list parameter names and types each of its elements:
+A product parameter names and types each of its elements:
 
 ```staple
 (a: i32, b: i32) => a + b
@@ -292,7 +292,7 @@ Consequently, this definition does not define a function with two parameters:
 let add = (a: i32, b: i32) => a + b
 ```
 
-It defines a function whose single parameter is a two-element list.
+It defines a function whose single parameter is a two-element product.
 
 A function value may declare its result type directly:
 
@@ -319,13 +319,13 @@ println "Hello, world!"
 ```
 
 Because each function accepts one value, passing several logical arguments
-means passing a list:
+means passing a product:
 
 ```staple
 printf ("%s\n", s)
 ```
 
-Here, `printf` receives one two-element list.
+Here, `printf` receives one two-element product.
 
 ## Block expressions
 
@@ -361,7 +361,7 @@ _
 _ -> i32
 ```
 
-The currently supported type syntax also includes pointer types, list types,
+The currently supported type syntax also includes pointer types, product types,
 variadic markers in external function signatures, and function types:
 
 ```staple
@@ -370,7 +370,7 @@ variadic markers in external function signatures, and function types:
 (*const c_char, ...) -> i32
 ```
 
-`...` denotes the variadic portion of an external function parameter list. Its
+`...` denotes the variadic portion of an external function parameter product. Its
 meaning outside foreign declarations is currently unspecified.
 
 The built-in type set, mutability model for pointers, type inference rules, and
@@ -395,7 +395,7 @@ interchangeable, even though they share a representation. This provides type
 safety without adding a runtime wrapper. The syntax for constructing,
 unwrapping, or explicitly converting these types remains unspecified.
 
-List types and values may have a trailing comma.
+Product types and values may have a trailing comma.
 
 #### `type alias`
 
@@ -410,7 +410,7 @@ type alias Person = (
 )
 ```
 
-Here, `person` is exactly the named list type on the right-hand side. The alias
+Here, `person` is exactly the named product type on the right-hand side. The alias
 does not create a separate nominal identity.
 
 ## Foreign declarations
@@ -425,7 +425,7 @@ extern "c" {
 ```
 
 The example declares an immutable foreign value named `printf`. Its type is a
-function from one list parameter—containing a C string pointer followed by
+function from one product parameter—containing a C string pointer followed by
 variadic values—to an `i32` result.
 
 Only the syntax of foreign declarations is currently defined. Linking,

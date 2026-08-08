@@ -26,7 +26,7 @@ fn parses_hello_world_losslessly() {
 }
 
 #[test]
-fn parses_list_parameter_and_expression_body() {
+fn parses_product_parameter_and_expression_body() {
     let source = "def add: _ -> i32 = (a: i32, b: i32) => a + b\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
@@ -36,7 +36,9 @@ fn parses_list_parameter_and_expression_body() {
     let Expression::Function(function) = binding.value.as_ref().expect("function value") else {
         panic!("expected function");
     };
-    assert!(matches!(function.parameter, Parameter::List(ref list) if list.elements.len() == 2));
+    assert!(
+        matches!(function.parameter, Parameter::Product(ref product) if product.elements.len() == 2)
+    );
     assert!(matches!(
         *function.body,
         Expression::Binary(ref binary) if binary.operator == BinaryOperator::Add
@@ -80,12 +82,12 @@ fn parses_single_parameter_and_application() {
         panic!("expected function");
     };
     assert!(
-        matches!(function.parameter, Parameter::List(ref list) if list.elements[0].name == "s")
+        matches!(function.parameter, Parameter::Product(ref product) if product.elements[0].name == "s")
     );
     let Expression::Call(call) = function.body.as_ref() else {
         panic!("expected call");
     };
-    assert!(matches!(*call.argument, Expression::List(_)));
+    assert!(matches!(*call.argument, Expression::Product(_)));
 }
 
 #[test]
@@ -108,7 +110,7 @@ fn comments_and_crlf_are_preserved() {
 }
 
 #[test]
-fn parses_named_list_types_values_and_access() {
+fn parses_named_product_types_values_and_access() {
     let source = concat!(
         "let args: (name: string, int)\n",
         "type user_id = int\n",
@@ -116,14 +118,14 @@ fn parses_named_list_types_values_and_access() {
         "def by_name = args.name\n",
         "def by_index = args.1\n",
     );
-    let root = parse(source).expect("named list syntax should parse");
+    let root = parse(source).expect("named product syntax should parse");
 
     assert_eq!(root.text(), source);
     let Statement::Binding(args) = statement(&root.items[0]) else {
         panic!("expected args binding");
     };
-    let Type::List(args_type) = args.annotation.as_ref().expect("args type") else {
-        panic!("expected list type");
+    let Type::Product(args_type) = args.annotation.as_ref().expect("args type") else {
+        panic!("expected product type");
     };
     assert_eq!(args_type.elements[0].name.as_deref(), Some("name"));
     assert_eq!(args_type.elements[1].name, None);
@@ -137,8 +139,8 @@ fn parses_named_list_types_values_and_access() {
     let Statement::Binding(value) = statement(&root.items[2]) else {
         panic!("expected value binding");
     };
-    let Expression::List(value) = value.value.as_ref().expect("list value") else {
-        panic!("expected list value");
+    let Expression::Product(value) = value.value.as_ref().expect("product value") else {
+        panic!("expected product value");
     };
     assert_eq!(value.elements[0].name.as_deref(), Some("name"));
 

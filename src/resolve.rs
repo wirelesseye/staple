@@ -163,8 +163,8 @@ impl NameResolver {
                 });
             }
             Expression::Block(block) => self.resolve_block(block),
-            Expression::List(list) => {
-                for element in &list.elements {
+            Expression::Product(product) => {
+                for element in &product.elements {
                     self.resolve_expression(&element.value, None, None);
                 }
             }
@@ -210,8 +210,8 @@ impl NameResolver {
             Parameter::Value(value) => {
                 self.declare(&value.name, value.syntax.id, value.syntax.span.clone());
             }
-            Parameter::List(list) => {
-                for value in &list.elements {
+            Parameter::Product(product) => {
+                for value in &product.elements {
                     self.declare(&value.name, value.syntax.id, value.syntax.span.clone());
                 }
             }

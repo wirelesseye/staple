@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{
-    Accessor, Binding, Diagnostic, Expression, FunctionId, Item, ListType, Module, Parameter,
-    PrimitiveType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, Type,
+    Accessor, Binding, Diagnostic, Expression, FunctionId, Item, Module, Parameter, PrimitiveType,
+    ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, Type,
     TypeDeclaration, TypeDeclarationKind,
 };
 
@@ -19,7 +19,7 @@ pub enum CheckedType {
         is_const: bool,
         pointee: Box<CheckedType>,
     },
-    List(CheckedListType),
+    Product(CheckedProductType),
     Function(CheckedFunctionType),
     Distinct {
         name: String,
@@ -28,7 +28,7 @@ pub enum CheckedType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckedListType {
+pub struct CheckedProductType {
     pub elements: Vec<CheckedTypeElement>,
     pub variadic: bool,
 }
@@ -46,8 +46,8 @@ pub struct CheckedFunctionType {
 }
 
 impl CheckedType {
-    pub fn empty_list() -> Self {
-        Self::List(CheckedListType {
+    pub fn empty_product() -> Self {
+        Self::Product(CheckedProductType {
             elements: Vec::new(),
             variadic: false,
         })
@@ -57,7 +57,7 @@ impl CheckedType {
         match self {
             Self::Inferred | Self::Error => false,
             Self::Pointer { pointee, .. } => pointee.is_concrete(),
-            Self::List(list) => list
+            Self::Product(product) => product
                 .elements
                 .iter()
                 .all(|element| element.value_type.is_concrete()),
@@ -86,9 +86,9 @@ impl fmt::Display for CheckedType {
                 }
                 write!(formatter, "{pointee}")
             }
-            Self::List(list) => {
+            Self::Product(product) => {
                 formatter.write_str("(")?;
-                for (index, element) in list.elements.iter().enumerate() {
+                for (index, element) in product.elements.iter().enumerate() {
                     if index > 0 {
                         formatter.write_str(", ")?;
                     }
@@ -97,8 +97,8 @@ impl fmt::Display for CheckedType {
                     }
                     write!(formatter, "{}", element.value_type)?;
                 }
-                if list.variadic {
-                    if !list.elements.is_empty() {
+                if product.variadic {
+                    if !product.elements.is_empty() {
                         formatter.write_str(", ")?;
                     }
                     formatter.write_str("...")?;
@@ -339,8 +339,8 @@ impl TypeChecker {
                     self.symbol_types.insert(symbol, value_type.clone());
                 }
             }
-            (Parameter::List(parameters), CheckedType::List(list_type)) => {
-                for (parameter, element) in parameters.elements.iter().zip(&list_type.elements) {
+            (Parameter::Product(parameters), CheckedType::Product(product_type)) => {
+                for (parameter, element) in parameters.elements.iter().zip(&product_type.elements) {
                     if let Some(symbol) = module.symbol_for(parameter.syntax.id) {
                         self.symbol_types.insert(symbol, element.value_type.clone());
                     }
@@ -368,7 +368,7 @@ impl TypeChecker {
         match statement {
             Statement::Binding(binding) => {
                 self.check_binding(module, binding);
-                CheckedType::empty_list()
+                CheckedType::empty_product()
             }
             Statement::Expression(expression) => self.check_expression(module, expression),
         }
@@ -431,14 +431,14 @@ impl TypeChecker {
                     .unwrap_or(CheckedType::Error)
             }
             Expression::Block(block) => {
-                let mut result = CheckedType::empty_list();
+                let mut result = CheckedType::empty_product();
                 for statement in &block.statements {
                     result = self.check_statement(module, statement);
                 }
                 result
             }
-            Expression::List(list) => CheckedType::List(CheckedListType {
-                elements: list
+            Expression::Product(product) => CheckedType::Product(CheckedProductType {
+                elements: product
                     .elements
                     .iter()
                     .map(|element| CheckedTypeElement {
@@ -473,20 +473,20 @@ impl TypeChecker {
             Expression::Access(access) => {
                 let value_type = self.check_expression(module, &access.value);
                 match value_type {
-                    CheckedType::List(list) => match &access.accessor {
+                    CheckedType::Product(product) => match &access.accessor {
                         Accessor::Index(index) => index
                             .parse::<usize>()
                             .ok()
-                            .and_then(|index| list.elements.get(index))
+                            .and_then(|index| product.elements.get(index))
                             .map(|element| element.value_type.clone())
                             .unwrap_or_else(|| {
                                 self.diagnostics.push(Diagnostic::new(
                                     access.syntax.span.clone(),
-                                    format!("list index `{index}` is out of bounds"),
+                                    format!("product index `{index}` is out of bounds"),
                                 ));
                                 CheckedType::Error
                             }),
-                        Accessor::Name(name) => list
+                        Accessor::Name(name) => product
                             .elements
                             .iter()
                             .find(|element| element.name.as_deref() == Some(name))
@@ -494,7 +494,7 @@ impl TypeChecker {
                             .unwrap_or_else(|| {
                                 self.diagnostics.push(Diagnostic::new(
                                     access.syntax.span.clone(),
-                                    format!("list has no element named `{name}`"),
+                                    format!("product has no element named `{name}`"),
                                 ));
                                 CheckedType::Error
                             }),
@@ -546,30 +546,30 @@ impl TypeChecker {
     }
 
     fn check_call_argument(&mut self, actual: CheckedType, expected: &CheckedType, span: Span) {
-        if let CheckedType::List(expected_list) = expected
-            && expected_list.variadic
+        if let CheckedType::Product(expected_product) = expected
+            && expected_product.variadic
         {
-            let CheckedType::List(actual_list) = actual else {
+            let CheckedType::Product(actual_product) = actual else {
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    format!("expected variadic argument list `{expected}`"),
+                    format!("expected variadic argument product `{expected}`"),
                 ));
                 return;
             };
-            if actual_list.elements.len() < expected_list.elements.len() {
+            if actual_product.elements.len() < expected_product.elements.len() {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     format!(
                         "expected at least {} arguments",
-                        expected_list.elements.len()
+                        expected_product.elements.len()
                     ),
                 ));
                 return;
             }
-            for (actual, expected) in actual_list
+            for (actual, expected) in actual_product
                 .elements
                 .into_iter()
-                .zip(&expected_list.elements)
+                .zip(&expected_product.elements)
             {
                 self.require_compatible(
                     actual.value_type,
@@ -608,7 +608,7 @@ impl TypeChecker {
                 is_const: pointer.is_const,
                 pointee: Box::new(self.resolve_source_type(&pointer.pointee)),
             },
-            Type::List(list) => CheckedType::List(self.resolve_list_type(list)),
+            Type::Product(product) => CheckedType::Product(self.resolve_product_type(product)),
             Type::Function(function) => CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(self.resolve_source_type(&function.parameter)),
                 result: Box::new(self.resolve_source_type(&function.result)),
@@ -618,9 +618,9 @@ impl TypeChecker {
         }
     }
 
-    fn resolve_list_type(&mut self, list: &ListType) -> CheckedListType {
-        CheckedListType {
-            elements: list
+    fn resolve_product_type(&mut self, product: &ProductType) -> CheckedProductType {
+        CheckedProductType {
+            elements: product
                 .elements
                 .iter()
                 .map(|element| CheckedTypeElement {
@@ -628,7 +628,7 @@ impl TypeChecker {
                     value_type: self.resolve_source_type(&element.ty),
                 })
                 .collect(),
-            variadic: list.variadic,
+            variadic: product.variadic,
         }
     }
 
@@ -701,7 +701,7 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
                 pointee: Box::new(pointee),
             })
         }
-        (CheckedType::List(actual), CheckedType::List(expected))
+        (CheckedType::Product(actual), CheckedType::Product(expected))
             if actual.variadic == expected.variadic
                 && actual.elements.len() == expected.elements.len() =>
         {
@@ -718,7 +718,7 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
-            Some(CheckedType::List(CheckedListType {
+            Some(CheckedType::Product(CheckedProductType {
                 elements,
                 variadic: actual.variadic,
             }))
