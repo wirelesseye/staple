@@ -61,7 +61,6 @@ pub enum CheckedType {
     U64,
     ISize,
     USize,
-    Bool,
     String,
     CString,
     CChar,
@@ -178,7 +177,6 @@ impl CheckedType {
             | Self::U64
             | Self::ISize
             | Self::USize
-            | Self::Bool
             | Self::String
             | Self::CString
             | Self::CChar
@@ -203,7 +201,6 @@ impl fmt::Display for CheckedType {
             Self::U64 => formatter.write_str("U64"),
             Self::ISize => formatter.write_str("ISize"),
             Self::USize => formatter.write_str("USize"),
-            Self::Bool => formatter.write_str("Bool"),
             Self::String => formatter.write_str("String"),
             Self::CString => formatter.write_str("CString"),
             Self::CChar => formatter.write_str("CChar"),
@@ -2088,7 +2085,6 @@ impl TypeChecker {
         if let Some(builtin) = module.builtin_type(id) {
             return match builtin {
                 BuiltinType::Integer(integer) => CheckedType::integer(integer),
-                BuiltinType::Bool => CheckedType::Bool,
                 BuiltinType::String => CheckedType::String,
                 BuiltinType::CChar => CheckedType::CChar,
                 BuiltinType::CString => CheckedType::CString,
@@ -2173,7 +2169,6 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         {
             Some(actual)
         }
-        (CheckedType::Bool, CheckedType::Bool) => Some(CheckedType::Bool),
         (CheckedType::String, CheckedType::String) => Some(CheckedType::String),
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),

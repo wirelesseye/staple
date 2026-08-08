@@ -761,6 +761,17 @@ The same form can select a singleton alternative in a propagating binding:
 let Ready()? = operation()
 ```
 
+The standard-library `Bool` type is defined entirely in these terms:
+
+```staple
+pub type True
+pub type False
+pub type alias Bool = True | False
+```
+
+`True` and `False` are the two values of `Bool`; `Bool` itself adds no nominal
+wrapper or compiler-specific type identity.
+
 #### `type`
 
 `type` creates a distinct nominal type

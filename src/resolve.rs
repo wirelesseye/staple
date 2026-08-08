@@ -47,7 +47,6 @@ pub struct ResolvedTraitImplementation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinType {
     Integer(IntegerType),
-    Bool,
     String,
     CChar,
     CString,
@@ -482,7 +481,6 @@ impl NameResolver {
                 BuiltinType::Integer(integer),
             );
         }
-        self.register_builtin_type(core, "std.core", "Bool", BuiltinType::Bool);
         self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
 
         if let Some(cinterop) = program.standard_library_cinterop() {

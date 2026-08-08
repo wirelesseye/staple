@@ -8,7 +8,9 @@ pub type U32 = opaque
 pub type U64 = opaque
 pub type ISize = opaque
 pub type USize = opaque
-pub type Bool = opaque
+pub type True
+pub type False
+pub type alias Bool = True | False
 pub type String = opaque
 
 pub(repr) type Ok = T => T

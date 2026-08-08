@@ -2685,7 +2685,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             CheckedType::U64 => Ok(self.compile_integer_type(IntegerType::U64).into()),
             CheckedType::ISize => Ok(self.compile_integer_type(IntegerType::ISize).into()),
             CheckedType::USize => Ok(self.compile_integer_type(IntegerType::USize).into()),
-            CheckedType::Bool => Ok(self.context.bool_type().into()),
             CheckedType::Distinct { representation, .. } => self.compile_type(representation),
         }
     }

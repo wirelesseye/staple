@@ -424,7 +424,30 @@ fn lowercase_i32_is_an_ordinary_unresolved_type_name() {
 
 #[test]
 fn bool_is_an_auto_loaded_standard_library_type() {
-    type_check("let predicate: Bool\n");
+    let module = type_check(concat!(
+        "let yes: Bool = True\n",
+        "let no: Bool = False\n",
+        "def require_true = (value: Bool) => { let True()? = value; True }\n",
+        "require_true(yes)\n",
+    ));
+    let require_true = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "require_true")
+        .expect("require_true function");
+    assert!(matches!(
+        module
+            .type_of_function(require_true.id)
+            .expect("require_true type")
+            .result
+            .as_ref(),
+        CheckedType::Sum(sum) if sum.alternatives.len() == 2
+    ));
+
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("library-defined Bool should use ordinary sum lowering");
 }
 
 #[test]
