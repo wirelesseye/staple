@@ -25,6 +25,8 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
             lex_identifier(text, at).map(|end| (TokenKind::Identifier, end))
         };
         let integer = take_while1(|c| c.is_ascii_digit()).map(|_| TokenKind::Integer);
+        let operator =
+            |text: &str, at: usize| lex_operator(text, at).map(|end| (TokenKind::Operator, end));
 
         let parsed = newline
             .or(whitespace)
@@ -35,6 +37,7 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
             .or(tag("...").map(|_| TokenKind::Ellipsis))
             .or(identifier)
             .or(integer)
+            .or(operator)
             .parse(source, offset);
 
         let (mut kind, end) = parsed.unwrap_or_else(|| {
@@ -60,10 +63,25 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
                 "type" => TokenKind::Type,
                 "alias" => TokenKind::Alias,
                 "const" => TokenKind::Const,
+                "infix" => TokenKind::Infix,
+                "infixl" => TokenKind::Infixl,
+                "infixr" => TokenKind::Infixr,
                 "i32" => TokenKind::I32,
                 "bool" => TokenKind::Bool,
                 "_" => TokenKind::Underscore,
                 _ => TokenKind::Identifier,
+            };
+        }
+        if kind == TokenKind::Operator {
+            kind = match text {
+                ":" => TokenKind::Colon,
+                "." => TokenKind::Dot,
+                "=" => TokenKind::Equals,
+                "*" => TokenKind::Star,
+                "+" => TokenKind::Plus,
+                "-" => TokenKind::Minus,
+                "/" => TokenKind::Slash,
+                _ => TokenKind::Operator,
             };
         }
         tokens.push(SyntaxToken {
@@ -110,6 +128,21 @@ fn lex_identifier(source: &str, offset: usize) -> Option<usize> {
     Some(end)
 }
 
+fn lex_operator(source: &str, offset: usize) -> Option<usize> {
+    let tail = source.get(offset..)?;
+    if tail.starts_with('.') && !tail.starts_with("..") {
+        return None;
+    }
+    let mut end = offset;
+    for (relative, character) in tail.char_indices() {
+        if !"!#$%&*+./<=>?@\\^|-~:".contains(character) {
+            break;
+        }
+        end = offset + relative + character.len_utf8();
+    }
+    (end > offset).then_some(end)
+}
+
 fn single_character_kind(character: char) -> TokenKind {
     match character {
         '(' => TokenKind::LParen,
@@ -124,6 +157,7 @@ fn single_character_kind(character: char) -> TokenKind {
         '+' => TokenKind::Plus,
         '-' => TokenKind::Minus,
         '/' => TokenKind::Slash,
+        '`' => TokenKind::Backtick,
         _ => TokenKind::Unknown,
     }
 }

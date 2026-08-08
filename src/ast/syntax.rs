@@ -25,6 +25,9 @@ pub enum TokenKind {
     Type,
     Alias,
     Const,
+    Infix,
+    Infixl,
+    Infixr,
     Underscore,
     Identifier,
     String,
@@ -43,6 +46,8 @@ pub enum TokenKind {
     Arrow,
     FatArrow,
     Ellipsis,
+    Backtick,
+    Operator,
     Star,
     Plus,
     Minus,
@@ -119,6 +124,15 @@ impl Syntax {
         Self {
             id: SyntaxId::COMPILER,
             span: Span::Compiler,
+            tokens: Arc::from([]),
+            token_range: 0..0,
+        }
+    }
+
+    pub(crate) fn synthetic(id: SyntaxId, span: Span) -> Self {
+        Self {
+            id,
+            span,
             tokens: Arc::from([]),
             token_range: 0..0,
         }

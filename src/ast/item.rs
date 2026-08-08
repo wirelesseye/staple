@@ -78,12 +78,35 @@ pub enum BindingKind {
     Def,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Associativity {
+    None,
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Fixity {
+    pub associativity: Associativity,
+    pub precedence: u8,
+}
+
+impl Default for Fixity {
+    fn default() -> Self {
+        Self {
+            associativity: Associativity::Left,
+            precedence: 9,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     pub syntax: Syntax,
     pub visibility: Visibility,
     pub kind: BindingKind,
     pub name: String,
+    pub fixity: Option<Fixity>,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
 }

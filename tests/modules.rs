@@ -65,7 +65,7 @@ fn imports_public_values_and_types_through_all_use_forms() {
         "math.sta",
         concat!(
             "pub type alias Number = i32\n",
-            "pub def add: (i32, i32) -> i32 = (a: i32, b: i32) => a + b\n",
+            "pub def add: (i32, i32) -> i32 = (a: i32, b: i32) => a\n",
             "pub let forty = 40\n",
             "let hidden = 2\n",
         ),
@@ -182,6 +182,36 @@ fn imports_public_extern_bindings() {
 }
 
 #[test]
+fn imports_operator_values_and_their_fixities() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "math.sta",
+        concat!(
+            "pub def infixl 6 +: i32 -> i32 -> i32 = x => y => x\n",
+            "pub def infixr 5 **: i32 -> i32 -> i32 = x => y => y\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use math\n",
+            "use math.+ as combine\n",
+            "use math.((**))\n",
+            "1 `combine` 2\n",
+            "1 ** 2 ** 3\n",
+            "1 math.+ 2\n",
+            "(math.+) 1 2\n",
+        ),
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("imported operators and fixities should compile");
+    assert!(llvm.contains("operator.2b"));
+    assert!(llvm.contains("operator.2a2a"));
+}
+
+#[test]
 fn loads_an_imported_top_level_global_from_a_function() {
     let fixture = Fixture::new();
     fixture.write(
@@ -204,7 +234,7 @@ fn loads_an_imported_top_level_global_from_a_function() {
 fn infers_imported_values_across_a_module_cycle() {
     let fixture = Fixture::new();
     fixture.write("main.sta", "use ma.*\na\n");
-    fixture.write("ma.sta", "use mb.*\npub let a = b + 1\n");
+    fixture.write("ma.sta", "use mb.*\npub let a = b\n");
     fixture.write("mb.sta", "use ma\npub let b = 41\n");
 
     fixture

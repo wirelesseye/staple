@@ -11,9 +11,9 @@ use inkwell::{
 };
 
 use crate::{
-    Accessor, BinaryExpression, BinaryOperator, CallExpression, CheckedFunctionType,
-    CheckedProductType, CheckedType, Diagnostic, Expression, FunctionId, Item, ModuleId, Pattern,
-    ProductExpression, ResolvedFunction, Span, Statement, SymbolId, TypedModule,
+    Accessor, CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic,
+    Expression, FunctionId, Item, ModuleId, Pattern, ProductExpression, ResolvedFunction, Span,
+    Statement, SymbolId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -574,7 +574,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map(|value| value.as_any_value_enum())
                     .map_err(|error| Diagnostic::new(access.syntax.span.clone(), error.to_string()))
             }
-            Expression::Binary(binary) => self.compile_binary_expression(environment, binary),
+            Expression::Infix(infix) => {
+                let lowered = self
+                    .typed_module
+                    .resolved()
+                    .lowered_infix(infix.syntax.id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(infix.syntax.span.clone(), "unresolved infix expression")
+                    })?;
+                self.compile_expression(environment, &lowered)
+            }
             Expression::Name(name) => {
                 let symbol = self
                     .typed_module
@@ -820,35 +830,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             })
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         Ok(self.context.struct_type(&fields, false))
-    }
-
-    fn compile_binary_expression(
-        &mut self,
-        environment: &mut FunctionEnvironment<'context>,
-        binary: &BinaryExpression,
-    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let AnyValueEnum::IntValue(left) = self.compile_expression(environment, &binary.left)?
-        else {
-            return Err(Diagnostic::new(
-                binary.left.syntax().span.clone(),
-                "arithmetic operands must be integers",
-            ));
-        };
-        let AnyValueEnum::IntValue(right) = self.compile_expression(environment, &binary.right)?
-        else {
-            return Err(Diagnostic::new(
-                binary.right.syntax().span.clone(),
-                "arithmetic operands must be integers",
-            ));
-        };
-        let result = match binary.operator {
-            BinaryOperator::Add => self.builder.build_int_add(left, right, "add"),
-            BinaryOperator::Subtract => self.builder.build_int_sub(left, right, "subtract"),
-            BinaryOperator::Multiply => self.builder.build_int_mul(left, right, "multiply"),
-            BinaryOperator::Divide => self.builder.build_int_signed_div(left, right, "divide"),
-        }
-        .map_err(|error| Diagnostic::new(binary.syntax.span.clone(), error.to_string()))?;
-        Ok(result.as_any_value_enum())
     }
 
     fn compile_product_expression(

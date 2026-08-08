@@ -261,14 +261,22 @@ String literals use double quotes. A backslash protects the following quote
 from ending the string. The complete set and meaning of escape sequences is
 currently unspecified.
 
-The arithmetic operators currently recognized by stapler are:
+Operators are ordinary curried function values; staple does not provide
+implicit arithmetic operators or arithmetic primitives. A symbolic function
+may declare its fixity as part of its binding:
 
-```text
-*  /
-+  -
+```staple
+def infixl 6 <>: i32 -> i32 -> i32 = left => right => left
 ```
 
-Multiplication and division bind more tightly than addition and subtraction.
+`infixl`, `infixr`, and `infix` declare left, right, and no associativity. The
+following integer is a precedence from `0` through `9`. A function without an
+explicit fixity defaults to `infixl 9`. Fixity modifiers are allowed only on
+module-level `let` and `def` bindings and external declarations.
+
+Symbolic operators use maximal sequences of
+`!#$%&*+./<=>?@\^|-~:`. Staple's arrows, comments, and structural punctuation
+remain reserved in their grammatical contexts.
 
 ### Products
 
@@ -445,6 +453,28 @@ Both calls produce `3`. `add 1` returns a function that captures the value of
 stored or passed like other values. Product-parameter functions remain the
 ordinary choice when all arguments should be supplied together.
 
+An infix call supplies its left and right operands through two curried calls:
+
+```staple
+def infixl 6 <>: i32 -> i32 -> i32 = left => right => left
+def infixr 5 choose: i32 -> i32 -> i32 = left => right => right
+
+1 <> 2
+1 `choose` 2
+(<>) 1 2
+(<>)
+```
+
+The last expression passes `<>` as a value rather than calling it. Function
+application and access bind more tightly than infix calls. Operators at the
+same precedence must use a compatible associativity; chaining an `infix`
+operator is an error.
+
+Public functions carry their fixity through namespace, glob, selected, and
+renamed imports. Symbolic selected imports use an extra pair of parentheses,
+for example `use math.((<>))`; qualified values and calls may be written
+`(math.<>)` and `1 math.<> 2`.
+
 ## Block expressions
 
 Braces construct a block expression:
@@ -452,7 +482,7 @@ Braces construct a block expression:
 ```staple
 {
     let x = 1
-    x + 1
+    x
 }
 ```
 

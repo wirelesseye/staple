@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
 use crate::{
-    Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, Module, ModuleId, Pattern,
-    Program, Span, Statement, SyntaxId, Type, TypeDeclaration, UseKind, Visibility,
+    AccessExpression, Accessor, Associativity, Binding, BindingKind, BlockExpression,
+    CallExpression, Diagnostic, Expression, Fixity, InfixExpression, InfixOperator, Item, Module,
+    ModuleId, NameExpression, Pattern, Program, Span, Statement, Syntax, SyntaxId, Type,
+    TypeDeclaration, UseKind, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -36,6 +38,7 @@ pub struct ResolvedModule {
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
+    lowered_infix: HashMap<SyntaxId, Expression>,
 }
 
 impl ResolvedModule {
@@ -74,11 +77,16 @@ impl ResolvedModule {
     pub fn module_for_syntax(&self, syntax_id: SyntaxId) -> Option<ModuleId> {
         self.syntax_modules.get(&syntax_id).copied()
     }
+
+    pub fn lowered_infix(&self, syntax_id: SyntaxId) -> Option<&Expression> {
+        self.lowered_infix.get(&syntax_id)
+    }
 }
 
 #[derive(Default)]
 struct Interface {
     values: HashMap<String, SymbolId>,
+    fixities: HashMap<String, Fixity>,
     types: HashMap<String, TypeId>,
 }
 
@@ -87,12 +95,15 @@ pub struct NameResolver {
     scopes: Vec<HashMap<String, SymbolId>>,
     namespaces: HashMap<String, ModuleId>,
     imported_types: HashMap<String, TypeId>,
+    imported_fixities: HashMap<String, Fixity>,
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     function_parents: HashMap<FunctionId, Option<FunctionId>>,
     function_captures: HashMap<FunctionId, Vec<SymbolId>>,
     function_stack: Vec<FunctionId>,
+    declared_fixities: Vec<HashMap<String, Fixity>>,
+    lowered_infix: HashMap<SyntaxId, Expression>,
     functions: Vec<ResolvedFunction>,
     named_types: HashMap<SyntaxId, TypeId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
@@ -104,6 +115,7 @@ pub struct NameResolver {
     diagnostics: Vec<Diagnostic>,
     next_symbol_id: usize,
     next_function_id: usize,
+    next_syntax_id: usize,
     current_module: ModuleId,
     multiple_modules: bool,
 }
@@ -119,12 +131,20 @@ impl NameResolver {
 
     pub fn resolve_program(mut self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
         self.multiple_modules = program.modules().len() > 1;
+        self.next_syntax_id = program
+            .modules()
+            .iter()
+            .map(|module| module.syntax.syntax.id.0)
+            .max()
+            .unwrap_or(0)
+            + 1;
         self.collect_interfaces(&program);
         for source_module in program.modules() {
             self.current_module = source_module.id;
             self.scopes.clear();
             self.namespaces.clear();
             self.imported_types.clear();
+            self.imported_fixities.clear();
             self.push_scope();
             self.install_imports(&program, source_module.id);
             self.predeclare_items(&source_module.syntax.items);
@@ -147,6 +167,7 @@ impl NameResolver {
             type_declarations: self.type_declarations,
             type_names: self.type_names,
             syntax_modules: self.syntax_modules,
+            lowered_infix: self.lowered_infix,
         })
     }
 
@@ -157,12 +178,18 @@ impl NameResolver {
         self.declared_types = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
+        self.declared_fixities = (0..program.modules().len())
+            .map(|_| HashMap::new())
+            .collect();
         for source_module in program.modules() {
             for item in &source_module.syntax.items {
                 match item {
                     Item::ExternBlock(block) => {
                         for binding in &block.bindings {
                             let symbol = self.allocate_symbol(binding);
+                            let fixity = binding.fixity.unwrap_or_default();
+                            self.declared_fixities[source_module.id.0]
+                                .insert(binding.name.clone(), fixity);
                             if block.visibility == Visibility::Public {
                                 self.insert_public_value(
                                     source_module.id,
@@ -170,6 +197,9 @@ impl NameResolver {
                                     symbol,
                                     binding.syntax.span.clone(),
                                 );
+                                self.interfaces[source_module.id.0]
+                                    .fixities
+                                    .insert(binding.name.clone(), fixity);
                             }
                         }
                     }
@@ -200,6 +230,9 @@ impl NameResolver {
                     Item::Statement(statement) => {
                         if let Statement::Binding(binding) = statement.as_ref() {
                             let symbol = self.allocate_symbol(binding);
+                            let fixity = binding.fixity.unwrap_or_default();
+                            self.declared_fixities[source_module.id.0]
+                                .insert(binding.name.clone(), fixity);
                             if binding.visibility == Visibility::Public {
                                 self.insert_public_value(
                                     source_module.id,
@@ -207,6 +240,9 @@ impl NameResolver {
                                     symbol,
                                     binding.syntax.span.clone(),
                                 );
+                                self.interfaces[source_module.id.0]
+                                    .fixities
+                                    .insert(binding.name.clone(), fixity);
                             }
                         }
                     }
@@ -261,6 +297,11 @@ impl NameResolver {
                 }
                 UseKind::Glob => {
                     for (name, symbol) in self.interfaces[imported.0].values.clone() {
+                        if let Some(fixity) =
+                            self.interfaces[imported.0].fixities.get(&name).copied()
+                        {
+                            self.imported_fixities.insert(name.clone(), fixity);
+                        }
                         self.insert_imported_value(name, symbol, declaration.syntax.span.clone());
                     }
                     for (name, ty) in self.interfaces[imported.0].types.clone() {
@@ -288,6 +329,9 @@ impl NameResolver {
         let mut found = false;
         if let Some(symbol) = self.interfaces[module.0].values.get(item).copied() {
             found = true;
+            if let Some(fixity) = self.interfaces[module.0].fixities.get(item).copied() {
+                self.imported_fixities.insert(local.to_owned(), fixity);
+            }
             self.insert_imported_value(local.to_owned(), symbol, span.clone());
         }
         if let Some(ty) = self.interfaces[module.0].types.get(item).copied() {
@@ -416,6 +460,7 @@ impl NameResolver {
                 let base_name = suggested_function
                     .map(|(name, _)| name.to_owned())
                     .unwrap_or_else(|| format!("function.{}", function_id.0));
+                let base_name = mangle_function_name(&base_name);
                 let name = if self.multiple_modules || base_name == "main" {
                     format!("__staple_m{}_{}", self.current_module.0, base_name)
                 } else {
@@ -471,9 +516,10 @@ impl NameResolver {
                     self.resolve_expression(&access.value, None, None);
                 }
             }
-            Expression::Binary(binary) => {
-                self.resolve_expression(&binary.left, None, None);
-                self.resolve_expression(&binary.right, None, None);
+            Expression::Infix(infix) => {
+                let lowered = self.lower_infix(infix);
+                self.resolve_expression(&lowered, expected_type, suggested_function);
+                self.lowered_infix.insert(infix.syntax.id, lowered);
             }
             Expression::Name(name) => match self.lookup(&name.name) {
                 Some(symbol) => {
@@ -530,6 +576,102 @@ impl NameResolver {
             }
             Type::Inferred(_) | Type::Primitive(_) => {}
         }
+    }
+
+    fn lower_infix(&mut self, infix: &InfixExpression) -> Expression {
+        let mut values = vec![infix.operands[0].clone()];
+        let mut operators: Vec<(InfixOperator, Fixity)> = Vec::new();
+        for (index, operator) in infix.operators.iter().cloned().enumerate() {
+            let fixity = self.operator_fixity(&operator);
+            while let Some((top_operator, top_fixity)) = operators.last() {
+                let reduce = if top_fixity.precedence > fixity.precedence {
+                    true
+                } else if top_fixity.precedence < fixity.precedence {
+                    false
+                } else if top_fixity.associativity == fixity.associativity
+                    && top_fixity.associativity != Associativity::None
+                {
+                    top_fixity.associativity == Associativity::Left
+                } else {
+                    self.diagnostics.push(Diagnostic::new(
+                        operator.syntax.span.clone(),
+                        format!(
+                            "operators `{}` and `{}` have incompatible associativity at precedence {}",
+                            top_operator.name, operator.name, fixity.precedence
+                        ),
+                    ));
+                    true
+                };
+                if !reduce {
+                    break;
+                }
+                let (operator, _) = operators.pop().expect("peeked operator");
+                self.reduce_infix(&mut values, operator, infix.syntax.span.clone());
+            }
+            operators.push((operator, fixity));
+            values.push(infix.operands[index + 1].clone());
+        }
+        while let Some((operator, _)) = operators.pop() {
+            self.reduce_infix(&mut values, operator, infix.syntax.span.clone());
+        }
+        values.pop().expect("infix expression result")
+    }
+
+    fn reduce_infix(&mut self, values: &mut Vec<Expression>, operator: InfixOperator, span: Span) {
+        let right = values.pop().expect("right infix operand");
+        let left = values.pop().expect("left infix operand");
+        let operator = self.operator_value(operator);
+        let first_call = Expression::Call(CallExpression {
+            syntax: self.fresh_syntax(span.clone()),
+            callee: Box::new(operator),
+            argument: Box::new(left),
+        });
+        values.push(Expression::Call(CallExpression {
+            syntax: self.fresh_syntax(span),
+            callee: Box::new(first_call),
+            argument: Box::new(right),
+        }));
+    }
+
+    fn operator_fixity(&self, operator: &InfixOperator) -> Fixity {
+        if let Some(namespace) = &operator.namespace {
+            return self
+                .namespaces
+                .get(namespace)
+                .and_then(|module| self.interfaces[module.0].fixities.get(&operator.name))
+                .copied()
+                .unwrap_or_default();
+        }
+        self.declared_fixities[self.current_module.0]
+            .get(&operator.name)
+            .or_else(|| self.imported_fixities.get(&operator.name))
+            .copied()
+            .unwrap_or_default()
+    }
+
+    fn operator_value(&mut self, operator: InfixOperator) -> Expression {
+        if let Some(namespace) = operator.namespace {
+            let namespace_syntax = self.fresh_syntax(operator.syntax.span.clone());
+            Expression::Access(AccessExpression {
+                syntax: operator.syntax,
+                value: Box::new(Expression::Name(NameExpression {
+                    syntax: namespace_syntax,
+                    name: namespace,
+                })),
+                accessor: Accessor::Name(operator.name),
+            })
+        } else {
+            Expression::Name(NameExpression {
+                syntax: operator.syntax,
+                name: operator.name,
+            })
+        }
+    }
+
+    fn fresh_syntax(&mut self, span: Span) -> Syntax {
+        let id = SyntaxId(self.next_syntax_id);
+        self.next_syntax_id += 1;
+        Syntax::synthetic(id, span)
     }
 
     fn resolve_block(&mut self, block: &BlockExpression) {
@@ -640,5 +782,23 @@ impl NameResolver {
     }
     fn current_scope_mut(&mut self) -> &mut HashMap<String, SymbolId> {
         self.scopes.last_mut().expect("resolver scope")
+    }
+}
+
+fn mangle_function_name(name: &str) -> String {
+    let mut characters = name.chars();
+    let ordinary = characters
+        .next()
+        .is_some_and(|first| first == '_' || first.is_alphabetic())
+        && characters.all(|character| character == '_' || character.is_alphanumeric());
+    if ordinary {
+        name.to_owned()
+    } else {
+        let encoded = name
+            .as_bytes()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        format!("operator.{encoded}")
     }
 }

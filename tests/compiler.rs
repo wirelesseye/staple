@@ -1,5 +1,5 @@
 use inkwell::context::Context;
-use stapler::{CheckedType, CodeGenerator, NameResolver, TypeChecker, parse};
+use stapler::{CheckedType, CodeGenerator, Item, NameResolver, Statement, TypeChecker, parse};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn resolve(source: &str) -> stapler::ResolvedModule {
@@ -15,14 +15,29 @@ fn type_check(source: &str) -> stapler::TypedModule {
         .expect("source should type-check")
 }
 
+fn infix_call(
+    expression: &stapler::Expression,
+) -> (&str, &stapler::Expression, &stapler::Expression) {
+    let stapler::Expression::Call(outer) = expression else {
+        panic!("expected lowered outer call");
+    };
+    let stapler::Expression::Call(inner) = outer.callee.as_ref() else {
+        panic!("expected lowered inner call");
+    };
+    let stapler::Expression::Name(operator) = inner.callee.as_ref() else {
+        panic!("expected operator name");
+    };
+    (&operator.name, &inner.argument, &outer.argument)
+}
+
 #[test]
-fn resolves_names_in_function_parameters_and_binary_expressions() {
-    let source = "def add: _ -> i32 = (a: i32, b: i32) => a + b\nadd (1, 2)\n";
+fn resolves_names_in_function_parameters() {
+    let source = "def first: _ -> i32 = (a: i32, b: i32) => a\nfirst (1, 2)\n";
     let module = resolve(source);
 
     assert_eq!(module.syntax().text(), source);
     assert_eq!(module.functions().len(), 1);
-    assert_eq!(module.functions()[0].name, "add");
+    assert_eq!(module.functions()[0].name, "first");
 }
 
 #[test]
@@ -41,9 +56,9 @@ fn compiler_diagnostics_report_line_and_column() {
 #[test]
 fn infers_and_checks_function_return_types() {
     let module = type_check(concat!(
-        "let add = (a: i32, b: i32) => a + b\n",
-        "let subtract = (a: i32, b: i32) -> i32 => a - b\n",
-        "add (1, subtract (3, 2))\n",
+        "let first = (a: i32, b: i32) => a\n",
+        "let second = (a: i32, b: i32) -> i32 => b\n",
+        "first (1, second (3, 2))\n",
     ));
 
     for function in module.functions() {
@@ -130,7 +145,7 @@ fn treats_singleton_products_as_their_element() {
 #[test]
 fn destructures_nested_product_patterns() {
     let module = type_check(concat!(
-        "let add_nested = (x: i32, (y: i32, z: i32)) => x + y + z\n",
+        "let add_nested = (x: i32, (y: i32, z: i32)) => x\n",
         "add_nested (1, (2, 3))\n",
     ));
     let context = Context::create();
@@ -145,7 +160,7 @@ fn destructures_nested_product_patterns() {
 #[test]
 fn binds_a_product_without_destructuring_it() {
     let module = type_check(concat!(
-        "let sum = pair: (i32, i32) => pair.0 + pair.1\n",
+        "let sum = pair: (i32, i32) => pair.0\n",
         "sum (1, 2)\n",
     ));
     let context = Context::create();
@@ -191,15 +206,14 @@ fn reports_duplicate_definitions() {
 
 #[test]
 fn generates_a_named_function_after_predeclaring_it() {
-    let module = type_check("let add = (a: i32, b: i32) => a + b\nadd (1, 2)\n");
+    let module = type_check("let first = (a: i32, b: i32) => a\nfirst (1, 2)\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("module should compile");
 
-    assert!(llvm.contains("define i32 @add(ptr %0, i32 %a, i32 %b)"));
-    assert!(llvm.contains("add i32 %a, %b"));
-    assert!(llvm.contains("call i32 @add(ptr null, i32 1, i32 2)"));
+    assert!(llvm.contains("define i32 @first(ptr %0, i32 %a, i32 %b)"));
+    assert!(llvm.contains("call i32 @first(ptr null, i32 1, i32 2)"));
 }
 
 #[test]
@@ -217,7 +231,10 @@ fn predeclares_functions_for_recursion() {
 fn preserves_the_environment_for_recursive_closures() {
     let module = type_check(concat!(
         "def outer = value: i32 => {\n",
-        "  def recurse = n: i32 => value + recurse n\n",
+        "  def recurse: i32 -> i32 = n => {\n",
+        "    let captured = value\n",
+        "    recurse n\n",
+        "  }\n",
         "  recurse 1\n",
         "}\n",
     ));
@@ -250,8 +267,8 @@ fn lowers_captured_locals_into_closure_environments() {
 #[test]
 fn type_checks_and_generates_curried_functions() {
     let module = type_check(concat!(
-        "def inferred = a: i32 => b: i32 => a + b\n",
-        "def annotated: i32 -> i32 -> i32 = a => b => a + b\n",
+        "def inferred = a: i32 => b: i32 => a\n",
+        "def annotated: i32 -> i32 -> i32 = a => b => a\n",
         "def add_one = annotated 1\n",
         "inferred 1 2\n",
         "add_one 2\n",
@@ -285,7 +302,7 @@ fn type_checks_and_generates_curried_functions() {
 
 #[test]
 fn contextually_types_product_parameters() {
-    type_check("def add: (i32, i32) -> i32 = (a, b) => a + b\nadd (1, 2)\n");
+    type_check("def first: (i32, i32) -> i32 = (a, b) => a\nfirst (1, 2)\n");
 }
 
 #[test]
@@ -304,7 +321,7 @@ fn rejects_untyped_parameters_without_a_function_annotation() {
 #[test]
 fn lowers_transitive_captures_across_curried_layers() {
     let module = type_check(concat!(
-        "def sum = a: i32 => b: i32 => c: i32 => a + b + c\n",
+        "def sum = a: i32 => b: i32 => c: i32 => (a, b, c)\n",
         "def add_one = sum 1\n",
         "def add_one_two = add_one 2\n",
         "add_one_two 3\n",
@@ -331,6 +348,90 @@ fn adapts_non_variadic_externs_used_as_function_values() {
         .expect("external function adapter should compile");
     assert!(llvm.contains("define internal i32 @__staple_extern_puts"));
     assert!(llvm.contains("call i32 @puts"));
+}
+
+#[test]
+fn calls_user_defined_functions_with_symbolic_and_backtick_infix_syntax() {
+    let module = type_check(concat!(
+        "def infixl 6 +: i32 -> i32 -> i32 = x => y => x\n",
+        "def infixl 7 combine: i32 -> i32 -> i32 = x => y => y\n",
+        "def plus = (+)\n",
+        "1 + 2\n",
+        "1 `combine` 2\n",
+        "(+) 1 2\n",
+        "plus 1 2\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("infix calls should compile as curried calls");
+    assert!(llvm.contains("@operator.2b"));
+    assert!(llvm.contains("closure.call"));
+}
+
+#[test]
+fn rejects_incompatible_fixity_chains() {
+    let syntax = parse(concat!(
+        "def infix 4 ==: i32 -> i32 -> i32 = x => y => x\n",
+        "1 == 2 == 3\n",
+    ))
+    .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve(&syntax)
+        .expect_err("non-associative chaining should fail");
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("incompatible associativity")
+    );
+}
+
+#[test]
+fn associates_infix_chains_using_inline_fixity() {
+    let source = concat!(
+        "def infixl 6 +: i32 -> i32 -> i32 = x => y => x\n",
+        "def infixr 7 **: i32 -> i32 -> i32 = x => y => y\n",
+        "def choose: i32 -> i32 -> i32 = x => y => x\n",
+        "1 + 2 + 3\n",
+        "1 ** 2 ** 3\n",
+        "1 + 2 ** 3\n",
+        "1 `choose` 2 `choose` 3\n",
+    );
+    let module = resolve(source);
+    let lowered = module
+        .syntax()
+        .items
+        .iter()
+        .skip(3)
+        .map(|item| {
+            let Item::Statement(statement) = item else {
+                panic!("expected expression item");
+            };
+            let Statement::Expression(stapler::Expression::Infix(infix)) = statement.as_ref()
+            else {
+                panic!("expected infix source expression");
+            };
+            module
+                .lowered_infix(infix.syntax.id)
+                .expect("lowered infix")
+        })
+        .collect::<Vec<_>>();
+
+    let (operator, left, _) = infix_call(lowered[0]);
+    assert_eq!(operator, "+");
+    assert_eq!(infix_call(left).0, "+");
+
+    let (operator, _, right) = infix_call(lowered[1]);
+    assert_eq!(operator, "**");
+    assert_eq!(infix_call(right).0, "**");
+
+    let (operator, _, right) = infix_call(lowered[2]);
+    assert_eq!(operator, "+");
+    assert_eq!(infix_call(right).0, "**");
+
+    let (operator, left, _) = infix_call(lowered[3]);
+    assert_eq!(operator, "choose");
+    assert_eq!(infix_call(left).0, "choose");
 }
 
 #[test]

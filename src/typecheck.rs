@@ -561,17 +561,11 @@ impl TypeChecker {
                     }
                 }
             }
-            Expression::Binary(binary) => {
-                let left = self.check_expression(module, &binary.left);
-                let right = self.check_expression(module, &binary.right);
-                self.require_compatible(left, CheckedType::I32, binary.left.syntax().span.clone());
-                self.require_compatible(
-                    right,
-                    CheckedType::I32,
-                    binary.right.syntax().span.clone(),
-                );
-                CheckedType::I32
-            }
+            Expression::Infix(infix) => module
+                .lowered_infix(infix.syntax.id)
+                .cloned()
+                .map(|lowered| self.check_expression(module, &lowered))
+                .unwrap_or(CheckedType::Error),
             Expression::Name(name) => {
                 let symbol = module.symbol_for(name.syntax.id);
                 if let Some(symbol) = symbol {

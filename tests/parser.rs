@@ -1,5 +1,5 @@
 use stapler::{
-    Accessor, BinaryOperator, Expression, Item, Pattern, Statement, TokenKind, Type,
+    Accessor, Associativity, Expression, Item, Pattern, Statement, TokenKind, Type,
     TypeDeclarationKind, UseKind, Visibility, parse,
 };
 
@@ -71,18 +71,8 @@ fn parses_hello_world_losslessly() {
     let root = parse(source).expect("hello_world should parse");
 
     assert_eq!(root.text(), source);
-    assert_eq!(root.items.len(), 4);
+    assert_eq!(root.items.len(), 6);
     assert!(matches!(root.items[0], Item::ExternBlock(_)));
-    assert!(matches!(
-        root.items[1],
-        Item::Statement(ref statement)
-            if matches!(statement.as_ref(), Statement::Binding(_))
-    ));
-    assert!(matches!(
-        root.items[2],
-        Item::Statement(ref statement)
-            if matches!(statement.as_ref(), Statement::Expression(Expression::Call(_)))
-    ));
     assert!(matches!(
         root.items[3],
         Item::Statement(ref statement)
@@ -106,7 +96,8 @@ fn parses_product_parameter_and_expression_body() {
     );
     assert!(matches!(
         *function.body,
-        Expression::Binary(ref binary) if binary.operator == BinaryOperator::Add
+        Expression::Infix(ref infix)
+            if infix.operators.len() == 1 && infix.operators[0].name == "+"
     ));
 }
 
@@ -142,6 +133,55 @@ fn parses_contextually_typed_curried_parameters() {
     assert!(matches!(outer.pattern.ty(), Type::Inferred(_)));
     assert!(matches!(outer.body.as_ref(), Expression::Function(_)));
     assert_eq!(root.text(), source);
+}
+
+#[test]
+fn parses_inline_fixity_and_operator_call_forms() {
+    let source = concat!(
+        "def infixl 6 +: i32 -> i32 -> i32 = x => y => x\n",
+        "def infixr 5 **: i32 -> i32 -> i32 = x => y => y\n",
+        "1 + 2 ** 3\n",
+        "1 `combine` 2\n",
+        "(+) 1 2\n",
+        "(+)\n",
+    );
+    let root = parse(source).expect("operator syntax should parse");
+    let Statement::Binding(plus) = statement(&root.items[0]) else {
+        panic!("expected operator binding");
+    };
+    assert_eq!(plus.name, "+");
+    assert_eq!(
+        plus.fixity.expect("fixity").associativity,
+        Associativity::Left
+    );
+    assert_eq!(plus.fixity.expect("fixity").precedence, 6);
+
+    let Statement::Expression(Expression::Infix(infix)) = statement(&root.items[2]) else {
+        panic!("expected infix chain");
+    };
+    assert_eq!(
+        infix
+            .operators
+            .iter()
+            .map(|op| op.name.as_str())
+            .collect::<Vec<_>>(),
+        ["+", "**"]
+    );
+    assert!(matches!(
+        statement(&root.items[4]),
+        Statement::Expression(Expression::Call(_))
+    ));
+    assert!(
+        matches!(statement(&root.items[5]), Statement::Expression(Expression::Name(name)) if name.name == "+")
+    );
+    assert_eq!(root.text(), source);
+}
+
+#[test]
+fn rejects_block_local_fixity_modifiers() {
+    let error = parse("def outer = () => { def infixl 6 + = x: i32 => x }\n")
+        .expect_err("block fixity should be rejected");
+    assert!(error.message.contains("module level"));
 }
 
 #[test]

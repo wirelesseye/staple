@@ -118,7 +118,7 @@ impl Grammar {
     ) -> Result<Statement, ParseError> {
         match self.peek() {
             Some(TokenKind::Let | TokenKind::Def) => self
-                .parse_binding(visibility, start)
+                .parse_binding(visibility, start, start.is_some())
                 .map(Statement::Binding),
             _ if visibility == Visibility::Public => {
                 Err(self.error("`pub` must modify a declaration"))
@@ -141,25 +141,21 @@ impl Grammar {
                     return Err(self.error("renamed imports require a module path and item"));
                 }
                 let item = path.pop().expect("checked path length");
-                let alias = self
-                    .expect(TokenKind::Identifier, "expected import alias after `as`")?
-                    .text;
+                let alias = self.parse_value_name("expected import alias after `as`")?;
                 break UseKind::Renamed { item, alias };
             }
             if !self.eat(TokenKind::Dot) {
                 break UseKind::Namespace;
             }
-            if self.eat(TokenKind::Star) {
+            if self.at(TokenKind::Star) && self.peek_n(1) != Some(TokenKind::As) {
+                self.bump_token();
                 break UseKind::Glob;
             }
             if self.eat(TokenKind::LParen) {
                 let mut names = Vec::new();
                 if !self.at(TokenKind::RParen) {
                     loop {
-                        names.push(
-                            self.expect(TokenKind::Identifier, "expected imported item name")?
-                                .text,
-                        );
+                        names.push(self.parse_import_name()?);
                         if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                             break;
                         }
@@ -171,13 +167,7 @@ impl Grammar {
                 self.expect(TokenKind::RParen, "expected `)` after imported items")?;
                 break UseKind::Selected(names);
             }
-            path.push(
-                self.expect(
-                    TokenKind::Identifier,
-                    "expected module path component after `.`",
-                )?
-                .text,
-            );
+            path.push(self.parse_value_name("expected module path component after `.`")?);
         };
         Ok(UseDeclaration {
             syntax: self.syntax(start),
@@ -202,7 +192,7 @@ impl Grammar {
             if self.peek().is_none() {
                 return Err(self.error("unterminated extern block"));
             }
-            bindings.push(self.parse_binding(Visibility::Private, None)?);
+            bindings.push(self.parse_binding(Visibility::Private, None, true)?);
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
         Ok(ExternBlock {
@@ -244,6 +234,7 @@ impl Grammar {
         &mut self,
         visibility: Visibility,
         start: Option<usize>,
+        allow_fixity: bool,
     ) -> Result<Binding, ParseError> {
         let start = start.unwrap_or(self.position);
         let kind = match self.peek() {
@@ -257,10 +248,34 @@ impl Grammar {
             }
             _ => return Err(self.error("expected `let`, `def`, `type`, or `extern`")),
         };
-        let name = self
-            .expect(TokenKind::Identifier, "expected binding name")?
-            .text;
-        let annotation = if self.eat(TokenKind::Colon) {
+        let fixity = match self.peek() {
+            Some(TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr) => {
+                if !allow_fixity {
+                    return Err(self.error("fixity modifiers are only allowed at module level"));
+                }
+                let associativity = match self.bump_token().expect("peeked fixity").kind {
+                    TokenKind::Infix => Associativity::None,
+                    TokenKind::Infixl => Associativity::Left,
+                    TokenKind::Infixr => Associativity::Right,
+                    _ => unreachable!(),
+                };
+                let precedence = self
+                    .expect(TokenKind::Integer, "expected precedence after fixity")?
+                    .text
+                    .parse::<u8>()
+                    .map_err(|_| self.error("operator precedence must be between 0 and 9"))?;
+                if precedence > 9 {
+                    return Err(self.error("operator precedence must be between 0 and 9"));
+                }
+                Some(Fixity {
+                    associativity,
+                    precedence,
+                })
+            }
+            _ => None,
+        };
+        let (name, consumed_colon) = self.parse_binding_name()?;
+        let annotation = if consumed_colon || self.eat(TokenKind::Colon) {
             Some(self.parse_type()?)
         } else {
             None
@@ -275,12 +290,13 @@ impl Grammar {
             visibility,
             kind,
             name,
+            fixity,
             annotation,
             value,
         })
     }
 
-    /// Parses an expression, including function expressions and binary operators.
+    /// Parses an expression, including function expressions and infix calls.
     ///
     /// Function parsing is attempted first and rewound on failure so an ordinary
     /// expression can begin with the same tokens as a parameter pattern.
@@ -291,7 +307,7 @@ impl Grammar {
             Err(error) => error,
         };
         self.position = checkpoint;
-        let expression = self.parse_binary_expression(0)?;
+        let expression = self.parse_infix_expression()?;
         if matches!(self.peek(), Some(TokenKind::Arrow | TokenKind::FatArrow)) {
             return Err(function_error);
         }
@@ -454,27 +470,75 @@ impl Grammar {
         }))
     }
 
-    /// Parses a left-associative binary expression at or above a precedence.
-    fn parse_binary_expression(
-        &mut self,
-        minimum_precedence: u8,
-    ) -> Result<Expression, ParseError> {
-        let mut left = self.parse_call_expression()?;
-        while let Some((precedence, token_kind, operator)) = self.binary_operator() {
-            if precedence < minimum_precedence {
-                break;
-            }
-            let start = self.token_index_at(left.syntax().span.to_range().start);
-            self.expect(token_kind, "expected binary operator")?;
-            let right = self.parse_binary_expression(precedence + 1)?;
-            left = Expression::Binary(BinaryExpression {
-                syntax: self.syntax(start),
-                operator,
-                left: Box::new(left),
-                right: Box::new(right),
-            });
+    /// Parses a flat infix chain for fixity-aware lowering during resolution.
+    fn parse_infix_expression(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        let mut operands = vec![self.parse_call_expression()?];
+        let mut operators = Vec::new();
+        while let Some(operator) = self.parse_infix_operator()? {
+            operators.push(operator);
+            operands.push(self.parse_call_expression()?);
         }
-        Ok(left)
+        if operators.is_empty() {
+            Ok(operands.pop().expect("one operand"))
+        } else {
+            Ok(Expression::Infix(InfixExpression {
+                syntax: self.syntax(start),
+                operands,
+                operators,
+            }))
+        }
+    }
+
+    fn parse_infix_operator(&mut self) -> Result<Option<InfixOperator>, ParseError> {
+        if self.newline_terminates_expression && self.has_newline_before_next_token() {
+            return Ok(None);
+        }
+        let start = self.position;
+        if self.eat(TokenKind::Backtick) {
+            let first = self
+                .expect(
+                    TokenKind::Identifier,
+                    "expected function name after backtick",
+                )?
+                .text;
+            let (namespace, name) = if self.eat(TokenKind::Dot) {
+                let name = self
+                    .expect(TokenKind::Identifier, "expected qualified function name")?
+                    .text;
+                (Some(first), name)
+            } else {
+                (None, first)
+            };
+            self.expect(TokenKind::Backtick, "expected closing backtick")?;
+            return Ok(Some(InfixOperator {
+                syntax: self.syntax(start),
+                namespace,
+                name,
+            }));
+        }
+        if self.peek() == Some(TokenKind::Identifier)
+            && self.peek_n(1) == Some(TokenKind::Dot)
+            && self.peek_n(2).is_some_and(is_symbol_kind)
+        {
+            let namespace = self.bump_token().expect("peeked namespace").text;
+            self.expect(TokenKind::Dot, "expected `.`")?;
+            let name = self.bump_token().expect("peeked operator").text;
+            return Ok(Some(InfixOperator {
+                syntax: self.syntax(start),
+                namespace: Some(namespace),
+                name,
+            }));
+        }
+        if self.peek().is_some_and(is_symbol_kind) {
+            let name = self.bump_token().expect("peeked operator").text;
+            return Ok(Some(InfixOperator {
+                syntax: self.syntax(start),
+                namespace: None,
+                name,
+            }));
+        }
+        Ok(None)
     }
 
     /// Parses juxtaposition-based function calls.
@@ -519,6 +583,7 @@ impl Grammar {
     fn parse_atom(&mut self) -> Result<Expression, ParseError> {
         match self.peek() {
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
+            Some(TokenKind::LParen) if self.parenthesized_operator() => self.parse_operator_value(),
             Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
             Some(TokenKind::Identifier) => {
                 let start = self.position;
@@ -606,6 +671,12 @@ impl Grammar {
         if self.newline_terminates_expression && self.has_newline_before_next_token() {
             return false;
         }
+        if self.peek() == Some(TokenKind::Identifier)
+            && self.peek_n(1) == Some(TokenKind::Dot)
+            && self.peek_n(2).is_some_and(is_symbol_kind)
+        {
+            return false;
+        }
         matches!(
             self.peek(),
             Some(
@@ -618,17 +689,72 @@ impl Grammar {
         )
     }
 
-    /// Returns the precedence, token kind, and AST operator at the cursor.
-    fn binary_operator(&self) -> Option<(u8, TokenKind, BinaryOperator)> {
-        if self.newline_terminates_expression && self.has_newline_before_next_token() {
-            return None;
+    fn parenthesized_operator(&self) -> bool {
+        self.peek() == Some(TokenKind::LParen)
+            && (self.peek_n(1).is_some_and(is_symbol_kind)
+                && self.peek_n(2) == Some(TokenKind::RParen)
+                || self.peek_n(1) == Some(TokenKind::Identifier)
+                    && self.peek_n(2) == Some(TokenKind::Dot)
+                    && self.peek_n(3).is_some_and(is_symbol_kind)
+                    && self.peek_n(4) == Some(TokenKind::RParen))
+    }
+
+    fn parse_operator_value(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        self.expect(TokenKind::LParen, "expected `(`")?;
+        let first = self.bump_token().expect("peeked operator value");
+        let qualified_operator = if first.kind == TokenKind::Identifier {
+            self.expect(TokenKind::Dot, "expected `.`")?;
+            let operator = self.bump_token().expect("peeked qualified operator");
+            Some(operator.text)
+        } else {
+            None
+        };
+        self.expect(TokenKind::RParen, "expected `)` after operator")?;
+        let expression = if let Some(operator) = qualified_operator {
+            let namespace = Expression::Name(NameExpression {
+                syntax: self.syntax(start),
+                name: first.text,
+            });
+            Expression::Access(AccessExpression {
+                syntax: self.syntax(start),
+                value: Box::new(namespace),
+                accessor: Accessor::Name(operator),
+            })
+        } else {
+            Expression::Name(NameExpression {
+                syntax: self.syntax(start),
+                name: first.text,
+            })
+        };
+        Ok(expression)
+    }
+
+    fn parse_value_name(&mut self, message: &'static str) -> Result<String, ParseError> {
+        if self.peek() == Some(TokenKind::Identifier) || self.peek().is_some_and(is_symbol_kind) {
+            Ok(self.bump_token().expect("peeked value name").text)
+        } else {
+            Err(self.error(message))
         }
-        match self.peek()? {
-            TokenKind::Plus => Some((1, TokenKind::Plus, BinaryOperator::Add)),
-            TokenKind::Minus => Some((1, TokenKind::Minus, BinaryOperator::Subtract)),
-            TokenKind::Star => Some((2, TokenKind::Star, BinaryOperator::Multiply)),
-            TokenKind::Slash => Some((2, TokenKind::Slash, BinaryOperator::Divide)),
-            _ => None,
+    }
+
+    fn parse_binding_name(&mut self) -> Result<(String, bool), ParseError> {
+        let mut name = self.parse_value_name("expected binding name")?;
+        let consumed_colon =
+            name.len() > 1 && name.ends_with(':') && self.peek().is_some_and(is_type_atom_start);
+        if consumed_colon {
+            name.pop();
+        }
+        Ok((name, consumed_colon))
+    }
+
+    fn parse_import_name(&mut self) -> Result<String, ParseError> {
+        if self.eat(TokenKind::LParen) {
+            let name = self.parse_value_name("expected operator in imported name")?;
+            self.expect(TokenKind::RParen, "expected `)` after imported operator")?;
+            Ok(name)
+        } else {
+            self.parse_value_name("expected imported item name")
         }
     }
 
@@ -731,12 +857,6 @@ impl Grammar {
         }
     }
 
-    /// Finds the token index containing or following `byte_offset`.
-    fn token_index_at(&self, byte_offset: usize) -> usize {
-        self.tokens
-            .partition_point(|token| token.span.end <= byte_offset)
-    }
-
     /// Creates a parse error at the next non-trivia token.
     fn error(&self, message: impl Into<String>) -> ParseError {
         let position = self.next_non_trivia(self.position);
@@ -779,4 +899,30 @@ fn line_starts(source: &str) -> Vec<usize> {
         }
     }
     starts
+}
+
+fn is_symbol_kind(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Operator
+            | TokenKind::Colon
+            | TokenKind::Dot
+            | TokenKind::Equals
+            | TokenKind::Star
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Slash
+    )
+}
+
+fn is_type_atom_start(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::I32
+            | TokenKind::Bool
+            | TokenKind::Underscore
+            | TokenKind::Star
+            | TokenKind::LParen
+            | TokenKind::Identifier
+    )
 }

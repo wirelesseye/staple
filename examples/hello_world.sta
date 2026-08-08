@@ -2,7 +2,9 @@ extern "c" {
     let printf: (*const c_char, ...) -> i32
 }
 
-def add = a: i32 => b: i32 => a + b
+def infixl 1 |>: i32 -> i32 -> i32 = left => right => right
+def choose_right = (|>)
 
 printf ("hello, world!\n")
-printf ("1 + 2 = %d\n", add 1 2)
+printf ("infix choice: %d\n", 1 |> 2)
+printf ("prefix choice: %d\n", choose_right 1 2)

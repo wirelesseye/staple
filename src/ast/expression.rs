@@ -7,7 +7,7 @@ pub enum Expression {
     Product(ProductExpression),
     Call(CallExpression),
     Access(AccessExpression),
-    Binary(BinaryExpression),
+    Infix(InfixExpression),
     Name(NameExpression),
     String(StringExpression),
     Integer(IntegerExpression),
@@ -21,7 +21,7 @@ impl Expression {
             Self::Product(expression) => &expression.syntax,
             Self::Call(expression) => &expression.syntax,
             Self::Access(expression) => &expression.syntax,
-            Self::Binary(expression) => &expression.syntax,
+            Self::Infix(expression) => &expression.syntax,
             Self::Name(expression) => &expression.syntax,
             Self::String(expression) => &expression.syntax,
             Self::Integer(expression) => &expression.syntax,
@@ -85,20 +85,18 @@ pub enum Accessor {
     Index(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BinaryOperator {
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InfixExpression {
+    pub syntax: Syntax,
+    pub operands: Vec<Expression>,
+    pub operators: Vec<InfixOperator>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BinaryExpression {
+pub struct InfixOperator {
     pub syntax: Syntax,
-    pub operator: BinaryOperator,
-    pub left: Box<Expression>,
-    pub right: Box<Expression>,
+    pub namespace: Option<String>,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
