@@ -294,58 +294,62 @@ impl Expression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionExpression {
     pub syntax: Syntax,
-    pub parameter: Parameter,
+    pub pattern: Pattern,
     pub return_type: Option<Type>,
     pub body: Box<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Parameter {
-    Value(ValueParameter),
-    Product(ProductParameter),
+pub enum Pattern {
+    Binding(BindingPattern),
+    Product(ProductPattern),
 }
 
-impl Parameter {
+impl Pattern {
+    pub fn syntax(&self) -> &Syntax {
+        match self {
+            Self::Binding(pattern) => &pattern.syntax,
+            Self::Product(pattern) => &pattern.syntax,
+        }
+    }
+
     pub fn ty(&self) -> Type {
         match self {
-            Parameter::Value(value_parameter) => value_parameter.ty.clone(),
-            Parameter::Product(product_parameter) => {
-                let elements = product_parameter
-                    .elements
-                    .iter()
-                    .map(|param| param.type_element())
-                    .collect();
+            Self::Binding(pattern) => pattern.ty.clone(),
+            Self::Product(pattern) => {
+                let elements = pattern.elements.iter().map(Self::type_element).collect();
                 Type::Product(ProductType {
-                    syntax: product_parameter.syntax.clone(),
+                    syntax: pattern.syntax.clone(),
                     elements,
                     variadic: false,
                 })
             }
         }
     }
-}
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ValueParameter {
-    pub syntax: Syntax,
-    pub name: String,
-    pub ty: Type,
-}
-
-impl ValueParameter {
-    pub fn type_element(&self) -> TypeElement {
+    fn type_element(&self) -> TypeElement {
         TypeElement {
-            syntax: self.syntax.clone(),
-            name: Some(self.name.clone()),
-            ty: self.ty.clone(),
+            syntax: self.syntax().clone(),
+            name: match self {
+                Self::Binding(pattern) => Some(pattern.name.clone()),
+                Self::Product(_) => None,
+            },
+            ty: self.ty(),
         }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ProductParameter {
+pub struct BindingPattern {
     pub syntax: Syntax,
-    pub elements: Vec<ValueParameter>,
+    pub name: String,
+    pub ty: Type,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProductPattern {
+    pub syntax: Syntax,
+    pub elements: Vec<Pattern>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

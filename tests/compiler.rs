@@ -83,8 +83,64 @@ fn rejects_incorrect_call_arguments() {
     assert!(
         diagnostics[0]
             .message
-            .contains("expected `(value: i32)`, found `(string)`")
+            .contains("expected `i32`, found `string`")
     );
+}
+
+#[test]
+fn treats_singleton_products_as_their_element() {
+    let module = type_check(concat!(
+        "let answer: (i32) = 42\n",
+        "let identity = (value: i32) => value\n",
+        "identity (answer)\n",
+    ));
+    let function = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "identity")
+        .expect("identity should resolve");
+    let function_type = module
+        .type_of_function(function.id)
+        .expect("identity should have a type");
+
+    assert_eq!(*function_type.parameter, CheckedType::I32);
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("singleton products should compile as their element");
+    assert!(llvm.contains("define i32 @identity(i32 %value)"));
+    assert!(!llvm.contains("define i32 @identity({ i32 }"));
+}
+
+#[test]
+fn destructures_nested_product_patterns() {
+    let module = type_check(concat!(
+        "let add_nested = (x: i32, (y: i32, z: i32)) => x + y + z\n",
+        "add_nested (1, (2, 3))\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("nested product pattern should compile");
+
+    assert!(llvm.contains("define i32 @add_nested(i32 %x, <{ i32, i32 }>"));
+    assert!(llvm.contains("extractvalue <{ i32, i32 }>"));
+}
+
+#[test]
+fn binds_a_product_without_destructuring_it() {
+    let module = type_check(concat!(
+        "let sum = pair: (i32, i32) => pair.0 + pair.1\n",
+        "sum (1, 2)\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a product binding pattern should compile");
+
+    assert!(llvm.contains("define i32 @sum(i32 %0, i32 %1)"));
+    assert!(llvm.contains("extractvalue <{ i32, i32 }>"));
 }
 
 #[test]

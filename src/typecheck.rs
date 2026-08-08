@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{
-    Accessor, Binding, Diagnostic, Expression, FunctionId, Item, Module, Parameter, PrimitiveType,
+    Accessor, Binding, Diagnostic, Expression, FunctionId, Item, Module, Pattern, PrimitiveType,
     ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, Type,
     TypeDeclaration, TypeDeclarationKind,
 };
@@ -249,7 +249,7 @@ impl TypeChecker {
 
     fn seed_function_types(&mut self, module: &ResolvedModule) {
         for function in module.functions() {
-            let parameter = self.resolve_source_type(&function.parameter.ty());
+            let parameter = self.resolve_source_type(&function.pattern.ty());
             let result = function
                 .return_annotation
                 .as_ref()
@@ -304,7 +304,7 @@ impl TypeChecker {
             .cloned()
             .expect("resolved function ID must be valid");
         let function_type = self.function_types[&function.id].clone();
-        self.bind_parameter_types(module, &function.parameter, &function_type.parameter);
+        self.bind_pattern_types(module, &function.pattern, &function_type.parameter);
         let body_type = self.check_expression(module, &function.body);
         let result_type = self.require_compatible(
             body_type,
@@ -327,26 +327,29 @@ impl TypeChecker {
         self.checked_functions.insert(function_id);
     }
 
-    fn bind_parameter_types(
+    fn bind_pattern_types(
         &mut self,
         module: &ResolvedModule,
-        parameter: &Parameter,
-        parameter_type: &CheckedType,
+        pattern: &Pattern,
+        value_type: &CheckedType,
     ) {
-        match (parameter, parameter_type) {
-            (Parameter::Value(parameter), value_type) => {
-                if let Some(symbol) = module.symbol_for(parameter.syntax.id) {
+        match pattern {
+            Pattern::Binding(binding) => {
+                if let Some(symbol) = module.symbol_for(binding.syntax.id) {
                     self.symbol_types.insert(symbol, value_type.clone());
                 }
             }
-            (Parameter::Product(parameters), CheckedType::Product(product_type)) => {
-                for (parameter, element) in parameters.elements.iter().zip(&product_type.elements) {
-                    if let Some(symbol) = module.symbol_for(parameter.syntax.id) {
-                        self.symbol_types.insert(symbol, element.value_type.clone());
-                    }
+            Pattern::Product(product) if product.elements.len() == 1 => {
+                self.bind_pattern_types(module, &product.elements[0], value_type);
+            }
+            Pattern::Product(product) => {
+                let CheckedType::Product(product_type) = value_type else {
+                    return;
+                };
+                for (pattern, element) in product.elements.iter().zip(&product_type.elements) {
+                    self.bind_pattern_types(module, pattern, &element.value_type);
                 }
             }
-            _ => {}
         }
     }
 
@@ -437,8 +440,8 @@ impl TypeChecker {
                 }
                 result
             }
-            Expression::Product(product) => CheckedType::Product(CheckedProductType {
-                elements: product
+            Expression::Product(product) => normalize_product_type(
+                product
                     .elements
                     .iter()
                     .map(|element| CheckedTypeElement {
@@ -446,8 +449,8 @@ impl TypeChecker {
                         value_type: self.check_expression(module, &element.value),
                     })
                     .collect(),
-                variadic: false,
-            }),
+                false,
+            ),
             Expression::Call(call) => {
                 let callee_type = self.check_expression(module, &call.callee);
                 let argument_type = self.check_expression(module, &call.argument);
@@ -549,14 +552,14 @@ impl TypeChecker {
         if let CheckedType::Product(expected_product) = expected
             && expected_product.variadic
         {
-            let CheckedType::Product(actual_product) = actual else {
-                self.diagnostics.push(Diagnostic::new(
-                    span,
-                    format!("expected variadic argument product `{expected}`"),
-                ));
-                return;
+            let actual_elements = match actual {
+                CheckedType::Product(product) => product.elements,
+                value_type => vec![CheckedTypeElement {
+                    name: None,
+                    value_type,
+                }],
             };
-            if actual_product.elements.len() < expected_product.elements.len() {
+            if actual_elements.len() < expected_product.elements.len() {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     format!(
@@ -566,11 +569,7 @@ impl TypeChecker {
                 ));
                 return;
             }
-            for (actual, expected) in actual_product
-                .elements
-                .into_iter()
-                .zip(&expected_product.elements)
-            {
+            for (actual, expected) in actual_elements.into_iter().zip(&expected_product.elements) {
                 self.require_compatible(
                     actual.value_type,
                     expected.value_type.clone(),
@@ -608,7 +607,10 @@ impl TypeChecker {
                 is_const: pointer.is_const,
                 pointee: Box::new(self.resolve_source_type(&pointer.pointee)),
             },
-            Type::Product(product) => CheckedType::Product(self.resolve_product_type(product)),
+            Type::Product(product) => {
+                let product = self.resolve_product_type(product);
+                normalize_product_type(product.elements, product.variadic)
+            }
             Type::Function(function) => CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(self.resolve_source_type(&function.parameter)),
                 result: Box::new(self.resolve_source_type(&function.result)),
@@ -718,10 +720,7 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
                     })
                 })
                 .collect::<Option<Vec<_>>>()?;
-            Some(CheckedType::Product(CheckedProductType {
-                elements,
-                variadic: actual.variadic,
-            }))
+            Some(normalize_product_type(elements, actual.variadic))
         }
         (CheckedType::Function(actual), CheckedType::Function(expected)) => {
             Some(CheckedType::Function(CheckedFunctionType {
@@ -746,5 +745,13 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             )?),
         }),
         _ => None,
+    }
+}
+
+fn normalize_product_type(elements: Vec<CheckedTypeElement>, variadic: bool) -> CheckedType {
+    if !variadic && elements.len() == 1 {
+        elements.into_iter().next().unwrap().value_type
+    } else {
+        CheckedType::Product(CheckedProductType { elements, variadic })
     }
 }

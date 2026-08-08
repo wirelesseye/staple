@@ -200,11 +200,15 @@ Parentheses construct a product:
 
 ```staple
 ()          // a nullary product
-(value)     // a product containing one value
+(value)     // equivalent to value
 (a, b)      // a product containing two values
 ```
 
-Parentheses are therefore not grouping syntax in the current design.
+A non-variadic product with exactly one element is definitionally
+equal to that element: `(T) = T` and `(value) = value`. The parser preserves
+the parentheses, while type checking and code generation normalize the
+singleton product away. A name on a singleton product type does not create a
+distinct wrapper type.
 
 #### Named elements
 
@@ -258,29 +262,28 @@ A function value has one of the following forms:
 There is no distinction between a top-level function and an inline function or
 lambda. Both are function values and use the same syntax.
 
-Every function takes exactly one parameter. That parameter can represent:
-
-- an ordinary value;
-- a nullary product; or
-- a product containing one or more values.
+Every function takes exactly one argument and matches it with a pattern.
+Patterns are recursive: a binding pattern introduces one name, while a product
+pattern matches the elements of a product. Product patterns may contain other
+product patterns.
 
 `=>` introduces the body of the abstraction. `->`, when present, introduces an
 explicit result type. Without an explicit result type, stapler infers it from
 the body.
 
-An ordinary parameter has a name and a type:
+A binding pattern has a name and a type:
 
 ```staple
 s: string => printf ("%s\n", s)
 ```
 
-A nullary-product parameter is written as `()`:
+A nullary product pattern is written as `()`:
 
 ```staple
 () => 42
 ```
 
-A product parameter names and types each of its elements:
+A product pattern names and types each of its elements:
 
 ```staple
 (a: i32, b: i32) => a + b
@@ -293,6 +296,15 @@ let add = (a: i32, b: i32) => a + b
 ```
 
 It defines a function whose single parameter is a two-element product.
+
+Patterns may be nested:
+
+```staple
+(x: i32, (y: i32, z: i32)) => x + y + z
+```
+
+A singleton product pattern is equivalent to its contained pattern, so
+`(value: T)` matches the same values as `value: T`.
 
 A function value may declare its result type directly:
 

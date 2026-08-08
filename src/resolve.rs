@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use crate::{
-    Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, Module, Parameter, Span,
+    Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, Module, Pattern, Span,
     Statement, SyntaxId, Type,
 };
 
@@ -16,7 +16,7 @@ pub struct ResolvedFunction {
     pub id: FunctionId,
     pub name: String,
     pub binding_syntax: Option<SyntaxId>,
-    pub parameter: Parameter,
+    pub pattern: Pattern,
     pub return_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
     pub body: Expression,
@@ -146,7 +146,7 @@ impl NameResolver {
                     .insert(function.syntax.id, function_id);
 
                 self.push_scope();
-                self.declare_parameter(&function.parameter);
+                self.declare_pattern(&function.pattern);
                 self.resolve_expression(&function.body, None, None);
                 self.pop_scope();
 
@@ -156,7 +156,7 @@ impl NameResolver {
                         .map(|(name, _)| name.to_owned())
                         .unwrap_or_else(|| format!("function.{}", function_id.0)),
                     binding_syntax: suggested_function.map(|(_, syntax_id)| syntax_id),
-                    parameter: function.parameter.clone(),
+                    pattern: function.pattern.clone(),
                     return_annotation: function.return_type.clone(),
                     binding_annotation: expected_type.cloned(),
                     body: (*function.body).clone(),
@@ -205,14 +205,18 @@ impl NameResolver {
         self.pop_scope();
     }
 
-    fn declare_parameter(&mut self, parameter: &Parameter) {
-        match parameter {
-            Parameter::Value(value) => {
-                self.declare(&value.name, value.syntax.id, value.syntax.span.clone());
+    fn declare_pattern(&mut self, pattern: &Pattern) {
+        match pattern {
+            Pattern::Binding(binding) => {
+                self.declare(
+                    &binding.name,
+                    binding.syntax.id,
+                    binding.syntax.span.clone(),
+                );
             }
-            Parameter::Product(product) => {
-                for value in &product.elements {
-                    self.declare(&value.name, value.syntax.id, value.syntax.span.clone());
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    self.declare_pattern(element);
                 }
             }
         }

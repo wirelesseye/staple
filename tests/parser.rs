@@ -1,5 +1,5 @@
 use stapler::{
-    Accessor, BinaryOperator, Expression, Item, Parameter, Statement, TokenKind, Type,
+    Accessor, BinaryOperator, Expression, Item, Pattern, Statement, TokenKind, Type,
     TypeDeclarationKind, parse,
 };
 
@@ -37,7 +37,7 @@ fn parses_product_parameter_and_expression_body() {
         panic!("expected function");
     };
     assert!(
-        matches!(function.parameter, Parameter::Product(ref product) if product.elements.len() == 2)
+        matches!(function.pattern, Pattern::Product(ref product) if product.elements.len() == 2)
     );
     assert!(matches!(
         *function.body,
@@ -81,13 +81,36 @@ fn parses_single_parameter_and_application() {
     let Expression::Function(function) = binding.value.as_ref().expect("function value") else {
         panic!("expected function");
     };
-    assert!(
-        matches!(function.parameter, Parameter::Product(ref product) if product.elements[0].name == "s")
-    );
+    assert!(matches!(
+        function.pattern,
+        Pattern::Product(ref product)
+            if matches!(
+                product.elements.first(),
+                Some(Pattern::Binding(binding)) if binding.name == "s"
+            )
+    ));
     let Expression::Call(call) = function.body.as_ref() else {
         panic!("expected call");
     };
     assert!(matches!(*call.argument, Expression::Product(_)));
+}
+
+#[test]
+fn parses_nested_product_patterns_losslessly() {
+    let source = "let first = (x: i32, (y: i32, z: i32)) => x + y\n";
+    let root = parse(source).expect("nested product pattern should parse");
+    let Statement::Binding(binding) = statement(&root.items[0]) else {
+        panic!("expected binding");
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("expected function");
+    };
+    let Pattern::Product(pattern) = &function.pattern else {
+        panic!("expected product pattern");
+    };
+
+    assert!(matches!(pattern.elements[1], Pattern::Product(_)));
+    assert_eq!(root.text(), source);
 }
 
 #[test]

@@ -155,7 +155,7 @@ impl Grammar {
 
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
-        let parameter = self.parse_parameter()?;
+        let pattern = self.parse_pattern()?;
         let return_type = if self.eat(TokenKind::Arrow) {
             Some(self.parse_type()?)
         } else {
@@ -165,42 +165,42 @@ impl Grammar {
         let body = Box::new(self.parse_expression()?);
         Ok(FunctionExpression {
             syntax: self.syntax(start),
-            parameter,
+            pattern,
             return_type,
             body,
         })
     }
 
-    fn parse_parameter(&mut self) -> Result<Parameter, ParseError> {
+    fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         let start = self.position;
         if self.eat(TokenKind::LParen) {
             let mut elements = Vec::new();
             if !self.at(TokenKind::RParen) {
                 loop {
-                    elements.push(self.parse_value_parameter()?);
+                    elements.push(self.parse_pattern()?);
                     if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                         break;
                     }
                 }
             }
             self.expect(TokenKind::RParen, "expected `)` after parameter")?;
-            Ok(Parameter::Product(ProductParameter {
+            Ok(Pattern::Product(ProductPattern {
                 syntax: self.syntax(start),
                 elements,
             }))
         } else {
-            self.parse_value_parameter().map(Parameter::Value)
+            self.parse_binding_pattern().map(Pattern::Binding)
         }
     }
 
-    fn parse_value_parameter(&mut self) -> Result<ValueParameter, ParseError> {
+    fn parse_binding_pattern(&mut self) -> Result<BindingPattern, ParseError> {
         let start = self.position;
         let name = self
             .expect(TokenKind::Identifier, "expected parameter name")?
             .text;
         self.expect(TokenKind::Colon, "expected `:` after parameter name")?;
         let ty = self.parse_type_atom()?;
-        Ok(ValueParameter {
+        Ok(BindingPattern {
             syntax: self.syntax(start),
             name,
             ty,

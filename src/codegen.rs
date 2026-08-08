@@ -7,7 +7,7 @@ use inkwell::{
 
 use crate::{
     Accessor, BinaryExpression, BinaryOperator, CheckedFunctionType, CheckedProductType,
-    CheckedType, Diagnostic, Expression, FunctionId, Item, Parameter, ProductExpression,
+    CheckedType, Diagnostic, Expression, FunctionId, Item, Pattern, ProductExpression,
     ResolvedFunction, Span, Statement, SymbolId, TypedModule,
 };
 
@@ -160,36 +160,83 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     }
 
     fn bind_function_parameters(
-        &self,
+        &mut self,
         environment: &mut FunctionEnvironment<'context>,
         function: &ResolvedFunction,
         llvm_function: inkwell::values::FunctionValue<'context>,
     ) -> CodeGenerationResult<()> {
         let parameters = llvm_function.get_params();
-        let syntax_parameters = match &function.parameter {
-            Parameter::Value(value) => vec![value],
-            Parameter::Product(product) => product.elements.iter().collect(),
-        };
-        if parameters.len() != syntax_parameters.len() {
-            return Err(Diagnostic::new(
-                function.parameter.ty().syntax().span.clone(),
-                "function parameter layout does not match its declared type",
-            ));
+        self.bind_top_level_pattern(environment, &function.pattern, &parameters)
+    }
+
+    fn bind_top_level_pattern(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        pattern: &Pattern,
+        values: &[BasicValueEnum<'context>],
+    ) -> CodeGenerationResult<()> {
+        match pattern {
+            Pattern::Binding(_) => {
+                let value = self.build_product_value(values, pattern.syntax().span.clone())?;
+                self.bind_pattern_value(environment, pattern, value)
+            }
+            Pattern::Product(product) if product.elements.len() == 1 => {
+                self.bind_top_level_pattern(environment, &product.elements[0], values)
+            }
+            Pattern::Product(product) if product.elements.len() == values.len() => {
+                for (pattern, value) in product.elements.iter().zip(values.iter().copied()) {
+                    self.bind_pattern_value(environment, pattern, value)?;
+                }
+                Ok(())
+            }
+            _ => Err(Diagnostic::new(
+                pattern.syntax().span.clone(),
+                "function pattern layout does not match its declared type",
+            )),
         }
-        for (value, parameter) in parameters.into_iter().zip(syntax_parameters) {
-            value.set_name(&parameter.name);
-            let symbol = self
-                .typed_module
-                .symbol_for(parameter.syntax.id)
-                .ok_or_else(|| {
-                    Diagnostic::new(
-                        parameter.syntax.span.clone(),
-                        "unresolved function parameter",
-                    )
-                })?;
-            environment.locals.insert(symbol, value.as_any_value_enum());
+    }
+
+    fn bind_pattern_value(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        pattern: &Pattern,
+        value: BasicValueEnum<'context>,
+    ) -> CodeGenerationResult<()> {
+        match pattern {
+            Pattern::Binding(binding) => {
+                value.set_name(&binding.name);
+                let symbol = self
+                    .typed_module
+                    .symbol_for(binding.syntax.id)
+                    .ok_or_else(|| {
+                        Diagnostic::new(binding.syntax.span.clone(), "unresolved pattern binding")
+                    })?;
+                environment.locals.insert(symbol, value.as_any_value_enum());
+                Ok(())
+            }
+            Pattern::Product(product) if product.elements.len() == 1 => {
+                self.bind_pattern_value(environment, &product.elements[0], value)
+            }
+            Pattern::Product(product) if product.elements.is_empty() => Ok(()),
+            Pattern::Product(product) => {
+                let BasicValueEnum::StructValue(product_value) = value else {
+                    return Err(Diagnostic::new(
+                        product.syntax.span.clone(),
+                        "nested product pattern requires a product value",
+                    ));
+                };
+                for (index, pattern) in product.elements.iter().enumerate() {
+                    let element = self
+                        .builder
+                        .build_extract_value(product_value, index as u32, "pattern.element")
+                        .map_err(|error| {
+                            Diagnostic::new(product.syntax.span.clone(), error.to_string())
+                        })?;
+                    self.bind_pattern_value(environment, pattern, element)?;
+                }
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     fn compile_main_function(&mut self) -> CodeGenerationResult<()> {
@@ -267,18 +314,20 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .as_any_value_enum()
                 }))
             }
-            Expression::Product(product) => self
-                .compile_product_expression(environment, product)
-                .map(AnyValueEnum::from),
+            Expression::Product(product) => self.compile_product_expression(environment, product),
             Expression::Call(call) => {
                 let callee = self.compile_expression(environment, &call.callee)?;
-                let arguments = self.compile_arguments(environment, &call.argument)?;
                 let AnyValueEnum::FunctionValue(function) = callee else {
                     return Err(Diagnostic::new(
                         call.callee.syntax().span.clone(),
                         "expression is not directly callable",
                     ));
                 };
+                let arguments = self.compile_arguments(
+                    environment,
+                    &call.argument,
+                    function.count_params() as usize,
+                )?;
                 let call_site = self
                     .builder
                     .build_direct_call(function, &arguments, "call")
@@ -383,7 +432,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
         product: &ProductExpression,
-    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let values = product
             .elements
             .iter()
@@ -399,6 +448,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     })
             })
             .collect::<CodeGenerationResult<Vec<_>>>()?;
+        if let [value] = values.as_slice() {
+            return Ok(value.as_any_value_enum());
+        }
         let types = values
             .iter()
             .map(BasicValueEnum::get_type)
@@ -411,13 +463,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(|error| Diagnostic::new(product.syntax.span.clone(), error.to_string()))?
                 .into_struct_value();
         }
-        Ok(product_value)
+        Ok(product_value.as_any_value_enum())
     }
 
     fn compile_arguments(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
         argument: &Expression,
+        expected_count: usize,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
         let expressions: Vec<&Expression> = match argument {
             Expression::Product(product) => product
@@ -427,12 +480,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .collect(),
             expression => vec![expression],
         };
-        expressions
+        let arguments = expressions
             .into_iter()
             .map(|expression| {
                 self.compile_expression(environment, expression)
                     .and_then(|value| {
-                        value_as_basic(value).map(Into::into).ok_or_else(|| {
+                        value_as_basic(value).ok_or_else(|| {
                             Diagnostic::new(
                                 expression.syntax().span.clone(),
                                 "argument is not a first-class value",
@@ -440,7 +493,51 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         })
                     })
             })
-            .collect()
+            .collect::<CodeGenerationResult<Vec<BasicValueEnum<'context>>>>()?;
+        if arguments.len() == expected_count {
+            return Ok(arguments.into_iter().map(Into::into).collect());
+        }
+        if let [BasicValueEnum::StructValue(product)] = arguments.as_slice()
+            && product.get_type().count_fields() as usize == expected_count
+        {
+            return (0..expected_count)
+                .map(|index| {
+                    self.builder
+                        .build_extract_value(*product, index as u32, "argument.element")
+                        .map(Into::into)
+                        .map_err(|error| {
+                            Diagnostic::new(argument.syntax().span.clone(), error.to_string())
+                        })
+                })
+                .collect();
+        }
+        Err(Diagnostic::new(
+            argument.syntax().span.clone(),
+            "argument layout does not match the called function",
+        ))
+    }
+
+    fn build_product_value(
+        &mut self,
+        values: &[BasicValueEnum<'context>],
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        if let [value] = values {
+            return Ok(*value);
+        }
+        let types = values
+            .iter()
+            .map(BasicValueEnum::get_type)
+            .collect::<Vec<_>>();
+        let mut product = self.context.struct_type(&types, true).const_zero();
+        for (index, value) in values.iter().copied().enumerate() {
+            product = self
+                .builder
+                .build_insert_value(product, value, index as u32, "product.element")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+                .into_struct_value();
+        }
+        Ok(product.into())
     }
 
     fn compile_function_type(
