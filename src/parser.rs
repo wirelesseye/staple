@@ -86,6 +86,23 @@ impl Grammar {
         } else {
             Visibility::Private
         };
+        let representation_visibility =
+            if visibility == Visibility::Public && self.eat(TokenKind::LParen) {
+                let modifier = self.expect(
+                    TokenKind::Identifier,
+                    "expected `repr` in visibility modifier",
+                )?;
+                if modifier.text != "repr" {
+                    return Err(self.error("expected `repr` in visibility modifier"));
+                }
+                self.expect(TokenKind::RParen, "expected `)` after `repr`")?;
+                Visibility::Public
+            } else {
+                Visibility::Private
+            };
+        if representation_visibility == Visibility::Public && self.peek() != Some(TokenKind::Type) {
+            return Err(self.error("`pub(repr)` may only modify a type declaration"));
+        }
         let item = match self.peek() {
             Some(TokenKind::Use) if visibility == Visibility::Private => {
                 self.parse_use_declaration().map(Item::UseDeclaration)
@@ -95,7 +112,7 @@ impl Grammar {
                 .parse_extern_block(visibility, item_start)
                 .map(Item::ExternBlock),
             Some(TokenKind::Type) => self
-                .parse_type_declaration(visibility, item_start)
+                .parse_type_declaration(visibility, representation_visibility, item_start)
                 .map(Item::TypeDeclaration),
             Some(TokenKind::Macro) => self
                 .parse_macro_declaration(visibility, item_start)
@@ -136,7 +153,8 @@ impl Grammar {
         start: Option<usize>,
     ) -> Result<Statement, ParseError> {
         match self.peek() {
-            Some(TokenKind::Let | TokenKind::Def) => self
+            Some(TokenKind::Let) => self.parse_let_statement(visibility, start),
+            Some(TokenKind::Def) => self
                 .parse_binding(visibility, start, start.is_some())
                 .map(Statement::Binding),
             _ if visibility == Visibility::Public => {
@@ -144,6 +162,35 @@ impl Grammar {
             }
             _ => self.parse_expression().map(Statement::Expression),
         }
+    }
+
+    fn parse_let_statement(
+        &mut self,
+        visibility: Visibility,
+        start: Option<usize>,
+    ) -> Result<Statement, ParseError> {
+        let checkpoint = self.position;
+        let pattern_start = start.unwrap_or(self.position);
+        self.expect(TokenKind::Let, "expected `let`")?;
+        let pattern = self.parse_pattern()?;
+        if !matches!(pattern, Pattern::Binding(_)) {
+            if visibility == Visibility::Public {
+                return Err(self.error("destructuring `let` bindings cannot be public"));
+            }
+            self.expect(
+                TokenKind::Equals,
+                "expected `=` after destructuring pattern",
+            )?;
+            let value = self.parse_expression()?;
+            return Ok(Statement::PatternBinding(PatternBinding {
+                syntax: self.syntax(pattern_start),
+                pattern,
+                value,
+            }));
+        }
+        self.position = checkpoint;
+        self.parse_binding(visibility, start, start.is_some())
+            .map(Statement::Binding)
     }
 
     /// Parses a namespace, glob, selected, or renamed `use` declaration.
@@ -230,6 +277,7 @@ impl Grammar {
     fn parse_type_declaration(
         &mut self,
         visibility: Visibility,
+        representation_visibility: Visibility,
         start: usize,
     ) -> Result<TypeDeclaration, ParseError> {
         self.expect(TokenKind::Type, "expected `type`")?;
@@ -258,9 +306,15 @@ impl Grammar {
         } else {
             (kind, Some(self.parse_type()?))
         };
+        if representation_visibility == Visibility::Public
+            && (kind != TypeDeclarationKind::Distinct || underlying.is_none())
+        {
+            return Err(self.error("`pub(repr)` requires a represented distinct type"));
+        }
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
             visibility,
+            representation_visibility,
             kind,
             name,
             type_parameters,
@@ -449,16 +503,36 @@ impl Grammar {
                 elements,
             }))
         } else {
-            self.parse_binding_pattern().map(Pattern::Binding)
+            self.parse_named_pattern()
         }
     }
 
-    /// Parses a named binding pattern whose type may be supplied contextually.
-    fn parse_binding_pattern(&mut self) -> Result<BindingPattern, ParseError> {
+    fn parse_named_pattern(&mut self) -> Result<Pattern, ParseError> {
         let start = self.position;
-        let name = self
-            .expect(TokenKind::Identifier, "expected parameter name")?
-            .text;
+        let first = self.expect(TokenKind::Identifier, "expected pattern")?.text;
+        let (namespace, name) = if self.eat(TokenKind::Dot) {
+            let name = self
+                .expect(TokenKind::Identifier, "expected type name after namespace")?
+                .text;
+            (Some(first), name)
+        } else {
+            (None, first)
+        };
+        let adjacent_argument = !(self.newline_terminates_expression
+            && self.has_newline_before_next_token())
+            && matches!(self.peek(), Some(TokenKind::Identifier | TokenKind::LParen));
+        if namespace.is_some() && !adjacent_argument {
+            return Err(self.error("expected an argument after nominal pattern"));
+        }
+        if adjacent_argument {
+            let argument = Box::new(self.parse_pattern()?);
+            return Ok(Pattern::Nominal(NominalPattern {
+                syntax: self.syntax(start),
+                namespace,
+                name,
+                argument,
+            }));
+        }
         let ty = if self.eat(TokenKind::Colon) {
             self.parse_type_application()?
         } else {
@@ -466,11 +540,11 @@ impl Grammar {
                 syntax: self.syntax(start),
             })
         };
-        Ok(BindingPattern {
+        Ok(Pattern::Binding(BindingPattern {
             syntax: self.syntax(start),
             name,
             ty,
-        })
+        }))
     }
 
     /// Parses a type, treating function arrows as right-associative.

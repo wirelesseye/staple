@@ -390,6 +390,40 @@ fn parses_compile_time_parameters_and_type_application() {
 }
 
 #[test]
+fn parses_public_representations_and_nominal_patterns() {
+    let source = concat!(
+        "pub(repr) type Box = T => (value: T)\n",
+        "let Box (value) = Box (value: 42)\n",
+        "def unbox: Box I32 -> I32 = Box value => value\n",
+    );
+    let root = parse(source).expect("nominal patterns should parse");
+    let Item::TypeDeclaration(declaration) = &root.items[0] else {
+        panic!("expected type declaration");
+    };
+    assert_eq!(declaration.representation_visibility, Visibility::Public);
+    assert!(matches!(
+        statement(&root.items[1]),
+        Statement::PatternBinding(binding)
+            if matches!(binding.pattern, Pattern::Nominal(_))
+    ));
+    let Statement::Binding(binding) = statement(&root.items[2]) else {
+        panic!("expected function binding");
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("expected function expression");
+    };
+    assert!(matches!(function.pattern, Pattern::Nominal(_)));
+}
+
+#[test]
+fn rejects_invalid_public_representation_and_pattern_visibility_syntax() {
+    assert!(parse("pub(repr) type alias Number = I32\n").is_err());
+    assert!(parse("pub(repr) type Handle = opaque\n").is_err());
+    assert!(parse("pub let (a, b) = (1, 2)\n").is_err());
+    assert!(parse("pub(repr) def value = 1\n").is_err());
+}
+
+#[test]
 fn block_items_are_typed() {
     let source = "def answer = () => { let x = 40 }\n";
     let root = parse(source).expect("block should parse");

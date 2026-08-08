@@ -46,6 +46,7 @@ pub enum UseKind {
 #[allow(clippy::large_enum_variant)]
 pub enum Statement {
     Binding(Binding),
+    PatternBinding(PatternBinding),
     Expression(Expression),
 }
 
@@ -69,10 +70,18 @@ pub enum TypeDeclarationKind {
 pub struct TypeDeclaration {
     pub syntax: Syntax,
     pub visibility: Visibility,
+    pub representation_visibility: Visibility,
     pub kind: TypeDeclarationKind,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub underlying: Option<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PatternBinding {
+    pub syntax: Syntax,
+    pub pattern: super::Pattern,
+    pub value: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

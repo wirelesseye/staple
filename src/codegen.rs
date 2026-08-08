@@ -245,6 +245,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let Item::Statement(statement) = item else {
                     continue;
                 };
+                if let Statement::PatternBinding(binding) = statement.as_ref() {
+                    self.declare_pattern_storage(source_module.id, &binding.pattern)?;
+                    continue;
+                }
                 let Statement::Binding(binding) = statement.as_ref() else {
                     continue;
                 };
@@ -267,6 +271,41 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 global.set_initializer(&zero);
                 global.set_linkage(inkwell::module::Linkage::Internal);
                 self.storage.insert(symbol, global);
+            }
+        }
+        Ok(())
+    }
+
+    fn declare_pattern_storage(
+        &mut self,
+        module: ModuleId,
+        pattern: &Pattern,
+    ) -> CodeGenerationResult<()> {
+        match pattern {
+            Pattern::Binding(binding) => {
+                let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
+                    return Ok(());
+                };
+                let Some(value_type) = self.typed_module.type_of_symbol(symbol) else {
+                    return Ok(());
+                };
+                let llvm_type = self.compile_type(value_type)?;
+                let global = self.llvm_module.add_global(
+                    llvm_type,
+                    None,
+                    &format!("__staple_m{}_{}", module.0, binding.name),
+                );
+                global.set_initializer(&llvm_type.const_zero());
+                global.set_linkage(inkwell::module::Linkage::Internal);
+                self.storage.insert(symbol, global);
+            }
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    self.declare_pattern_storage(module, element)?;
+                }
+            }
+            Pattern::Nominal(pattern) => {
+                self.declare_pattern_storage(module, &pattern.argument)?;
             }
         }
         Ok(())
@@ -516,7 +555,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         values: &[BasicValueEnum<'context>],
     ) -> CodeGenerationResult<()> {
         match pattern {
-            Pattern::Binding(_) => {
+            Pattern::Binding(_) | Pattern::Nominal(_) => {
                 let value = self.build_product_value(values, pattern.syntax().span.clone())?;
                 self.bind_pattern_value(environment, pattern, value)
             }
@@ -575,6 +614,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     self.bind_pattern_value(environment, pattern, element)?;
                 }
                 Ok(())
+            }
+            Pattern::Nominal(pattern) => {
+                self.bind_pattern_value(environment, &pattern.argument, value)
             }
         }
     }
@@ -661,11 +703,57 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(())
             }
+            Statement::PatternBinding(binding) => {
+                let value = self.compile_expression(environment, &binding.value)?;
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        "destructured value is not first-class",
+                    )
+                })?;
+                self.bind_pattern_value(environment, &binding.pattern, value)?;
+                self.store_pattern_globals(environment, &binding.pattern)
+            }
             Statement::Expression(expression) => {
                 self.compile_expression(environment, expression)?;
                 Ok(())
             }
         }
+    }
+
+    fn store_pattern_globals(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        pattern: &Pattern,
+    ) -> CodeGenerationResult<()> {
+        match pattern {
+            Pattern::Binding(binding) => {
+                let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
+                    return Ok(());
+                };
+                let Some(global) = self.storage.get(&symbol) else {
+                    return Ok(());
+                };
+                let value = environment.locals.get(&symbol).copied().ok_or_else(|| {
+                    Diagnostic::new(binding.syntax.span.clone(), "unbound destructuring pattern")
+                })?;
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(binding.syntax.span.clone(), "pattern value is not storable")
+                })?;
+                self.builder
+                    .build_store(global.as_pointer_value(), value)
+                    .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+            }
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    self.store_pattern_globals(environment, element)?;
+                }
+            }
+            Pattern::Nominal(pattern) => {
+                self.store_pattern_globals(environment, &pattern.argument)?;
+            }
+        }
+        Ok(())
     }
 
     fn compile_statement(
@@ -688,6 +776,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             })?;
                     environment.locals.insert(symbol, value);
                 }
+                Ok(None)
+            }
+            Statement::PatternBinding(binding) => {
+                let value = self.compile_expression(environment, &binding.value)?;
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        "destructured value is not first-class",
+                    )
+                })?;
+                self.bind_pattern_value(environment, &binding.pattern, value)?;
                 Ok(None)
             }
             Statement::Expression(expression) => {

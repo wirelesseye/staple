@@ -746,6 +746,87 @@ fn contextually_specializes_first_class_constructors() {
 }
 
 #[test]
+fn destructures_nominal_values_in_lets_and_functions() {
+    let module = type_check(concat!(
+        "type UserId = I32\n",
+        "type PairIds = (UserId, UserId)\n",
+        "let user: UserId = UserId 42\n",
+        "let UserId raw = user\n",
+        "let pair: PairIds = PairIds (UserId 1, UserId 2)\n",
+        "let PairIds (UserId first, UserId second) = pair\n",
+        "def unwrap: UserId -> I32 = UserId id => id\n",
+        "def get_raw: () -> I32 = () => raw\n",
+        "let answer: I32 = unwrap user\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("nominal destructuring should be zero-cost");
+}
+
+#[test]
+fn destructures_contextually_typed_generic_nominal_patterns() {
+    let module = type_check(concat!(
+        "type Box = T => (value: T)\n",
+        "def unbox: T => Box T -> T = Box (value) => value\n",
+        "let answer: I32 = unbox (Box (value: 42))\n",
+        "let text: String = unbox (Box (value: \"hello\"))\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generic nominal patterns should monomorphize");
+}
+
+#[test]
+fn captures_values_bound_by_nominal_patterns() {
+    let module = type_check(concat!(
+        "type UserId = I32\n",
+        "def capture: UserId -> (() -> I32) = user => {\n",
+        "  let UserId id = user\n",
+        "  () => id\n",
+        "}\n",
+        "let get_id: () -> I32 = capture (UserId 42)\n",
+        "let answer: I32 = get_id ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("destructured leaves should be captured normally");
+}
+
+#[test]
+fn rejects_non_nominal_and_mismatched_nominal_patterns() {
+    let syntax = parse(concat!(
+        "type alias Number = I32\n",
+        "let Number value = 42\n",
+    ))
+    .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve(&syntax)
+        .expect_err("aliases cannot be used as nominal patterns");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("not a represented nominal type")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Left = I32\n",
+            "type Right = I32\n",
+            "let right: Right = Right 42\n",
+            "let Left value = right\n",
+        )))
+        .expect_err("a nominal pattern must match the same nominal type");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("cannot match"))
+    );
+}
+
+#[test]
 fn monomorphizes_nested_and_recursive_generic_calls() {
     let module = type_check(concat!(
         "def identity: T => T -> T = x => x\n",

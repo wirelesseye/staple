@@ -67,6 +67,7 @@ pub struct ResolvedModule {
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     named_types: HashMap<SyntaxId, TypeId>,
+    nominal_patterns: HashMap<SyntaxId, TypeId>,
     type_parameters: HashMap<SyntaxId, TypeParameterId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
@@ -76,6 +77,7 @@ pub struct ResolvedModule {
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     constructors: HashMap<SymbolId, TypeId>,
+    type_modules: HashMap<TypeId, ModuleId>,
 }
 
 impl ResolvedModule {
@@ -101,6 +103,15 @@ impl ResolvedModule {
 
     pub fn type_for(&self, syntax_id: SyntaxId) -> Option<TypeId> {
         self.named_types.get(&syntax_id).copied()
+    }
+
+    pub fn type_for_pattern(&self, syntax_id: SyntaxId) -> Option<TypeId> {
+        self.nominal_patterns.get(&syntax_id).copied()
+    }
+
+    pub fn representation_visible_from(&self, id: TypeId, module: ModuleId) -> bool {
+        self.type_modules.get(&id).copied() == Some(module)
+            || self.type_declarations[&id].representation_visibility == Visibility::Public
     }
 
     pub fn type_parameter_for(&self, syntax_id: SyntaxId) -> Option<TypeParameterId> {
@@ -181,6 +192,8 @@ pub struct NameResolver {
     primitive_macros: HashMap<MacroId, PrimitiveMacro>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     constructors: HashMap<SymbolId, TypeId>,
+    nominal_patterns: HashMap<SyntaxId, TypeId>,
+    type_modules: HashMap<TypeId, ModuleId>,
     type_constructor_symbols: HashMap<TypeId, SymbolId>,
     functions: Vec<ResolvedFunction>,
     named_types: HashMap<SyntaxId, TypeId>,
@@ -266,6 +279,7 @@ impl NameResolver {
             symbols: self.symbols,
             function_expressions: self.function_expressions,
             named_types: self.named_types,
+            nominal_patterns: self.nominal_patterns,
             type_parameters: self.type_parameters,
             type_declarations: self.type_declarations,
             type_names: self.type_names,
@@ -275,6 +289,7 @@ impl NameResolver {
             intrinsic_functions: self.intrinsic_functions,
             macro_calls: self.macro_calls,
             constructors: self.constructors,
+            type_modules: self.type_modules,
         })
     }
 
@@ -465,6 +480,7 @@ impl NameResolver {
                             ));
                         }
                         self.type_declarations.insert(id, declaration.clone());
+                        self.type_modules.insert(id, source_module.id);
                         if declaration.kind == crate::TypeDeclarationKind::Distinct
                             && declaration.underlying.is_some()
                         {
@@ -473,6 +489,14 @@ impl NameResolver {
                             self.symbol_owners.insert(symbol, None);
                             self.type_constructor_symbols.insert(id, symbol);
                             self.constructors.insert(symbol, id);
+                            if declaration.representation_visibility == Visibility::Public {
+                                self.insert_public_value(
+                                    source_module.id,
+                                    &declaration.name,
+                                    symbol,
+                                    declaration.syntax.span.clone(),
+                                );
+                            }
                         }
                         let qualified = if self.multiple_modules {
                             format!("m{}.{}", source_module.id.0, declaration.name)
@@ -504,8 +528,8 @@ impl NameResolver {
                                 .insert(declaration.name.clone(), id);
                         }
                     }
-                    Item::Statement(statement) => {
-                        if let Statement::Binding(binding) = statement.as_ref() {
+                    Item::Statement(statement) => match statement.as_ref() {
+                        Statement::Binding(binding) => {
                             let symbol = self.allocate_symbol(binding);
                             let fixity = binding.fixity.unwrap_or_default();
                             self.declared_fixities[source_module.id.0]
@@ -522,7 +546,11 @@ impl NameResolver {
                                     .insert(binding.name.clone(), fixity);
                             }
                         }
-                    }
+                        Statement::PatternBinding(binding) => {
+                            self.allocate_pattern_symbols(&binding.pattern);
+                        }
+                        Statement::Expression(_) => {}
+                    },
                     Item::UseDeclaration(_) => {}
                 }
             }
@@ -538,6 +566,24 @@ impl NameResolver {
         self.symbols.insert(binding.syntax.id, symbol);
         self.symbol_owners.insert(symbol, None);
         symbol
+    }
+
+    fn allocate_pattern_symbols(&mut self, pattern: &Pattern) {
+        match pattern {
+            Pattern::Binding(binding) => {
+                let symbol = SymbolId(self.next_symbol_id);
+                self.next_symbol_id += 1;
+                self.declared_symbols.insert(binding.syntax.id, symbol);
+                self.symbols.insert(binding.syntax.id, symbol);
+                self.symbol_owners.insert(symbol, None);
+            }
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    self.allocate_pattern_symbols(element);
+                }
+            }
+            Pattern::Nominal(pattern) => self.allocate_pattern_symbols(&pattern.argument),
+        }
     }
 
     fn insert_public_value(&mut self, module: ModuleId, name: &str, symbol: SymbolId, span: Span) {
@@ -737,6 +783,9 @@ impl NameResolver {
                 }
                 if let Some(underlying) = &declaration.underlying {
                     self.resolve_type(underlying);
+                    if declaration.representation_visibility == Visibility::Public {
+                        self.validate_public_representation(underlying);
+                    }
                 }
                 self.pop_type_parameter_scope();
             }
@@ -758,6 +807,11 @@ impl NameResolver {
     fn resolve_statement(&mut self, statement: &Statement) {
         match statement {
             Statement::Binding(binding) => self.resolve_binding(binding),
+            Statement::PatternBinding(binding) => {
+                self.resolve_pattern_types(&binding.pattern);
+                self.resolve_expression(&binding.value, None, None);
+                self.declare_pattern(&binding.pattern);
+            }
             Statement::Expression(expression) => self.resolve_expression(expression, None, None),
         }
     }
@@ -840,7 +894,7 @@ impl NameResolver {
                     .insert(function.syntax.id, function_id);
                 self.function_parents
                     .insert(function_id, self.function_stack.last().copied());
-                self.resolve_type(&function.pattern.ty());
+                self.resolve_pattern_types(&function.pattern);
                 if let Some(ty) = &function.return_type {
                     self.resolve_type(ty);
                 }
@@ -1010,6 +1064,60 @@ impl NameResolver {
         }
     }
 
+    fn resolve_pattern_types(&mut self, pattern: &Pattern) {
+        match pattern {
+            Pattern::Binding(binding) => self.resolve_type(&binding.ty),
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    self.resolve_pattern_types(element);
+                }
+            }
+            Pattern::Nominal(pattern) => {
+                self.resolve_type(&Type::Named(crate::NamedType {
+                    syntax: pattern.syntax.clone(),
+                    namespace: pattern.namespace.clone(),
+                    name: pattern.name.clone(),
+                }));
+                self.resolve_pattern_types(&pattern.argument);
+            }
+        }
+    }
+
+    fn validate_public_representation(&mut self, ty: &Type) {
+        match ty {
+            Type::Named(named) => {
+                if self.type_parameters.contains_key(&named.syntax.id) {
+                    return;
+                }
+                if let Some(id) = self.named_types.get(&named.syntax.id).copied()
+                    && self.type_declarations[&id].visibility != Visibility::Public
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        named.syntax.span.clone(),
+                        format!(
+                            "public representation references private type `{}`",
+                            named.name
+                        ),
+                    ));
+                }
+            }
+            Type::Product(product) => {
+                for element in &product.elements {
+                    self.validate_public_representation(&element.ty);
+                }
+            }
+            Type::Function(function) => {
+                self.validate_public_representation(&function.parameter);
+                self.validate_public_representation(&function.result);
+            }
+            Type::Application(application) => {
+                self.validate_public_representation(&application.callee);
+                self.validate_public_representation(&application.argument);
+            }
+            Type::Inferred(_) => {}
+        }
+    }
+
     fn lower_infix(&mut self, infix: &InfixExpression) -> Expression {
         let mut values = vec![infix.operands[0].clone()];
         let mut operators: Vec<(InfixOperator, Fixity)> = Vec::new();
@@ -1124,15 +1232,49 @@ impl NameResolver {
 
     fn declare_pattern(&mut self, pattern: &Pattern) {
         match pattern {
-            Pattern::Binding(binding) => self.declare_fresh_name(
-                &binding.name,
-                binding.syntax.id,
-                binding.syntax.span.clone(),
-            ),
+            Pattern::Binding(binding) => {
+                if let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied() {
+                    self.declare_symbol(
+                        &binding.name,
+                        binding.syntax.id,
+                        binding.syntax.span.clone(),
+                        symbol,
+                    );
+                } else {
+                    self.declare_fresh_name(
+                        &binding.name,
+                        binding.syntax.id,
+                        binding.syntax.span.clone(),
+                    );
+                }
+            }
             Pattern::Product(product) => {
                 for element in &product.elements {
                     self.declare_pattern(element);
                 }
+            }
+            Pattern::Nominal(pattern) => {
+                if let Some(id) = self.named_types.get(&pattern.syntax.id).copied() {
+                    let declaration = &self.type_declarations[&id];
+                    if declaration.kind != crate::TypeDeclarationKind::Distinct
+                        || declaration.underlying.is_none()
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            pattern.syntax.span.clone(),
+                            format!("`{}` is not a represented nominal type", pattern.name),
+                        ));
+                    } else if self.type_modules.get(&id).copied() != Some(self.current_module)
+                        && declaration.representation_visibility != Visibility::Public
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            pattern.syntax.span.clone(),
+                            format!("the representation of `{}` is private", pattern.name),
+                        ));
+                    } else {
+                        self.nominal_patterns.insert(pattern.syntax.id, id);
+                    }
+                }
+                self.declare_pattern(&pattern.argument);
             }
         }
     }

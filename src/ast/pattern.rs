@@ -4,6 +4,7 @@ use super::{ProductType, Syntax, Type, TypeElement};
 pub enum Pattern {
     Binding(BindingPattern),
     Product(ProductPattern),
+    Nominal(NominalPattern),
 }
 
 impl Pattern {
@@ -11,6 +12,7 @@ impl Pattern {
         match self {
             Self::Binding(pattern) => &pattern.syntax,
             Self::Product(pattern) => &pattern.syntax,
+            Self::Nominal(pattern) => &pattern.syntax,
         }
     }
 
@@ -25,6 +27,11 @@ impl Pattern {
                     variadic: false,
                 })
             }
+            Self::Nominal(pattern) => Type::Named(super::NamedType {
+                syntax: pattern.syntax.clone(),
+                namespace: pattern.namespace.clone(),
+                name: pattern.name.clone(),
+            }),
         }
     }
 
@@ -34,6 +41,7 @@ impl Pattern {
             name: match self {
                 Self::Binding(pattern) => Some(pattern.name.clone()),
                 Self::Product(_) => None,
+                Self::Nominal(_) => None,
             },
             ty: self.ty(),
         }
@@ -51,4 +59,12 @@ pub struct BindingPattern {
 pub struct ProductPattern {
     pub syntax: Syntax,
     pub elements: Vec<Pattern>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NominalPattern {
+    pub syntax: Syntax,
+    pub namespace: Option<String>,
+    pub name: String,
+    pub argument: Box<Pattern>,
 }

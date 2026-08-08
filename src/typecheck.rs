@@ -404,7 +404,14 @@ impl TypeChecker {
 
     fn seed_function_types(&mut self, module: &ResolvedModule) {
         for function in module.functions() {
-            let parameter = self.resolve_source_type(module, &function.pattern.ty());
+            let mut parameter = self.resolve_source_type(module, &function.pattern.ty());
+            if !parameter.is_concrete()
+                && let Some(annotation) = &function.binding_annotation
+                && let CheckedType::Function(annotation) =
+                    self.resolve_source_type(module, annotation)
+            {
+                parameter = *annotation.parameter;
+            }
             let result = function
                 .return_annotation
                 .as_ref()
@@ -491,8 +498,18 @@ impl TypeChecker {
     ) {
         match pattern {
             Pattern::Binding(binding) => {
+                let value_type = if matches!(binding.ty, Type::Inferred(_)) {
+                    value_type.clone()
+                } else {
+                    let declared = self.resolve_source_type(module, &binding.ty);
+                    self.require_compatible(
+                        value_type.clone(),
+                        declared,
+                        binding.syntax.span.clone(),
+                    )
+                };
                 if let Some(symbol) = module.symbol_for(binding.syntax.id) {
-                    self.symbol_types.insert(symbol, value_type.clone());
+                    self.symbol_types.insert(symbol, value_type);
                 }
             }
             Pattern::Product(product) if product.elements.len() == 1 => {
@@ -500,10 +517,44 @@ impl TypeChecker {
             }
             Pattern::Product(product) => {
                 let CheckedType::Product(product_type) = value_type else {
+                    if *value_type != CheckedType::Error {
+                        self.diagnostics.push(Diagnostic::new(
+                            product.syntax.span.clone(),
+                            format!("product pattern cannot match `{value_type}`"),
+                        ));
+                    }
                     return;
                 };
+                if product.elements.len() != product_type.elements.len() {
+                    self.diagnostics.push(Diagnostic::new(
+                        product.syntax.span.clone(),
+                        format!(
+                            "product pattern has {} elements but value has {}",
+                            product.elements.len(),
+                            product_type.elements.len()
+                        ),
+                    ));
+                    return;
+                }
                 for (pattern, element) in product.elements.iter().zip(&product_type.elements) {
                     self.bind_pattern_types(module, pattern, &element.value_type);
+                }
+            }
+            Pattern::Nominal(pattern) => {
+                let Some(expected_id) = module.type_for_pattern(pattern.syntax.id) else {
+                    return;
+                };
+                match value_type {
+                    CheckedType::Distinct {
+                        id, representation, ..
+                    } if *id == expected_id => {
+                        self.bind_pattern_types(module, &pattern.argument, representation);
+                    }
+                    CheckedType::Error => {}
+                    other => self.diagnostics.push(Diagnostic::new(
+                        pattern.syntax.span.clone(),
+                        format!("nominal pattern `{}` cannot match `{other}`", pattern.name),
+                    )),
                 }
             }
         }
@@ -533,6 +584,11 @@ impl TypeChecker {
         match statement {
             Statement::Binding(binding) => {
                 self.check_binding(module, binding);
+                CheckedType::empty_product()
+            }
+            Statement::PatternBinding(binding) => {
+                let value_type = self.check_expression(module, &binding.value);
+                self.bind_pattern_types(module, &binding.pattern, &value_type);
                 CheckedType::empty_product()
             }
             Statement::Expression(expression) => self.check_expression(module, expression),

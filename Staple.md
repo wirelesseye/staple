@@ -379,9 +379,10 @@ There is no distinction between a top-level function and an inline function or
 lambda. Both are function values and use the same syntax.
 
 Every function takes exactly one argument and matches it with a pattern.
-Patterns are recursive: a binding pattern introduces one name, while a product
-pattern matches the elements of a product. Product patterns may contain other
-product patterns.
+Patterns are recursive: a binding pattern introduces one name, a product
+pattern matches the elements of a product, and a nominal pattern exposes the
+single representation value of a distinct type when that representation is
+visible.
 
 `=>` introduces the body of the abstraction. `->`, when present, introduces an
 explicit result type. Without an explicit result type, stapler infers it from
@@ -427,6 +428,21 @@ Patterns may be nested:
 ```staple
 (x: I32, (y: I32, z: I32)) => x + y + z
 ```
+
+Nominal patterns use the generated constructor name followed by a nested
+pattern. They are irrefutable and add no runtime check or wrapper:
+
+```staple
+type UserId = I32
+def unwrap: UserId -> I32 = UserId value => value
+
+let user: UserId = UserId 42
+let UserId value = user
+```
+
+The same syntax works inside products and with qualified type names. A generic
+nominal pattern must receive its applied type from the value being destructured
+or a surrounding function annotation.
 
 A singleton product pattern is equivalent to its contained pattern, so
 `(value: T)` matches the same values as `value: T`.
@@ -649,9 +665,22 @@ declares a private constructor in its defining module:
 let user: UserId = UserId 42
 ```
 
-Construction is a zero-cost conversion into the nominal type. No unwrap
-operation is generated, and the constructor is not exported even when the type
-is public. Opaque declarations have no constructor.
+Construction and nominal-pattern destructuring are zero-cost conversions. No
+standalone unwrap operation is generated. With ordinary `pub type`, the type is
+public but its representation and constructor remain private to its defining
+module. Opaque declarations have no constructor.
+
+`pub(repr)` exposes the representation and generated constructor as part of the
+module interface:
+
+```staple
+pub(repr) type Box = T => (value: T)
+```
+
+Importers may construct `Box` values and use `Box pattern` to destructure them,
+including through namespace, selected, renamed, or glob imports. Every named
+type directly referenced by a public representation must also be public.
+`pub(repr)` is rejected on aliases and opaque declarations.
 
 Represented types, aliases, and explicitly opaque declarations may introduce
 compile-time parameters using the same binder syntax as generic functions:

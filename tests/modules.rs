@@ -1,5 +1,6 @@
 use std::fs;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inkwell::context::Context;
@@ -9,14 +10,19 @@ struct Fixture {
     root: PathBuf,
 }
 
+static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);
+
 impl Fixture {
     fn new() -> Self {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock should follow epoch")
             .as_nanos();
-        let root =
-            std::env::temp_dir().join(format!("stapler-modules-{}-{nonce}", std::process::id()));
+        let sequence = NEXT_FIXTURE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!(
+            "stapler-modules-{}-{nonce}-{sequence}",
+            std::process::id()
+        ));
         fs::create_dir_all(&root).expect("fixture directory should be created");
         Self { root }
     }
@@ -120,6 +126,96 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
         .compile()
         .expect_err("a public type must not export its constructor");
     assert!(error.contains("unknown name `UserId`"));
+}
+
+#[test]
+fn exports_constructors_and_destructors_for_public_representations() {
+    let fixture = Fixture::new();
+    fixture.write("boxes.sta", "pub(repr) type Box = T => (value: T)\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use boxes\n",
+            "let boxed: boxes.Box I32 = boxes.Box (value: 42)\n",
+            "let boxes.Box (value) = boxed\n",
+            "value\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("public representations should construct and destructure by namespace");
+
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use boxes.(Box)\n",
+            "let boxed: Box I32 = Box (value: 42)\n",
+            "let Box (value) = boxed\n",
+            "value\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("public representations should import through selection");
+
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use boxes.Box as Wrapped\n",
+            "let boxed: Wrapped I32 = Wrapped (value: 42)\n",
+            "let Wrapped (value) = boxed\n",
+            "value\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("public representations should import through renaming");
+
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use boxes.*\n",
+            "let boxed: Box I32 = Box (value: 42)\n",
+            "let Box (value) = boxed\n",
+            "value\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("public representations should import through a glob");
+}
+
+#[test]
+fn rejects_private_components_of_public_representations() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!("type Hidden = I32\n", "pub(repr) type Exposed = Hidden\n",),
+    );
+    let error = fixture
+        .compile()
+        .expect_err("public representations must not expose private component types");
+    assert!(error.contains("public representation references private type `Hidden`"));
+}
+
+#[test]
+fn rejects_destructuring_an_imported_private_representation() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "ids.sta",
+        concat!(
+            "pub type UserId = I32\n",
+            "pub def make: I32 -> UserId = UserId\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!("use ids.*\n", "let UserId value = make 42\n",),
+    );
+    let error = fixture
+        .compile()
+        .expect_err("ordinary public types keep their representations private");
+    assert!(error.contains("the representation of `UserId` is private"));
 }
 
 #[test]
