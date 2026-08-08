@@ -2,12 +2,16 @@ use crate::ast::*;
 use crate::lexer::lex;
 use std::sync::Arc;
 
-/// Parse a complete staple source file.
+/// Parses a complete Staple source file into a lossless syntax tree.
 pub fn parse(source: &str) -> Result<Module, ParseError> {
     let tokens = Arc::from(lex(source));
     Grammar::new(tokens, source.len(), 0, None).parse_source_file()
 }
 
+/// Parses a named source while assigning syntax IDs from a shared sequence.
+///
+/// On success, `next_syntax_id` is advanced past every ID assigned to the
+/// module. The source name is retained in the spans produced by the parser.
 pub(crate) fn parse_with_syntax_ids(
     source: &str,
     next_syntax_id: &mut usize,
@@ -35,6 +39,7 @@ struct Grammar {
 }
 
 impl Grammar {
+    /// Creates a grammar cursor over `tokens` with the given syntax metadata.
     fn new(
         tokens: Arc<[SyntaxToken]>,
         source_len: usize,
@@ -51,6 +56,7 @@ impl Grammar {
         }
     }
 
+    /// Parses all top-level items and returns the completed module.
     fn parse_source_file(mut self) -> Result<Module, ParseError> {
         let start = self.position;
         let mut items = Vec::new();
@@ -64,6 +70,7 @@ impl Grammar {
         })
     }
 
+    /// Parses one top-level declaration or statement.
     fn parse_item(&mut self) -> Result<Item, ParseError> {
         let previous = self.newline_terminates_expression;
         self.newline_terminates_expression = true;
@@ -92,10 +99,12 @@ impl Grammar {
         item
     }
 
+    /// Parses a private statement in a block expression.
     fn parse_statement(&mut self) -> Result<Statement, ParseError> {
         self.parse_statement_with_visibility(Visibility::Private, None)
     }
 
+    /// Parses a statement, applying `visibility` to declarations.
     fn parse_statement_with_visibility(
         &mut self,
         visibility: Visibility,
@@ -112,6 +121,7 @@ impl Grammar {
         }
     }
 
+    /// Parses a namespace, glob, selected, or renamed `use` declaration.
     fn parse_use_declaration(&mut self) -> Result<UseDeclaration, ParseError> {
         let start = self.position;
         self.expect(TokenKind::Use, "expected `use`")?;
@@ -170,6 +180,7 @@ impl Grammar {
         })
     }
 
+    /// Parses an `extern` block and each binding declared within it.
     fn parse_extern_block(
         &mut self,
         visibility: Visibility,
@@ -196,6 +207,7 @@ impl Grammar {
         })
     }
 
+    /// Parses a distinct or alias type declaration.
     fn parse_type_declaration(
         &mut self,
         visibility: Visibility,
@@ -221,6 +233,7 @@ impl Grammar {
         })
     }
 
+    /// Parses a `let` or `def` binding with optional type and value.
     fn parse_binding(
         &mut self,
         visibility: Visibility,
@@ -261,6 +274,10 @@ impl Grammar {
         })
     }
 
+    /// Parses an expression, including function expressions and binary operators.
+    ///
+    /// Function parsing is attempted first and rewound on failure so an ordinary
+    /// expression can begin with the same tokens as a parameter pattern.
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
         let checkpoint = self.position;
         let function_error = match self.parse_function_expression() {
@@ -275,6 +292,7 @@ impl Grammar {
         Ok(expression)
     }
 
+    /// Parses a function parameter pattern, optional result type, and body.
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
         let pattern = self.parse_pattern()?;
@@ -293,6 +311,7 @@ impl Grammar {
         })
     }
 
+    /// Parses either a binding pattern or a nested product pattern.
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         let start = self.position;
         if self.eat(TokenKind::LParen) {
@@ -315,6 +334,7 @@ impl Grammar {
         }
     }
 
+    /// Parses a named, type-annotated binding pattern.
     fn parse_binding_pattern(&mut self) -> Result<BindingPattern, ParseError> {
         let start = self.position;
         let name = self
@@ -329,6 +349,7 @@ impl Grammar {
         })
     }
 
+    /// Parses a type, treating function arrows as right-associative.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
         let parameter = self.parse_type_atom()?;
@@ -344,6 +365,7 @@ impl Grammar {
         }
     }
 
+    /// Parses a non-function type such as a primitive, pointer, product, or name.
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
         if self.eat(TokenKind::I32) {
@@ -421,6 +443,7 @@ impl Grammar {
         }))
     }
 
+    /// Parses a left-associative binary expression at or above a precedence.
     fn parse_binary_expression(
         &mut self,
         minimum_precedence: u8,
@@ -443,6 +466,7 @@ impl Grammar {
         Ok(left)
     }
 
+    /// Parses juxtaposition-based function calls.
     fn parse_call_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_access_expression()?;
@@ -457,6 +481,7 @@ impl Grammar {
         Ok(expression)
     }
 
+    /// Parses chained named or positional product access.
     fn parse_access_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_atom()?;
@@ -479,6 +504,7 @@ impl Grammar {
         Ok(expression)
     }
 
+    /// Parses a primary expression without call, access, or binary operators.
     fn parse_atom(&mut self) -> Result<Expression, ParseError> {
         match self.peek() {
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
@@ -511,6 +537,7 @@ impl Grammar {
         }
     }
 
+    /// Parses a brace-delimited sequence of statements.
     fn parse_block_expression(&mut self) -> Result<BlockExpression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LBrace, "expected `{`")?;
@@ -528,6 +555,7 @@ impl Grammar {
         })
     }
 
+    /// Parses a parenthesized product expression with optional element names.
     fn parse_product_expression(&mut self) -> Result<ProductExpression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LParen, "expected `(`")?;
@@ -562,6 +590,7 @@ impl Grammar {
         })
     }
 
+    /// Returns whether the next token can begin an atom in the current context.
     fn starts_atom(&self) -> bool {
         if self.newline_terminates_expression && self.has_newline_before_next_token() {
             return false;
@@ -578,6 +607,7 @@ impl Grammar {
         )
     }
 
+    /// Returns the precedence, token kind, and AST operator at the cursor.
     fn binary_operator(&self) -> Option<(u8, TokenKind, BinaryOperator)> {
         if self.newline_terminates_expression && self.has_newline_before_next_token() {
             return None;
@@ -591,10 +621,12 @@ impl Grammar {
         }
     }
 
+    /// Returns the next non-trivia token kind without consuming it.
     fn peek(&self) -> Option<TokenKind> {
         self.peek_n(0)
     }
 
+    /// Returns the `n`th non-trivia token kind without consuming it.
     fn peek_n(&self, n: usize) -> Option<TokenKind> {
         let mut position = self.position;
         for index in 0..=n {
@@ -608,10 +640,12 @@ impl Grammar {
         None
     }
 
+    /// Returns whether the next non-trivia token has `kind`.
     fn at(&self, kind: TokenKind) -> bool {
         self.peek() == Some(kind)
     }
 
+    /// Consumes the next non-trivia token when it has `kind`.
     fn eat(&mut self, kind: TokenKind) -> bool {
         if self.at(kind) {
             self.bump_token();
@@ -621,6 +655,7 @@ impl Grammar {
         }
     }
 
+    /// Consumes a required token or reports `message` at the cursor.
     fn expect(
         &mut self,
         kind: TokenKind,
@@ -633,6 +668,7 @@ impl Grammar {
         }
     }
 
+    /// Consumes and returns the next non-trivia token.
     fn bump_token(&mut self) -> Option<SyntaxToken> {
         self.position = self.next_non_trivia(self.position);
         let token = self.tokens.get(self.position)?.clone();
@@ -640,6 +676,7 @@ impl Grammar {
         Some(token)
     }
 
+    /// Advances an arbitrary token index past trivia.
     fn next_non_trivia(&self, mut position: usize) -> usize {
         while self
             .tokens
@@ -651,12 +688,14 @@ impl Grammar {
         position
     }
 
+    /// Returns whether skipped trivia before the next token contains a newline.
     fn has_newline_before_next_token(&self) -> bool {
         self.tokens[self.position..self.next_non_trivia(self.position)]
             .iter()
             .any(|token| token.kind == TokenKind::Newline)
     }
 
+    /// Builds syntax metadata for tokens consumed since `start`.
     fn syntax(&mut self, start: usize) -> Syntax {
         let tokens = &self.tokens[start..self.position];
         let span_start = tokens
@@ -676,11 +715,13 @@ impl Grammar {
         }
     }
 
+    /// Finds the token index containing or following `byte_offset`.
     fn token_index_at(&self, byte_offset: usize) -> usize {
         self.tokens
             .partition_point(|token| token.span.end <= byte_offset)
     }
 
+    /// Creates a parse error at the next non-trivia token.
     fn error(&self, message: impl Into<String>) -> ParseError {
         let position = self.next_non_trivia(self.position);
         ParseError {
