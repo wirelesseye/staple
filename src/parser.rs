@@ -1009,7 +1009,6 @@ fn is_symbol_kind(kind: TokenKind) -> bool {
         kind,
         TokenKind::Operator
             | TokenKind::Colon
-            | TokenKind::Dot
             | TokenKind::Equals
             | TokenKind::Star
             | TokenKind::Plus

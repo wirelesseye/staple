@@ -219,6 +219,14 @@ fn parses_inline_fixity_and_operator_call_forms() {
 }
 
 #[test]
+fn rejects_dot_as_a_binding_name() {
+    let error = parse("def .: I32 -> I32 = x => x\n")
+        .expect_err("dot should remain punctuation rather than a binding name");
+
+    assert_eq!(error.message, "expected binding name");
+}
+
+#[test]
 fn rejects_block_local_fixity_modifiers() {
     let error = parse("def outer = () => { def infixl 6 + = x: I32 => x }\n")
         .expect_err("block fixity should be rejected");
