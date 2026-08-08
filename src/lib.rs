@@ -1,13 +1,11 @@
-//! A small, lossless parser for staple.
-//!
-//! The lexer deliberately emits trivia tokens. Every AST node keeps the exact
-//! token slice from which it was parsed, so [`SyntaxNode::text`] is a lossless
-//! reconstruction of its source.
-
 mod ast;
+mod codegen;
 mod combinator;
 mod lexer;
 mod parser;
+mod normalise;
 
 pub use ast::*;
+pub use normalise::*;
+pub use codegen::*;
 pub use parser::parse;

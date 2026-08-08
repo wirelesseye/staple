@@ -56,6 +56,8 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
                 "type" => TokenKind::Type,
                 "alias" => TokenKind::Alias,
                 "const" => TokenKind::Const,
+                "i32" => TokenKind::I32,
+                "bool" => TokenKind::Bool,
                 "_" => TokenKind::Underscore,
                 _ => TokenKind::Identifier,
             };

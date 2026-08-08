@@ -30,12 +30,35 @@ pub enum TokenKind {
     Plus,
     Minus,
     Slash,
+    I32,
+    Bool,
     Unknown,
 }
 
 impl TokenKind {
     pub fn is_trivia(self) -> bool {
         matches!(self, Self::Whitespace | Self::Newline | Self::LineComment)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Span {
+    User(Range<usize>),
+    Compiler,
+}
+
+impl Span {
+    pub fn to_range(&self) -> Range<usize> {
+        match self {
+            Span::User(range) => range.clone(),
+            Span::Compiler => unreachable!(),
+        }
+    }
+}
+
+impl From<Range<usize>> for Span {
+    fn from(value: Range<usize>) -> Self {
+        Self::User(value.into())
     }
 }
 
@@ -49,7 +72,7 @@ pub struct SyntaxToken {
 /// The exact source covered by an AST node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Syntax {
-    pub span: Range<usize>,
+    pub span: Span,
     pub tokens: Vec<SyntaxToken>,
 }
 
@@ -60,15 +83,24 @@ impl Syntax {
             .map(|token| token.text.as_str())
             .collect()
     }
+
+    pub fn compiler() -> Self {
+        Self {
+            span: Span::Compiler,
+            tokens: vec![],
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SourceFile {
+pub struct Module {
     pub syntax: Syntax,
     pub items: Vec<Item>,
+    pub fn_decls: Vec<FunctionDefinition>,
+    pub top_stmts: Vec<Statement>,
 }
 
-impl SourceFile {
+impl Module {
     pub fn text(&self) -> String {
         self.syntax.text()
     }
@@ -78,14 +110,13 @@ impl SourceFile {
 pub enum Item {
     ExternBlock(ExternBlock),
     TypeDeclaration(TypeDeclaration),
-    Binding(Binding),
-    Statement(ExpressionStatement),
+    Statement(Statement),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpressionStatement {
-    pub syntax: Syntax,
-    pub expression: Expression,
+pub enum Statement {
+    Binding(Binding),
+    Expression(Expression),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -123,26 +154,41 @@ pub struct Binding {
     pub name: String,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
+    pub symbol_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
-    Inferred(Syntax),
+    Inferred(InferredType),
     Named(NamedType),
     Pointer(PointerType),
     List(ListType),
     Function(FunctionType),
-    Variadic(Syntax),
+    Primitive(PrimitiveType),
 }
 
 impl Type {
     pub fn syntax(&self) -> &Syntax {
         match self {
-            Self::Inferred(syntax) | Self::Variadic(syntax) => syntax,
+            Self::Inferred(ty) => &ty.syntax,
             Self::Named(ty) => &ty.syntax,
             Self::Pointer(ty) => &ty.syntax,
             Self::List(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
+            Self::Primitive(ty) => ty.syntax(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InferredType {
+    pub syntax: Syntax,
+}
+
+impl InferredType {
+    pub fn new() -> Self {
+        Self {
+            syntax: Syntax::compiler(),
         }
     }
 }
@@ -151,6 +197,7 @@ impl Type {
 pub struct NamedType {
     pub syntax: Syntax,
     pub name: String,
+    pub symbol_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -164,6 +211,7 @@ pub struct PointerType {
 pub struct ListType {
     pub syntax: Syntax,
     pub elements: Vec<TypeElement>,
+    pub variadic: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -178,6 +226,21 @@ pub struct FunctionType {
     pub syntax: Syntax,
     pub parameter: Box<Type>,
     pub result: Box<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrimitiveType {
+    I32(Syntax),
+    Bool(Syntax),
+}
+
+impl PrimitiveType {
+    pub fn syntax(&self) -> &Syntax {
+        match self {
+            Self::I32(syntax) => syntax,
+            Self::Bool(syntax) => syntax,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,6 +270,10 @@ impl Expression {
             Self::Integer(expression) => &expression.syntax,
         }
     }
+
+    pub fn ty(&self) -> Option<Type> {
+        None
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -214,6 +281,7 @@ pub struct FunctionExpression {
     pub syntax: Syntax,
     pub parameter: Parameter,
     pub body: Box<Expression>,
+    pub fn_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,11 +290,41 @@ pub enum Parameter {
     List(ListParameter),
 }
 
+impl Parameter {
+    pub fn ty(&self) -> Type {
+        match self {
+            Parameter::Value(value_parameter) => value_parameter.ty.clone(),
+            Parameter::List(list_parameter) => {
+                let elements = list_parameter
+                    .elements
+                    .iter()
+                    .map(|param| param.type_element())
+                    .collect();
+                Type::List(ListType {
+                    syntax: list_parameter.syntax.clone(),
+                    elements,
+                    variadic: false,
+                })
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ValueParameter {
     pub syntax: Syntax,
     pub name: String,
     pub ty: Type,
+}
+
+impl ValueParameter {
+    pub fn type_element(&self) -> TypeElement {
+        TypeElement {
+            syntax: self.syntax.clone(),
+            name: Some(self.name.clone()),
+            ty: self.ty.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -238,19 +336,24 @@ pub struct ListParameter {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockExpression {
     pub syntax: Syntax,
-    pub items: Vec<BlockItem>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum BlockItem {
-    Binding(Binding),
-    Expression(Expression),
+    pub statements: Vec<Statement>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ListExpression {
     pub syntax: Syntax,
     pub elements: Vec<ListElement>,
+    pub ty: Option<ListType>,
+}
+
+impl ListExpression {
+    pub fn empty() -> Self {
+        Self {
+            syntax: Syntax::compiler(),
+            elements: vec![],
+            ty: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -300,6 +403,7 @@ pub struct BinaryExpression {
 pub struct NameExpression {
     pub syntax: Syntax,
     pub name: String,
+    pub symbol_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +418,13 @@ pub struct IntegerExpression {
     pub syntax: Syntax,
     /// The literal exactly as written.
     pub literal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionDefinition {
+    pub parameter: Parameter,
+    pub body: Box<Expression>,
+    pub ty: FunctionType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

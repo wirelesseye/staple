@@ -2,7 +2,7 @@ use crate::ast::*;
 use crate::lexer::lex;
 
 /// Parse a complete staple source file.
-pub fn parse(source: &str) -> Result<SourceFile, ParseError> {
+pub fn parse(source: &str) -> Result<Module, ParseError> {
     let tokens = lex(source);
     Grammar::new(tokens, source.len()).parse_source_file()
 }
@@ -24,16 +24,18 @@ impl Grammar {
         }
     }
 
-    fn parse_source_file(mut self) -> Result<SourceFile, ParseError> {
+    fn parse_source_file(mut self) -> Result<Module, ParseError> {
         let start = self.position;
         let mut items = Vec::new();
         while self.peek().is_some() {
             items.push(self.parse_item()?);
         }
         self.position = self.tokens.len();
-        Ok(SourceFile {
+        Ok(Module {
             syntax: self.syntax(start),
             items,
+            fn_decls: Vec::new(),
+            top_stmts: Vec::new(),
         })
     }
 
@@ -43,20 +45,17 @@ impl Grammar {
         let item = match self.peek() {
             Some(TokenKind::Extern) => self.parse_extern_block().map(Item::ExternBlock),
             Some(TokenKind::Type) => self.parse_type_declaration().map(Item::TypeDeclaration),
-            Some(TokenKind::Let | TokenKind::Def) => self.parse_binding().map(Item::Binding),
-            _ => self.parse_expression_statement().map(Item::Statement),
+            _ => self.parse_statement().map(Item::Statement),
         };
         self.newline_terminates_expression = previous;
         item
     }
 
-    fn parse_expression_statement(&mut self) -> Result<ExpressionStatement, ParseError> {
-        let start = self.position;
-        let expression = self.parse_expression()?;
-        Ok(ExpressionStatement {
-            syntax: self.syntax(start),
-            expression,
-        })
+    fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+        match self.peek() {
+            Some(TokenKind::Let | TokenKind::Def) => self.parse_binding().map(Statement::Binding),
+            _ => self.parse_expression().map(Statement::Expression),
+        }
     }
 
     fn parse_extern_block(&mut self) -> Result<ExternBlock, ParseError> {
@@ -134,6 +133,7 @@ impl Grammar {
             name,
             annotation,
             value,
+            symbol_id: None,
         })
     }
 
@@ -155,6 +155,7 @@ impl Grammar {
             syntax: self.syntax(start),
             parameter,
             body,
+            fn_id: None,
         })
     }
 
@@ -211,8 +212,16 @@ impl Grammar {
 
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
+        if self.eat(TokenKind::I32) {
+            return Ok(Type::Primitive(PrimitiveType::I32(self.syntax(start))));
+        }
+        if self.eat(TokenKind::Bool) {
+            return Ok(Type::Primitive(PrimitiveType::Bool(self.syntax(start))));
+        }
         if self.eat(TokenKind::Underscore) {
-            return Ok(Type::Inferred(self.syntax(start)));
+            return Ok(Type::Inferred(InferredType {
+                syntax: self.syntax(start),
+            }));
         }
         if self.eat(TokenKind::Star) {
             let is_const = self.eat(TokenKind::Const);
@@ -225,6 +234,7 @@ impl Grammar {
         }
         if self.eat(TokenKind::LParen) {
             let mut elements = Vec::new();
+            let mut variadic = false;
             if !self.at(TokenKind::RParen) {
                 loop {
                     let element_start = self.position;
@@ -237,16 +247,18 @@ impl Grammar {
                     } else {
                         None
                     };
-                    let ty = if self.eat(TokenKind::Ellipsis) {
-                        Type::Variadic(self.syntax(element_start))
+
+                    if self.eat(TokenKind::Ellipsis) {
+                        variadic = true;
                     } else {
-                        self.parse_type()?
-                    };
-                    elements.push(TypeElement {
-                        syntax: self.syntax(element_start),
-                        name,
-                        ty,
-                    });
+                        let ty = self.parse_type()?;
+                        elements.push(TypeElement {
+                            syntax: self.syntax(element_start),
+                            name,
+                            ty,
+                        });
+                    }
+
                     if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                         break;
                     }
@@ -256,12 +268,14 @@ impl Grammar {
             return Ok(Type::List(ListType {
                 syntax: self.syntax(start),
                 elements,
+                variadic,
             }));
         }
         let name = self.expect(TokenKind::Identifier, "expected type")?.text;
         Ok(Type::Named(NamedType {
             syntax: self.syntax(start),
             name,
+            symbol_id: None,
         }))
     }
 
@@ -274,7 +288,7 @@ impl Grammar {
             if precedence < minimum_precedence {
                 break;
             }
-            let start = self.token_index_at(left.syntax().span.start);
+            let start = self.token_index_at(left.syntax().span.to_range().start);
             self.expect(token_kind, "expected binary operator")?;
             let right = self.parse_binary_expression(precedence + 1)?;
             left = Expression::Binary(BinaryExpression {
@@ -333,6 +347,7 @@ impl Grammar {
                 Ok(Expression::Name(NameExpression {
                     syntax: self.syntax(start),
                     name,
+                    symbol_id: None,
                 }))
             }
             Some(TokenKind::String) => {
@@ -358,21 +373,17 @@ impl Grammar {
     fn parse_block_expression(&mut self) -> Result<BlockExpression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LBrace, "expected `{`")?;
-        let mut items = Vec::new();
+        let mut statements = Vec::new();
         while !self.at(TokenKind::RBrace) {
             if self.peek().is_none() {
                 return Err(self.error("unterminated block expression"));
             }
-            if matches!(self.peek(), Some(TokenKind::Let | TokenKind::Def)) {
-                items.push(BlockItem::Binding(self.parse_binding()?));
-            } else {
-                items.push(BlockItem::Expression(self.parse_expression()?));
-            }
+            statements.push(self.parse_statement()?);
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
         Ok(BlockExpression {
             syntax: self.syntax(start),
-            items,
+            statements,
         })
     }
 
@@ -407,6 +418,7 @@ impl Grammar {
         Ok(ListExpression {
             syntax: self.syntax(start),
             elements,
+            ty: None,
         })
     }
 
@@ -512,7 +524,7 @@ impl Grammar {
             .map_or(self.source_len, |token| token.span.start);
         let span_end = tokens.last().map_or(span_start, |token| token.span.end);
         Syntax {
-            span: span_start..span_end,
+            span: (span_start..span_end).into(),
             tokens,
         }
     }

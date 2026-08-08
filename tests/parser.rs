@@ -1,5 +1,5 @@
 use stapler::{
-    Accessor, BinaryOperator, BlockItem, Expression, Item, Parameter, TokenKind, Type,
+    Accessor, BinaryOperator, Expression, Item, Parameter, Statement, TokenKind, Type,
     TypeDeclarationKind, parse,
 };
 
@@ -13,8 +13,8 @@ fn parses_hello_world_losslessly() {
     assert!(matches!(root.items[0], Item::ExternBlock(_)));
     assert!(matches!(
         root.items[1],
-        Item::Statement(ref statement)
-            if matches!(statement.expression, Expression::Call(_))
+        Item::Statement(Statement::Expression(ref expression))
+            if matches!(expression, Expression::Call(_))
     ));
 }
 
@@ -23,7 +23,7 @@ fn parses_list_parameter_and_expression_body() {
     let source = "def add: _ -> i32 = (a: i32, b: i32) -> a + b\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(binding) = &root.items[0] else {
+    let Item::Statement(Statement::Binding(binding)) = &root.items[0] else {
         panic!("expected binding");
     };
     let Expression::Function(function) = binding.value.as_ref().expect("function value") else {
@@ -41,7 +41,7 @@ fn parses_single_parameter_and_application() {
     let source = "def println: _ -> i32 = s: string -> printf (\"%s\\n\", s)\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(binding) = &root.items[0] else {
+    let Item::Statement(Statement::Binding(binding)) = &root.items[0] else {
         panic!("expected binding");
     };
     let Expression::Function(function) = binding.value.as_ref().expect("function value") else {
@@ -69,19 +69,6 @@ fn comments_and_crlf_are_preserved() {
 }
 
 #[test]
-fn arrow_is_always_followed_by_the_function_body() {
-    let source = "def main = () -> i32 { 0 }\n";
-    let root = parse(source).expect("this is a function whose body calls `i32`");
-    let Item::Binding(binding) = &root.items[0] else {
-        panic!("expected binding");
-    };
-    let Expression::Function(function) = binding.value.as_ref().expect("function value") else {
-        panic!("expected function");
-    };
-    assert!(matches!(*function.body, Expression::Call(_)));
-}
-
-#[test]
 fn parses_named_list_types_values_and_access() {
     let source = concat!(
         "let args: (name: string, int)\n",
@@ -93,7 +80,7 @@ fn parses_named_list_types_values_and_access() {
     let root = parse(source).expect("named list syntax should parse");
 
     assert_eq!(root.text(), source);
-    let Item::Binding(args) = &root.items[0] else {
+    let Item::Statement(Statement::Binding(args)) = &root.items[0] else {
         panic!("expected args binding");
     };
     let Type::List(args_type) = args.annotation.as_ref().expect("args type") else {
@@ -108,7 +95,7 @@ fn parses_named_list_types_values_and_access() {
             if declaration.kind == TypeDeclarationKind::Distinct
     ));
 
-    let Item::Binding(value) = &root.items[2] else {
+    let Item::Statement(Statement::Binding(value)) = &root.items[2] else {
         panic!("expected value binding");
     };
     let Expression::List(value) = value.value.as_ref().expect("list value") else {
@@ -116,7 +103,7 @@ fn parses_named_list_types_values_and_access() {
     };
     assert_eq!(value.elements[0].name.as_deref(), Some("name"));
 
-    let Item::Binding(by_name) = &root.items[3] else {
+    let Item::Statement(Statement::Binding(by_name)) = &root.items[3] else {
         panic!("expected name access binding");
     };
     assert!(matches!(
@@ -124,7 +111,7 @@ fn parses_named_list_types_values_and_access() {
         Some(Expression::Access(ref access)) if access.accessor == Accessor::Name("name".into())
     ));
 
-    let Item::Binding(by_index) = &root.items[4] else {
+    let Item::Statement(Statement::Binding(by_index)) = &root.items[4] else {
         panic!("expected index access binding");
     };
     assert!(matches!(
@@ -137,7 +124,7 @@ fn parses_named_list_types_values_and_access() {
 fn block_items_are_typed() {
     let source = "def answer = () -> { let x = 40 }\n";
     let root = parse(source).expect("block should parse");
-    let Item::Binding(binding) = &root.items[0] else {
+    let Item::Statement(Statement::Binding(binding)) = &root.items[0] else {
         panic!("expected binding");
     };
     let Some(Expression::Function(function)) = &binding.value else {
@@ -146,7 +133,7 @@ fn block_items_are_typed() {
     let Expression::Block(block) = function.body.as_ref() else {
         panic!("expected block");
     };
-    assert!(matches!(block.items[0], BlockItem::Binding(_)));
+    assert!(matches!(block.statements[0], Statement::Binding(_)));
 }
 
 #[test]
@@ -156,7 +143,10 @@ fn parses_multiple_top_level_statements() {
 
     assert_eq!(root.text(), source);
     assert_eq!(root.items.len(), 3);
-    assert!(matches!(root.items[0], Item::Binding(_)));
+    assert!(matches!(
+        root.items[0],
+        Item::Statement(Statement::Binding(_))
+    ));
     assert!(matches!(root.items[1], Item::Statement(_)));
     assert!(matches!(root.items[2], Item::Statement(_)));
 }
