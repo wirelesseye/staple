@@ -218,8 +218,18 @@ impl Grammar {
         let name = self
             .expect(TokenKind::Identifier, "expected type name")?
             .text;
-        self.expect(TokenKind::Equals, "expected `=` after type name")?;
-        let underlying = self.parse_type()?;
+        let underlying = if self.eat(TokenKind::Equals) {
+            Some(self.parse_type()?)
+        } else if kind == TypeDeclarationKind::Alias {
+            return Err(self.error("expected `=` after type alias name"));
+        } else {
+            None
+        };
+        let kind = if underlying.is_none() {
+            TypeDeclarationKind::Opaque
+        } else {
+            kind
+        };
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
             visibility,
@@ -395,9 +405,6 @@ impl Grammar {
     /// Parses a non-function type such as a primitive, pointer, product, or name.
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
-        if self.eat(TokenKind::I32) {
-            return Ok(Type::Primitive(PrimitiveType::I32(self.syntax(start))));
-        }
         if self.eat(TokenKind::Bool) {
             return Ok(Type::Primitive(PrimitiveType::Bool(self.syntax(start))));
         }
@@ -918,8 +925,7 @@ fn is_symbol_kind(kind: TokenKind) -> bool {
 fn is_type_atom_start(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::I32
-            | TokenKind::Bool
+        TokenKind::Bool
             | TokenKind::Underscore
             | TokenKind::Star
             | TokenKind::LParen

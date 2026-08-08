@@ -17,7 +17,7 @@ fn parses_use_declarations_and_public_items_losslessly() {
         "use path.to.another_module.*\n",
         "use path.to.another_module.(func, MyType)\n",
         "use path.to.another_module.func as my_func\n",
-        "pub type alias PublicType = i32\n",
+        "pub type alias PublicType = I32\n",
         "pub def public_value = 1\n",
     );
     let root = parse(source).expect("module syntax should parse");
@@ -43,7 +43,7 @@ fn parses_use_declarations_and_public_items_losslessly() {
         declaration
             .syntax
             .text()
-            .ends_with("pub type alias PublicType = i32")
+            .ends_with("pub type alias PublicType = I32")
     );
     let Statement::Binding(binding) = statement(&root.items[5]) else {
         panic!("expected binding")
@@ -66,6 +66,17 @@ fn parses_namespace_qualified_types() {
 }
 
 #[test]
+fn parses_opaque_type_declarations() {
+    let root = parse("pub type I32\n").expect("opaque type should parse");
+    assert!(matches!(
+        root.items[0],
+        Item::TypeDeclaration(ref declaration)
+            if declaration.kind == TypeDeclarationKind::Opaque
+                && declaration.underlying.is_none()
+    ));
+}
+
+#[test]
 fn parses_hello_world_losslessly() {
     let source = include_str!("../examples/hello_world.sta");
     let root = parse(source).expect("hello_world should parse");
@@ -82,7 +93,7 @@ fn parses_hello_world_losslessly() {
 
 #[test]
 fn parses_product_parameter_and_expression_body() {
-    let source = "def add: _ -> i32 = (a: i32, b: i32) => a + b\n";
+    let source = "def add: _ -> I32 = (a: I32, b: I32) => a + b\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
     let Statement::Binding(binding) = statement(&root.items[0]) else {
@@ -103,7 +114,7 @@ fn parses_product_parameter_and_expression_body() {
 
 #[test]
 fn parses_function_result_annotation_before_body_arrow() {
-    let source = "let add = (a: i32, b: i32) -> i32 => a + b\n";
+    let source = "let add = (a: I32, b: I32) -> I32 => a + b\n";
     let root = parse(source).expect("function should parse");
     let Statement::Binding(binding) = statement(&root.items[0]) else {
         panic!("expected binding");
@@ -114,14 +125,14 @@ fn parses_function_result_annotation_before_body_arrow() {
 
     assert!(matches!(
         function.return_type,
-        Some(Type::Primitive(stapler::PrimitiveType::I32(_)))
+        Some(Type::Named(ref named)) if named.name == "I32"
     ));
     assert_eq!(root.text(), source);
 }
 
 #[test]
 fn parses_contextually_typed_curried_parameters() {
-    let source = "def add: i32 -> i32 -> i32 = a => b => a + b\n";
+    let source = "def add: I32 -> I32 -> I32 = a => b => a + b\n";
     let root = parse(source).expect("curried function should parse");
     let Statement::Binding(binding) = statement(&root.items[0]) else {
         panic!("expected binding");
@@ -138,8 +149,8 @@ fn parses_contextually_typed_curried_parameters() {
 #[test]
 fn parses_inline_fixity_and_operator_call_forms() {
     let source = concat!(
-        "def infixl 6 +: i32 -> i32 -> i32 = x => y => x\n",
-        "def infixr 5 **: i32 -> i32 -> i32 = x => y => y\n",
+        "def infixl 6 +: I32 -> I32 -> I32 = x => y => x\n",
+        "def infixr 5 **: I32 -> I32 -> I32 = x => y => y\n",
         "1 + 2 ** 3\n",
         "1 `combine` 2\n",
         "(+) 1 2\n",
@@ -179,7 +190,7 @@ fn parses_inline_fixity_and_operator_call_forms() {
 
 #[test]
 fn rejects_block_local_fixity_modifiers() {
-    let error = parse("def outer = () => { def infixl 6 + = x: i32 => x }\n")
+    let error = parse("def outer = () => { def infixl 6 + = x: I32 => x }\n")
         .expect_err("block fixity should be rejected");
     assert!(error.message.contains("module level"));
 }
@@ -204,7 +215,7 @@ fn parse_errors_report_one_based_line_and_character_column() {
 
 #[test]
 fn parses_single_parameter_and_application() {
-    let source = "def println: _ -> i32 = (s: string) => printf (\"%s\\n\", s)\n";
+    let source = "def println: _ -> I32 = (s: string) => printf (\"%s\\n\", s)\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
     let Statement::Binding(binding) = statement(&root.items[0]) else {
@@ -229,7 +240,7 @@ fn parses_single_parameter_and_application() {
 
 #[test]
 fn parses_nested_product_patterns_losslessly() {
-    let source = "let first = (x: i32, (y: i32, z: i32)) => x + y\n";
+    let source = "let first = (x: I32, (y: I32, z: I32)) => x + y\n";
     let root = parse(source).expect("nested product pattern should parse");
     let Statement::Binding(binding) = statement(&root.items[0]) else {
         panic!("expected binding");

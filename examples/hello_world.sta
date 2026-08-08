@@ -1,8 +1,8 @@
 extern "c" {
-    let printf: (*const c_char, ...) -> i32
+    let printf: (*const c_char, ...) -> I32
 }
 
-def infixl 1 |>: i32 -> i32 -> i32 = left => right => right
+def infixl 1 |>: I32 -> I32 -> I32 = left => right => right
 def choose_right = (|>)
 
 printf ("hello, world!\n")

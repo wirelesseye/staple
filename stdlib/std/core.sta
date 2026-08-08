@@ -1,0 +1,13 @@
+pub type I32
+
+extern "staple-intrinsic" {
+    let __i32_add: (I32, I32) -> I32
+    let __i32_subtract: (I32, I32) -> I32
+    let __i32_multiply: (I32, I32) -> I32
+    let __i32_divide: (I32, I32) -> I32
+}
+
+pub def infixl 6 +: I32 -> I32 -> I32 = left => right => __i32_add (left, right)
+pub def infixl 6 -: I32 -> I32 -> I32 = left => right => __i32_subtract (left, right)
+pub def infixl 7 *: I32 -> I32 -> I32 = left => right => __i32_multiply (left, right)
+pub def infixl 7 /: I32 -> I32 -> I32 = left => right => __i32_divide (left, right)

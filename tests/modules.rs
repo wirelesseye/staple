@@ -30,7 +30,9 @@ impl Fixture {
     }
 
     fn compile(&self) -> Result<String, String> {
-        let program = ProgramLoader::new().load_path(&self.root.join("main.sta"))?;
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_path(&self.root.join("main.sta"))?;
         let resolved = NameResolver::new()
             .resolve_program(program)
             .map_err(format_diagnostics)?;
@@ -64,8 +66,8 @@ fn imports_public_values_and_types_through_all_use_forms() {
     fixture.write(
         "math.sta",
         concat!(
-            "pub type alias Number = i32\n",
-            "pub def add: (i32, i32) -> i32 = (a: i32, b: i32) => a\n",
+            "pub type alias Number = I32\n",
+            "pub def add: (I32, I32) -> I32 = (a: I32, b: I32) => a\n",
             "pub let forty = 40\n",
             "let hidden = 2\n",
         ),
@@ -95,14 +97,14 @@ fn resolves_mutually_recursive_module_namespaces() {
         "ma.sta",
         concat!(
             "use mb\n",
-            "pub def a: (i32) -> i32 = (n: i32) => mb.b (n)\n",
+            "pub def a: (I32) -> I32 = (n: I32) => mb.b (n)\n",
         ),
     );
     fixture.write(
         "mb.sta",
         concat!(
             "use ma\n",
-            "pub def b: (i32) -> i32 = (n: i32) => ma.a (n)\n",
+            "pub def b: (I32) -> I32 = (n: I32) => ma.a (n)\n",
         ),
     );
 
@@ -174,11 +176,25 @@ fn imports_public_extern_bindings() {
     fixture.write("main.sta", "use ffi.(puts)\nputs (\"hello\")\n");
     fixture.write(
         "ffi.sta",
-        "pub extern \"c\" { let puts: (*const c_char) -> i32 }\n",
+        "pub extern \"c\" { let puts: (*const c_char) -> I32 }\n",
     );
 
     let llvm = fixture.compile().expect("public extern should import");
     assert!(llvm.contains("declare i32 @puts"));
+}
+
+#[test]
+fn rejects_user_declarations_with_the_intrinsic_abi() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        "extern \"staple-intrinsic\" { let fake: (I32, I32) -> I32 }\n",
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("the intrinsic ABI must be reserved");
+    assert!(error.contains("reserved for the standard library"));
 }
 
 #[test]
@@ -187,8 +203,8 @@ fn imports_operator_values_and_their_fixities() {
     fixture.write(
         "math.sta",
         concat!(
-            "pub def infixl 6 +: i32 -> i32 -> i32 = x => y => x\n",
-            "pub def infixr 5 **: i32 -> i32 -> i32 = x => y => y\n",
+            "pub def infixl 6 +: I32 -> I32 -> I32 = x => y => x\n",
+            "pub def infixr 5 **: I32 -> I32 -> I32 = x => y => y\n",
         ),
     );
     fixture.write(
@@ -218,7 +234,7 @@ fn loads_an_imported_top_level_global_from_a_function() {
         "main.sta",
         concat!(
             "use values.*\n",
-            "def get: () -> i32 = () => value\n",
+            "def get: () -> I32 = () => value\n",
             "get ()\n",
         ),
     );

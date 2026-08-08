@@ -16,6 +16,19 @@ pub struct FunctionId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeId(pub usize);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinType {
+    I32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntrinsicFunction {
+    I32Add,
+    I32Subtract,
+    I32Multiply,
+    I32Divide,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedFunction {
     pub id: FunctionId,
@@ -39,6 +52,8 @@ pub struct ResolvedModule {
     type_names: HashMap<TypeId, String>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     lowered_infix: HashMap<SyntaxId, Expression>,
+    builtin_types: HashMap<TypeId, BuiltinType>,
+    intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
 }
 
 impl ResolvedModule {
@@ -81,6 +96,18 @@ impl ResolvedModule {
     pub fn lowered_infix(&self, syntax_id: SyntaxId) -> Option<&Expression> {
         self.lowered_infix.get(&syntax_id)
     }
+
+    pub fn builtin_type(&self, id: TypeId) -> Option<BuiltinType> {
+        self.builtin_types.get(&id).copied()
+    }
+
+    pub fn intrinsic_function(&self, symbol: SymbolId) -> Option<IntrinsicFunction> {
+        self.intrinsic_functions.get(&symbol).copied()
+    }
+
+    pub fn intrinsic_functions(&self) -> &HashMap<SymbolId, IntrinsicFunction> {
+        &self.intrinsic_functions
+    }
 }
 
 #[derive(Default)]
@@ -96,6 +123,9 @@ pub struct NameResolver {
     namespaces: HashMap<String, ModuleId>,
     imported_types: HashMap<String, TypeId>,
     imported_fixities: HashMap<String, Fixity>,
+    prelude_values: HashMap<String, SymbolId>,
+    prelude_types: HashMap<String, TypeId>,
+    prelude_fixities: HashMap<String, Fixity>,
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
@@ -104,6 +134,8 @@ pub struct NameResolver {
     function_stack: Vec<FunctionId>,
     declared_fixities: Vec<HashMap<String, Fixity>>,
     lowered_infix: HashMap<SyntaxId, Expression>,
+    builtin_types: HashMap<TypeId, BuiltinType>,
+    intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     functions: Vec<ResolvedFunction>,
     named_types: HashMap<SyntaxId, TypeId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
@@ -118,6 +150,7 @@ pub struct NameResolver {
     next_syntax_id: usize,
     current_module: ModuleId,
     multiple_modules: bool,
+    standard_library_core: Option<ModuleId>,
 }
 
 impl NameResolver {
@@ -130,7 +163,13 @@ impl NameResolver {
     }
 
     pub fn resolve_program(mut self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
-        self.multiple_modules = program.modules().len() > 1;
+        self.standard_library_core = program.standard_library_core();
+        self.multiple_modules = program
+            .modules()
+            .iter()
+            .filter(|module| Some(module.id) != self.standard_library_core)
+            .count()
+            > 1;
         self.next_syntax_id = program
             .modules()
             .iter()
@@ -139,13 +178,18 @@ impl NameResolver {
             .unwrap_or(0)
             + 1;
         self.collect_interfaces(&program);
+        self.collect_standard_library_contract(&program);
         for source_module in program.modules() {
             self.current_module = source_module.id;
             self.scopes.clear();
             self.namespaces.clear();
             self.imported_types.clear();
             self.imported_fixities.clear();
+            self.prelude_values.clear();
+            self.prelude_types.clear();
+            self.prelude_fixities.clear();
             self.push_scope();
+            self.install_prelude(&program, source_module.id);
             self.install_imports(&program, source_module.id);
             self.predeclare_items(&source_module.syntax.items);
             for item in &source_module.syntax.items {
@@ -168,7 +212,83 @@ impl NameResolver {
             type_names: self.type_names,
             syntax_modules: self.syntax_modules,
             lowered_infix: self.lowered_infix,
+            builtin_types: self.builtin_types,
+            intrinsic_functions: self.intrinsic_functions,
         })
+    }
+
+    fn collect_standard_library_contract(&mut self, program: &Program) {
+        let Some(core) = program.standard_library_core() else {
+            return;
+        };
+        let Some(i32_id) = self.declared_types[core.0].get("I32").copied() else {
+            self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "standard library `std.core` does not declare `I32`",
+            ));
+            return;
+        };
+        if self.type_declarations[&i32_id].kind != crate::TypeDeclarationKind::Opaque {
+            self.diagnostics.push(Diagnostic::new(
+                self.type_declarations[&i32_id].syntax.span.clone(),
+                "standard library type `I32` must be opaque",
+            ));
+        }
+        self.type_names.insert(i32_id, "I32".to_owned());
+        self.builtin_types.insert(i32_id, BuiltinType::I32);
+
+        let expected = [
+            ("__i32_add", IntrinsicFunction::I32Add),
+            ("__i32_subtract", IntrinsicFunction::I32Subtract),
+            ("__i32_multiply", IntrinsicFunction::I32Multiply),
+            ("__i32_divide", IntrinsicFunction::I32Divide),
+        ];
+        let mut found = HashMap::new();
+        for item in &program.module(core).syntax.items {
+            let Item::ExternBlock(block) = item else {
+                continue;
+            };
+            if block.abi != "\"staple-intrinsic\"" {
+                continue;
+            }
+            for binding in &block.bindings {
+                if let Some((_, intrinsic)) =
+                    expected.iter().find(|(name, _)| *name == binding.name)
+                    && let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied()
+                {
+                    found.insert(binding.name.clone(), symbol);
+                    self.intrinsic_functions.insert(symbol, *intrinsic);
+                } else {
+                    self.diagnostics.push(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        format!("unknown Staple intrinsic `{}`", binding.name),
+                    ));
+                }
+            }
+        }
+        for (name, _) in expected {
+            if !found.contains_key(name) {
+                self.diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!("standard library `std.core` does not declare intrinsic `{name}`"),
+                ));
+            }
+        }
+        for source_module in program.modules() {
+            if source_module.id == core {
+                continue;
+            }
+            for item in &source_module.syntax.items {
+                if let Item::ExternBlock(block) = item
+                    && block.abi == "\"staple-intrinsic\""
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        block.syntax.span.clone(),
+                        "the `staple-intrinsic` ABI is reserved for the standard library",
+                    ));
+                }
+            }
+        }
     }
 
     fn collect_interfaces(&mut self, program: &Program) {
@@ -325,6 +445,18 @@ impl NameResolver {
         }
     }
 
+    fn install_prelude(&mut self, program: &Program, module: ModuleId) {
+        let Some(core) = program.standard_library_core() else {
+            return;
+        };
+        if module == core {
+            return;
+        }
+        self.prelude_values = self.interfaces[core.0].values.clone();
+        self.prelude_types = self.interfaces[core.0].types.clone();
+        self.prelude_fixities = self.interfaces[core.0].fixities.clone();
+    }
+
     fn install_selected(&mut self, module: ModuleId, item: &str, local: &str, span: Span) {
         let mut found = false;
         if let Some(symbol) = self.interfaces[module.0].values.get(item).copied() {
@@ -399,7 +531,11 @@ impl NameResolver {
                     }
                 }
             }
-            Item::TypeDeclaration(declaration) => self.resolve_type(&declaration.underlying),
+            Item::TypeDeclaration(declaration) => {
+                if let Some(underlying) = &declaration.underlying {
+                    self.resolve_type(underlying);
+                }
+            }
             Item::Statement(statement) => self.resolve_statement(statement),
         }
     }
@@ -461,7 +597,10 @@ impl NameResolver {
                     .map(|(name, _)| name.to_owned())
                     .unwrap_or_else(|| format!("function.{}", function_id.0));
                 let base_name = mangle_function_name(&base_name);
-                let name = if self.multiple_modules || base_name == "main" {
+                let name = if self.multiple_modules
+                    || base_name == "main"
+                    || Some(self.current_module) == self.standard_library_core
+                {
                     format!("__staple_m{}_{}", self.current_module.0, base_name)
                 } else {
                     base_name
@@ -554,6 +693,7 @@ impl NameResolver {
                         .get(&named.name)
                         .copied()
                         .or_else(|| self.imported_types.get(&named.name).copied())
+                        .or_else(|| self.prelude_types.get(&named.name).copied())
                 };
                 if let Some(id) = resolved {
                     self.named_types.insert(named.syntax.id, id);
@@ -645,6 +785,7 @@ impl NameResolver {
         self.declared_fixities[self.current_module.0]
             .get(&operator.name)
             .or_else(|| self.imported_fixities.get(&operator.name))
+            .or_else(|| self.prelude_fixities.get(&operator.name))
             .copied()
             .unwrap_or_default()
     }
@@ -770,6 +911,7 @@ impl NameResolver {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).copied())
+            .or_else(|| self.prelude_values.get(name).copied())
     }
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());

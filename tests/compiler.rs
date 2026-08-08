@@ -1,11 +1,18 @@
 use inkwell::context::Context;
-use stapler::{CheckedType, CodeGenerator, Item, NameResolver, Statement, TypeChecker, parse};
+use stapler::{
+    CheckedType, CodeGenerator, Item, NameResolver, ProgramLoader, Statement, TypeChecker, parse,
+};
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn resolve(source: &str) -> stapler::ResolvedModule {
-    let syntax = parse(source).expect("source should parse");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(source, root)
+        .expect("source should load");
     NameResolver::new()
-        .resolve(&syntax)
+        .resolve_program(program)
         .expect("source should resolve")
 }
 
@@ -32,12 +39,16 @@ fn infix_call(
 
 #[test]
 fn resolves_names_in_function_parameters() {
-    let source = "def first: _ -> i32 = (a: i32, b: i32) => a\nfirst (1, 2)\n";
+    let source = "def first: _ -> I32 = (a: I32, b: I32) => a\nfirst (1, 2)\n";
     let module = resolve(source);
 
     assert_eq!(module.syntax().text(), source);
-    assert_eq!(module.functions().len(), 1);
-    assert_eq!(module.functions()[0].name, "first");
+    assert!(
+        module
+            .functions()
+            .iter()
+            .any(|function| function.name == "first")
+    );
 }
 
 #[test]
@@ -56,12 +67,16 @@ fn compiler_diagnostics_report_line_and_column() {
 #[test]
 fn infers_and_checks_function_return_types() {
     let module = type_check(concat!(
-        "let first = (a: i32, b: i32) => a\n",
-        "let second = (a: i32, b: i32) -> i32 => b\n",
+        "let first = (a: I32, b: I32) => a\n",
+        "let second = (a: I32, b: I32) -> I32 => b\n",
         "first (1, second (3, 2))\n",
     ));
 
-    for function in module.functions() {
+    for function in module
+        .functions()
+        .iter()
+        .filter(|function| matches!(function.name.as_str(), "first" | "second"))
+    {
         let function_type = module
             .type_of_function(function.id)
             .expect("function should have a checked type");
@@ -77,7 +92,11 @@ fn infers_return_types_through_forward_function_references() {
         "first ()\n",
     ));
 
-    for function in module.functions() {
+    for function in module
+        .functions()
+        .iter()
+        .filter(|function| matches!(function.name.as_str(), "first" | "second"))
+    {
         assert_eq!(
             *module
                 .type_of_function(function.id)
@@ -98,13 +117,13 @@ fn rejects_an_incorrect_function_result_type() {
     assert!(
         diagnostics[0]
             .message
-            .contains("expected `string`, found `i32`")
+            .contains("expected `string`, found `I32`")
     );
 }
 
 #[test]
 fn rejects_incorrect_call_arguments() {
-    let module = resolve("let identity = (value: i32) => value\nidentity (\"wrong\")\n");
+    let module = resolve("let identity = (value: I32) => value\nidentity (\"wrong\")\n");
     let diagnostics = TypeChecker::new()
         .check(module)
         .expect_err("incorrect argument type should fail");
@@ -112,15 +131,15 @@ fn rejects_incorrect_call_arguments() {
     assert!(
         diagnostics[0]
             .message
-            .contains("expected `i32`, found `string`")
+            .contains("expected `I32`, found `string`")
     );
 }
 
 #[test]
 fn treats_singleton_products_as_their_element() {
     let module = type_check(concat!(
-        "let answer: (i32) = 42\n",
-        "let identity = (value: i32) => value\n",
+        "let answer: (I32) = 42\n",
+        "let identity = (value: I32) => value\n",
         "identity (answer)\n",
     ));
     let function = module
@@ -145,7 +164,7 @@ fn treats_singleton_products_as_their_element() {
 #[test]
 fn destructures_nested_product_patterns() {
     let module = type_check(concat!(
-        "let add_nested = (x: i32, (y: i32, z: i32)) => x\n",
+        "let add_nested = (x: I32, (y: I32, z: I32)) => x\n",
         "add_nested (1, (2, 3))\n",
     ));
     let context = Context::create();
@@ -160,7 +179,7 @@ fn destructures_nested_product_patterns() {
 #[test]
 fn binds_a_product_without_destructuring_it() {
     let module = type_check(concat!(
-        "let sum = pair: (i32, i32) => pair.0\n",
+        "let sum = pair: (I32, I32) => pair.0\n",
         "sum (1, 2)\n",
     ));
     let context = Context::create();
@@ -174,12 +193,53 @@ fn binds_a_product_without_destructuring_it() {
 
 #[test]
 fn type_checks_transparent_aliases() {
-    type_check("type alias number = i32\nlet answer: number = 42\n");
+    type_check("type alias number = I32\nlet answer: number = 42\n");
+}
+
+#[test]
+fn uses_regular_prelude_functions_for_i32_arithmetic() {
+    let module = type_check(concat!(
+        "def add_one = (+) 1\n",
+        "let sum = 1 + 2\n",
+        "let difference = 4 - 3\n",
+        "let product = 2 * 3\n",
+        "let quotient = 8 / 2\n",
+        "add_one 2\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("prelude arithmetic should compile");
+
+    assert!(llvm.contains("add i32"));
+    assert!(llvm.contains("sub i32"));
+    assert!(llvm.contains("mul i32"));
+    assert!(llvm.contains("sdiv i32"));
+    assert!(llvm.contains("closure.call"));
+    assert!(!llvm.contains("declare i32 @__i32_add"));
+}
+
+#[test]
+fn lowercase_i32_is_an_ordinary_unresolved_type_name() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("let value: i32 = 1\n", root)
+        .expect("source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("lowercase i32 should not name the builtin");
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "unknown type `i32`")
+    );
 }
 
 #[test]
 fn type_checks_function_declarations_without_values() {
-    type_check("let add: (x: i32, y: i32) -> i32\n");
+    type_check("let add: (x: I32, y: I32) -> I32\n");
 }
 
 #[test]
@@ -206,7 +266,7 @@ fn reports_duplicate_definitions() {
 
 #[test]
 fn generates_a_named_function_after_predeclaring_it() {
-    let module = type_check("let first = (a: i32, b: i32) => a\nfirst (1, 2)\n");
+    let module = type_check("let first = (a: I32, b: I32) => a\nfirst (1, 2)\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
@@ -218,7 +278,7 @@ fn generates_a_named_function_after_predeclaring_it() {
 
 #[test]
 fn predeclares_functions_for_recursion() {
-    let module = type_check("def recurse: (n: i32) -> i32 = (n: i32) => recurse (n)\n");
+    let module = type_check("def recurse: (n: I32) -> I32 = (n: I32) => recurse (n)\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
@@ -230,8 +290,8 @@ fn predeclares_functions_for_recursion() {
 #[test]
 fn preserves_the_environment_for_recursive_closures() {
     let module = type_check(concat!(
-        "def outer = value: i32 => {\n",
-        "  def recurse: i32 -> i32 = n => {\n",
+        "def outer = value: I32 => {\n",
+        "  def recurse: I32 -> I32 = n => {\n",
         "    let captured = value\n",
         "    recurse n\n",
         "  }\n",
@@ -249,7 +309,7 @@ fn preserves_the_environment_for_recursive_closures() {
 #[test]
 fn lowers_captured_locals_into_closure_environments() {
     let module = type_check(concat!(
-        "let outer = (value: i32) => {\n",
+        "let outer = (value: I32) => {\n",
         "  let inner = () => value\n",
         "  inner ()\n",
         "}\n",
@@ -267,8 +327,8 @@ fn lowers_captured_locals_into_closure_environments() {
 #[test]
 fn type_checks_and_generates_curried_functions() {
     let module = type_check(concat!(
-        "def inferred = a: i32 => b: i32 => a\n",
-        "def annotated: i32 -> i32 -> i32 = a => b => a\n",
+        "def inferred = a: I32 => b: I32 => a\n",
+        "def annotated: I32 -> I32 -> I32 = a => b => a\n",
         "def add_one = annotated 1\n",
         "inferred 1 2\n",
         "add_one 2\n",
@@ -302,7 +362,7 @@ fn type_checks_and_generates_curried_functions() {
 
 #[test]
 fn contextually_types_product_parameters() {
-    type_check("def first: (i32, i32) -> i32 = (a, b) => a\nfirst (1, 2)\n");
+    type_check("def first: (I32, I32) -> I32 = (a, b) => a\nfirst (1, 2)\n");
 }
 
 #[test]
@@ -321,7 +381,7 @@ fn rejects_untyped_parameters_without_a_function_annotation() {
 #[test]
 fn lowers_transitive_captures_across_curried_layers() {
     let module = type_check(concat!(
-        "def sum = a: i32 => b: i32 => c: i32 => (a, b, c)\n",
+        "def sum = a: I32 => b: I32 => c: I32 => (a, b, c)\n",
         "def add_one = sum 1\n",
         "def add_one_two = add_one 2\n",
         "add_one_two 3\n",
@@ -338,8 +398,8 @@ fn lowers_transitive_captures_across_curried_layers() {
 #[test]
 fn adapts_non_variadic_externs_used_as_function_values() {
     let module = type_check(concat!(
-        "extern \"c\" { let puts: (*const c_char) -> i32 }\n",
-        "def apply: ((*const c_char) -> i32, *const c_char) -> i32 = (f, value) => f value\n",
+        "extern \"c\" { let puts: (*const c_char) -> I32 }\n",
+        "def apply: ((*const c_char) -> I32, *const c_char) -> I32 = (f, value) => f value\n",
         "apply (puts, \"hello\")\n",
     ));
     let context = Context::create();
@@ -353,8 +413,8 @@ fn adapts_non_variadic_externs_used_as_function_values() {
 #[test]
 fn calls_user_defined_functions_with_symbolic_and_backtick_infix_syntax() {
     let module = type_check(concat!(
-        "def infixl 6 +: i32 -> i32 -> i32 = x => y => x\n",
-        "def infixl 7 combine: i32 -> i32 -> i32 = x => y => y\n",
+        "def infixl 6 +: I32 -> I32 -> I32 = x => y => x\n",
+        "def infixl 7 combine: I32 -> I32 -> I32 = x => y => y\n",
         "def plus = (+)\n",
         "1 + 2\n",
         "1 `combine` 2\n",
@@ -372,7 +432,7 @@ fn calls_user_defined_functions_with_symbolic_and_backtick_infix_syntax() {
 #[test]
 fn rejects_incompatible_fixity_chains() {
     let syntax = parse(concat!(
-        "def infix 4 ==: i32 -> i32 -> i32 = x => y => x\n",
+        "def infix 4 ==: I32 -> I32 -> I32 = x => y => x\n",
         "1 == 2 == 3\n",
     ))
     .expect("source should parse");
@@ -380,18 +440,18 @@ fn rejects_incompatible_fixity_chains() {
         .resolve(&syntax)
         .expect_err("non-associative chaining should fail");
     assert!(
-        diagnostics[0]
-            .message
-            .contains("incompatible associativity")
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("incompatible associativity"))
     );
 }
 
 #[test]
 fn associates_infix_chains_using_inline_fixity() {
     let source = concat!(
-        "def infixl 6 +: i32 -> i32 -> i32 = x => y => x\n",
-        "def infixr 7 **: i32 -> i32 -> i32 = x => y => y\n",
-        "def choose: i32 -> i32 -> i32 = x => y => x\n",
+        "def infixl 6 +: I32 -> I32 -> I32 = x => y => x\n",
+        "def infixr 7 **: I32 -> I32 -> I32 = x => y => y\n",
+        "def choose: I32 -> I32 -> I32 = x => y => x\n",
         "1 + 2 + 3\n",
         "1 ** 2 ** 3\n",
         "1 + 2 ** 3\n",
@@ -437,7 +497,7 @@ fn associates_infix_chains_using_inline_fixity() {
 #[test]
 fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
-        "extern \"c\" { let puts: (*const c_char) -> i32 }\n",
+        "extern \"c\" { let puts: (*const c_char) -> I32 }\n",
         "puts (\"hello\\n\")\n",
     );
     let module = type_check(source);

@@ -79,14 +79,12 @@ pub struct FunctionType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PrimitiveType {
-    I32(Syntax),
     Bool(Syntax),
 }
 
 impl PrimitiveType {
     pub fn syntax(&self) -> &Syntax {
         match self {
-            Self::I32(syntax) => syntax,
             Self::Bool(syntax) => syntax,
         }
     }

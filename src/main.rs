@@ -24,6 +24,7 @@ struct Options {
     library_paths: Vec<PathBuf>,
     libraries: Vec<OsString>,
     linker: Option<OsString>,
+    standard_library: Option<PathBuf>,
 }
 
 fn main() -> ExitCode {
@@ -46,14 +47,18 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Option<String>, 
         return Ok(Some(format!("{}\n", usage())));
     }
     let options = parse_options(arguments)?;
+    let loader = match &options.standard_library {
+        Some(root) => ProgramLoader::new().with_standard_library_root(root),
+        None => ProgramLoader::new(),
+    };
     let module = if options.input == "-" {
         let source = read_source(&options.input)?;
         let root = std::env::current_dir()
             .map_err(|error| format!("could not determine current directory: {error}"))?;
-        let program = ProgramLoader::new().load_source(&source, &root)?;
+        let program = loader.load_source(&source, &root)?;
         compile_program(program)?
     } else {
-        let program = ProgramLoader::new().load_path(Path::new(&options.input))?;
+        let program = loader.load_path(Path::new(&options.input))?;
         compile_program(program)?
     };
     let context = inkwell::context::Context::create();
@@ -106,6 +111,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         library_paths: Vec::new(),
         libraries: Vec::new(),
         linker: None,
+        standard_library: None,
     };
     let mut positional_only = false;
 
@@ -133,6 +139,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.linker = Some(next_value(&mut arguments, "--linker")?);
             continue;
         }
+        if !positional_only && argument == "--stdlib" {
+            options.standard_library = Some(PathBuf::from(next_value(&mut arguments, "--stdlib")?));
+            continue;
+        }
         if !positional_only && argument == "-L" {
             options
                 .library_paths
@@ -151,6 +161,8 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.target = Some(value.to_owned());
         } else if !positional_only && let Some(value) = text.strip_prefix("--linker=") {
             options.linker = Some(value.into());
+        } else if !positional_only && let Some(value) = text.strip_prefix("--stdlib=") {
+            options.standard_library = Some(PathBuf::from(value));
         } else if !positional_only && text.starts_with("-L") && text.len() > 2 {
             options.library_paths.push(PathBuf::from(&text[2..]));
         } else if !positional_only && text.starts_with("-l") && text.len() > 2 {
@@ -218,11 +230,11 @@ fn read_source(input: &OsStr) -> Result<String, String> {
 
 #[cfg(test)]
 fn compile(source: &str) -> Result<TypedModule, String> {
-    let module = stapler::parse(source).map_err(|error| error.to_string())?;
-    let module = NameResolver::new()
-        .resolve(&module)
-        .map_err(format_diagnostics)?;
-    TypeChecker::new().check(module).map_err(format_diagnostics)
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(source, root)?;
+    compile_program(program)
 }
 
 fn compile_program(program: Program) -> Result<TypedModule, String> {
@@ -309,6 +321,7 @@ fn usage() -> String {
         "  -o <path>                 output file; LLVM uses stdout by default\n",
         "  --target <triple>         LLVM target triple\n",
         "  --linker <command>        linker driver (default: $CC or cc)\n",
+        "  --stdlib <path>           Staple standard-library root\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         stop parsing options\n",
@@ -349,6 +362,8 @@ mod tests {
             "hello".into(),
             "--target".into(),
             "aarch64-apple-darwin".into(),
+            "--stdlib".into(),
+            "vendor/stdlib".into(),
             "-L".into(),
             "vendor/lib".into(),
             "-lm".into(),
@@ -359,6 +374,10 @@ mod tests {
         assert_eq!(options.emit, EmitKind::Executable);
         assert_eq!(options.output.unwrap().to_string_lossy(), "hello");
         assert_eq!(options.target.as_deref(), Some("aarch64-apple-darwin"));
+        assert_eq!(
+            options.standard_library.unwrap().to_string_lossy(),
+            "vendor/stdlib"
+        );
         assert_eq!(options.library_paths[0].to_string_lossy(), "vendor/lib");
         assert_eq!(options.libraries[0].to_string_lossy(), "m");
     }

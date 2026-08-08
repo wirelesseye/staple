@@ -66,7 +66,6 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
                 "infix" => TokenKind::Infix,
                 "infixl" => TokenKind::Infixl,
                 "infixr" => TokenKind::Infixr,
-                "i32" => TokenKind::I32,
                 "bool" => TokenKind::Bool,
                 "_" => TokenKind::Underscore,
                 _ => TokenKind::Identifier,

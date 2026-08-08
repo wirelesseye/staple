@@ -17,6 +17,7 @@ pub struct SourceModule {
 #[derive(Debug, Clone)]
 pub struct Program {
     entry: ModuleId,
+    standard_library_core: Option<ModuleId>,
     modules: Vec<SourceModule>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
     initialization_order: Vec<ModuleId>,
@@ -26,6 +27,7 @@ impl Program {
     pub(crate) fn single(module: Module) -> Self {
         Self {
             entry: ModuleId(0),
+            standard_library_core: None,
             modules: vec![SourceModule {
                 id: ModuleId(0),
                 path: PathBuf::from("<memory>.sta"),
@@ -38,6 +40,10 @@ impl Program {
 
     pub fn entry(&self) -> ModuleId {
         self.entry
+    }
+
+    pub fn standard_library_core(&self) -> Option<ModuleId> {
+        self.standard_library_core
     }
 
     pub fn modules(&self) -> &[SourceModule] {
@@ -64,6 +70,8 @@ pub struct ProgramLoader {
     imported_modules: HashMap<SyntaxId, ModuleId>,
     next_syntax_id: usize,
     module_root: Option<PathBuf>,
+    standard_library_root: Option<PathBuf>,
+    standard_library_core: Option<ModuleId>,
 }
 
 impl ProgramLoader {
@@ -71,10 +79,16 @@ impl ProgramLoader {
         Self::default()
     }
 
+    pub fn with_standard_library_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.standard_library_root = Some(root.into());
+        self
+    }
+
     pub fn load_path(mut self, entry: &Path) -> Result<Program, String> {
         let entry = canonical_file(entry)?;
         self.module_root = Some(entry.parent().unwrap_or_else(|| Path::new(".")).to_owned());
         let entry_id = self.load_file(&entry)?;
+        self.load_standard_library_core()?;
         Ok(self.finish(entry_id))
     }
 
@@ -89,6 +103,7 @@ impl ProgramLoader {
         let path = root.join("<stdin>.sta");
         let entry = self.insert_source(path, source)?;
         self.load_imports(entry, &root)?;
+        self.load_standard_library_core()?;
         Ok(self.finish(entry))
     }
 
@@ -128,7 +143,12 @@ impl ProgramLoader {
             })
             .collect::<Vec<_>>();
         for declaration in uses {
-            let path = use_path(root, &declaration);
+            let import_root = if declaration.path.first().is_some_and(|part| part == "std") {
+                self.resolve_standard_library_root()?
+            } else {
+                root.to_owned()
+            };
+            let path = use_path(&import_root, &declaration);
             let path = canonical_file(&path).map_err(|message| match &declaration.syntax.span {
                 crate::Span::User {
                     location: Some(location),
@@ -146,15 +166,53 @@ impl ProgramLoader {
         Ok(())
     }
 
+    fn load_standard_library_core(&mut self) -> Result<(), String> {
+        let root = self.resolve_standard_library_root()?;
+        let core = canonical_file(&root.join("std/core.sta"))?;
+        self.standard_library_core = Some(self.load_file(&core)?);
+        Ok(())
+    }
+
+    fn resolve_standard_library_root(&mut self) -> Result<PathBuf, String> {
+        if let Some(root) = &self.standard_library_root {
+            return canonical_directory(root, "standard library");
+        }
+        if let Some(root) = std::env::var_os("STAPLE_STDLIB") {
+            let root = PathBuf::from(root);
+            let root = canonical_directory(&root, "standard library from `STAPLE_STDLIB`")?;
+            self.standard_library_root = Some(root.clone());
+            return Ok(root);
+        }
+        let executable = std::env::current_exe()
+            .map_err(|error| format!("could not locate the Staple standard library: {error}"))?;
+        let prefix = executable
+            .parent()
+            .and_then(Path::parent)
+            .ok_or_else(|| "could not determine the Stapler installation prefix".to_owned())?;
+        let root = prefix.join("lib/staple/stdlib");
+        canonical_directory(&root, "standard library")
+            .map_err(|error| format!("{error}; pass `--stdlib <path>` or set `STAPLE_STDLIB`"))
+    }
+
     fn finish(self, entry: ModuleId) -> Program {
         let initialization_order = initialization_order(&self.modules, &self.imported_modules);
         Program {
             entry,
+            standard_library_core: self.standard_library_core,
             modules: self.modules,
             imported_modules: self.imported_modules,
             initialization_order,
         }
     }
+}
+
+fn canonical_directory(path: &Path, description: &str) -> Result<PathBuf, String> {
+    std::fs::canonicalize(path).map_err(|error| {
+        format!(
+            "could not resolve {description} `{}`: {error}",
+            path.display()
+        )
+    })
 }
 
 fn canonical_file(path: &Path) -> Result<PathBuf, String> {

@@ -61,6 +61,7 @@ pub struct ExternBlock {
 pub enum TypeDeclarationKind {
     Alias,
     Distinct,
+    Opaque,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -69,7 +70,7 @@ pub struct TypeDeclaration {
     pub visibility: Visibility,
     pub kind: TypeDeclarationKind,
     pub name: String,
-    pub underlying: Type,
+    pub underlying: Option<Type>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

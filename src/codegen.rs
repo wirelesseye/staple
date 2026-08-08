@@ -12,8 +12,8 @@ use inkwell::{
 
 use crate::{
     Accessor, CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic,
-    Expression, FunctionId, Item, ModuleId, Pattern, ProductExpression, ResolvedFunction, Span,
-    Statement, SymbolId, TypedModule,
+    Expression, FunctionId, IntrinsicFunction, Item, ModuleId, Pattern, ProductExpression,
+    ResolvedFunction, Span, Statement, SymbolId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -155,6 +155,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                                     "unresolved external binding",
                                 )
                             })?;
+                    if self
+                        .typed_module
+                        .resolved()
+                        .intrinsic_function(symbol)
+                        .is_some()
+                    {
+                        continue;
+                    }
                     let Some(CheckedType::Function(function_type)) =
                         self.typed_module.type_of_symbol(symbol)
                     else {
@@ -668,6 +676,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         call: &CallExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         if let Some(symbol) = self.typed_module.symbol_for(call.callee.syntax().id)
+            && let Some(intrinsic) = self.typed_module.resolved().intrinsic_function(symbol)
+        {
+            return self.compile_intrinsic_call(environment, call, intrinsic);
+        }
+        if let Some(symbol) = self.typed_module.symbol_for(call.callee.syntax().id)
             && !environment.locals.contains_key(&symbol)
             && let Some(AnyValueEnum::FunctionValue(function)) = self.globals.get(&symbol).copied()
         {
@@ -745,6 +758,40 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .try_as_basic_value()
             .unwrap_basic()
             .as_any_value_enum())
+    }
+
+    fn compile_intrinsic_call(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+        intrinsic: IntrinsicFunction,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
+        let [
+            inkwell::values::BasicMetadataValueEnum::IntValue(left),
+            inkwell::values::BasicMetadataValueEnum::IntValue(right),
+        ] = arguments.as_slice()
+        else {
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "I32 arithmetic intrinsic operands must be integers",
+            ));
+        };
+        let value = match intrinsic {
+            IntrinsicFunction::I32Add => self.builder.build_int_add(*left, *right, "i32.add"),
+            IntrinsicFunction::I32Subtract => {
+                self.builder.build_int_sub(*left, *right, "i32.subtract")
+            }
+            IntrinsicFunction::I32Multiply => {
+                self.builder.build_int_mul(*left, *right, "i32.multiply")
+            }
+            IntrinsicFunction::I32Divide => {
+                self.builder
+                    .build_int_signed_div(*left, *right, "i32.divide")
+            }
+        }
+        .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        Ok(value.as_any_value_enum())
     }
 
     fn build_closure(
@@ -1040,6 +1087,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "cannot generate code for an erroneous type",
             )),
             CheckedType::CChar => Ok(self.context.i8_type().into()),
+            CheckedType::Opaque { name, .. } => Err(Diagnostic::new(
+                Span::Compiler,
+                format!("opaque type `{name}` has no by-value representation"),
+            )),
             CheckedType::String => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::Pointer { .. } => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())

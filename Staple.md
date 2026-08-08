@@ -109,6 +109,12 @@ are linked through `$CC`, or `cc` when `$CC` is unset. `--linker` selects a
 different linker driver. `-L <path>` and `-l <name>` add library search paths
 and libraries for executable output.
 
+Stapler loads the standard library at compile time. `--stdlib <path>` selects
+its root explicitly, `STAPLE_STDLIB` provides the same path through the
+environment, and an installed compiler otherwise looks in
+`../lib/staple/stdlib` relative to its executable. The standard-library root
+contains `std/core.sta`.
+
 ### Top-level statements
 
 A source file may contain expression statements alongside bindings, type
@@ -116,7 +122,7 @@ declarations, and foreign declarations:
 
 ```staple
 extern "c" {
-    let printf: (*const c_char, ...) -> i32
+    let printf: (*const c_char, ...) -> I32
 }
 
 printf ("hello, world!\n")
@@ -167,8 +173,8 @@ declaration, is an error.
 Top-level declarations are private by default. `pub` exports a binding or type:
 
 ```staple
-pub def format = (value: i32) => value
-pub type alias Number = i32
+pub def format = (value: I32) => value
+pub type alias Number = I32
 ```
 
 `pub extern` exports every binding declared by that external block. `pub use`
@@ -195,7 +201,7 @@ let answer = 42
 A type may be written after the binding name:
 
 ```staple
-let answer: i32 = 42
+let answer: I32 = 42
 ```
 
 An external declaration may omit its value because its implementation is
@@ -203,7 +209,7 @@ provided outside staple:
 
 ```staple
 extern "c" {
-    let printf: (*const c_char, ...) -> i32
+    let printf: (*const c_char, ...) -> I32
 }
 ```
 
@@ -235,13 +241,13 @@ The optional type annotation on a binding describes the complete type of its
 value:
 
 ```staple
-def get_number: _ -> i32 = () => {
+def get_number: _ -> I32 = () => {
     42
 }
 ```
 
 `_` is an inferred type placeholder. In this example, stapler infers the
-function's parameter type from `()` while requiring its result to be `i32`.
+function's parameter type from `()` while requiring its result to be `I32`.
 Inferred placeholders may appear wherever a type is expected.
 
 ## Values and expressions
@@ -261,12 +267,13 @@ String literals use double quotes. A backslash protects the following quote
 from ending the string. The complete set and meaning of escape sequences is
 currently unspecified.
 
-Operators are ordinary curried function values; staple does not provide
-implicit arithmetic operators or arithmetic primitives. A symbolic function
-may declare its fixity as part of its binding:
+Operators are ordinary curried function values. The standard prelude currently
+provides `+`, `-`, `*`, and `/` for `I32`; their public definitions are ordinary
+functions backed by private compiler intrinsics. A symbolic function may
+declare its fixity as part of its binding:
 
 ```staple
-def infixl 6 <>: i32 -> i32 -> i32 = left => right => left
+def infixl 6 <>: I32 -> I32 -> I32 = left => right => left
 ```
 
 `infixl`, `infixr`, and `infix` declare left, right, and no associativity. The
@@ -304,11 +311,11 @@ Every product element may optionally have a name. Names are written before the
 element type in a product type:
 
 ```staple
-let args: (name: string, int)
+let args: (name: string, I32)
 ```
 
 Here, `args` is a two-element product. Its first element is named `name` and has
-type `string`; its second element is unnamed and has type `int`.
+type `string`; its second element is unnamed and has type `I32`.
 
 Names may likewise be supplied when constructing a product value:
 
@@ -326,7 +333,7 @@ Every element can be accessed by its zero-based index. A named element can also
 be accessed by name:
 
 ```staple
-let args: (name: string, int)
+let args: (name: string, I32)
 
 args.name // the first element, accessed by name
 args.0    // the first element, accessed by index
@@ -368,7 +375,7 @@ s: string => printf ("%s\n", s)
 The type may be omitted when a surrounding function type supplies it:
 
 ```staple
-def identity: i32 -> i32 = value => value
+def identity: I32 -> I32 = value => value
 ```
 
 An omitted parameter type without such a context is an error. Stapler does not
@@ -383,13 +390,13 @@ A nullary product pattern is written as `()`:
 A product pattern names and types each of its elements:
 
 ```staple
-(a: i32, b: i32) => a + b
+(a: I32, b: I32) => a + b
 ```
 
 Consequently, this definition does not define a function with two parameters:
 
 ```staple
-let add = (a: i32, b: i32) => a + b
+let add = (a: I32, b: I32) => a + b
 ```
 
 It defines a function whose single parameter is a two-element product.
@@ -397,7 +404,7 @@ It defines a function whose single parameter is a two-element product.
 Patterns may be nested:
 
 ```staple
-(x: i32, (y: i32, z: i32)) => x + y + z
+(x: I32, (y: I32, z: I32)) => x + y + z
 ```
 
 A singleton product pattern is equivalent to its contained pattern, so
@@ -406,7 +413,7 @@ A singleton product pattern is equivalent to its contained pattern, so
 A function value may declare its result type directly:
 
 ```staple
-let get_number = () -> i32 => {
+let get_number = () -> I32 => {
     42
 }
 ```
@@ -415,7 +422,7 @@ A binding annotation may also constrain the complete function type. A function
 declaration uses the same function-type syntax and omits the value:
 
 ```staple
-let add: (x: i32, y: i32) -> i32
+let add: (x: I32, y: I32) -> I32
 ```
 
 ## Function application
@@ -440,8 +447,8 @@ Function application associates to the left, while function types associate to
 the right. Nested function values can therefore define a curried API:
 
 ```staple
-def add = a: i32 => b: i32 => a + b
-def annotated_add: i32 -> i32 -> i32 = a => b => a + b
+def add = a: I32 => b: I32 => a + b
+def annotated_add: I32 -> I32 -> I32 = a => b => a + b
 
 def add_one = add 1
 add_one 2
@@ -456,8 +463,8 @@ ordinary choice when all arguments should be supplied together.
 An infix call supplies its left and right operands through two curried calls:
 
 ```staple
-def infixl 6 <>: i32 -> i32 -> i32 = left => right => left
-def infixr 5 choose: i32 -> i32 -> i32 = left => right => right
+def infixl 6 <>: I32 -> I32 -> I32 = left => right => left
+def infixr 5 choose: I32 -> I32 -> I32 = left => right => right
 
 1 <> 2
 1 `choose` 2
@@ -497,16 +504,21 @@ value are currently unspecified.
 Named types are written as identifiers:
 
 ```staple
-i32
+I32
 string
 c_char
 ```
+
+`I32` and the arithmetic functions from `std.core` are imported implicitly into
+every source module. `I32` is an ordinary type name rather than a keyword, so a
+local declaration or explicit import can shadow the prelude name. Integer
+literals have type `I32`.
 
 An underscore asks stapler to infer a type:
 
 ```staple
 _
-_ -> i32
+_ -> I32
 ```
 
 The currently supported type syntax also includes pointer types, product types,
@@ -514,19 +526,32 @@ variadic markers in external function signatures, and function types:
 
 ```staple
 *const c_char
-(i32, string)
-(*const c_char, ...) -> i32
+(I32, string)
+(*const c_char, ...) -> I32
 ```
 
 `...` denotes the variadic portion of an external function parameter product. Its
 meaning outside foreign declarations is currently unspecified.
 
-The built-in type set, mutability model for pointers, type inference rules, and
-type compatibility rules remain unspecified.
+`I32` is currently the only standard-library numeric type. The future numeric
+type set, mutability model for pointers, type inference rules, and broader type
+compatibility rules remain unspecified.
 
 ### Type declarations
 
-staple distinguishes transparent aliases from distinct type definitions.
+staple distinguishes transparent aliases, distinct type definitions, and
+opaque type declarations.
+
+An opaque type has no source-level representation:
+
+```staple
+pub type Handle
+```
+
+Opaque values can be named and used behind pointers. A by-value use requires a
+representation supplied by the compiler or another future implementation
+mechanism. `std.core.I32` is an opaque declaration whose representation is
+provided by Stapler.
 
 #### `type`
 
@@ -534,11 +559,11 @@ staple distinguishes transparent aliases from distinct type definitions.
 with the same runtime representation as its underlying type:
 
 ```staple
-type UserId = int
-type OrderId = int
+type UserId = I32
+type OrderId = I32
 ```
 
-`user_id`, `order_id`, and `int` are distinct types and are not implicitly
+`UserId`, `OrderId`, and `I32` are distinct types and are not implicitly
 interchangeable, even though they share a representation. This provides type
 safety without adding a runtime wrapper. The syntax for constructing,
 unwrapping, or explicitly converting these types remains unspecified.
@@ -554,7 +579,7 @@ are interchangeable:
 ```staple
 type alias Person = (
     name: string,
-    age: i32,
+    age: I32,
 )
 ```
 
@@ -568,13 +593,13 @@ string following `extern`:
 
 ```staple
 extern "c" {
-    let printf: (*const c_char, ...) -> i32
+    let printf: (*const c_char, ...) -> I32
 }
 ```
 
 The example declares an immutable foreign value named `printf`. Its type is a
 function from one product parameter—containing a C string pointer followed by
-variadic values—to an `i32` result.
+variadic values—to an `I32` result.
 
 External symbols are resolved by the native linker when producing an
 executable. Libraries outside the platform defaults can be supplied to

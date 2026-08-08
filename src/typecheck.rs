@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{
-    Accessor, Binding, Diagnostic, Expression, FunctionId, Item, Module, Pattern, PrimitiveType,
-    ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, Type,
-    TypeDeclaration, TypeDeclarationKind, TypeId,
+    Accessor, Binding, BuiltinType, Diagnostic, Expression, FunctionId, Item, Module, Pattern,
+    PrimitiveType, ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId,
+    SyntaxId, Type, TypeDeclaration, TypeDeclarationKind, TypeId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +15,10 @@ pub enum CheckedType {
     Bool,
     String,
     CChar,
+    Opaque {
+        id: TypeId,
+        name: String,
+    },
     Pointer {
         is_const: bool,
         pointee: Box<CheckedType>,
@@ -65,7 +69,7 @@ impl CheckedType {
                 function.parameter.is_concrete() && function.result.is_concrete()
             }
             Self::Distinct { representation, .. } => representation.is_concrete(),
-            Self::I32 | Self::Bool | Self::String | Self::CChar => true,
+            Self::I32 | Self::Bool | Self::String | Self::CChar | Self::Opaque { .. } => true,
         }
     }
 }
@@ -75,10 +79,11 @@ impl fmt::Display for CheckedType {
         match self {
             Self::Inferred => formatter.write_str("_"),
             Self::Error => formatter.write_str("<error>"),
-            Self::I32 => formatter.write_str("i32"),
+            Self::I32 => formatter.write_str("I32"),
             Self::Bool => formatter.write_str("bool"),
             Self::String => formatter.write_str("string"),
             Self::CChar => formatter.write_str("c_char"),
+            Self::Opaque { name, .. } => formatter.write_str(name),
             Self::Pointer { is_const, pointee } => {
                 formatter.write_str("*")?;
                 if *is_const {
@@ -181,6 +186,7 @@ impl TypeChecker {
         self.collect_type_declarations(&module);
         self.collect_top_level_bindings(&module);
         self.seed_declared_bindings(&module);
+        self.validate_intrinsics(&module);
         self.seed_function_types(&module);
 
         let module_order = module.program().initialization_order().to_vec();
@@ -254,6 +260,33 @@ impl TypeChecker {
         let value_type = self.resolve_source_type(module, annotation);
         if let Some(symbol) = module.symbol_for(binding.syntax.id) {
             self.symbol_types.insert(symbol, value_type);
+        }
+    }
+
+    fn validate_intrinsics(&mut self, module: &ResolvedModule) {
+        let expected = CheckedType::Function(CheckedFunctionType {
+            parameter: Box::new(CheckedType::Product(CheckedProductType {
+                elements: vec![
+                    CheckedTypeElement {
+                        name: None,
+                        value_type: CheckedType::I32,
+                    },
+                    CheckedTypeElement {
+                        name: None,
+                        value_type: CheckedType::I32,
+                    },
+                ],
+                variadic: false,
+            })),
+            result: Box::new(CheckedType::I32),
+        });
+        for symbol in module.intrinsic_functions().keys() {
+            if self.symbol_types.get(symbol) != Some(&expected) {
+                self.diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    "every I32 arithmetic intrinsic must have type `(I32, I32) -> I32`",
+                ));
+            }
         }
     }
 
@@ -661,7 +694,6 @@ impl TypeChecker {
                 parameter: Box::new(self.resolve_source_type(module, &function.parameter)),
                 result: Box::new(self.resolve_source_type(module, &function.result)),
             }),
-            Type::Primitive(PrimitiveType::I32(_)) => CheckedType::I32,
             Type::Primitive(PrimitiveType::Bool(_)) => CheckedType::Bool,
         }
     }
@@ -698,11 +730,22 @@ impl TypeChecker {
         let Some(id) = module.type_for(named.syntax.id) else {
             return CheckedType::Error;
         };
+        if module.builtin_type(id) == Some(BuiltinType::I32) {
+            return CheckedType::I32;
+        }
         if let Some(value_type) = self.resolved_named_types.get(&id) {
             return value_type.clone();
         }
         let declaration = self.type_declarations[&id].clone();
         let display_name = module.type_name(id).unwrap_or(&declaration.name).to_owned();
+        if declaration.kind == TypeDeclarationKind::Opaque {
+            let value_type = CheckedType::Opaque {
+                id,
+                name: display_name,
+            };
+            self.resolved_named_types.insert(id, value_type.clone());
+            return value_type;
+        }
         if !self.resolving_named_types.insert(id) {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
@@ -710,7 +753,13 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         }
-        let representation = self.resolve_source_type(module, &declaration.underlying);
+        let representation = self.resolve_source_type(
+            module,
+            declaration
+                .underlying
+                .as_ref()
+                .expect("non-opaque type declaration has an underlying type"),
+        );
         self.resolving_named_types.remove(&id);
         let value_type = match declaration.kind {
             TypeDeclarationKind::Alias => representation,
@@ -718,6 +767,7 @@ impl TypeChecker {
                 name: display_name,
                 representation: Box::new(representation),
             },
+            TypeDeclarationKind::Opaque => unreachable!(),
         };
         self.resolved_named_types.insert(id, value_type.clone());
         value_type
@@ -734,6 +784,19 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         (CheckedType::Bool, CheckedType::Bool) => Some(CheckedType::Bool),
         (CheckedType::String, CheckedType::String) => Some(CheckedType::String),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
+        (
+            CheckedType::Opaque {
+                id: actual_id,
+                name: actual_name,
+            },
+            CheckedType::Opaque {
+                id: expected_id,
+                name: _,
+            },
+        ) if actual_id == expected_id => Some(CheckedType::Opaque {
+            id: actual_id,
+            name: actual_name,
+        }),
         (
             CheckedType::String,
             CheckedType::Pointer {
