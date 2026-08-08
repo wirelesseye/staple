@@ -2,9 +2,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{
-    Accessor, Binding, BuiltinType, Diagnostic, Expression, FunctionId, Item, Module, Pattern,
-    ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, TraitId,
-    TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId,
+    Accessor, Binding, BuiltinType, Diagnostic, Expression, FunctionId, IntegerType, Item, Module,
+    Pattern, ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId,
+    TraitId, TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId,
     TypeParameterPattern,
 };
 
@@ -32,6 +32,15 @@ pub enum CheckedType {
     Inferred,
     Error,
     I32,
+    I8,
+    I16,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    ISize,
+    USize,
     Bool,
     String,
     CString,
@@ -82,6 +91,37 @@ pub struct CheckedFunctionType {
 }
 
 impl CheckedType {
+    pub fn integer(integer: IntegerType) -> Self {
+        match integer {
+            IntegerType::I8 => Self::I8,
+            IntegerType::I16 => Self::I16,
+            IntegerType::I32 => Self::I32,
+            IntegerType::I64 => Self::I64,
+            IntegerType::U8 => Self::U8,
+            IntegerType::U16 => Self::U16,
+            IntegerType::U32 => Self::U32,
+            IntegerType::U64 => Self::U64,
+            IntegerType::ISize => Self::ISize,
+            IntegerType::USize => Self::USize,
+        }
+    }
+
+    pub fn integer_type(&self) -> Option<IntegerType> {
+        Some(match self {
+            Self::I8 => IntegerType::I8,
+            Self::I16 => IntegerType::I16,
+            Self::I32 => IntegerType::I32,
+            Self::I64 => IntegerType::I64,
+            Self::U8 => IntegerType::U8,
+            Self::U16 => IntegerType::U16,
+            Self::U32 => IntegerType::U32,
+            Self::U64 => IntegerType::U64,
+            Self::ISize => IntegerType::ISize,
+            Self::USize => IntegerType::USize,
+            _ => return None,
+        })
+    }
+
     pub fn empty_product() -> Self {
         Self::Product(CheckedProductType {
             elements: Vec::new(),
@@ -102,6 +142,15 @@ impl CheckedType {
             }
             Self::Distinct { representation, .. } => representation.is_concrete(),
             Self::I32
+            | Self::I8
+            | Self::I16
+            | Self::I64
+            | Self::U8
+            | Self::U16
+            | Self::U32
+            | Self::U64
+            | Self::ISize
+            | Self::USize
             | Self::Bool
             | Self::String
             | Self::CString
@@ -118,6 +167,15 @@ impl fmt::Display for CheckedType {
             Self::Inferred => formatter.write_str("_"),
             Self::Error => formatter.write_str("<error>"),
             Self::I32 => formatter.write_str("I32"),
+            Self::I8 => formatter.write_str("I8"),
+            Self::I16 => formatter.write_str("I16"),
+            Self::I64 => formatter.write_str("I64"),
+            Self::U8 => formatter.write_str("U8"),
+            Self::U16 => formatter.write_str("U16"),
+            Self::U32 => formatter.write_str("U32"),
+            Self::U64 => formatter.write_str("U64"),
+            Self::ISize => formatter.write_str("ISize"),
+            Self::USize => formatter.write_str("USize"),
             Self::Bool => formatter.write_str("Bool"),
             Self::String => formatter.write_str("String"),
             Self::CString => formatter.write_str("CString"),
@@ -501,28 +559,27 @@ impl TypeChecker {
     }
 
     fn validate_intrinsics(&mut self, module: &ResolvedModule) {
-        let i32_arithmetic = CheckedType::Function(CheckedFunctionType {
-            parameter: Box::new(CheckedType::Product(CheckedProductType {
-                elements: vec![
-                    CheckedTypeElement {
-                        name: None,
-                        value_type: CheckedType::I32,
-                    },
-                    CheckedTypeElement {
-                        name: None,
-                        value_type: CheckedType::I32,
-                    },
-                ],
-                variadic: false,
-            })),
-            result: Box::new(CheckedType::I32),
-        });
         for (symbol, intrinsic) in module.intrinsic_functions() {
             let expected = match intrinsic {
-                crate::IntrinsicFunction::I32Add
-                | crate::IntrinsicFunction::I32Subtract
-                | crate::IntrinsicFunction::I32Multiply
-                | crate::IntrinsicFunction::I32Divide => i32_arithmetic.clone(),
+                crate::IntrinsicFunction::IntegerBinary { integer, .. } => {
+                    let integer = CheckedType::integer(*integer);
+                    CheckedType::Function(CheckedFunctionType {
+                        parameter: Box::new(CheckedType::Product(CheckedProductType {
+                            elements: vec![
+                                CheckedTypeElement {
+                                    name: None,
+                                    value_type: integer.clone(),
+                                },
+                                CheckedTypeElement {
+                                    name: None,
+                                    value_type: integer.clone(),
+                                },
+                            ],
+                            variadic: false,
+                        })),
+                        result: Box::new(integer),
+                    })
+                }
                 crate::IntrinsicFunction::StringFromCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::CString),
@@ -928,6 +985,16 @@ impl TypeChecker {
                 let Some(function_id) = module.function_for(function.syntax.id) else {
                     return CheckedType::Error;
                 };
+                if !self.checked_functions.contains(&function_id)
+                    && let Some(CheckedType::Function(expected)) = expected
+                    && let Some(current) = self.function_types.get(&function_id).cloned()
+                    && let Some(CheckedType::Function(merged)) = merge_types(
+                        CheckedType::Function(current),
+                        CheckedType::Function(expected.clone()),
+                    )
+                {
+                    self.function_types.insert(function_id, merged);
+                }
                 self.ensure_function_checked(module, function_id);
                 self.function_types
                     .get(&function_id)
@@ -1204,7 +1271,31 @@ impl TypeChecker {
                 instantiated
             }
             Expression::String(_) => CheckedType::String,
-            Expression::Integer(_) => CheckedType::I32,
+            Expression::Integer(integer) => {
+                let integer_type = expected
+                    .and_then(CheckedType::integer_type)
+                    .unwrap_or(IntegerType::I32);
+                if let Some(width) = integer_type.fixed_width()
+                    && integer.literal.parse::<u128>().ok().is_none_or(|value| {
+                        let value_bits = if integer_type.is_signed() {
+                            width - 1
+                        } else {
+                            width
+                        };
+                        value > ((1_u128 << value_bits) - 1)
+                    })
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        integer.syntax.span.clone(),
+                        format!(
+                            "integer literal `{}` does not fit in `{}`",
+                            integer.literal,
+                            integer_type.name()
+                        ),
+                    ));
+                }
+                CheckedType::integer(integer_type)
+            }
         };
         self.expression_types
             .insert(expression.syntax().id, value_type.clone());
@@ -1672,7 +1763,7 @@ impl TypeChecker {
         };
         if let Some(builtin) = module.builtin_type(id) {
             return match builtin {
-                BuiltinType::I32 => CheckedType::I32,
+                BuiltinType::Integer(integer) => CheckedType::integer(integer),
                 BuiltinType::Bool => CheckedType::Bool,
                 BuiltinType::String => CheckedType::String,
                 BuiltinType::CChar => CheckedType::CChar,
@@ -1741,7 +1832,12 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         (CheckedType::Inferred, value_type) | (value_type, CheckedType::Inferred) => {
             Some(value_type)
         }
-        (CheckedType::I32, CheckedType::I32) => Some(CheckedType::I32),
+        (actual, expected)
+            if actual.integer_type().is_some()
+                && actual.integer_type() == expected.integer_type() =>
+        {
+            Some(actual)
+        }
         (CheckedType::Bool, CheckedType::Bool) => Some(CheckedType::Bool),
         (CheckedType::String, CheckedType::String) => Some(CheckedType::String),
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),

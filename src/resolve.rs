@@ -46,12 +46,96 @@ pub struct ResolvedTraitImplementation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinType {
-    I32,
+    Integer(IntegerType),
     Bool,
     String,
     CChar,
     CString,
     CPointer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegerType {
+    I8,
+    I16,
+    I32,
+    I64,
+    U8,
+    U16,
+    U32,
+    U64,
+    ISize,
+    USize,
+}
+
+impl IntegerType {
+    pub const ALL: [Self; 10] = [
+        Self::I8,
+        Self::I16,
+        Self::I32,
+        Self::I64,
+        Self::U8,
+        Self::U16,
+        Self::U32,
+        Self::U64,
+        Self::ISize,
+        Self::USize,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::I8 => "I8",
+            Self::I16 => "I16",
+            Self::I32 => "I32",
+            Self::I64 => "I64",
+            Self::U8 => "U8",
+            Self::U16 => "U16",
+            Self::U32 => "U32",
+            Self::U64 => "U64",
+            Self::ISize => "ISize",
+            Self::USize => "USize",
+        }
+    }
+
+    pub fn intrinsic_name(self) -> &'static str {
+        match self {
+            Self::I8 => "i8",
+            Self::I16 => "i16",
+            Self::I32 => "i32",
+            Self::I64 => "i64",
+            Self::U8 => "u8",
+            Self::U16 => "u16",
+            Self::U32 => "u32",
+            Self::U64 => "u64",
+            Self::ISize => "isize",
+            Self::USize => "usize",
+        }
+    }
+
+    pub fn is_signed(self) -> bool {
+        matches!(
+            self,
+            Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::ISize
+        )
+    }
+
+    pub fn fixed_width(self) -> Option<u32> {
+        match self {
+            Self::I8 | Self::U8 => Some(8),
+            Self::I16 | Self::U16 => Some(16),
+            Self::I32 | Self::U32 => Some(32),
+            Self::I64 | Self::U64 => Some(64),
+            Self::ISize | Self::USize => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegerBinaryOperation {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -61,10 +145,10 @@ pub enum PrimitiveMacro {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IntrinsicFunction {
-    I32Add,
-    I32Subtract,
-    I32Multiply,
-    I32Divide,
+    IntegerBinary {
+        integer: IntegerType,
+        operation: IntegerBinaryOperation,
+    },
     StringFromCString,
     StringToCString,
 }
@@ -378,7 +462,14 @@ impl NameResolver {
         let Some(core) = program.standard_library_core() else {
             return;
         };
-        self.register_builtin_type(core, "std.core", "I32", BuiltinType::I32);
+        for integer in IntegerType::ALL {
+            self.register_builtin_type(
+                core,
+                "std.core",
+                integer.name(),
+                BuiltinType::Integer(integer),
+            );
+        }
         self.register_builtin_type(core, "std.core", "Bool", BuiltinType::Bool);
         self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
 
@@ -389,17 +480,28 @@ impl NameResolver {
             self.register_primitive_macro(cinterop, "c_string", PrimitiveMacro::CString);
         }
 
-        let expected = [
-            ("__i32_add", IntrinsicFunction::I32Add),
-            ("__i32_subtract", IntrinsicFunction::I32Subtract),
-            ("__i32_multiply", IntrinsicFunction::I32Multiply),
-            ("__i32_divide", IntrinsicFunction::I32Divide),
-            (
-                "__string_from_c_string",
-                IntrinsicFunction::StringFromCString,
-            ),
-            ("__string_to_c_string", IntrinsicFunction::StringToCString),
-        ];
+        let mut expected = Vec::new();
+        for integer in IntegerType::ALL {
+            for (suffix, operation) in [
+                ("add", IntegerBinaryOperation::Add),
+                ("subtract", IntegerBinaryOperation::Subtract),
+                ("multiply", IntegerBinaryOperation::Multiply),
+                ("divide", IntegerBinaryOperation::Divide),
+            ] {
+                expected.push((
+                    format!("__{}_{}", integer.intrinsic_name(), suffix),
+                    IntrinsicFunction::IntegerBinary { integer, operation },
+                ));
+            }
+        }
+        expected.push((
+            "__string_from_c_string".to_owned(),
+            IntrinsicFunction::StringFromCString,
+        ));
+        expected.push((
+            "__string_to_c_string".to_owned(),
+            IntrinsicFunction::StringToCString,
+        ));
         let mut found = HashMap::new();
         for source_module in [Some(core), program.standard_library_cinterop()]
             .into_iter()
@@ -429,7 +531,7 @@ impl NameResolver {
             }
         }
         for (name, _) in expected {
-            if !found.contains_key(name) {
+            if !found.contains_key(&name) {
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
                     format!("standard library `std.core` does not declare intrinsic `{name}`"),

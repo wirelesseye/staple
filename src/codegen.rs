@@ -15,8 +15,9 @@ use inkwell::{
 use crate::typecheck::{contains_type_parameter, infer_type_parameters, substitute_type};
 use crate::{
     Accessor, CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic,
-    Expression, FunctionId, IntrinsicFunction, Item, ModuleId, Pattern, ProductExpression,
-    ResolvedFunction, Span, Statement, SymbolId, TypeParameterId, TypedModule,
+    Expression, FunctionId, IntegerBinaryOperation, IntegerType, IntrinsicFunction, Item, ModuleId,
+    Pattern, ProductExpression, ResolvedFunction, Span, Statement, SymbolId, TypeParameterId,
+    TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -1061,11 +1062,29 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let value = integer.literal.parse::<u64>().map_err(|_| {
                     Diagnostic::new(integer.syntax.span.clone(), "integer literal is too large")
                 })?;
-                Ok(self
-                    .context
-                    .i32_type()
-                    .const_int(value, false)
-                    .as_any_value_enum())
+                let integer_type = self
+                    .typed_module
+                    .type_of_expression(integer.syntax.id)
+                    .and_then(CheckedType::integer_type)
+                    .unwrap_or(IntegerType::I32);
+                let llvm_type = self.compile_integer_type(integer_type);
+                let width = llvm_type.get_bit_width();
+                let value_bits = if integer_type.is_signed() {
+                    width - 1
+                } else {
+                    width
+                };
+                if value_bits < 64 && value > ((1_u64 << value_bits) - 1) {
+                    return Err(Diagnostic::new(
+                        integer.syntax.span.clone(),
+                        format!(
+                            "integer literal `{}` does not fit in `{}`",
+                            integer.literal,
+                            integer_type.name()
+                        ),
+                    ));
+                }
+                Ok(llvm_type.const_int(value, false).as_any_value_enum())
             }
         }
     }
@@ -1387,17 +1406,46 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ));
         };
         let value = match intrinsic {
-            IntrinsicFunction::I32Add => self.builder.build_int_add(*left, *right, "i32.add"),
-            IntrinsicFunction::I32Subtract => {
-                self.builder.build_int_sub(*left, *right, "i32.subtract")
-            }
-            IntrinsicFunction::I32Multiply => {
-                self.builder.build_int_mul(*left, *right, "i32.multiply")
-            }
-            IntrinsicFunction::I32Divide => {
-                self.builder
-                    .build_int_signed_div(*left, *right, "i32.divide")
-            }
+            IntrinsicFunction::IntegerBinary {
+                integer,
+                operation: IntegerBinaryOperation::Add,
+            } => self.builder.build_int_add(
+                *left,
+                *right,
+                &format!("{}.add", integer.intrinsic_name()),
+            ),
+            IntrinsicFunction::IntegerBinary {
+                integer,
+                operation: IntegerBinaryOperation::Subtract,
+            } => self.builder.build_int_sub(
+                *left,
+                *right,
+                &format!("{}.subtract", integer.intrinsic_name()),
+            ),
+            IntrinsicFunction::IntegerBinary {
+                integer,
+                operation: IntegerBinaryOperation::Multiply,
+            } => self.builder.build_int_mul(
+                *left,
+                *right,
+                &format!("{}.multiply", integer.intrinsic_name()),
+            ),
+            IntrinsicFunction::IntegerBinary {
+                integer,
+                operation: IntegerBinaryOperation::Divide,
+            } if integer.is_signed() => self.builder.build_int_signed_div(
+                *left,
+                *right,
+                &format!("{}.divide", integer.intrinsic_name()),
+            ),
+            IntrinsicFunction::IntegerBinary {
+                integer,
+                operation: IntegerBinaryOperation::Divide,
+            } => self.builder.build_int_unsigned_div(
+                *left,
+                *right,
+                &format!("{}.divide", integer.intrinsic_name()),
+            ),
             IntrinsicFunction::StringFromCString | IntrinsicFunction::StringToCString => {
                 unreachable!()
             }
@@ -2269,9 +2317,28 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             CheckedType::Function(_) => Ok(self.closure_type().into()),
             CheckedType::Product(product) => self.compile_product_type(product).map(Into::into),
-            CheckedType::I32 => Ok(self.context.i32_type().into()),
+            CheckedType::I8 => Ok(self.compile_integer_type(IntegerType::I8).into()),
+            CheckedType::I16 => Ok(self.compile_integer_type(IntegerType::I16).into()),
+            CheckedType::I32 => Ok(self.compile_integer_type(IntegerType::I32).into()),
+            CheckedType::I64 => Ok(self.compile_integer_type(IntegerType::I64).into()),
+            CheckedType::U8 => Ok(self.compile_integer_type(IntegerType::U8).into()),
+            CheckedType::U16 => Ok(self.compile_integer_type(IntegerType::U16).into()),
+            CheckedType::U32 => Ok(self.compile_integer_type(IntegerType::U32).into()),
+            CheckedType::U64 => Ok(self.compile_integer_type(IntegerType::U64).into()),
+            CheckedType::ISize => Ok(self.compile_integer_type(IntegerType::ISize).into()),
+            CheckedType::USize => Ok(self.compile_integer_type(IntegerType::USize).into()),
             CheckedType::Bool => Ok(self.context.bool_type().into()),
             CheckedType::Distinct { representation, .. } => self.compile_type(representation),
+        }
+    }
+
+    fn compile_integer_type(&self, integer: IntegerType) -> inkwell::types::IntType<'context> {
+        match integer {
+            IntegerType::I8 | IntegerType::U8 => self.context.i8_type(),
+            IntegerType::I16 | IntegerType::U16 => self.context.i16_type(),
+            IntegerType::I32 | IntegerType::U32 => self.context.i32_type(),
+            IntegerType::I64 | IntegerType::U64 => self.context.i64_type(),
+            IntegerType::ISize | IntegerType::USize => self.size_type,
         }
     }
 

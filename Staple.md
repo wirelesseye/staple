@@ -290,9 +290,11 @@ Macros are module items and support the same namespace, glob, selected, and
 renamed import forms as values and types. User-defined macros are not yet
 supported.
 
-Operators are ordinary curried function values. The standard prelude currently
-provides `+`, `-`, `*`, and `/` for `I32`; their public definitions are ordinary
-functions backed by private compiler intrinsics. A symbolic function may
+Operators are ordinary curried function values. The standard prelude provides
+`+`, `-`, `*`, and `/` through the `Add`, `Subtract`, `Multiply`, and `Divide`
+traits. Each operator is one bounded generic function; arithmetic is not
+implemented with function overloading. The standard integer implementations
+are backed by private compiler intrinsics. A symbolic function may
 declare its fixity as part of its binding:
 
 ```staple
@@ -638,7 +640,16 @@ Here `answer` returns `42`. Returning unit is written explicitly as `return ()`;
 Named types are written as identifiers:
 
 ```staple
+I8
+I16
 I32
+I64
+U8
+U16
+U32
+U64
+ISize
+USize
 Bool
 String
 CString
@@ -646,10 +657,12 @@ CChar
 CPointer CChar
 ```
 
-`I32`, `Bool`, `String`, and the arithmetic functions from `std.core` are imported
-implicitly into every source module. These are ordinary type names rather than
-keywords, so a local declaration or explicit import can shadow a prelude name.
-Integer literals have type `I32`.
+The integer types, `Bool`, `String`, arithmetic traits, and arithmetic functions
+from `std.core` are imported implicitly into every source module. These are
+ordinary type names rather than keywords, so a local declaration or explicit
+import can shadow a prelude name. Integer literals use an expected integer type
+when one is available and otherwise default to `I32`. Mixed-type arithmetic is
+not implicit.
 
 `String` is an owned UTF-8 buffer represented by a pointer, byte length, and
 capacity. String literals have this canonical type. Until Staple gains
@@ -687,9 +700,12 @@ CPointer CChar
 `...` denotes the variadic portion of an external function parameter product. Its
 meaning outside foreign declarations is currently unspecified.
 
-`I32` is currently the only standard-library numeric type. The future numeric
-type set, type inference rules, and broader type compatibility rules remain
-unspecified.
+The fixed-width standard-library integers are `I8`, `I16`, `I32`, `I64`, `U8`,
+`U16`, `U32`, and `U64`. `ISize` and `USize` use the target pointer width.
+Arithmetic is homogeneous: both operands and the result have the same type.
+Signed integer division uses signed semantics, while unsigned integer division
+uses unsigned semantics. Staple does not currently provide implicit numeric
+conversions or floating-point types.
 
 ### Type declarations
 

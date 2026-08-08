@@ -1154,6 +1154,73 @@ fn rejects_returns_outside_functions_and_incompatible_return_values() {
 }
 
 #[test]
+fn supports_contextual_literals_and_arithmetic_for_all_integer_types() {
+    let source = concat!(
+        "def i8_value = () -> I8 => { let a: I8 = 8; let b: I8 = 4; (a + b) * b - a / b; }\n",
+        "def i16_value = () -> I16 => { let a: I16 = 8; let b: I16 = 4; (a + b) * b - a / b; }\n",
+        "def i32_value = () -> I32 => { let a: I32 = 8; let b: I32 = 4; (a + b) * b - a / b; }\n",
+        "def i64_value = () -> I64 => { let a: I64 = 8; let b: I64 = 4; (a + b) * b - a / b; }\n",
+        "def u8_value = () -> U8 => { let a: U8 = 8; let b: U8 = 4; (a + b) * b - a / b; }\n",
+        "def u16_value = () -> U16 => { let a: U16 = 8; let b: U16 = 4; (a + b) * b - a / b; }\n",
+        "def u32_value = () -> U32 => { let a: U32 = 8; let b: U32 = 4; (a + b) * b - a / b; }\n",
+        "def u64_value = () -> U64 => { let a: U64 = 8; let b: U64 = 4; (a + b) * b - a / b; }\n",
+        "def isize_value = () -> ISize => { let a: ISize = 8; let b: ISize = 4; (a + b) * b - a / b; }\n",
+        "def usize_value = () -> USize => { let a: USize = 8; let b: USize = 4; (a + b) * b - a / b; }\n",
+        "i8_value ()\n",
+    );
+    let module = type_check(source);
+
+    let expected = [
+        ("i8_value", CheckedType::I8),
+        ("i16_value", CheckedType::I16),
+        ("i32_value", CheckedType::I32),
+        ("i64_value", CheckedType::I64),
+        ("u8_value", CheckedType::U8),
+        ("u16_value", CheckedType::U16),
+        ("u32_value", CheckedType::U32),
+        ("u64_value", CheckedType::U64),
+        ("isize_value", CheckedType::ISize),
+        ("usize_value", CheckedType::USize),
+    ];
+    for (name, expected_type) in expected {
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap();
+        assert_eq!(
+            *module.type_of_function(function.id).unwrap().result,
+            expected_type
+        );
+    }
+
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("all integer arithmetic should generate valid LLVM");
+}
+
+#[test]
+fn rejects_out_of_range_and_mixed_integer_arithmetic() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let too_large: U8 = 256\n"))
+        .expect_err("an out-of-range literal should fail");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("integer literal `256` does not fit in `U8`")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def mixed = (left: I8, right: I16) => left + right\n",
+            "mixed (1, 2)\n",
+        )))
+        .expect_err("mixed integer arithmetic should require an explicit conversion");
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
 fn emits_a_native_object_file() {
     let module = type_check(include_str!("../examples/hello_world.sta"));
     let context = Context::create();
