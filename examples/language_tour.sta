@@ -1,0 +1,27 @@
+// Bindings, literals, products, functions, closures, blocks, and operators.
+use std.cinterop.*
+
+extern "c" {
+    let printf: (CPointer CChar, ...) -> I32
+}
+
+let greeting: String = "Staple language tour"
+let details: (name: String, year: I32) = (name: greeting, year: 2026)
+
+def add_curried: I32 -> I32 -> I32 = left => right => left + right
+def add_ten = add_curried 10
+
+def nested_sum = (first: I32, (second: I32, third: I32)) -> I32 => {
+    let subtotal = first + second
+    subtotal + third
+}
+
+// Symbolic and backtick infix operators are ordinary curried functions.
+def infixl 1 |>: I32 -> I32 -> I32 = value => function_result => function_result
+def infixr 5 choose: I32 -> I32 -> I32 = left => right => right
+
+printf (c_string "%s (%d)\n", string_to_c_string details.0, details.1)
+printf (c_string "product access: %s / %d\n", string_to_c_string details.0, details.1)
+printf (c_string "closure: %d\n", add_ten 32)
+printf (c_string "nested pattern: %d\n", nested_sum (10, (20, 12)))
+printf (c_string "operators: %d %d %d\n", 1 + 2 * 3, 1 |> 9, 1 `choose` 2)
