@@ -173,7 +173,10 @@ fn mangles_a_source_binding_named_main_away_from_the_generated_entry_point() {
 #[test]
 fn imports_public_extern_bindings() {
     let fixture = Fixture::new();
-    fixture.write("main.sta", "use ffi.(puts)\nputs (\"hello\")\n");
+    fixture.write(
+        "main.sta",
+        "use ffi.(puts)\nuse std.cinterop.(c_string)\nputs (c_string \"hello\")\n",
+    );
     fixture.write(
         "ffi.sta",
         "use std.cinterop.*\npub extern \"c\" { let puts: (*const CChar) -> I32 }\n",
@@ -181,6 +184,24 @@ fn imports_public_extern_bindings() {
 
     let llvm = fixture.compile().expect("public extern should import");
     assert!(llvm.contains("declare i32 @puts"));
+}
+
+#[test]
+fn imports_primitive_macros_through_namespace_and_renaming() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use std.cinterop\n",
+            "use std.cinterop.c_string as cs\n",
+            "let first: cinterop.CString = cinterop.c_string \"first\"\n",
+            "let second: cinterop.CString = cs \"second\"\n",
+        ),
+    );
+
+    let llvm = fixture.compile().expect("macro imports should compile");
+    assert!(llvm.contains("c\"first\\00\""));
+    assert!(llvm.contains("c\"second\\00\""));
 }
 
 #[test]

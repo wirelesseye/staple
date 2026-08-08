@@ -1,2 +1,12 @@
 pub type CChar
 pub type CString
+
+pub macro c_string
+
+extern "staple-intrinsic" {
+    let __string_from_c_string: CString -> String
+    let __string_to_c_string: String -> CString
+}
+
+pub def string_from_c_string: CString -> String = value => __string_from_c_string value
+pub def string_to_c_string: String -> CString = value => __string_to_c_string value

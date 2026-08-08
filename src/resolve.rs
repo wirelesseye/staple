@@ -17,10 +17,19 @@ pub struct FunctionId(pub usize);
 pub struct TypeId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct MacroId(pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinType {
     I32,
     Bool,
+    String,
     CChar,
+    CString,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PrimitiveMacro {
     CString,
 }
 
@@ -30,6 +39,8 @@ pub enum IntrinsicFunction {
     I32Subtract,
     I32Multiply,
     I32Divide,
+    StringFromCString,
+    StringToCString,
 }
 
 #[derive(Debug, Clone)]
@@ -57,6 +68,7 @@ pub struct ResolvedModule {
     lowered_infix: HashMap<SyntaxId, Expression>,
     builtin_types: HashMap<TypeId, BuiltinType>,
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
+    macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
 }
 
 impl ResolvedModule {
@@ -111,6 +123,10 @@ impl ResolvedModule {
     pub fn intrinsic_functions(&self) -> &HashMap<SymbolId, IntrinsicFunction> {
         &self.intrinsic_functions
     }
+
+    pub fn primitive_macro_for(&self, syntax: SyntaxId) -> Option<PrimitiveMacro> {
+        self.macro_calls.get(&syntax).copied()
+    }
 }
 
 #[derive(Default)]
@@ -118,6 +134,7 @@ struct Interface {
     values: HashMap<String, SymbolId>,
     fixities: HashMap<String, Fixity>,
     types: HashMap<String, TypeId>,
+    macros: HashMap<String, MacroId>,
 }
 
 #[derive(Default)]
@@ -126,9 +143,11 @@ pub struct NameResolver {
     namespaces: HashMap<String, ModuleId>,
     imported_types: HashMap<String, TypeId>,
     imported_fixities: HashMap<String, Fixity>,
+    imported_macros: HashMap<String, MacroId>,
     prelude_values: HashMap<String, SymbolId>,
     prelude_types: HashMap<String, TypeId>,
     prelude_fixities: HashMap<String, Fixity>,
+    prelude_macros: HashMap<String, MacroId>,
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
@@ -139,6 +158,8 @@ pub struct NameResolver {
     lowered_infix: HashMap<SyntaxId, Expression>,
     builtin_types: HashMap<TypeId, BuiltinType>,
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
+    primitive_macros: HashMap<MacroId, PrimitiveMacro>,
+    macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     functions: Vec<ResolvedFunction>,
     named_types: HashMap<SyntaxId, TypeId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
@@ -147,9 +168,11 @@ pub struct NameResolver {
     interfaces: Vec<Interface>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
     declared_types: Vec<HashMap<String, TypeId>>,
+    declared_macros: Vec<HashMap<String, MacroId>>,
     diagnostics: Vec<Diagnostic>,
     next_symbol_id: usize,
     next_function_id: usize,
+    next_macro_id: usize,
     next_syntax_id: usize,
     current_module: ModuleId,
     multiple_modules: bool,
@@ -193,9 +216,11 @@ impl NameResolver {
             self.namespaces.clear();
             self.imported_types.clear();
             self.imported_fixities.clear();
+            self.imported_macros.clear();
             self.prelude_values.clear();
             self.prelude_types.clear();
             self.prelude_fixities.clear();
+            self.prelude_macros.clear();
             self.push_scope();
             self.install_prelude(&program, source_module.id);
             self.install_imports(&program, source_module.id);
@@ -222,6 +247,7 @@ impl NameResolver {
             lowered_infix: self.lowered_infix,
             builtin_types: self.builtin_types,
             intrinsic_functions: self.intrinsic_functions,
+            macro_calls: self.macro_calls,
         })
     }
 
@@ -231,10 +257,12 @@ impl NameResolver {
         };
         self.register_builtin_type(core, "std.core", "I32", BuiltinType::I32);
         self.register_builtin_type(core, "std.core", "Bool", BuiltinType::Bool);
+        self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
 
         if let Some(cinterop) = program.standard_library_cinterop() {
             self.register_builtin_type(cinterop, "std.cinterop", "CChar", BuiltinType::CChar);
             self.register_builtin_type(cinterop, "std.cinterop", "CString", BuiltinType::CString);
+            self.register_primitive_macro(cinterop, "c_string", PrimitiveMacro::CString);
         }
 
         let expected = [
@@ -242,27 +270,37 @@ impl NameResolver {
             ("__i32_subtract", IntrinsicFunction::I32Subtract),
             ("__i32_multiply", IntrinsicFunction::I32Multiply),
             ("__i32_divide", IntrinsicFunction::I32Divide),
+            (
+                "__string_from_c_string",
+                IntrinsicFunction::StringFromCString,
+            ),
+            ("__string_to_c_string", IntrinsicFunction::StringToCString),
         ];
         let mut found = HashMap::new();
-        for item in &program.module(core).syntax.items {
-            let Item::ExternBlock(block) = item else {
-                continue;
-            };
-            if block.abi != "\"staple-intrinsic\"" {
-                continue;
-            }
-            for binding in &block.bindings {
-                if let Some((_, intrinsic)) =
-                    expected.iter().find(|(name, _)| *name == binding.name)
-                    && let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied()
-                {
-                    found.insert(binding.name.clone(), symbol);
-                    self.intrinsic_functions.insert(symbol, *intrinsic);
-                } else {
-                    self.diagnostics.push(Diagnostic::new(
-                        binding.syntax.span.clone(),
-                        format!("unknown Staple intrinsic `{}`", binding.name),
-                    ));
+        for source_module in [Some(core), program.standard_library_cinterop()]
+            .into_iter()
+            .flatten()
+        {
+            for item in &program.module(source_module).syntax.items {
+                let Item::ExternBlock(block) = item else {
+                    continue;
+                };
+                if block.abi != "\"staple-intrinsic\"" {
+                    continue;
+                }
+                for binding in &block.bindings {
+                    if let Some((_, intrinsic)) =
+                        expected.iter().find(|(name, _)| *name == binding.name)
+                        && let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied()
+                    {
+                        found.insert(binding.name.clone(), symbol);
+                        self.intrinsic_functions.insert(symbol, *intrinsic);
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            format!("unknown Staple intrinsic `{}`", binding.name),
+                        ));
+                    }
                 }
             }
         }
@@ -275,7 +313,9 @@ impl NameResolver {
             }
         }
         for source_module in program.modules() {
-            if source_module.id == core {
+            if source_module.id == core
+                || Some(source_module.id) == program.standard_library_cinterop()
+            {
                 continue;
             }
             for item in &source_module.syntax.items {
@@ -289,6 +329,28 @@ impl NameResolver {
                 }
             }
         }
+    }
+
+    fn register_primitive_macro(
+        &mut self,
+        module: ModuleId,
+        name: &str,
+        primitive: PrimitiveMacro,
+    ) {
+        let Some(id) = self.declared_macros[module.0].get(name).copied() else {
+            self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("standard library `std.cinterop` does not declare macro `{name}`"),
+            ));
+            return;
+        };
+        if !self.interfaces[module.0].macros.contains_key(name) {
+            self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("standard library macro `{name}` must be public"),
+            ));
+        }
+        self.primitive_macros.insert(id, primitive);
     }
 
     fn register_builtin_type(
@@ -327,6 +389,9 @@ impl NameResolver {
             .map(|_| Interface::default())
             .collect();
         self.declared_types = (0..program.modules().len())
+            .map(|_| HashMap::new())
+            .collect();
+        self.declared_macros = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
         self.declared_fixities = (0..program.modules().len())
@@ -375,6 +440,24 @@ impl NameResolver {
                         if declaration.visibility == Visibility::Public {
                             self.interfaces[source_module.id.0]
                                 .types
+                                .insert(declaration.name.clone(), id);
+                        }
+                    }
+                    Item::MacroDeclaration(declaration) => {
+                        let id = MacroId(self.next_macro_id);
+                        self.next_macro_id += 1;
+                        if self.declared_macros[source_module.id.0]
+                            .insert(declaration.name.clone(), id)
+                            .is_some()
+                        {
+                            self.diagnostics.push(Diagnostic::new(
+                                declaration.syntax.span.clone(),
+                                format!("duplicate macro definition of `{}`", declaration.name),
+                            ));
+                        }
+                        if declaration.visibility == Visibility::Public {
+                            self.interfaces[source_module.id.0]
+                                .macros
                                 .insert(declaration.name.clone(), id);
                         }
                     }
@@ -458,6 +541,9 @@ impl NameResolver {
                     for (name, ty) in self.interfaces[imported.0].types.clone() {
                         self.insert_imported_type(name, ty, declaration.syntax.span.clone());
                     }
+                    for (name, macro_id) in self.interfaces[imported.0].macros.clone() {
+                        self.insert_imported_macro(name, macro_id, declaration.syntax.span.clone());
+                    }
                 }
                 UseKind::Selected(names) => {
                     for name in names {
@@ -486,6 +572,7 @@ impl NameResolver {
         self.prelude_values = self.interfaces[core.0].values.clone();
         self.prelude_types = self.interfaces[core.0].types.clone();
         self.prelude_fixities = self.interfaces[core.0].fixities.clone();
+        self.prelude_macros = self.interfaces[core.0].macros.clone();
     }
 
     fn install_selected(&mut self, module: ModuleId, item: &str, local: &str, span: Span) {
@@ -500,6 +587,10 @@ impl NameResolver {
         if let Some(ty) = self.interfaces[module.0].types.get(item).copied() {
             found = true;
             self.insert_imported_type(local.to_owned(), ty, span.clone());
+        }
+        if let Some(macro_id) = self.interfaces[module.0].macros.get(item).copied() {
+            found = true;
+            self.insert_imported_macro(local.to_owned(), macro_id, span.clone());
         }
         if !found {
             self.diagnostics.push(Diagnostic::new(
@@ -520,6 +611,15 @@ impl NameResolver {
     fn insert_imported_type(&mut self, name: String, ty: TypeId, span: Span) {
         if self.declared_types[self.current_module.0].contains_key(&name)
             || self.imported_types.insert(name.clone(), ty).is_some()
+        {
+            self.duplicate_import(&name, span);
+        }
+    }
+
+    fn insert_imported_macro(&mut self, name: String, id: MacroId, span: Span) {
+        if self.current_scope().contains_key(&name)
+            || self.namespaces.contains_key(&name)
+            || self.imported_macros.insert(name.clone(), id).is_some()
         {
             self.duplicate_import(&name, span);
         }
@@ -547,7 +647,7 @@ impl NameResolver {
                         self.declare_allocated(binding);
                     }
                 }
-                Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
+                Item::UseDeclaration(_) | Item::TypeDeclaration(_) | Item::MacroDeclaration(_) => {}
             }
         }
     }
@@ -565,6 +665,17 @@ impl NameResolver {
             Item::TypeDeclaration(declaration) => {
                 if let Some(underlying) = &declaration.underlying {
                     self.resolve_type(underlying);
+                }
+            }
+            Item::MacroDeclaration(declaration) => {
+                if !self
+                    .primitive_macros
+                    .contains_key(&self.declared_macros[self.current_module.0][&declaration.name])
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        declaration.syntax.span.clone(),
+                        "user-defined macros are not supported yet",
+                    ));
                 }
             }
             Item::Statement(statement) => self.resolve_statement(statement),
@@ -664,6 +775,11 @@ impl NameResolver {
                 }
             }
             Expression::Call(call) => {
+                if let Some(primitive) = self.resolve_primitive_macro(&call.callee) {
+                    self.macro_calls.insert(call.syntax.id, primitive);
+                    self.resolve_expression(&call.argument, None, None);
+                    return;
+                }
                 self.resolve_expression(&call.callee, None, None);
                 self.resolve_expression(&call.argument, None, None);
             }
@@ -674,6 +790,11 @@ impl NameResolver {
                 {
                     if let Some(symbol) = self.interfaces[module.0].values.get(item).copied() {
                         self.symbols.insert(access.syntax.id, symbol);
+                    } else if self.interfaces[module.0].macros.contains_key(item) {
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            format!("macro `{item}` must be invoked"),
+                        ));
                     } else {
                         self.diagnostics.push(Diagnostic::new(
                             access.syntax.span.clone(),
@@ -701,6 +822,12 @@ impl NameResolver {
                     self.diagnostics.push(Diagnostic::new(
                         name.syntax.span.clone(),
                         format!("module namespace `{}` is not a value", name.name),
+                    ))
+                }
+                None if self.lookup_macro(&name.name).is_some() => {
+                    self.diagnostics.push(Diagnostic::new(
+                        name.syntax.span.clone(),
+                        format!("macro `{}` must be invoked", name.name),
                     ))
                 }
                 None => self.diagnostics.push(Diagnostic::new(
@@ -944,6 +1071,37 @@ impl NameResolver {
             .rev()
             .find_map(|scope| scope.get(name).copied())
             .or_else(|| self.prelude_values.get(name).copied())
+    }
+
+    fn lookup_macro(&self, name: &str) -> Option<MacroId> {
+        if self.lookup(name).is_some() {
+            return None;
+        }
+        self.declared_macros[self.current_module.0]
+            .get(name)
+            .copied()
+            .or_else(|| self.imported_macros.get(name).copied())
+            .or_else(|| self.prelude_macros.get(name).copied())
+    }
+
+    fn resolve_primitive_macro(&self, callee: &Expression) -> Option<PrimitiveMacro> {
+        let id = match callee {
+            Expression::Name(name) => self.lookup_macro(&name.name),
+            Expression::Access(access) => {
+                let Expression::Name(namespace) = access.value.as_ref() else {
+                    return None;
+                };
+                let Accessor::Name(item) = &access.accessor else {
+                    return None;
+                };
+                self.namespaces
+                    .get(&namespace.name)
+                    .and_then(|module| self.interfaces[module.0].macros.get(item))
+                    .copied()
+            }
+            _ => None,
+        }?;
+        self.primitive_macros.get(&id).copied()
     }
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());

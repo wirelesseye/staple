@@ -32,6 +32,7 @@ struct ModuleEmitter<'module, 'context> {
     external_symbols: HashSet<SymbolId>,
     storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initializers: HashMap<ModuleId, inkwell::values::FunctionValue<'context>>,
+    size_type: inkwell::types::IntType<'context>,
 }
 
 #[derive(Default)]
@@ -47,6 +48,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn new(
         context: &'context inkwell::context::Context,
         typed_module: &'module TypedModule,
+        target_machine: &TargetMachine,
     ) -> Self {
         Self {
             context,
@@ -60,6 +62,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             external_symbols: HashSet::new(),
             storage: HashMap::new(),
             initializers: HashMap::new(),
+            size_type: context.ptr_sized_int_type(&target_machine.get_target_data(), None),
         }
     }
 }
@@ -80,7 +83,7 @@ impl<'context> CodeGenerator<'context> {
     ) -> Result<String, Vec<Diagnostic>> {
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        ModuleEmitter::new(self.context, module)
+        ModuleEmitter::new(self.context, module, &target_machine)
             .compile(&target_machine)
             .map(|module| module.print_to_string().to_string())
             .map_err(|diagnostic| vec![diagnostic])
@@ -100,7 +103,7 @@ impl<'context> CodeGenerator<'context> {
         }
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        let llvm_module = ModuleEmitter::new(self.context, module)
+        let llvm_module = ModuleEmitter::new(self.context, module, &target_machine)
             .compile(&target_machine)
             .map_err(|diagnostic| vec![diagnostic])?;
         target_machine
@@ -126,6 +129,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.declare_functions()?;
         self.declare_top_level_storage()?;
         self.declare_initializers();
+        self.build_utf8_validator()?;
         let typed_module = self.typed_module;
         for function in typed_module.functions() {
             self.compile_function_body(function)?;
@@ -547,7 +551,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }))
             }
             Expression::Product(product) => self.compile_product_expression(environment, product),
-            Expression::Call(call) => self.compile_call_expression(environment, call),
+            Expression::Call(call) => {
+                if self
+                    .typed_module
+                    .resolved()
+                    .primitive_macro_for(call.syntax.id)
+                    .is_some()
+                {
+                    return self.compile_c_string_macro(call);
+                }
+                self.compile_call_expression(environment, call)
+            }
             Expression::Access(access) => {
                 if let Some(symbol) = self.typed_module.symbol_for(access.syntax.id) {
                     return self.compile_symbol_value(
@@ -608,10 +622,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Expression::String(string) => {
                 let value = decode_string_literal(&string.literal)
                     .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
-                self.builder
+                let source = self
+                    .builder
                     .build_global_string_ptr(&value, "string")
-                    .map(|global| global.as_any_value_enum())
-                    .map_err(|error| Diagnostic::new(string.syntax.span.clone(), error.to_string()))
+                    .map_err(|error| {
+                        Diagnostic::new(string.syntax.span.clone(), error.to_string())
+                    })?
+                    .as_pointer_value();
+                let length = self.size_type.const_int(value.len() as u64, false);
+                let pointer = self
+                    .builder
+                    .build_array_malloc(self.context.i8_type(), length, "string.data")
+                    .map_err(|error| {
+                        Diagnostic::new(string.syntax.span.clone(), error.to_string())
+                    })?;
+                self.builder
+                    .build_memcpy(pointer, 1, source, 1, length)
+                    .map_err(|error| {
+                        Diagnostic::new(string.syntax.span.clone(), error.to_string())
+                    })?;
+                self.build_string_value(pointer, length, string.syntax.span.clone())
+                    .map(|value| value.as_any_value_enum())
             }
             Expression::Integer(integer) => {
                 let value = integer.literal.parse::<u64>().map_err(|_| {
@@ -624,6 +655,53 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .as_any_value_enum())
             }
         }
+    }
+
+    fn compile_c_string_macro(
+        &mut self,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let Expression::String(string) = call.argument.as_ref() else {
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "`c_string` requires a string literal",
+            ));
+        };
+        let value = decode_string_literal(&string.literal)
+            .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
+        if value.as_bytes().contains(&0) {
+            return Err(Diagnostic::new(
+                string.syntax.span.clone(),
+                "C string literals cannot contain an interior NUL byte",
+            ));
+        }
+        self.builder
+            .build_global_string_ptr(&value, "c_string")
+            .map(|global| global.as_any_value_enum())
+            .map_err(|error| Diagnostic::new(string.syntax.span.clone(), error.to_string()))
+    }
+
+    fn build_string_value(
+        &self,
+        pointer: inkwell::values::PointerValue<'context>,
+        length: inkwell::values::IntValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let mut value = self.string_type().const_zero();
+        value = self
+            .builder
+            .build_insert_value(value, pointer, 0, "string.pointer")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_struct_value();
+        value = self
+            .builder
+            .build_insert_value(value, length, 1, "string.length")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_struct_value();
+        self.builder
+            .build_insert_value(value, length, 2, "string.capacity")
+            .map(|value| value.into_struct_value())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
     fn compile_symbol_value(
@@ -766,6 +844,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         call: &CallExpression,
         intrinsic: IntrinsicFunction,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        match intrinsic {
+            IntrinsicFunction::StringFromCString => {
+                return self.compile_string_from_c_string(environment, call);
+            }
+            IntrinsicFunction::StringToCString => {
+                return self.compile_string_to_c_string(environment, call);
+            }
+            _ => {}
+        }
         let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
         let [
             inkwell::values::BasicMetadataValueEnum::IntValue(left),
@@ -789,9 +876,548 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.builder
                     .build_int_signed_div(*left, *right, "i32.divide")
             }
+            IntrinsicFunction::StringFromCString | IntrinsicFunction::StringToCString => {
+                unreachable!()
+            }
         }
         .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
         Ok(value.as_any_value_enum())
+    }
+
+    fn compile_string_from_c_string(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let argument = self.compile_expression(environment, &call.argument)?;
+        let Some(BasicValueEnum::PointerValue(source)) = value_as_basic(argument) else {
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "CString conversion requires a pointer",
+            ));
+        };
+        let strlen_type = self.size_type.fn_type(
+            &[self.context.ptr_type(AddressSpace::default()).into()],
+            false,
+        );
+        let strlen = self
+            .llvm_module
+            .get_function("strlen")
+            .unwrap_or_else(|| self.llvm_module.add_function("strlen", strlen_type, None));
+        let length = self
+            .builder
+            .build_direct_call(strlen, &[source.into()], "c_string.length")
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let validator = self
+            .llvm_module
+            .get_function("__staple_is_valid_utf8")
+            .expect("UTF-8 validator is declared before function bodies");
+        let valid = self
+            .builder
+            .build_direct_call(
+                validator,
+                &[source.into(), length.into()],
+                "c_string.valid_utf8",
+            )
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let invalid = self
+            .builder
+            .build_not(valid, "c_string.invalid_utf8")
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        self.build_trap_if(invalid, call.syntax.span.clone())?;
+        let pointer = self
+            .builder
+            .build_array_malloc(self.context.i8_type(), length, "string.data")
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        self.builder
+            .build_memcpy(pointer, 1, source, 1, length)
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        self.build_string_value(pointer, length, call.syntax.span.clone())
+            .map(|value| value.as_any_value_enum())
+    }
+
+    fn compile_string_to_c_string(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let argument = self.compile_expression(environment, &call.argument)?;
+        let Some(BasicValueEnum::StructValue(string)) = value_as_basic(argument) else {
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "String conversion requires a String value",
+            ));
+        };
+        let pointer = self
+            .builder
+            .build_extract_value(string, 0, "string.pointer")
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
+            .into_pointer_value();
+        let length = self
+            .builder
+            .build_extract_value(string, 1, "string.length")
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
+            .into_int_value();
+
+        let memchr_type = self.context.ptr_type(AddressSpace::default()).fn_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.context.i32_type().into(),
+                self.size_type.into(),
+            ],
+            false,
+        );
+        let memchr = self
+            .llvm_module
+            .get_function("memchr")
+            .unwrap_or_else(|| self.llvm_module.add_function("memchr", memchr_type, None));
+        let nul = self
+            .builder
+            .build_direct_call(
+                memchr,
+                &[
+                    pointer.into(),
+                    self.context.i32_type().const_zero().into(),
+                    length.into(),
+                ],
+                "string.interior_nul",
+            )
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+        let has_nul = self
+            .builder
+            .build_is_not_null(nul, "string.has_interior_nul")
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        self.build_trap_if(has_nul, call.syntax.span.clone())?;
+
+        let allocation_length = self
+            .builder
+            .build_int_add(
+                length,
+                self.size_type.const_int(1, false),
+                "c_string.length",
+            )
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        let overflow = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                allocation_length,
+                length,
+                "c_string.length_overflow",
+            )
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        self.build_trap_if(overflow, call.syntax.span.clone())?;
+        let result = self
+            .builder
+            .build_array_malloc(self.context.i8_type(), allocation_length, "c_string.data")
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        self.builder
+            .build_memcpy(result, 1, pointer, 1, length)
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        let terminator = unsafe {
+            self.builder.build_gep(
+                self.context.i8_type(),
+                result,
+                &[length],
+                "c_string.terminator",
+            )
+        }
+        .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        self.builder
+            .build_store(terminator, self.context.i8_type().const_zero())
+            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        Ok(result.as_any_value_enum())
+    }
+
+    fn build_trap_if(
+        &mut self,
+        condition: inkwell::values::IntValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let current = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "trap has no containing function"))?;
+        let trap_block = self.context.append_basic_block(current, "trap");
+        let continue_block = self.context.append_basic_block(current, "trap.continue");
+        self.builder
+            .build_conditional_branch(condition, trap_block, continue_block)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder.position_at_end(trap_block);
+        let trap = self
+            .llvm_module
+            .get_function("llvm.trap")
+            .unwrap_or_else(|| {
+                self.llvm_module.add_function(
+                    "llvm.trap",
+                    self.context.void_type().fn_type(&[], false),
+                    None,
+                )
+            });
+        self.builder
+            .build_direct_call(trap, &[], "")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_unreachable()
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder.position_at_end(continue_block);
+        Ok(())
+    }
+
+    fn build_utf8_validator(&mut self) -> CodeGenerationResult<()> {
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let function_type = self
+            .context
+            .bool_type()
+            .fn_type(&[pointer_type.into(), self.size_type.into()], false);
+        let function = self.llvm_module.add_function(
+            "__staple_is_valid_utf8",
+            function_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(function, "entry");
+        let loop_block = self.context.append_basic_block(function, "loop");
+        let byte_block = self.context.append_basic_block(function, "byte");
+        let done_block = self.context.append_basic_block(function, "done");
+        let continuation_block = self.context.append_basic_block(function, "continuation");
+        let continuation_valid = self
+            .context
+            .append_basic_block(function, "continuation.valid");
+        let leading_block = self.context.append_basic_block(function, "leading");
+        let leading_valid = self.context.append_basic_block(function, "leading.valid");
+        let invalid_block = self.context.append_basic_block(function, "invalid");
+
+        let pointer = function.get_nth_param(0).unwrap().into_pointer_value();
+        let length = function.get_nth_param(1).unwrap().into_int_value();
+        let byte_type = self.context.i8_type();
+        self.builder.position_at_end(entry);
+        let index_slot = self
+            .builder
+            .build_alloca(self.size_type, "index")
+            .map_err(compiler_diagnostic)?;
+        let remaining_slot = self
+            .builder
+            .build_alloca(byte_type, "remaining")
+            .map_err(compiler_diagnostic)?;
+        let minimum_slot = self
+            .builder
+            .build_alloca(byte_type, "minimum")
+            .map_err(compiler_diagnostic)?;
+        let maximum_slot = self
+            .builder
+            .build_alloca(byte_type, "maximum")
+            .map_err(compiler_diagnostic)?;
+        for (slot, value) in [
+            (index_slot, self.size_type.const_zero()),
+            (remaining_slot, byte_type.const_zero()),
+            (minimum_slot, byte_type.const_int(0x80, false)),
+            (maximum_slot, byte_type.const_int(0xbf, false)),
+        ] {
+            self.builder
+                .build_store(slot, value)
+                .map_err(compiler_diagnostic)?;
+        }
+        self.builder
+            .build_unconditional_branch(loop_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(loop_block);
+        let index = self
+            .builder
+            .build_load(self.size_type, index_slot, "index")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let at_end = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, index, length, "at_end")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(at_end, done_block, byte_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(done_block);
+        let remaining = self
+            .builder
+            .build_load(byte_type, remaining_slot, "remaining")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let complete = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                remaining,
+                byte_type.const_zero(),
+                "complete",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_return(Some(&complete))
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(byte_block);
+        let byte_pointer = unsafe {
+            self.builder
+                .build_gep(byte_type, pointer, &[index], "byte.pointer")
+        }
+        .map_err(compiler_diagnostic)?;
+        let byte = self
+            .builder
+            .build_load(byte_type, byte_pointer, "byte")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let remaining = self
+            .builder
+            .build_load(byte_type, remaining_slot, "remaining")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let expects_continuation = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                remaining,
+                byte_type.const_zero(),
+                "expects_continuation",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(expects_continuation, continuation_block, leading_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(continuation_block);
+        let minimum = self
+            .builder
+            .build_load(byte_type, minimum_slot, "minimum")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let maximum = self
+            .builder
+            .build_load(byte_type, maximum_slot, "maximum")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let above_minimum = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::UGE, byte, minimum, "above_minimum")
+            .map_err(compiler_diagnostic)?;
+        let below_maximum = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::ULE, byte, maximum, "below_maximum")
+            .map_err(compiler_diagnostic)?;
+        let valid_continuation = self
+            .builder
+            .build_and(above_minimum, below_maximum, "valid_continuation")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(valid_continuation, continuation_valid, invalid_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(continuation_valid);
+        let next_remaining = self
+            .builder
+            .build_int_sub(remaining, byte_type.const_int(1, false), "next_remaining")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(remaining_slot, next_remaining)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(minimum_slot, byte_type.const_int(0x80, false))
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(maximum_slot, byte_type.const_int(0xbf, false))
+            .map_err(compiler_diagnostic)?;
+        self.increment_utf8_index(index_slot, index, loop_block)?;
+
+        self.builder.position_at_end(leading_block);
+        let ascii = self.byte_in_range(byte, 0, 0x7f)?;
+        let two = self.byte_in_range(byte, 0xc2, 0xdf)?;
+        let three_low = self.byte_in_range(byte, 0xe1, 0xec)?;
+        let three_high = self.byte_in_range(byte, 0xee, 0xef)?;
+        let three_general = self
+            .builder
+            .build_or(three_low, three_high, "three.general")
+            .map_err(compiler_diagnostic)?;
+        let e0 = self.byte_equals(byte, 0xe0)?;
+        let ed = self.byte_equals(byte, 0xed)?;
+        let three = self
+            .builder
+            .build_or(e0, ed, "three.special")
+            .and_then(|special| self.builder.build_or(special, three_general, "three"))
+            .map_err(compiler_diagnostic)?;
+        let four_general = self.byte_in_range(byte, 0xf1, 0xf3)?;
+        let f0 = self.byte_equals(byte, 0xf0)?;
+        let f4 = self.byte_equals(byte, 0xf4)?;
+        let four = self
+            .builder
+            .build_or(f0, f4, "four.special")
+            .and_then(|special| self.builder.build_or(special, four_general, "four"))
+            .map_err(compiler_diagnostic)?;
+        let valid_leading = self
+            .builder
+            .build_or(ascii, two, "leading.short")
+            .and_then(|short| self.builder.build_or(short, three, "leading.three"))
+            .and_then(|partial| self.builder.build_or(partial, four, "valid_leading"))
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(valid_leading, leading_valid, invalid_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(leading_valid);
+        let three_or_four = self
+            .builder
+            .build_or(three, four, "three_or_four")
+            .map_err(compiler_diagnostic)?;
+        let remaining_for_multibyte = self
+            .builder
+            .build_select(
+                four,
+                byte_type.const_int(3, false),
+                byte_type.const_int(2, false),
+                "long_remaining",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let remaining = self
+            .builder
+            .build_select(
+                two,
+                byte_type.const_int(1, false),
+                remaining_for_multibyte,
+                "multibyte_remaining",
+            )
+            .and_then(|value| {
+                self.builder.build_select(
+                    ascii,
+                    byte_type.const_zero(),
+                    value.into_int_value(),
+                    "remaining",
+                )
+            })
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let minimum = self
+            .builder
+            .build_select(
+                e0,
+                byte_type.const_int(0xa0, false),
+                byte_type.const_int(0x80, false),
+                "minimum.e0",
+            )
+            .and_then(|value| {
+                self.builder.build_select(
+                    f0,
+                    byte_type.const_int(0x90, false),
+                    value.into_int_value(),
+                    "minimum",
+                )
+            })
+            .map_err(compiler_diagnostic)?;
+        let maximum = self
+            .builder
+            .build_select(
+                ed,
+                byte_type.const_int(0x9f, false),
+                byte_type.const_int(0xbf, false),
+                "maximum.ed",
+            )
+            .and_then(|value| {
+                self.builder.build_select(
+                    f4,
+                    byte_type.const_int(0x8f, false),
+                    value.into_int_value(),
+                    "maximum",
+                )
+            })
+            .map_err(compiler_diagnostic)?;
+        let _ = three_or_four;
+        self.builder
+            .build_store(remaining_slot, remaining)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(minimum_slot, minimum)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(maximum_slot, maximum)
+            .map_err(compiler_diagnostic)?;
+        self.increment_utf8_index(index_slot, index, loop_block)?;
+
+        self.builder.position_at_end(invalid_block);
+        self.builder
+            .build_return(Some(&self.context.bool_type().const_zero()))
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    fn increment_utf8_index(
+        &self,
+        slot: inkwell::values::PointerValue<'context>,
+        index: inkwell::values::IntValue<'context>,
+        destination: inkwell::basic_block::BasicBlock<'context>,
+    ) -> CodeGenerationResult<()> {
+        let next = self
+            .builder
+            .build_int_add(index, self.size_type.const_int(1, false), "next_index")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(slot, next)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_unconditional_branch(destination)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    fn byte_in_range(
+        &self,
+        byte: inkwell::values::IntValue<'context>,
+        minimum: u64,
+        maximum: u64,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        let ty = self.context.i8_type();
+        let lower = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGE,
+                byte,
+                ty.const_int(minimum, false),
+                "byte.lower",
+            )
+            .map_err(compiler_diagnostic)?;
+        let upper = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULE,
+                byte,
+                ty.const_int(maximum, false),
+                "byte.upper",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_and(lower, upper, "byte.in_range")
+            .map_err(compiler_diagnostic)
+    }
+
+    fn byte_equals(
+        &self,
+        byte: inkwell::values::IntValue<'context>,
+        expected: u64,
+    ) -> CodeGenerationResult<inkwell::values::IntValue<'context>> {
+        self.builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                byte,
+                self.context.i8_type().const_int(expected, false),
+                "byte.equals",
+            )
+            .map_err(compiler_diagnostic)
     }
 
     fn build_closure(
@@ -1092,6 +1718,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 format!("opaque type `{name}` has no by-value representation"),
             )),
             CheckedType::CString => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            CheckedType::String => Ok(self.string_type().into()),
             CheckedType::Pointer { .. } => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
@@ -1107,6 +1734,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let pointer = self.context.ptr_type(AddressSpace::default());
         self.context
             .struct_type(&[pointer.into(), pointer.into()], false)
+    }
+
+    fn string_type(&self) -> inkwell::types::StructType<'context> {
+        self.context.struct_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.size_type.into(),
+                self.size_type.into(),
+            ],
+            false,
+        )
     }
 
     fn compile_product_type(
@@ -1193,6 +1831,10 @@ fn decode_string_literal(literal: &str) -> Result<String, String> {
         });
     }
     Ok(output)
+}
+
+fn compiler_diagnostic(error: inkwell::builder::BuilderError) -> Diagnostic {
+    Diagnostic::new(Span::Compiler, error.to_string())
 }
 
 #[cfg(test)]

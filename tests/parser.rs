@@ -77,12 +77,22 @@ fn parses_opaque_type_declarations() {
 }
 
 #[test]
+fn parses_opaque_macro_declarations() {
+    let root = parse("pub macro c_string\n").expect("macro declaration should parse");
+    assert!(matches!(
+        root.items[0],
+        Item::MacroDeclaration(ref declaration)
+            if declaration.visibility == Visibility::Public && declaration.name == "c_string"
+    ));
+}
+
+#[test]
 fn parses_hello_world_losslessly() {
     let source = include_str!("../examples/hello_world.sta");
     let root = parse(source).expect("hello_world should parse");
 
     assert_eq!(root.text(), source);
-    assert_eq!(root.items.len(), 7);
+    assert_eq!(root.items.len(), 10);
     assert!(matches!(root.items[0], Item::UseDeclaration(_)));
     assert!(matches!(root.items[1], Item::ExternBlock(_)));
     assert!(matches!(
@@ -216,7 +226,7 @@ fn parse_errors_report_one_based_line_and_character_column() {
 
 #[test]
 fn parses_single_parameter_and_application() {
-    let source = "def println: _ -> I32 = (s: CString) => printf (\"%s\\n\", s)\n";
+    let source = "def identity: _ -> String = (s: String) => consume (s)\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
     let Statement::Binding(binding) = statement(&root.items[0]) else {
@@ -259,7 +269,7 @@ fn parses_nested_product_patterns_losslessly() {
 
 #[test]
 fn comments_and_crlf_are_preserved() {
-    let source = "// entry\r\ndef main: _ -> CString = () => {\r\n  \"ok\"\r\n}\r\n";
+    let source = "// entry\r\ndef main: _ -> String = () => {\r\n  \"ok\"\r\n}\r\n";
     let root = parse(source).expect("source should parse");
     assert_eq!(root.text(), source);
     assert!(
@@ -279,7 +289,7 @@ fn comments_and_crlf_are_preserved() {
 #[test]
 fn parses_named_product_types_values_and_access() {
     let source = concat!(
-        "let args: (name: CString, int)\n",
+        "let args: (name: String, int)\n",
         "type user_id = int\n",
         "def value = (name: \"staple\", 1)\n",
         "def by_name = args.name\n",

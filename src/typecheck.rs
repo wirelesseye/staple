@@ -13,6 +13,7 @@ pub enum CheckedType {
     Error,
     I32,
     Bool,
+    String,
     CString,
     CChar,
     Opaque {
@@ -69,7 +70,12 @@ impl CheckedType {
                 function.parameter.is_concrete() && function.result.is_concrete()
             }
             Self::Distinct { representation, .. } => representation.is_concrete(),
-            Self::I32 | Self::Bool | Self::CString | Self::CChar | Self::Opaque { .. } => true,
+            Self::I32
+            | Self::Bool
+            | Self::String
+            | Self::CString
+            | Self::CChar
+            | Self::Opaque { .. } => true,
         }
     }
 }
@@ -81,6 +87,7 @@ impl fmt::Display for CheckedType {
             Self::Error => formatter.write_str("<error>"),
             Self::I32 => formatter.write_str("I32"),
             Self::Bool => formatter.write_str("Bool"),
+            Self::String => formatter.write_str("String"),
             Self::CString => formatter.write_str("CString"),
             Self::CChar => formatter.write_str("CChar"),
             Self::Opaque { name, .. } => formatter.write_str(name),
@@ -247,7 +254,9 @@ impl TypeChecker {
                             self.seed_binding_annotation(module, binding);
                         }
                     }
-                    Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
+                    Item::UseDeclaration(_)
+                    | Item::TypeDeclaration(_)
+                    | Item::MacroDeclaration(_) => {}
                 }
             }
         }
@@ -264,7 +273,7 @@ impl TypeChecker {
     }
 
     fn validate_intrinsics(&mut self, module: &ResolvedModule) {
-        let expected = CheckedType::Function(CheckedFunctionType {
+        let i32_arithmetic = CheckedType::Function(CheckedFunctionType {
             parameter: Box::new(CheckedType::Product(CheckedProductType {
                 elements: vec![
                     CheckedTypeElement {
@@ -280,11 +289,29 @@ impl TypeChecker {
             })),
             result: Box::new(CheckedType::I32),
         });
-        for symbol in module.intrinsic_functions().keys() {
+        for (symbol, intrinsic) in module.intrinsic_functions() {
+            let expected = match intrinsic {
+                crate::IntrinsicFunction::I32Add
+                | crate::IntrinsicFunction::I32Subtract
+                | crate::IntrinsicFunction::I32Multiply
+                | crate::IntrinsicFunction::I32Divide => i32_arithmetic.clone(),
+                crate::IntrinsicFunction::StringFromCString => {
+                    CheckedType::Function(CheckedFunctionType {
+                        parameter: Box::new(CheckedType::CString),
+                        result: Box::new(CheckedType::String),
+                    })
+                }
+                crate::IntrinsicFunction::StringToCString => {
+                    CheckedType::Function(CheckedFunctionType {
+                        parameter: Box::new(CheckedType::String),
+                        result: Box::new(CheckedType::CString),
+                    })
+                }
+            };
             if self.symbol_types.get(symbol) != Some(&expected) {
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
-                    "every I32 arithmetic intrinsic must have type `(I32, I32) -> I32`",
+                    "standard-library intrinsic has an invalid type",
                 ));
             }
         }
@@ -406,7 +433,7 @@ impl TypeChecker {
             Item::Statement(statement) => {
                 self.check_statement(module, statement);
             }
-            Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
+            Item::UseDeclaration(_) | Item::TypeDeclaration(_) | Item::MacroDeclaration(_) => {}
         }
     }
 
@@ -518,24 +545,36 @@ impl TypeChecker {
                 false,
             ),
             Expression::Call(call) => {
-                let callee_type = self.check_expression(module, &call.callee);
-                let argument_type = self.check_expression(module, &call.argument);
-                match callee_type {
-                    CheckedType::Function(function) => {
-                        self.check_call_argument(
-                            argument_type,
-                            &function.parameter,
-                            call.argument.syntax().span.clone(),
-                        );
-                        *function.result
-                    }
-                    CheckedType::Error => CheckedType::Error,
-                    other => {
+                if module.primitive_macro_for(call.syntax.id).is_some() {
+                    self.check_expression(module, &call.argument);
+                    if !matches!(call.argument.as_ref(), Expression::String(_)) {
                         self.diagnostics.push(Diagnostic::new(
-                            call.callee.syntax().span.clone(),
-                            format!("cannot call a value of type `{other}`"),
+                            call.argument.syntax().span.clone(),
+                            "`c_string` requires a string literal",
                         ));
-                        CheckedType::Error
+                        return CheckedType::Error;
+                    }
+                    CheckedType::CString
+                } else {
+                    let callee_type = self.check_expression(module, &call.callee);
+                    let argument_type = self.check_expression(module, &call.argument);
+                    match callee_type {
+                        CheckedType::Function(function) => {
+                            self.check_call_argument(
+                                argument_type,
+                                &function.parameter,
+                                call.argument.syntax().span.clone(),
+                            );
+                            *function.result
+                        }
+                        CheckedType::Error => CheckedType::Error,
+                        other => {
+                            self.diagnostics.push(Diagnostic::new(
+                                call.callee.syntax().span.clone(),
+                                format!("cannot call a value of type `{other}`"),
+                            ));
+                            CheckedType::Error
+                        }
                     }
                 }
             }
@@ -619,7 +658,7 @@ impl TypeChecker {
                         CheckedType::Error
                     })
             }
-            Expression::String(_) => CheckedType::CString,
+            Expression::String(_) => CheckedType::String,
             Expression::Integer(_) => CheckedType::I32,
         };
         self.expression_types
@@ -730,6 +769,7 @@ impl TypeChecker {
             return match builtin {
                 BuiltinType::I32 => CheckedType::I32,
                 BuiltinType::Bool => CheckedType::Bool,
+                BuiltinType::String => CheckedType::String,
                 BuiltinType::CChar => CheckedType::CChar,
                 BuiltinType::CString => CheckedType::CString,
             };
@@ -783,6 +823,7 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         }
         (CheckedType::I32, CheckedType::I32) => Some(CheckedType::I32),
         (CheckedType::Bool, CheckedType::Bool) => Some(CheckedType::Bool),
+        (CheckedType::String, CheckedType::String) => Some(CheckedType::String),
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
         (

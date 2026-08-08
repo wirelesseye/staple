@@ -23,6 +23,7 @@ pub enum TokenKind {
     Def,
     Extern,
     Type,
+    Macro,
     Alias,
     Const,
     Infix,

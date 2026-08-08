@@ -131,7 +131,7 @@ fn rejects_incorrect_call_arguments() {
     assert!(
         diagnostics[0]
             .message
-            .contains("expected `I32`, found `CString`")
+            .contains("expected `I32`, found `String`")
     );
 }
 
@@ -280,7 +280,7 @@ fn cinterop_types_require_an_explicit_import() {
 }
 
 #[test]
-fn string_literals_have_the_canonical_cstring_type() {
+fn string_literals_have_the_canonical_string_type() {
     let module = type_check("\"hello\"\n");
     let Item::Statement(statement) = &module.syntax().items[0] else {
         panic!("expected expression statement");
@@ -291,7 +291,74 @@ fn string_literals_have_the_canonical_cstring_type() {
 
     assert_eq!(
         module.type_of_expression(expression.syntax().id),
-        Some(&CheckedType::CString)
+        Some(&CheckedType::String)
+    );
+}
+
+#[test]
+fn c_string_is_an_imported_primitive_macro() {
+    let module = type_check(concat!(
+        "use std.cinterop.*\n",
+        "let text: String = \"hello\"\n",
+        "let c_text: CString = c_string \"hello\"\n",
+        "let copied: String = string_from_c_string c_text\n",
+        "let converted: CString = string_to_c_string text\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("String operations should compile");
+
+    assert!(llvm.contains("string.capacity"));
+    assert!(llvm.contains("@strlen"));
+    assert!(llvm.contains("@memchr"));
+    assert!(llvm.contains("@llvm.trap"));
+    assert!(llvm.contains("c\"hello\\00\""));
+}
+
+#[test]
+fn c_string_rejects_non_literal_arguments() {
+    let module = resolve(concat!(
+        "use std.cinterop.*\n",
+        "let text = \"hello\"\n",
+        "c_string text\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("c_string should require a literal");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "`c_string` requires a string literal")
+    );
+}
+
+#[test]
+fn c_string_rejects_interior_nul_bytes() {
+    let module = type_check("use std.cinterop.*\nc_string \"bad\\0value\"\n");
+    let context = Context::create();
+    let diagnostics = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect_err("interior NUL should fail code generation");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "C string literals cannot contain an interior NUL byte"
+    }));
+}
+
+#[test]
+fn user_defined_macros_are_reserved_for_future_support() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("macro custom\n", root)
+        .expect("macro declaration should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("user macro should not resolve yet");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "user-defined macros are not supported yet"
+        })
     );
 }
 
@@ -459,7 +526,7 @@ fn adapts_non_variadic_externs_used_as_function_values() {
         "use std.cinterop.*\n",
         "extern \"c\" { let puts: (*const CChar) -> I32 }\n",
         "def apply: ((*const CChar) -> I32, *const CChar) -> I32 = (f, value) => f value\n",
-        "apply (puts, \"hello\")\n",
+        "apply (puts, c_string \"hello\")\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -558,7 +625,7 @@ fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
         "use std.cinterop.*\n",
         "extern \"c\" { let puts: (*const CChar) -> I32 }\n",
-        "puts (\"hello\\n\")\n",
+        "puts (c_string \"hello\\n\")\n",
     );
     let module = type_check(source);
     let context = Context::create();

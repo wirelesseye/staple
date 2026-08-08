@@ -17,6 +17,7 @@ pub enum Item {
     UseDeclaration(UseDeclaration),
     ExternBlock(ExternBlock),
     TypeDeclaration(TypeDeclaration),
+    MacroDeclaration(MacroDeclaration),
     Statement(Box<Statement>),
 }
 
@@ -71,6 +72,13 @@ pub struct TypeDeclaration {
     pub kind: TypeDeclarationKind,
     pub name: String,
     pub underlying: Option<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MacroDeclaration {
+    pub syntax: Syntax,
+    pub visibility: Visibility,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

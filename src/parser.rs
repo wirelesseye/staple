@@ -97,12 +97,31 @@ impl Grammar {
             Some(TokenKind::Type) => self
                 .parse_type_declaration(visibility, item_start)
                 .map(Item::TypeDeclaration),
+            Some(TokenKind::Macro) => self
+                .parse_macro_declaration(visibility, item_start)
+                .map(Item::MacroDeclaration),
             _ => self
                 .parse_statement_with_visibility(visibility, Some(item_start))
                 .map(|statement| Item::Statement(Box::new(statement))),
         };
         self.newline_terminates_expression = previous;
         item
+    }
+
+    fn parse_macro_declaration(
+        &mut self,
+        visibility: Visibility,
+        start: usize,
+    ) -> Result<MacroDeclaration, ParseError> {
+        self.expect(TokenKind::Macro, "expected `macro`")?;
+        let name = self
+            .expect(TokenKind::Identifier, "expected macro name")?
+            .text;
+        Ok(MacroDeclaration {
+            syntax: self.syntax(start),
+            visibility,
+            name,
+        })
     }
 
     /// Parses a private statement in a block expression.

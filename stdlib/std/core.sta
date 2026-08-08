@@ -1,5 +1,6 @@
 pub type I32
 pub type Bool
+pub type String
 
 extern "staple-intrinsic" {
     let __i32_add: (I32, I32) -> I32

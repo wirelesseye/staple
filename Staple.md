@@ -75,6 +75,10 @@ The following details remain unspecified:
 - access to types and reactive dependency information during expansion; and
 - restrictions placed on compile-time effects.
 
+The only macro currently implemented is the compiler-provided `c_string` macro.
+The parser and module system recognize opaque declarations such as
+`pub macro c_string`, but user-defined macro bodies remain future work.
+
 ## Source files
 
 staple source files use the `.sta` extension.
@@ -127,7 +131,7 @@ extern "c" {
     let printf: (*const CChar, ...) -> I32
 }
 
-printf ("hello, world!\n")
+printf (c_string "hello, world!\n")
 ```
 
 There is no distinguished source-level entry-point function. Stapler generates
@@ -229,7 +233,7 @@ available only after the definition.
 
 ```staple
 def greet = () => {
-    printf ("hello, world!\n")
+    printf (c_string "hello, world!\n")
 }
 ```
 
@@ -267,9 +271,22 @@ integers:
 42
 ```
 
-String literals use double quotes. A backslash protects the following quote
-from ending the string. The complete set and meaning of escape sequences is
-currently unspecified.
+String literals use double quotes and produce owned UTF-8 `String` values. A
+backslash protects the following quote from ending the string. Supported
+escapes are `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, and `\\"`.
+
+The primitive `c_string` macro from `std.cinterop` accepts only a string literal
+and produces a `CString` backed by static NUL-terminated storage:
+
+```staple
+use std.cinterop.(c_string, CString)
+
+let message: CString = c_string "hello"
+```
+
+Macros are module items and support the same namespace, glob, selected, and
+renamed import forms as values and types. User-defined macros are not yet
+supported.
 
 Operators are ordinary curried function values. The standard prelude currently
 provides `+`, `-`, `*`, and `/` for `I32`; their public definitions are ordinary
@@ -315,11 +332,11 @@ Every product element may optionally have a name. Names are written before the
 element type in a product type:
 
 ```staple
-let args: (name: CString, I32)
+let args: (name: String, I32)
 ```
 
 Here, `args` is a two-element product. Its first element is named `name` and has
-type `CString`; its second element is unnamed and has type `I32`.
+type `String`; its second element is unnamed and has type `I32`.
 
 Names may likewise be supplied when constructing a product value:
 
@@ -337,7 +354,7 @@ Every element can be accessed by its zero-based index. A named element can also
 be accessed by name:
 
 ```staple
-let args: (name: CString, I32)
+let args: (name: String, I32)
 
 args.name // the first element, accessed by name
 args.0    // the first element, accessed by index
@@ -373,7 +390,7 @@ the body.
 A binding pattern normally has a name and a type:
 
 ```staple
-s: CString => printf ("%s\n", s)
+s: String => s
 ```
 
 The type may be omitted when a surrounding function type supplies it:
@@ -442,7 +459,7 @@ Because each function accepts one value, passing several logical arguments
 means passing a product:
 
 ```staple
-printf ("%s\n", s)
+printf (c_string "%s\n", string_to_c_string s)
 ```
 
 Here, `printf` receives one two-element product.
@@ -510,19 +527,25 @@ Named types are written as identifiers:
 ```staple
 I32
 Bool
+String
 CString
 CChar
 ```
 
-`I32`, `Bool`, and the arithmetic functions from `std.core` are imported
+`I32`, `Bool`, `String`, and the arithmetic functions from `std.core` are imported
 implicitly into every source module. These are ordinary type names rather than
 keywords, so a local declaration or explicit import can shadow a prelude name.
 Integer literals have type `I32`.
 
+`String` is an owned UTF-8 buffer represented by a pointer, byte length, and
+capacity. String literals have this canonical type. Until Staple gains
+move/drop semantics, allocated string buffers live until process exit.
+
 `CChar` and `CString` are public opaque types in `std.cinterop`. Source code
-must import them explicitly, for example with `use std.cinterop.*`. String
-literals have the canonical `CString` type even in modules that do not bring
-the name into scope.
+must import them explicitly, for example with `use std.cinterop.*`. `CString`
+is a raw pointer to NUL-terminated bytes. `string_from_c_string` validates and
+copies UTF-8 into a `String`; `string_to_c_string` copies a `String`, appends a
+terminator, and traps on an interior NUL byte. Invalid UTF-8 also traps.
 
 An underscore asks stapler to infer a type:
 
@@ -536,7 +559,7 @@ variadic markers in external function signatures, and function types:
 
 ```staple
 *const CChar
-(I32, CString)
+(I32, String)
 (*const CChar, ...) -> I32
 ```
 
@@ -588,7 +611,7 @@ are interchangeable:
 
 ```staple
 type alias Person = (
-    name: CString,
+    name: String,
     age: I32,
 )
 ```
