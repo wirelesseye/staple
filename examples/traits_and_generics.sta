@@ -1,9 +1,5 @@
 // Generic aliases/functions, traits, implementations, bounds, and static dispatch.
-use std.cinterop.*
-
-extern "c" {
-    let printf: (CPointer CChar, ...) -> I32
-}
+use std.io.(println)
 
 type alias Pair = (A, B) => (A, B)
 
@@ -31,5 +27,5 @@ let int_identity: I32 -> I32 = identity
 let pair: Pair (I32, String) = (42, "answer")
 let flag: Bool = True
 
-printf (c_string "%s: %d\n", string_to_c_string (labeled (int_identity (first pair))), first pair)
-printf (c_string "%s\n", string_to_c_string (labeled flag))
+println (labeled (int_identity (first pair)))
+println (labeled flag)

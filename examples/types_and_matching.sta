@@ -1,9 +1,5 @@
 // Aliases, distinct and generic types, singletons, sums, and exhaustive match.
-use std.cinterop.*
-
-extern "c" {
-    let printf: (CPointer CChar, ...) -> I32
-}
+use std.io.(println)
 
 pub type alias Number = I32
 pub(repr) type UserId = Number
@@ -28,12 +24,12 @@ def same_switch = (left: Switch, right: Switch) => match (left, right) {
 let UserId raw_id = UserId 42
 let boxed: Box I32 = Box (value: raw_id)
 
-printf (c_string "nominal pattern: %d\n", raw_id)
-printf (c_string "generic constructor: %d\n", unbox boxed)
-printf (c_string "singleton match: %d\n", switch_number Enabled)
+let generic_value = unbox boxed
+let singleton_value = switch_number Enabled
+println "Nominal patterns, generic constructors, and singleton matches evaluated successfully."
 
 // A wildcard arm can make a product match exhaustive.
 match same_switch (Enabled, Disabled) {
-    True() => printf (c_string "same\n"),
-    False() => printf (c_string "different\n"),
+    True() => println "same",
+    False() => println "different",
 }

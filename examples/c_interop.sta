@@ -1,0 +1,15 @@
+use std.cinterop.*
+
+extern "c" {
+    let printf: (CPointer CChar, ...) -> I32
+}
+
+def infixl 1 |>: I32 -> I32 -> I32 = left => right => right
+def choose_right = (|>)
+
+printf (c_string "hello, world!\n")
+printf (string_to_c_string "owned Staple String\n")
+let round_trip = string_from_c_string (c_string "CString round trip\n")
+printf (string_to_c_string round_trip)
+printf (c_string "infix choice: %d\n", 1 |> 2)
+printf (c_string "prefix choice: %d\n", choose_right 1 2)

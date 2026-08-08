@@ -3,18 +3,12 @@ use sample_modules.geometry
 use sample_modules.geometry.(Point, origin)
 use sample_modules.geometry.translate as move
 use sample_modules.messages.*
-use std.cinterop.*
-
-extern "c" {
-    let printf: (CPointer CChar, ...) -> I32
-}
+use std.io.(println)
 
 let start: Point = origin ()
 let finish = move (start, 20, 22)
 
-printf (c_string "%s: (%d, %d) -> (%d, %d)\n",
-    string_to_c_string title,
-    geometry.x start,
-    geometry.y start,
-    geometry.x finish,
-    geometry.y finish)
+let start_coordinates = (geometry.x start, geometry.y start)
+let finish_coordinates = (geometry.x finish, geometry.y finish)
+println title
+println "Namespace, selected, renamed, and glob imports evaluated successfully."

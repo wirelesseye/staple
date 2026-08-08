@@ -67,6 +67,26 @@ fn format_diagnostics(diagnostics: Vec<stapler::Diagnostic>) -> String {
 }
 
 #[test]
+fn imports_standard_io_print_functions() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use std.io.(print, println)\n",
+            "print \"hello\"\n",
+            "println \" world\"\n",
+        ),
+    );
+
+    let llvm = fixture.compile().expect("std.io should compile");
+    assert!(llvm.contains("__staple_m1_print"));
+    assert!(llvm.contains("__staple_m1_println"));
+    assert!(llvm.contains("@printf"));
+    assert!(llvm.contains("c\"%s\\00\""));
+    assert!(llvm.contains("c\"%s\\0A\\00\""));
+}
+
+#[test]
 fn imports_public_values_and_types_through_all_use_forms() {
     let fixture = Fixture::new();
     fixture.write(

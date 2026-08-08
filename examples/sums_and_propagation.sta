@@ -1,9 +1,5 @@
 // Open sums, nominal payloads, propagating bindings, returns, and catch-all arms.
-use std.cinterop.*
-
-extern "c" {
-    let printf: (CPointer CChar, ...) -> I32
-}
+use std.io.(println)
 
 pub(repr) type Found = T => T
 pub(repr) type Missing = String
@@ -21,9 +17,9 @@ def doubled: Bool -> Found I32 | Missing | Invalid = available => {
 }
 
 def describe = result: Found I32 | Missing | Invalid => match result {
-    Found value => printf (c_string "found %d\n", value),
-    Missing message => printf (c_string "missing: %s\n", string_to_c_string message),
-    _ => printf (c_string "invalid\n"),
+    Found _ => println "found",
+    Missing message => println message,
+    _ => println "invalid",
 }
 
 def explicit_return = value: I32 => {
@@ -33,4 +29,5 @@ def explicit_return = value: I32 => {
 
 describe (doubled True)
 describe (doubled False)
-printf (c_string "explicit return: %d\n", explicit_return 41)
+let returned = explicit_return 41
+println "Explicit return evaluated successfully."

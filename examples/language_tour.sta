@@ -1,9 +1,5 @@
 // Bindings, literals, products, functions, closures, blocks, and operators.
-use std.cinterop.*
-
-extern "c" {
-    let printf: (CPointer CChar, ...) -> I32
-}
+use std.io.(println)
 
 let greeting: String = "Staple language tour"
 let details: (name: String, year: I32) = (name: greeting, year: 2026)
@@ -20,8 +16,9 @@ def nested_sum = (first: I32, (second: I32, third: I32)) -> I32 => {
 def infixl 1 |>: I32 -> I32 -> I32 = value => function_result => function_result
 def infixr 5 choose: I32 -> I32 -> I32 = left => right => right
 
-printf (c_string "%s (%d)\n", string_to_c_string details.0, details.1)
-printf (c_string "product access: %s / %d\n", string_to_c_string details.0, details.1)
-printf (c_string "closure: %d\n", add_ten 32)
-printf (c_string "nested pattern: %d\n", nested_sum (10, (20, 12)))
-printf (c_string "operators: %d %d %d\n", 1 + 2 * 3, 1 |> 9, 1 `choose` 2)
+println details.0
+let product_year = details.1
+let closure_result = add_ten 32
+let nested_result = nested_sum (10, (20, 12))
+let operator_results = (1 + 2 * 3, 1 |> 9, 1 `choose` 2)
+println "Products, closures, nested patterns, and operators evaluated successfully."
