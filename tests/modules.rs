@@ -90,6 +90,39 @@ fn imports_public_values_and_types_through_all_use_forms() {
 }
 
 #[test]
+fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "values.sta",
+        concat!(
+            "pub type UserId = I32\n",
+            "pub def identity: T => T -> T = x => x\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use values.*\n",
+            "let answer: I32 = identity 42\n",
+            "let text: String = identity \"hello\"\n",
+        ),
+    );
+    let llvm = fixture
+        .compile()
+        .expect("public generic functions should specialize");
+    assert!(llvm.matches("identity__").count() >= 2);
+
+    fixture.write(
+        "main.sta",
+        concat!("use values.*\n", "let user: UserId = UserId 42\n"),
+    );
+    let error = fixture
+        .compile()
+        .expect_err("a public type must not export its constructor");
+    assert!(error.contains("unknown name `UserId`"));
+}
+
+#[test]
 fn resolves_mutually_recursive_module_namespaces() {
     let fixture = Fixture::new();
     fixture.write("main.sta", "use ma\nma.a (1)\n");

@@ -211,7 +211,11 @@ impl Grammar {
             if self.peek().is_none() {
                 return Err(self.error("unterminated extern block"));
             }
-            bindings.push(self.parse_binding(Visibility::Private, None, true)?);
+            let binding = self.parse_binding(Visibility::Private, None, true)?;
+            if !binding.type_parameters.is_empty() {
+                return Err(self.error("external bindings cannot have compile-time parameters"));
+            }
+            bindings.push(binding);
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
         Ok(ExternBlock {
@@ -238,9 +242,16 @@ impl Grammar {
             .expect(TokenKind::Identifier, "expected type name")?
             .text;
         let underlying = if self.eat(TokenKind::Equals) {
-            Some(self.parse_type()?)
+            Some(())
         } else if kind == TypeDeclarationKind::Alias {
             return Err(self.error("expected `=` after type alias name"));
+        } else {
+            None
+        };
+        let mut type_parameters = Vec::new();
+        let underlying = if underlying.is_some() {
+            type_parameters = self.parse_type_parameters()?;
+            Some(self.parse_type()?)
         } else {
             None
         };
@@ -254,6 +265,7 @@ impl Grammar {
             visibility,
             kind,
             name,
+            type_parameters,
             underlying,
         })
     }
@@ -305,10 +317,20 @@ impl Grammar {
         };
         let (name, consumed_colon) = self.parse_binding_name()?;
         let annotation = if consumed_colon || self.eat(TokenKind::Colon) {
+            Some(())
+        } else {
+            None
+        };
+        let mut type_parameters = Vec::new();
+        let annotation = if annotation.is_some() {
+            type_parameters = self.parse_type_parameters()?;
             Some(self.parse_type()?)
         } else {
             None
         };
+        if !type_parameters.is_empty() && kind != BindingKind::Def {
+            return Err(self.error("compile-time parameters are only allowed on `def` bindings"));
+        }
         let value = if self.eat(TokenKind::Equals) {
             Some(self.parse_expression()?)
         } else {
@@ -320,9 +342,57 @@ impl Grammar {
             kind,
             name,
             fixity,
+            type_parameters,
             annotation,
             value,
         })
+    }
+
+    fn parse_type_parameters(&mut self) -> Result<Vec<TypeParameterPattern>, ParseError> {
+        let mut parameters = Vec::new();
+        loop {
+            let checkpoint = self.position;
+            let Ok(parameter) = self.parse_type_parameter_pattern() else {
+                self.position = checkpoint;
+                break;
+            };
+            if !self.eat(TokenKind::FatArrow) {
+                self.position = checkpoint;
+                break;
+            }
+            parameters.push(parameter);
+        }
+        Ok(parameters)
+    }
+
+    fn parse_type_parameter_pattern(&mut self) -> Result<TypeParameterPattern, ParseError> {
+        let start = self.position;
+        if self.eat(TokenKind::LParen) {
+            let mut elements = Vec::new();
+            if !self.at(TokenKind::RParen) {
+                loop {
+                    elements.push(self.parse_type_parameter_pattern()?);
+                    if !self.eat(TokenKind::Comma) {
+                        break;
+                    }
+                }
+            }
+            self.expect(
+                TokenKind::RParen,
+                "expected `)` after compile-time parameters",
+            )?;
+            return Ok(TypeParameterPattern::Product(TypeParameterProduct {
+                syntax: self.syntax(start),
+                elements,
+            }));
+        }
+        let name = self
+            .expect(TokenKind::Identifier, "expected compile-time parameter")?
+            .text;
+        Ok(TypeParameterPattern::Binding(TypeParameterBinding {
+            syntax: self.syntax(start),
+            name,
+        }))
     }
 
     /// Parses an expression, including function expressions and infix calls.
@@ -392,7 +462,7 @@ impl Grammar {
             .expect(TokenKind::Identifier, "expected parameter name")?
             .text;
         let ty = if self.eat(TokenKind::Colon) {
-            self.parse_type_atom()?
+            self.parse_type_application()?
         } else {
             Type::Inferred(InferredType {
                 syntax: self.syntax(start),
@@ -408,7 +478,7 @@ impl Grammar {
     /// Parses a type, treating function arrows as right-associative.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
-        let parameter = self.parse_type_atom()?;
+        let parameter = self.parse_type_application()?;
         if self.eat(TokenKind::Arrow) {
             let result = self.parse_type()?;
             Ok(Type::Function(FunctionType {
@@ -421,6 +491,29 @@ impl Grammar {
         }
     }
 
+    fn parse_type_application(&mut self) -> Result<Type, ParseError> {
+        let start = self.position;
+        let mut ty = self.parse_type_atom()?;
+        while self.starts_type_atom() {
+            let argument = self.parse_type_atom()?;
+            ty = Type::Application(TypeApplication {
+                syntax: self.syntax(start),
+                callee: Box::new(ty),
+                argument: Box::new(argument),
+            });
+        }
+        Ok(ty)
+    }
+
+    fn starts_type_atom(&self) -> bool {
+        matches!(
+            self.peek(),
+            Some(
+                TokenKind::Underscore | TokenKind::Star | TokenKind::LParen | TokenKind::Identifier
+            )
+        )
+    }
+
     /// Parses a non-function type such as a primitive, pointer, product, or name.
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
@@ -431,7 +524,7 @@ impl Grammar {
         }
         if self.eat(TokenKind::Star) {
             let is_const = self.eat(TokenKind::Const);
-            let pointee = self.parse_type_atom()?;
+            let pointee = self.parse_type_application()?;
             return Ok(Type::Pointer(PointerType {
                 syntax: self.syntax(start),
                 is_const,

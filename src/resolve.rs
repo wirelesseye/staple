@@ -4,7 +4,7 @@ use crate::{
     AccessExpression, Accessor, Associativity, Binding, BindingKind, BlockExpression,
     CallExpression, Diagnostic, Expression, Fixity, InfixExpression, InfixOperator, Item, Module,
     ModuleId, NameExpression, Pattern, Program, Span, Statement, Syntax, SyntaxId, Type,
-    TypeDeclaration, UseKind, Visibility,
+    TypeDeclaration, TypeParameterPattern, UseKind, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -15,6 +15,9 @@ pub struct FunctionId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeId(pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TypeParameterId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MacroId(pub usize);
@@ -51,6 +54,7 @@ pub struct ResolvedFunction {
     pub pattern: Pattern,
     pub return_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
+    pub type_parameters: Vec<TypeParameterPattern>,
     pub captures: Vec<SymbolId>,
     pub body: Expression,
 }
@@ -62,6 +66,7 @@ pub struct ResolvedModule {
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     named_types: HashMap<SyntaxId, TypeId>,
+    type_parameters: HashMap<SyntaxId, TypeParameterId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
@@ -69,6 +74,7 @@ pub struct ResolvedModule {
     builtin_types: HashMap<TypeId, BuiltinType>,
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
+    constructors: HashMap<SymbolId, TypeId>,
 }
 
 impl ResolvedModule {
@@ -94,6 +100,10 @@ impl ResolvedModule {
 
     pub fn type_for(&self, syntax_id: SyntaxId) -> Option<TypeId> {
         self.named_types.get(&syntax_id).copied()
+    }
+
+    pub fn type_parameter_for(&self, syntax_id: SyntaxId) -> Option<TypeParameterId> {
+        self.type_parameters.get(&syntax_id).copied()
     }
 
     pub fn type_declarations(&self) -> &HashMap<TypeId, TypeDeclaration> {
@@ -127,6 +137,14 @@ impl ResolvedModule {
     pub fn primitive_macro_for(&self, syntax: SyntaxId) -> Option<PrimitiveMacro> {
         self.macro_calls.get(&syntax).copied()
     }
+
+    pub fn constructor_type(&self, symbol: SymbolId) -> Option<TypeId> {
+        self.constructors.get(&symbol).copied()
+    }
+
+    pub fn constructors(&self) -> &HashMap<SymbolId, TypeId> {
+        &self.constructors
+    }
 }
 
 #[derive(Default)]
@@ -144,6 +162,7 @@ pub struct NameResolver {
     imported_types: HashMap<String, TypeId>,
     imported_fixities: HashMap<String, Fixity>,
     imported_macros: HashMap<String, MacroId>,
+    type_parameter_scopes: Vec<HashMap<String, TypeParameterId>>,
     prelude_values: HashMap<String, SymbolId>,
     prelude_types: HashMap<String, TypeId>,
     prelude_fixities: HashMap<String, Fixity>,
@@ -160,19 +179,24 @@ pub struct NameResolver {
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     primitive_macros: HashMap<MacroId, PrimitiveMacro>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
+    constructors: HashMap<SymbolId, TypeId>,
+    type_constructor_symbols: HashMap<TypeId, SymbolId>,
     functions: Vec<ResolvedFunction>,
     named_types: HashMap<SyntaxId, TypeId>,
+    type_parameters: HashMap<SyntaxId, TypeParameterId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     interfaces: Vec<Interface>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
+    binding_type_parameters: HashMap<SyntaxId, Vec<TypeParameterPattern>>,
     declared_types: Vec<HashMap<String, TypeId>>,
     declared_macros: Vec<HashMap<String, MacroId>>,
     diagnostics: Vec<Diagnostic>,
     next_symbol_id: usize,
     next_function_id: usize,
     next_macro_id: usize,
+    next_type_parameter_id: usize,
     next_syntax_id: usize,
     current_module: ModuleId,
     multiple_modules: bool,
@@ -241,6 +265,7 @@ impl NameResolver {
             symbols: self.symbols,
             function_expressions: self.function_expressions,
             named_types: self.named_types,
+            type_parameters: self.type_parameters,
             type_declarations: self.type_declarations,
             type_names: self.type_names,
             syntax_modules: self.syntax_modules,
@@ -248,6 +273,7 @@ impl NameResolver {
             builtin_types: self.builtin_types,
             intrinsic_functions: self.intrinsic_functions,
             macro_calls: self.macro_calls,
+            constructors: self.constructors,
         })
     }
 
@@ -431,6 +457,15 @@ impl NameResolver {
                             ));
                         }
                         self.type_declarations.insert(id, declaration.clone());
+                        if declaration.kind == crate::TypeDeclarationKind::Distinct
+                            && declaration.underlying.is_some()
+                        {
+                            let symbol = SymbolId(self.next_symbol_id);
+                            self.next_symbol_id += 1;
+                            self.symbol_owners.insert(symbol, None);
+                            self.type_constructor_symbols.insert(id, symbol);
+                            self.constructors.insert(symbol, id);
+                        }
                         let qualified = if self.multiple_modules {
                             format!("m{}.{}", source_module.id.0, declaration.name)
                         } else {
@@ -490,6 +525,8 @@ impl NameResolver {
         let symbol = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
         self.declared_symbols.insert(binding.syntax.id, symbol);
+        self.binding_type_parameters
+            .insert(binding.syntax.id, binding.type_parameters.clone());
         self.symbols.insert(binding.syntax.id, symbol);
         self.symbol_owners.insert(symbol, None);
         symbol
@@ -650,6 +687,29 @@ impl NameResolver {
                 Item::UseDeclaration(_) | Item::TypeDeclaration(_) | Item::MacroDeclaration(_) => {}
             }
         }
+        for item in items {
+            let Item::TypeDeclaration(declaration) = item else {
+                continue;
+            };
+            let Some(id) = self.declared_types[self.current_module.0]
+                .get(&declaration.name)
+                .copied()
+            else {
+                continue;
+            };
+            let Some(symbol) = self.type_constructor_symbols.get(&id).copied() else {
+                continue;
+            };
+            if self.current_scope().contains_key(&declaration.name) {
+                self.diagnostics.push(Diagnostic::new(
+                    declaration.syntax.span.clone(),
+                    format!("duplicate definition of `{}`", declaration.name),
+                ));
+            } else {
+                self.current_scope_mut()
+                    .insert(declaration.name.clone(), symbol);
+            }
+        }
     }
 
     fn resolve_item(&mut self, item: &Item) {
@@ -663,9 +723,14 @@ impl NameResolver {
                 }
             }
             Item::TypeDeclaration(declaration) => {
+                self.push_type_parameter_scope();
+                for parameter in &declaration.type_parameters {
+                    self.declare_type_parameter_pattern(parameter);
+                }
                 if let Some(underlying) = &declaration.underlying {
                     self.resolve_type(underlying);
                 }
+                self.pop_type_parameter_scope();
             }
             Item::MacroDeclaration(declaration) => {
                 if !self
@@ -690,6 +755,13 @@ impl NameResolver {
     }
 
     fn resolve_binding(&mut self, binding: &Binding) {
+        self.binding_type_parameters
+            .entry(binding.syntax.id)
+            .or_insert_with(|| binding.type_parameters.clone());
+        self.push_type_parameter_scope();
+        for parameter in &binding.type_parameters {
+            self.declare_type_parameter_pattern(parameter);
+        }
         if let Some(annotation) = &binding.annotation {
             self.resolve_type(annotation);
         }
@@ -702,6 +774,47 @@ impl NameResolver {
         }
         if binding.kind == BindingKind::Let {
             self.declare_allocated(binding);
+        }
+        self.pop_type_parameter_scope();
+    }
+
+    fn push_type_parameter_scope(&mut self) {
+        self.type_parameter_scopes.push(HashMap::new());
+    }
+
+    fn pop_type_parameter_scope(&mut self) {
+        self.type_parameter_scopes.pop();
+    }
+
+    fn lookup_type_parameter(&self, name: &str) -> Option<TypeParameterId> {
+        self.type_parameter_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+    }
+
+    fn declare_type_parameter_pattern(&mut self, pattern: &TypeParameterPattern) {
+        match pattern {
+            TypeParameterPattern::Binding(binding) => {
+                let id = TypeParameterId(self.next_type_parameter_id);
+                self.next_type_parameter_id += 1;
+                let scope = self
+                    .type_parameter_scopes
+                    .last_mut()
+                    .expect("type parameter scope");
+                if scope.insert(binding.name.clone(), id).is_some() {
+                    self.diagnostics.push(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        format!("duplicate compile-time parameter `{}`", binding.name),
+                    ));
+                }
+                self.type_parameters.insert(binding.syntax.id, id);
+            }
+            TypeParameterPattern::Product(product) => {
+                for element in &product.elements {
+                    self.declare_type_parameter_pattern(element);
+                }
+            }
         }
     }
 
@@ -764,6 +877,9 @@ impl NameResolver {
                     pattern: function.pattern.clone(),
                     return_annotation: function.return_type.clone(),
                     binding_annotation: expected_type.cloned(),
+                    type_parameters: suggested_function
+                        .and_then(|(_, syntax)| self.binding_type_parameters.get(&syntax).cloned())
+                        .unwrap_or_default(),
                     captures,
                     body: (*function.body).clone(),
                 });
@@ -842,6 +958,12 @@ impl NameResolver {
     fn resolve_type(&mut self, ty: &Type) {
         match ty {
             Type::Named(named) => {
+                if named.namespace.is_none()
+                    && let Some(id) = self.lookup_type_parameter(&named.name)
+                {
+                    self.type_parameters.insert(named.syntax.id, id);
+                    return;
+                }
                 let resolved = if let Some(namespace) = &named.namespace {
                     self.namespaces
                         .get(namespace)
@@ -872,6 +994,10 @@ impl NameResolver {
             Type::Function(function) => {
                 self.resolve_type(&function.parameter);
                 self.resolve_type(&function.result);
+            }
+            Type::Application(application) => {
+                self.resolve_type(&application.callee);
+                self.resolve_type(&application.argument);
             }
             Type::Inferred(_) => {}
         }

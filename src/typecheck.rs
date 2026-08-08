@@ -4,7 +4,7 @@ use std::fmt;
 use crate::{
     Accessor, Binding, BuiltinType, Diagnostic, Expression, FunctionId, Item, Module, Pattern,
     ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, Type,
-    TypeDeclaration, TypeDeclarationKind, TypeId,
+    TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,15 @@ pub enum CheckedType {
     String,
     CString,
     CChar,
+    Parameter {
+        id: TypeParameterId,
+        name: String,
+    },
+    TypeConstructor {
+        id: TypeId,
+        name: String,
+        arguments: Vec<CheckedType>,
+    },
     Opaque {
         id: TypeId,
         name: String,
@@ -27,7 +36,9 @@ pub enum CheckedType {
     Product(CheckedProductType),
     Function(CheckedFunctionType),
     Distinct {
+        id: TypeId,
         name: String,
+        arguments: Vec<CheckedType>,
         representation: Box<CheckedType>,
     },
 }
@@ -60,7 +71,7 @@ impl CheckedType {
 
     pub fn is_concrete(&self) -> bool {
         match self {
-            Self::Inferred | Self::Error => false,
+            Self::Inferred | Self::Error | Self::TypeConstructor { .. } => false,
             Self::Pointer { pointee, .. } => pointee.is_concrete(),
             Self::Product(product) => product
                 .elements
@@ -75,7 +86,8 @@ impl CheckedType {
             | Self::String
             | Self::CString
             | Self::CChar
-            | Self::Opaque { .. } => true,
+            | Self::Opaque { .. }
+            | Self::Parameter { .. } => true,
         }
     }
 }
@@ -90,6 +102,16 @@ impl fmt::Display for CheckedType {
             Self::String => formatter.write_str("String"),
             Self::CString => formatter.write_str("CString"),
             Self::CChar => formatter.write_str("CChar"),
+            Self::Parameter { name, .. } => formatter.write_str(name),
+            Self::TypeConstructor {
+                name, arguments, ..
+            } => {
+                formatter.write_str(name)?;
+                for argument in arguments {
+                    write!(formatter, " {argument}")?;
+                }
+                Ok(())
+            }
             Self::Opaque { name, .. } => formatter.write_str(name),
             Self::Pointer { is_const, pointee } => {
                 formatter.write_str("*")?;
@@ -120,7 +142,15 @@ impl fmt::Display for CheckedType {
             Self::Function(function) => {
                 write!(formatter, "{} -> {}", function.parameter, function.result)
             }
-            Self::Distinct { name, .. } => formatter.write_str(name),
+            Self::Distinct {
+                name, arguments, ..
+            } => {
+                formatter.write_str(name)?;
+                for argument in arguments {
+                    write!(formatter, " {argument}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -191,6 +221,7 @@ impl TypeChecker {
 
     pub fn check(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
         self.collect_type_declarations(&module);
+        self.seed_constructors(&module);
         self.collect_top_level_bindings(&module);
         self.seed_declared_bindings(&module);
         self.validate_intrinsics(&module);
@@ -225,6 +256,58 @@ impl TypeChecker {
 
     fn collect_type_declarations(&mut self, module: &ResolvedModule) {
         self.type_declarations = module.type_declarations().clone();
+    }
+
+    fn seed_constructors(&mut self, module: &ResolvedModule) {
+        for (symbol, id) in module.constructors() {
+            let declaration = self.type_declarations[id].clone();
+            let Some(underlying) = declaration.underlying.as_ref() else {
+                continue;
+            };
+            let parameter = self.resolve_source_type(module, underlying);
+            let arguments = declaration
+                .type_parameters
+                .iter()
+                .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
+                .collect::<Vec<_>>();
+            let result = self.instantiate_type_declaration(module, *id, arguments);
+            self.symbol_types.insert(
+                *symbol,
+                CheckedType::Function(CheckedFunctionType {
+                    parameter: Box::new(parameter),
+                    result: Box::new(result),
+                }),
+            );
+        }
+    }
+
+    fn checked_type_parameter_pattern(
+        &self,
+        module: &ResolvedModule,
+        pattern: &TypeParameterPattern,
+    ) -> CheckedType {
+        match pattern {
+            TypeParameterPattern::Binding(binding) => CheckedType::Parameter {
+                id: module
+                    .type_parameter_for(binding.syntax.id)
+                    .expect("resolved compile-time parameter"),
+                name: binding.name.clone(),
+            },
+            TypeParameterPattern::Product(product) if product.elements.len() == 1 => {
+                self.checked_type_parameter_pattern(module, &product.elements[0])
+            }
+            TypeParameterPattern::Product(product) => CheckedType::Product(CheckedProductType {
+                elements: product
+                    .elements
+                    .iter()
+                    .map(|element| CheckedTypeElement {
+                        name: None,
+                        value_type: self.checked_type_parameter_pattern(module, element),
+                    })
+                    .collect(),
+                variadic: false,
+            }),
+        }
     }
 
     fn collect_top_level_bindings(&mut self, module: &ResolvedModule) {
@@ -375,7 +458,8 @@ impl TypeChecker {
             .expect("resolved function ID must be valid");
         let function_type = self.function_types[&function.id].clone();
         self.bind_pattern_types(module, &function.pattern, &function_type.parameter);
-        let body_type = self.check_expression(module, &function.body);
+        let body_type =
+            self.check_expression_expected(module, &function.body, Some(&function_type.result));
         let result_type = self.require_compatible(
             body_type,
             (*function_type.result).clone(),
@@ -427,6 +511,12 @@ impl TypeChecker {
         match item {
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
+                    if !binding.type_parameters.is_empty() {
+                        self.diagnostics.push(Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            "external bindings cannot have compile-time parameters",
+                        ));
+                    }
                     self.check_binding(module, binding);
                 }
             }
@@ -463,10 +553,12 @@ impl TypeChecker {
             .annotation
             .as_ref()
             .map(|annotation| self.resolve_source_type(module, annotation));
+        let generic_annotation_is_function =
+            matches!(declared_type, Some(CheckedType::Function(_)));
         let value_type = binding
             .value
             .as_ref()
-            .map(|value| self.check_expression(module, value));
+            .map(|value| self.check_expression_expected(module, value, declared_type.as_ref()));
 
         let checked_type = match (value_type, declared_type) {
             (Some(actual), Some(expected)) => {
@@ -489,6 +581,32 @@ impl TypeChecker {
             self.diagnostics.push(Diagnostic::new(
                 binding.syntax.span.clone(),
                 format!("could not fully infer the type of `{}`", binding.name),
+            ));
+        }
+        if binding.type_parameters.is_empty()
+            && contains_type_parameter(&checked_type)
+            && checked_type != CheckedType::Error
+        {
+            self.diagnostics.push(Diagnostic::new(
+                binding.syntax.span.clone(),
+                format!(
+                    "generic value `{}` requires a concrete expected type",
+                    binding.name
+                ),
+            ));
+        }
+        if !binding.type_parameters.is_empty() && !generic_annotation_is_function {
+            self.diagnostics.push(Diagnostic::new(
+                binding.syntax.span.clone(),
+                "compile-time parameters require a function-valued `def`",
+            ));
+        }
+        if !binding.type_parameters.is_empty()
+            && !matches!(binding.value, Some(Expression::Function(_)))
+        {
+            self.diagnostics.push(Diagnostic::new(
+                binding.syntax.span.clone(),
+                "a generic `def` requires a function body",
             ));
         }
         if let Some(symbol) = symbol {
@@ -514,6 +632,15 @@ impl TypeChecker {
         module: &ResolvedModule,
         expression: &Expression,
     ) -> CheckedType {
+        self.check_expression_expected(module, expression, None)
+    }
+
+    fn check_expression_expected(
+        &mut self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
         let value_type = match expression {
             Expression::Function(function) => {
                 let Some(function_id) = module.function_for(function.syntax.id) else {
@@ -528,8 +655,14 @@ impl TypeChecker {
             }
             Expression::Block(block) => {
                 let mut result = CheckedType::empty_product();
-                for statement in &block.statements {
-                    result = self.check_statement(module, statement);
+                for (index, statement) in block.statements.iter().enumerate() {
+                    if index + 1 == block.statements.len()
+                        && let Statement::Expression(expression) = statement
+                    {
+                        result = self.check_expression_expected(module, expression, expected);
+                    } else {
+                        result = self.check_statement(module, statement);
+                    }
                 }
                 result
             }
@@ -537,9 +670,21 @@ impl TypeChecker {
                 product
                     .elements
                     .iter()
-                    .map(|element| CheckedTypeElement {
+                    .enumerate()
+                    .map(|(index, element)| CheckedTypeElement {
                         name: element.name.clone(),
-                        value_type: self.check_expression(module, &element.value),
+                        value_type: self.check_expression_expected(
+                            module,
+                            &element.value,
+                            match expected {
+                                Some(CheckedType::Product(product)) => product
+                                    .elements
+                                    .get(index)
+                                    .map(|element| &element.value_type),
+                                other if product.elements.len() == 1 => other,
+                                _ => None,
+                            },
+                        ),
                     })
                     .collect(),
                 false,
@@ -556,8 +701,36 @@ impl TypeChecker {
                     }
                     CheckedType::CString
                 } else {
-                    let callee_type = self.check_expression(module, &call.callee);
-                    let argument_type = self.check_expression(module, &call.argument);
+                    let mut raw_callee_type = self.check_expression(module, &call.callee);
+                    let argument_expected = match &raw_callee_type {
+                        CheckedType::Function(function)
+                            if !contains_type_parameter(&raw_callee_type) =>
+                        {
+                            Some(function.parameter.as_ref())
+                        }
+                        _ => None,
+                    };
+                    let argument_type =
+                        self.check_expression_expected(module, &call.argument, argument_expected);
+                    if let Some(expected_result) = expected {
+                        let expected_callee = CheckedType::Function(CheckedFunctionType {
+                            parameter: Box::new(argument_type.clone()),
+                            result: Box::new(expected_result.clone()),
+                        });
+                        raw_callee_type = self.check_expression_expected(
+                            module,
+                            &call.callee,
+                            Some(&expected_callee),
+                        );
+                    }
+                    let callee_type = self.instantiate_function_use(
+                        raw_callee_type,
+                        Some(&argument_type),
+                        expected,
+                        call.callee.syntax().span.clone(),
+                    );
+                    self.expression_types
+                        .insert(call.callee.syntax().id, callee_type.clone());
                     match callee_type {
                         CheckedType::Function(function) => {
                             self.check_call_argument(
@@ -636,7 +809,7 @@ impl TypeChecker {
             Expression::Infix(infix) => module
                 .lowered_infix(infix.syntax.id)
                 .cloned()
-                .map(|lowered| self.check_expression(module, &lowered))
+                .map(|lowered| self.check_expression_expected(module, &lowered, expected))
                 .unwrap_or(CheckedType::Error),
             Expression::Name(name) => {
                 let symbol = module.symbol_for(name.syntax.id);
@@ -648,7 +821,7 @@ impl TypeChecker {
                 {
                     self.ensure_function_checked(module, function_id);
                 }
-                symbol
+                let raw = symbol
                     .and_then(|symbol| self.symbol_types.get(&symbol).cloned())
                     .unwrap_or_else(|| {
                         self.diagnostics.push(Diagnostic::new(
@@ -656,7 +829,8 @@ impl TypeChecker {
                             format!("the type of `{}` is not available here", name.name),
                         ));
                         CheckedType::Error
-                    })
+                    });
+                self.instantiate_function_use(raw, None, expected, name.syntax.span.clone())
             }
             Expression::String(_) => CheckedType::String,
             Expression::Integer(_) => CheckedType::I32,
@@ -664,6 +838,84 @@ impl TypeChecker {
         self.expression_types
             .insert(expression.syntax().id, value_type.clone());
         value_type
+    }
+
+    fn instantiate_function_use(
+        &mut self,
+        value_type: CheckedType,
+        argument: Option<&CheckedType>,
+        expected: Option<&CheckedType>,
+        span: Span,
+    ) -> CheckedType {
+        if !contains_type_parameter(&value_type) {
+            return value_type;
+        }
+        let declared_parameters = type_parameter_ids(&value_type);
+        let CheckedType::Function(function) = &value_type else {
+            return value_type;
+        };
+        let mut substitutions = HashMap::new();
+        if let Some(argument) = argument
+            && !infer_type_parameters(&function.parameter, argument, &mut substitutions)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                span.clone(),
+                format!(
+                    "generic function parameter `{}` conflicts with argument `{argument}`",
+                    function.parameter
+                ),
+            ));
+            return CheckedType::Error;
+        }
+        if let Some(expected) = expected {
+            let template = if argument.is_some() {
+                function.result.as_ref()
+            } else {
+                &value_type
+            };
+            if !infer_type_parameters(template, expected, &mut substitutions) {
+                let polymorphic_recursion = declared_parameters.iter().any(|id| {
+                    substitutions.get(id).is_some_and(|replacement| {
+                        type_contains_parameter(replacement, *id)
+                            && !matches!(replacement, CheckedType::Parameter { id: replacement_id, .. } if replacement_id == id)
+                    })
+                });
+                self.diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    if polymorphic_recursion {
+                        "polymorphic recursion is not supported"
+                    } else {
+                        "generic function conflicts with the expected type"
+                    },
+                ));
+                return CheckedType::Error;
+            }
+        }
+        let instantiated = substitute_type(value_type, &substitutions);
+        if argument.is_some() || expected.is_some() {
+            for id in declared_parameters {
+                let Some(replacement) = substitutions.get(&id) else {
+                    if matches!(instantiated, CheckedType::Function(_)) {
+                        continue;
+                    }
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "could not infer all compile-time parameters",
+                    ));
+                    return CheckedType::Error;
+                };
+                if type_contains_parameter(replacement, id)
+                    && !matches!(replacement, CheckedType::Parameter { id: replacement_id, .. } if *replacement_id == id)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "polymorphic recursion is not supported",
+                    ));
+                    return CheckedType::Error;
+                }
+            }
+        }
+        instantiated
     }
 
     fn check_call_argument(&mut self, actual: CheckedType, expected: &CheckedType, span: Span) {
@@ -720,7 +972,16 @@ impl TypeChecker {
     fn resolve_source_type(&mut self, module: &ResolvedModule, source_type: &Type) -> CheckedType {
         match source_type {
             Type::Inferred(_) => CheckedType::Inferred,
-            Type::Named(named) => self.resolve_named_type(module, named),
+            Type::Named(named) => {
+                if let Some(id) = module.type_parameter_for(named.syntax.id) {
+                    CheckedType::Parameter {
+                        id,
+                        name: named.name.clone(),
+                    }
+                } else {
+                    self.resolve_named_type(module, named)
+                }
+            }
             Type::Pointer(pointer) => CheckedType::Pointer {
                 is_const: pointer.is_const,
                 pointee: Box::new(self.resolve_source_type(module, &pointer.pointee)),
@@ -733,6 +994,142 @@ impl TypeChecker {
                 parameter: Box::new(self.resolve_source_type(module, &function.parameter)),
                 result: Box::new(self.resolve_source_type(module, &function.result)),
             }),
+            Type::Application(application) => {
+                let callee = self.resolve_source_type(module, &application.callee);
+                let argument = self.resolve_source_type(module, &application.argument);
+                self.apply_type_argument(module, callee, argument, application.syntax.span.clone())
+            }
+        }
+    }
+
+    fn apply_type_argument(
+        &mut self,
+        module: &ResolvedModule,
+        callee: CheckedType,
+        argument: CheckedType,
+        span: Span,
+    ) -> CheckedType {
+        let CheckedType::TypeConstructor {
+            id,
+            name,
+            mut arguments,
+        } = callee
+        else {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("type `{callee}` does not accept compile-time arguments"),
+            ));
+            return CheckedType::Error;
+        };
+        arguments.push(argument);
+        let declaration = &self.type_declarations[&id];
+        if arguments.len() < declaration.type_parameters.len() {
+            return CheckedType::TypeConstructor {
+                id,
+                name,
+                arguments,
+            };
+        }
+        if arguments.len() > declaration.type_parameters.len() {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("too many compile-time arguments for `{name}`"),
+            ));
+            return CheckedType::Error;
+        }
+        self.instantiate_type_declaration(module, id, arguments)
+    }
+
+    fn instantiate_type_declaration(
+        &mut self,
+        module: &ResolvedModule,
+        id: TypeId,
+        arguments: Vec<CheckedType>,
+    ) -> CheckedType {
+        let declaration = self.type_declarations[&id].clone();
+        let display_name = module.type_name(id).unwrap_or(&declaration.name).to_owned();
+        let mut substitutions = HashMap::new();
+        for (pattern, argument) in declaration.type_parameters.iter().zip(&arguments) {
+            if !self.bind_type_argument(module, pattern, argument, &mut substitutions) {
+                return CheckedType::Error;
+            }
+        }
+        if !self.resolving_named_types.insert(id) {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("cyclic type definition involving `{display_name}`"),
+            ));
+            return CheckedType::Error;
+        }
+        let template = self.resolve_source_type(
+            module,
+            declaration.underlying.as_ref().expect("represented type"),
+        );
+        self.resolving_named_types.remove(&id);
+        let representation = substitute_type(template, &substitutions);
+        match declaration.kind {
+            TypeDeclarationKind::Alias => representation,
+            TypeDeclarationKind::Distinct => CheckedType::Distinct {
+                id,
+                name: display_name,
+                arguments,
+                representation: Box::new(representation),
+            },
+            TypeDeclarationKind::Opaque => CheckedType::Error,
+        }
+    }
+
+    fn bind_type_argument(
+        &mut self,
+        module: &ResolvedModule,
+        pattern: &TypeParameterPattern,
+        argument: &CheckedType,
+        substitutions: &mut HashMap<TypeParameterId, CheckedType>,
+    ) -> bool {
+        match pattern {
+            TypeParameterPattern::Binding(binding) => {
+                let Some(id) = module.type_parameter_for(binding.syntax.id) else {
+                    return false;
+                };
+                substitutions.insert(id, argument.clone());
+                true
+            }
+            TypeParameterPattern::Product(product) => {
+                if product.elements.len() == 1 {
+                    return self.bind_type_argument(
+                        module,
+                        &product.elements[0],
+                        argument,
+                        substitutions,
+                    );
+                }
+                let CheckedType::Product(argument) = argument else {
+                    self.diagnostics.push(Diagnostic::new(
+                        product.syntax.span.clone(),
+                        "compile-time product parameter requires a product type argument",
+                    ));
+                    return false;
+                };
+                if product.elements.len() != argument.elements.len() {
+                    self.diagnostics.push(Diagnostic::new(
+                        product.syntax.span.clone(),
+                        "compile-time product argument has the wrong number of elements",
+                    ));
+                    return false;
+                }
+                product
+                    .elements
+                    .iter()
+                    .zip(&argument.elements)
+                    .all(|(pattern, argument)| {
+                        self.bind_type_argument(
+                            module,
+                            pattern,
+                            &argument.value_type,
+                            substitutions,
+                        )
+                    })
+            }
         }
     }
 
@@ -779,6 +1176,13 @@ impl TypeChecker {
         }
         let declaration = self.type_declarations[&id].clone();
         let display_name = module.type_name(id).unwrap_or(&declaration.name).to_owned();
+        if !declaration.type_parameters.is_empty() {
+            return CheckedType::TypeConstructor {
+                id,
+                name: display_name,
+                arguments: Vec::new(),
+            };
+        }
         if declaration.kind == TypeDeclarationKind::Opaque {
             let value_type = CheckedType::Opaque {
                 id,
@@ -805,7 +1209,9 @@ impl TypeChecker {
         let value_type = match declaration.kind {
             TypeDeclarationKind::Alias => representation,
             TypeDeclarationKind::Distinct => CheckedType::Distinct {
+                id,
                 name: display_name,
+                arguments: Vec::new(),
                 representation: Box::new(representation),
             },
             TypeDeclarationKind::Opaque => unreachable!(),
@@ -826,6 +1232,10 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         (CheckedType::String, CheckedType::String) => Some(CheckedType::String),
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
+        (
+            CheckedType::Parameter { id: actual, name },
+            CheckedType::Parameter { id: expected, .. },
+        ) if actual == expected => Some(CheckedType::Parameter { id: actual, name }),
         (
             CheckedType::Opaque {
                 id: actual_id,
@@ -888,21 +1298,220 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         }
         (
             CheckedType::Distinct {
+                id: actual_id,
                 name: actual_name,
+                arguments: actual_arguments,
                 representation: actual_representation,
             },
             CheckedType::Distinct {
-                name: expected_name,
+                id: expected_id,
+                name: _,
+                arguments: expected_arguments,
                 representation: expected_representation,
             },
-        ) if actual_name == expected_name => Some(CheckedType::Distinct {
-            name: actual_name,
-            representation: Box::new(merge_types(
-                *actual_representation,
-                *expected_representation,
-            )?),
-        }),
+        ) if actual_id == expected_id && actual_arguments == expected_arguments => {
+            Some(CheckedType::Distinct {
+                id: actual_id,
+                name: actual_name,
+                arguments: actual_arguments,
+                representation: Box::new(merge_types(
+                    *actual_representation,
+                    *expected_representation,
+                )?),
+            })
+        }
         _ => None,
+    }
+}
+
+pub(crate) fn substitute_type(
+    value_type: CheckedType,
+    substitutions: &HashMap<TypeParameterId, CheckedType>,
+) -> CheckedType {
+    match value_type {
+        CheckedType::Parameter { id, name } => substitutions
+            .get(&id)
+            .cloned()
+            .unwrap_or(CheckedType::Parameter { id, name }),
+        CheckedType::Pointer { is_const, pointee } => CheckedType::Pointer {
+            is_const,
+            pointee: Box::new(substitute_type(*pointee, substitutions)),
+        },
+        CheckedType::Product(product) => CheckedType::Product(CheckedProductType {
+            elements: product
+                .elements
+                .into_iter()
+                .map(|element| CheckedTypeElement {
+                    name: element.name,
+                    value_type: substitute_type(element.value_type, substitutions),
+                })
+                .collect(),
+            variadic: product.variadic,
+        }),
+        CheckedType::Function(function) => CheckedType::Function(CheckedFunctionType {
+            parameter: Box::new(substitute_type(*function.parameter, substitutions)),
+            result: Box::new(substitute_type(*function.result, substitutions)),
+        }),
+        CheckedType::Distinct {
+            id,
+            name,
+            arguments,
+            representation,
+        } => CheckedType::Distinct {
+            id,
+            name,
+            arguments: arguments
+                .into_iter()
+                .map(|argument| substitute_type(argument, substitutions))
+                .collect(),
+            representation: Box::new(substitute_type(*representation, substitutions)),
+        },
+        CheckedType::TypeConstructor {
+            id,
+            name,
+            arguments,
+        } => CheckedType::TypeConstructor {
+            id,
+            name,
+            arguments: arguments
+                .into_iter()
+                .map(|argument| substitute_type(argument, substitutions))
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
+    match value_type {
+        CheckedType::Parameter { .. } => true,
+        CheckedType::Pointer { pointee, .. } => contains_type_parameter(pointee),
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| contains_type_parameter(&element.value_type)),
+        CheckedType::Function(function) => {
+            contains_type_parameter(&function.parameter)
+                || contains_type_parameter(&function.result)
+        }
+        CheckedType::Distinct {
+            arguments,
+            representation,
+            ..
+        } => {
+            arguments.iter().any(contains_type_parameter) || contains_type_parameter(representation)
+        }
+        CheckedType::TypeConstructor { arguments, .. } => {
+            arguments.iter().any(contains_type_parameter)
+        }
+        _ => false,
+    }
+}
+
+fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
+    fn collect(value_type: &CheckedType, ids: &mut HashSet<TypeParameterId>) {
+        match value_type {
+            CheckedType::Parameter { id, .. } => {
+                ids.insert(*id);
+            }
+            CheckedType::Pointer { pointee, .. } => collect(pointee, ids),
+            CheckedType::Product(product) => {
+                for element in &product.elements {
+                    collect(&element.value_type, ids);
+                }
+            }
+            CheckedType::Function(function) => {
+                collect(&function.parameter, ids);
+                collect(&function.result, ids);
+            }
+            CheckedType::Distinct {
+                arguments,
+                representation,
+                ..
+            } => {
+                for argument in arguments {
+                    collect(argument, ids);
+                }
+                collect(representation, ids);
+            }
+            CheckedType::TypeConstructor { arguments, .. } => {
+                for argument in arguments {
+                    collect(argument, ids);
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut ids = HashSet::new();
+    collect(value_type, &mut ids);
+    ids
+}
+
+fn type_contains_parameter(value_type: &CheckedType, expected: TypeParameterId) -> bool {
+    type_parameter_ids(value_type).contains(&expected)
+}
+
+pub(crate) fn infer_type_parameters(
+    template: &CheckedType,
+    actual: &CheckedType,
+    substitutions: &mut HashMap<TypeParameterId, CheckedType>,
+) -> bool {
+    match template {
+        CheckedType::Parameter { id, .. } => match substitutions.get(id) {
+            Some(existing) => existing == actual,
+            None => {
+                substitutions.insert(*id, actual.clone());
+                true
+            }
+        },
+        CheckedType::Pointer { is_const, pointee } => {
+            matches!(actual, CheckedType::Pointer { is_const: actual_const, pointee: actual_pointee }
+            if is_const == actual_const && infer_type_parameters(pointee, actual_pointee, substitutions))
+        }
+        CheckedType::Product(template) => {
+            let CheckedType::Product(actual) = actual else {
+                return false;
+            };
+            template.variadic == actual.variadic
+                && template.elements.len() == actual.elements.len()
+                && template
+                    .elements
+                    .iter()
+                    .zip(&actual.elements)
+                    .all(|(template, actual)| {
+                        infer_type_parameters(
+                            &template.value_type,
+                            &actual.value_type,
+                            substitutions,
+                        )
+                    })
+        }
+        CheckedType::Function(template) => {
+            let CheckedType::Function(actual) = actual else {
+                return false;
+            };
+            infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
+                && infer_type_parameters(&template.result, &actual.result, substitutions)
+        }
+        CheckedType::Distinct { id, arguments, .. } => {
+            let CheckedType::Distinct {
+                id: actual_id,
+                arguments: actual_arguments,
+                ..
+            } = actual
+            else {
+                return false;
+            };
+            id == actual_id
+                && arguments.len() == actual_arguments.len()
+                && arguments
+                    .iter()
+                    .zip(actual_arguments)
+                    .all(|(template, actual)| {
+                        infer_type_parameters(template, actual, substitutions)
+                    })
+        }
+        _ => template == actual || *actual == CheckedType::Inferred,
     }
 }
 

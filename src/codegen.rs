@@ -1,4 +1,6 @@
+use std::collections::hash_map::DefaultHasher;
 use std::collections::{HashMap, HashSet};
+use std::hash::{Hash, Hasher};
 use std::path::Path;
 
 use inkwell::{
@@ -10,10 +12,11 @@ use inkwell::{
     values::{AnyValue, AnyValueEnum, BasicValueEnum},
 };
 
+use crate::typecheck::{contains_type_parameter, infer_type_parameters, substitute_type};
 use crate::{
     Accessor, CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic,
     Expression, FunctionId, IntrinsicFunction, Item, ModuleId, Pattern, ProductExpression,
-    ResolvedFunction, Span, Statement, SymbolId, TypedModule,
+    ResolvedFunction, Span, Statement, SymbolId, TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -26,6 +29,14 @@ struct ModuleEmitter<'module, 'context> {
     llvm_module: inkwell::module::Module<'context>,
     builder: inkwell::builder::Builder<'context>,
     functions: HashMap<FunctionId, inkwell::values::FunctionValue<'context>>,
+    specialized_functions: HashMap<(FunctionId, String), inkwell::values::FunctionValue<'context>>,
+    constructor_codes: HashMap<(SymbolId, String), inkwell::values::FunctionValue<'context>>,
+    specialization_queue: Vec<(
+        FunctionId,
+        CheckedFunctionType,
+        HashMap<TypeParameterId, CheckedType>,
+    )>,
+    active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     globals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
     closure_codes: HashMap<SymbolId, inkwell::values::FunctionValue<'context>>,
@@ -56,6 +67,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             llvm_module: context.create_module("staple"),
             builder: context.create_builder(),
             functions: HashMap::new(),
+            specialized_functions: HashMap::new(),
+            constructor_codes: HashMap::new(),
+            specialization_queue: Vec::new(),
+            active_type_substitutions: HashMap::new(),
             function_symbols: HashMap::new(),
             globals: HashMap::new(),
             closure_codes: HashMap::new(),
@@ -132,9 +147,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.build_utf8_validator()?;
         let typed_module = self.typed_module;
         for function in typed_module.functions() {
-            self.compile_function_body(function)?;
+            let function_type = typed_module
+                .type_of_function(function.id)
+                .expect("checked function");
+            if !contains_type_parameter(&CheckedType::Function(function_type.clone())) {
+                self.compile_function_body(function)?;
+            }
         }
         self.compile_module_initializers()?;
+        self.compile_queued_specializations()?;
         self.compile_main_function()?;
 
         self.llvm_module.verify().map_err(|message| {
@@ -227,6 +248,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let Statement::Binding(binding) = statement.as_ref() else {
                     continue;
                 };
+                if !binding.type_parameters.is_empty() {
+                    continue;
+                }
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     continue;
                 };
@@ -268,6 +292,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(function.body.syntax().span.clone(), "unchecked function")
                     })?;
+            if let Some(binding_syntax) = function.binding_syntax
+                && let Some(symbol) = self.typed_module.symbol_for(binding_syntax)
+            {
+                self.function_symbols.insert(symbol, function.id);
+            }
+            if contains_type_parameter(&CheckedType::Function(function_type.clone())) {
+                continue;
+            }
             let llvm_type = self.compile_closure_function_type(function_type)?;
             let llvm_function = self
                 .llvm_module
@@ -278,7 +310,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             {
                 self.globals.insert(symbol, llvm_function.into());
                 self.closure_codes.insert(symbol, llvm_function);
-                self.function_symbols.insert(symbol, function.id);
             }
         }
         Ok(())
@@ -286,6 +317,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
     fn compile_function_body(&mut self, function: &ResolvedFunction) -> CodeGenerationResult<()> {
         let llvm_function = self.functions[&function.id];
+        self.compile_function_body_as(function, llvm_function)
+    }
+
+    fn compile_function_body_as(
+        &mut self,
+        function: &ResolvedFunction,
+        llvm_function: inkwell::values::FunctionValue<'context>,
+    ) -> CodeGenerationResult<()> {
         let entry = self.context.append_basic_block(llvm_function, "entry");
         self.builder.position_at_end(entry);
 
@@ -305,6 +344,138 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_return(Some(&return_value))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         Ok(())
+    }
+
+    fn specialization_key(function_type: &CheckedFunctionType) -> String {
+        format!("{} -> {}", function_type.parameter, function_type.result)
+    }
+
+    fn ensure_function_specialization(
+        &mut self,
+        function_id: FunctionId,
+        function_type: &CheckedFunctionType,
+    ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
+        let key = Self::specialization_key(function_type);
+        if let Some(function) = self
+            .specialized_functions
+            .get(&(function_id, key.clone()))
+            .copied()
+        {
+            return Ok(function);
+        }
+        let template = self
+            .typed_module
+            .type_of_function(function_id)
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked generic function"))?;
+        let mut substitutions = HashMap::new();
+        if !infer_type_parameters(
+            &CheckedType::Function(template.clone()),
+            &CheckedType::Function(function_type.clone()),
+            &mut substitutions,
+        ) || contains_type_parameter(&CheckedType::Function(function_type.clone()))
+        {
+            return Err(Diagnostic::new(
+                Span::Compiler,
+                "generic function use is not fully specialized",
+            ));
+        }
+        for value_type in substitutions.values_mut() {
+            *value_type = substitute_type(value_type.clone(), &self.active_type_substitutions);
+        }
+        for (id, value_type) in &self.active_type_substitutions {
+            substitutions
+                .entry(*id)
+                .or_insert_with(|| value_type.clone());
+        }
+        let source = self
+            .typed_module
+            .functions()
+            .iter()
+            .find(|function| function.id == function_id)
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing generic function"))?;
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let name = format!("{}__{:016x}", source.name, hasher.finish());
+        let llvm_type = self.compile_closure_function_type(function_type)?;
+        let llvm_function = self.llvm_module.add_function(
+            &name,
+            llvm_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        self.specialized_functions
+            .insert((function_id, key), llvm_function);
+        self.specialization_queue
+            .push((function_id, function_type.clone(), substitutions));
+        Ok(llvm_function)
+    }
+
+    fn ensure_constructor_adapter(
+        &mut self,
+        symbol: SymbolId,
+        function_type: &CheckedFunctionType,
+    ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
+        let key = Self::specialization_key(function_type);
+        if let Some(function) = self.constructor_codes.get(&(symbol, key.clone())).copied() {
+            return Ok(function);
+        }
+        if contains_type_parameter(&CheckedType::Function(function_type.clone())) {
+            return Err(Diagnostic::new(
+                Span::Compiler,
+                "constructor value is not fully specialized",
+            ));
+        }
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let name = format!("__staple_constructor_{}_{:016x}", symbol.0, hasher.finish());
+        let llvm_type = self.compile_closure_function_type(function_type)?;
+        let function = self.llvm_module.add_function(
+            &name,
+            llvm_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        self.constructor_codes.insert((symbol, key), function);
+
+        let previous_block = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        let parameters = function.get_params();
+        let value = self.build_product_value(&parameters[1..], Span::Compiler)?;
+        self.builder
+            .build_return(Some(&value))
+            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+        if let Some(block) = previous_block {
+            self.builder.position_at_end(block);
+        }
+        Ok(function)
+    }
+
+    fn compile_queued_specializations(&mut self) -> CodeGenerationResult<()> {
+        let mut index = 0;
+        while index < self.specialization_queue.len() {
+            let (function_id, function_type, substitutions) =
+                self.specialization_queue[index].clone();
+            index += 1;
+            let key = Self::specialization_key(&function_type);
+            let llvm_function = self.specialized_functions[&(function_id, key)];
+            let function = self
+                .typed_module
+                .functions()
+                .iter()
+                .find(|function| function.id == function_id)
+                .cloned()
+                .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing generic function"))?;
+            let previous = std::mem::replace(&mut self.active_type_substitutions, substitutions);
+            self.compile_function_body_as(&function, llvm_function)?;
+            self.active_type_substitutions = previous;
+        }
+        Ok(())
+    }
+
+    fn concrete_expression_type(&self, expression: &Expression) -> Option<CheckedType> {
+        self.typed_module
+            .type_of_expression(expression.syntax().id)
+            .cloned()
+            .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
     }
 
     fn bind_function_parameters(
@@ -464,6 +635,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<()> {
         match statement {
             Statement::Binding(binding) => {
+                if !binding.type_parameters.is_empty() {
+                    return Ok(());
+                }
                 let Some(expression) = &binding.value else {
                     return Ok(());
                 };
@@ -501,6 +675,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<Option<AnyValueEnum<'context>>> {
         match statement {
             Statement::Binding(binding) => {
+                if !binding.type_parameters.is_empty() {
+                    return Ok(None);
+                }
                 if let Some(expression) = &binding.value {
                     let value = self.compile_expression(environment, expression)?;
                     let symbol =
@@ -535,6 +712,28 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             "unresolved function expression",
                         )
                     })?;
+                let template = self
+                    .typed_module
+                    .type_of_function(id)
+                    .expect("checked function expression");
+                if contains_type_parameter(&CheckedType::Function(template.clone())) {
+                    let concrete = substitute_type(
+                        CheckedType::Function(template.clone()),
+                        &self.active_type_substitutions,
+                    );
+                    let CheckedType::Function(concrete) = concrete else {
+                        unreachable!();
+                    };
+                    let code = self.ensure_function_specialization(id, &concrete)?;
+                    return self
+                        .build_closure_with_code(
+                            environment,
+                            id,
+                            code,
+                            function.syntax.span.clone(),
+                        )
+                        .map(|closure| closure.as_any_value_enum());
+                }
                 self.build_closure(environment, id, function.syntax.span.clone())
                     .map(|closure| closure.as_any_value_enum())
             }
@@ -559,6 +758,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .is_some()
                 {
                     return self.compile_c_string_macro(call);
+                }
+                if let Some(symbol) = self.typed_module.symbol_for(call.callee.syntax().id)
+                    && self
+                        .typed_module
+                        .resolved()
+                        .constructor_type(symbol)
+                        .is_some()
+                {
+                    return self.compile_expression(environment, &call.argument);
                 }
                 self.compile_call_expression(environment, call)
             }
@@ -612,6 +820,46 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .symbol_for(name.syntax.id)
                     .ok_or_else(|| Diagnostic::new(name.syntax.span.clone(), "unresolved name"))?;
+                if self
+                    .typed_module
+                    .resolved()
+                    .constructor_type(symbol)
+                    .is_some()
+                {
+                    let Some(CheckedType::Function(function_type)) =
+                        self.concrete_expression_type(expression)
+                    else {
+                        return Err(Diagnostic::new(
+                            name.syntax.span.clone(),
+                            "constructor has no concrete function type",
+                        ));
+                    };
+                    let code = self.ensure_constructor_adapter(symbol, &function_type)?;
+                    let environment = self.context.ptr_type(AddressSpace::default()).const_null();
+                    return self
+                        .build_closure_value(code, environment)
+                        .map(|closure| closure.as_any_value_enum());
+                }
+                if let Some(function_id) = self.function_symbols.get(&symbol).copied()
+                    && let Some(CheckedType::Function(function_type)) =
+                        self.concrete_expression_type(expression)
+                    && contains_type_parameter(&CheckedType::Function(
+                        self.typed_module
+                            .type_of_function(function_id)
+                            .expect("checked function")
+                            .clone(),
+                    ))
+                {
+                    let code = self.ensure_function_specialization(function_id, &function_type)?;
+                    return self
+                        .build_closure_with_code(
+                            environment,
+                            function_id,
+                            code,
+                            name.syntax.span.clone(),
+                        )
+                        .map(|closure| closure.as_any_value_enum());
+                }
                 self.compile_symbol_value(
                     environment,
                     symbol,
@@ -760,6 +1008,51 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
         if let Some(symbol) = self.typed_module.symbol_for(call.callee.syntax().id)
             && !environment.locals.contains_key(&symbol)
+            && let Some(function_id) = self.function_symbols.get(&symbol).copied()
+            && self
+                .typed_module
+                .functions()
+                .iter()
+                .find(|function| function.id == function_id)
+                .is_some_and(|function| function.captures.is_empty())
+            && contains_type_parameter(&CheckedType::Function(
+                self.typed_module
+                    .type_of_function(function_id)
+                    .expect("checked function")
+                    .clone(),
+            ))
+        {
+            let Some(CheckedType::Function(function_type)) =
+                self.concrete_expression_type(&call.callee)
+            else {
+                return Err(Diagnostic::new(
+                    call.callee.syntax().span.clone(),
+                    "generic call has no concrete function type",
+                ));
+            };
+            let function = self.ensure_function_specialization(function_id, &function_type)?;
+            let expected_count = function.count_params() as usize - 1;
+            let mut arguments =
+                self.compile_arguments(environment, &call.argument, expected_count, false)?;
+            let closure_environment = if environment.function_id == Some(function_id) {
+                environment
+                    .closure_environment
+                    .unwrap_or_else(|| self.context.ptr_type(AddressSpace::default()).const_null())
+            } else {
+                self.context.ptr_type(AddressSpace::default()).const_null()
+            };
+            arguments.insert(0, closure_environment.into());
+            let call_site = self
+                .builder
+                .build_direct_call(function, &arguments, "generic.call")
+                .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+            return Ok(call_site
+                .try_as_basic_value()
+                .unwrap_basic()
+                .as_any_value_enum());
+        }
+        if let Some(symbol) = self.typed_module.symbol_for(call.callee.syntax().id)
+            && !environment.locals.contains_key(&symbol)
             && let Some(AnyValueEnum::FunctionValue(function)) = self.globals.get(&symbol).copied()
         {
             let internal = !self.external_symbols.contains(&symbol);
@@ -798,9 +1091,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "expression is not a closure",
             ));
         };
-        let Some(CheckedType::Function(function_type)) = self
-            .typed_module
-            .type_of_expression(call.callee.syntax().id)
+        let Some(CheckedType::Function(function_type)) =
+            self.concrete_expression_type(&call.callee)
         else {
             return Err(Diagnostic::new(
                 call.callee.syntax().span.clone(),
@@ -826,7 +1118,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let call_site = self
             .builder
             .build_indirect_call(
-                self.compile_closure_function_type(function_type)?,
+                self.compile_closure_function_type(&function_type)?,
                 code,
                 &arguments,
                 "closure.call",
@@ -1426,6 +1718,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         function_id: FunctionId,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let code = self.functions[&function_id];
+        self.build_closure_with_code(environment, function_id, code, span)
+    }
+
+    fn build_closure_with_code(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        function_id: FunctionId,
+        code: inkwell::values::FunctionValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
         let function = self
             .typed_module
             .functions()
@@ -1463,7 +1766,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
             pointer
         };
-        self.build_closure_value(self.functions[&function_id], environment_pointer)
+        self.build_closure_value(code, environment_pointer)
     }
 
     fn build_closure_value(
@@ -1499,7 +1802,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.typed_module
                     .type_of_symbol(*symbol)
                     .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked capture"))
-                    .and_then(|ty| self.compile_type(ty))
+                    .map(|ty| substitute_type(ty.clone(), &self.active_type_substitutions))
+                    .and_then(|ty| self.compile_type(&ty))
             })
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         Ok(self.context.struct_type(&fields, false))
@@ -1713,6 +2017,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "cannot generate code for an erroneous type",
             )),
             CheckedType::CChar => Ok(self.context.i8_type().into()),
+            CheckedType::Parameter { name, .. } => Err(Diagnostic::new(
+                Span::Compiler,
+                format!("cannot generate code for unspecialized type parameter `{name}`"),
+            )),
+            CheckedType::TypeConstructor { name, .. } => Err(Diagnostic::new(
+                Span::Compiler,
+                format!("cannot generate code for partially applied type `{name}`"),
+            )),
             CheckedType::Opaque { name, .. } => Err(Diagnostic::new(
                 Span::Compiler,
                 format!("opaque type `{name}` has no by-value representation"),

@@ -339,6 +339,30 @@ fn parses_named_product_types_values_and_access() {
 }
 
 #[test]
+fn parses_compile_time_parameters_and_type_application() {
+    let source = concat!(
+        "type alias Pair = (A, B) => (A, B)\n",
+        "type Box = T => (value: T)\n",
+        "def identity: T => T -> T = x => x\n",
+        "let pair: Pair (String, I32)\n",
+    );
+    let root = parse(source).expect("generic syntax should parse");
+    assert_eq!(root.text(), source);
+    let Item::TypeDeclaration(pair) = &root.items[0] else {
+        panic!("expected type declaration");
+    };
+    assert_eq!(pair.type_parameters.len(), 1);
+    let Statement::Binding(identity) = statement(&root.items[2]) else {
+        panic!("expected generic function binding");
+    };
+    assert_eq!(identity.type_parameters.len(), 1);
+    let Statement::Binding(value) = statement(&root.items[3]) else {
+        panic!("expected annotated binding");
+    };
+    assert!(matches!(value.annotation, Some(Type::Application(_))));
+}
+
+#[test]
 fn block_items_are_typed() {
     let source = "def answer = () => { let x = 40 }\n";
     let root = parse(source).expect("block should parse");

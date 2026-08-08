@@ -446,6 +446,34 @@ declaration uses the same function-type syntax and omits the value:
 let add: (x: I32, y: I32) -> I32
 ```
 
+### Generic functions
+
+A function-valued `def` may introduce compile-time type parameters before its
+ordinary function type:
+
+```staple
+def identity: T => T -> T = value => value
+def first: (A, B) => (A, B) -> A = (a, b) => a
+def choose: T => (Bool, T, T) -> T = (condition, a, b) => {
+    // ...
+}
+```
+
+The compiler infers concrete type arguments from call arguments and the
+expected result or function type. A generic function can therefore be used as
+a first-class value when its context fixes a concrete function type:
+
+```staple
+let int_identity: I32 -> I32 = identity
+```
+
+Generic functions are rank-1: an ordinary parameter or result type cannot
+itself contain an uninstantiated generic scheme. Compile-time parameters must
+be declared explicitly; unannotated definitions are not generalized. Each
+reachable concrete use is monomorphized, unused instantiations produce no code,
+and recursive calls must retain the current specialization. Generic `let` and
+`extern` declarations are not supported.
+
 ## Function application
 
 Function application is written by placing the argument expression after the
@@ -598,8 +626,39 @@ type OrderId = I32
 
 `UserId`, `OrderId`, and `I32` are distinct types and are not implicitly
 interchangeable, even though they share a representation. This provides type
-safety without adding a runtime wrapper. The syntax for constructing,
-unwrapping, or explicitly converting these types remains unspecified.
+safety without adding a runtime wrapper. A represented distinct type also
+declares a private constructor in its defining module:
+
+```staple
+let user: UserId = UserId 42
+```
+
+Construction is a zero-cost conversion into the nominal type. No unwrap
+operation is generated, and the constructor is not exported even when the type
+is public. Opaque declarations have no constructor.
+
+Represented types and aliases may introduce compile-time parameters using the
+same binder syntax as generic functions:
+
+```staple
+type Box = T => (value: T)
+type HashMap = (K, V) => (key: K, value: V)
+type alias Pair = (A, B) => (A, B)
+```
+
+Type application uses left-associative juxtaposition. A product binder consumes
+one product type argument, while curried binders consume successive arguments:
+
+```staple
+HashMap (String, I32)
+
+// Given: type CurriedMap = K => V => (key: K, value: V)
+CurriedMap String I32
+```
+
+A type annotation must apply every compile-time parameter. Applying a
+non-parameterized type, supplying the wrong product shape, or leaving a type
+partially applied is an error.
 
 Product types and values may have a trailing comma.
 

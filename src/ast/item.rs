@@ -1,4 +1,4 @@
-use super::{Expression, Syntax, Type};
+use super::{Expression, Syntax, Type, TypeParameterPattern};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
@@ -71,6 +71,7 @@ pub struct TypeDeclaration {
     pub visibility: Visibility,
     pub kind: TypeDeclarationKind,
     pub name: String,
+    pub type_parameters: Vec<TypeParameterPattern>,
     pub underlying: Option<Type>,
 }
 
@@ -116,6 +117,7 @@ pub struct Binding {
     pub kind: BindingKind,
     pub name: String,
     pub fixity: Option<Fixity>,
+    pub type_parameters: Vec<TypeParameterPattern>,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
 }

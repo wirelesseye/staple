@@ -638,6 +638,170 @@ fn decodes_source_string_literals_before_llvm_generation() {
 }
 
 #[test]
+fn type_checks_generic_aliases_and_functions() {
+    let module = type_check(concat!(
+        "type alias Pair = (A, B) => (A, B)\n",
+        "def identity: T => T -> T = x => x\n",
+        "let pair: Pair (String, I32) = (\"answer\", 42)\n",
+        "let answer: I32 = identity 42\n",
+        "let text: String = identity \"hello\"\n",
+    ));
+    assert!(
+        module
+            .functions()
+            .iter()
+            .any(|function| function.name == "identity")
+    );
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generic functions should be monomorphized");
+    assert!(llvm.matches("identity__").count() >= 2);
+}
+
+#[test]
+fn constructs_distinct_and_generic_distinct_values() {
+    let module = type_check(concat!(
+        "type UserId = I32\n",
+        "type Box = T => (value: T)\n",
+        "let user: UserId = UserId 42\n",
+        "let boxed: Box I32 = Box (value: 42)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("constructors should compile as zero-cost conversions");
+}
+
+#[test]
+fn contextually_specializes_first_class_generic_functions() {
+    let module = type_check(concat!(
+        "def identity: T => T -> T = x => x\n",
+        "def apply: (I32 -> I32) -> I32 = f => f 42\n",
+        "let int_identity: I32 -> I32 = identity\n",
+        "let answer: I32 = apply identity\n",
+        "let other: I32 = int_identity 7\n",
+        "def apply_pair: (I32 -> I32, I32) -> I32 = (f, x) => f x\n",
+        "let paired: I32 = apply_pair (identity, 9)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("contextually specialized generic functions should compile");
+}
+
+#[test]
+fn contextually_specializes_first_class_constructors() {
+    let module = type_check(concat!(
+        "type UserId = I32\n",
+        "type Box = T => (value: T)\n",
+        "let make_user: I32 -> UserId = UserId\n",
+        "let make_box: (value: I32) -> Box I32 = Box\n",
+        "let user: UserId = make_user 42\n",
+        "let boxed: Box I32 = make_box (value: 42)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("first-class constructors should compile");
+}
+
+#[test]
+fn monomorphizes_nested_and_recursive_generic_calls() {
+    let module = type_check(concat!(
+        "def identity: T => T -> T = x => x\n",
+        "def copy: U => U -> U = x => identity x\n",
+        "def loop: V => V -> V = x => loop x\n",
+        "let answer: I32 = copy 42\n",
+        "let recurse: I32 = loop 1\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("nested generic calls should discover concrete specializations");
+}
+
+#[test]
+fn monomorphizes_generic_closures_with_captures() {
+    let module = type_check(concat!(
+        "def outer: I32 -> I32 = y => {\n",
+        "  def inner: T => T -> I32 = x => y\n",
+        "  inner \"ignored\"\n",
+        "}\n",
+        "let answer: I32 = outer 42\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generic closures should retain their captured environment");
+}
+
+#[test]
+fn infers_product_and_result_only_compile_time_parameters() {
+    let module = type_check(concat!(
+        "def first: (A, B) => (A, B) -> A = (a, b) => a\n",
+        "type Phantom = T => I32\n",
+        "def make: T => I32 -> Phantom T = x => Phantom x\n",
+        "let answer: I32 = first (42, \"ignored\")\n",
+        "let contextual: Phantom String = make 7\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("multiple compile-time parameters should specialize");
+}
+
+#[test]
+fn monomorphizes_curried_generic_function_layers() {
+    let module = type_check(concat!(
+        "def keep_first: (A, B) => A -> B -> A = a => b => a\n",
+        "let answer: I32 = keep_first 42 \"ignored\"\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("curried generic layers should specialize together");
+}
+
+#[test]
+fn rejects_unconstrained_generic_values_and_non_function_schemes() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def identity: T => T -> T = x => x\n",
+            "def copied = identity\n",
+            "def invalid: U => U = 42\n",
+        )))
+        .expect_err("generic values require a concrete use or function scheme");
+    let messages = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("requires a concrete expected type"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("function-valued `def`"))
+    );
+}
+
+#[test]
+fn rejects_polymorphic_recursion() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def grow: T => T -> T = x => grow (x, x)\n"))
+        .expect_err("recursive calls may not change their specialization");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("polymorphic recursion")),
+        "{diagnostics:?}"
+    );
+}
+
+#[test]
 fn emits_a_native_object_file() {
     let module = type_check(include_str!("../examples/hello_world.sta"));
     let context = Context::create();
