@@ -142,7 +142,7 @@ fn exhaustively_matches_sum_values_and_destructures_payloads() {
         .compile_module(&module)
         .expect("match should generate LLVM");
     assert!(llvm.contains("match.tag"));
-    assert!(llvm.contains("switch i32"));
+    assert!(llvm.contains("match.tag.matches"));
     assert!(llvm.contains("match.value"));
 }
 
@@ -212,7 +212,7 @@ fn rejects_invalid_match_subjects_and_coverage() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("match subject must have a sum type")
+            .contains("match subject must have a sum or product type")
     }));
 
     let diagnostics = TypeChecker::new()
@@ -239,15 +239,83 @@ fn rejects_invalid_match_subjects_and_coverage() {
             "invalid (Ok 1)\n",
         )))
         .expect_err("unreachable match arms should fail");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("unreachable duplicate match arm")
-    }));
     assert!(
         diagnostics
             .iter()
             .any(|diagnostic| { diagnostic.message.contains("unreachable match arm") })
+    );
+}
+
+#[test]
+fn exhaustively_matches_product_combinations() {
+    let module = type_check(concat!(
+        "def same = (left: Bool, right: Bool) => match (left, right) {\n",
+        "  (True(), True()) => True,\n",
+        "  (False(), False()) => True,\n",
+        "  _ => False,\n",
+        "}\n",
+        "def table = (left: Bool, right: Bool) => match (left, right) {\n",
+        "  (True(), True()) => True,\n",
+        "  (True(), False()) => False,\n",
+        "  (False(), True()) => False,\n",
+        "  (False(), False()) => True,\n",
+        "}\n",
+        "same (True, False)\n",
+        "table (False, False)\n",
+    ));
+    let same = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "same")
+        .expect("same function");
+    let CheckedType::Sum(result) = module
+        .type_of_function(same.id)
+        .expect("same type")
+        .result
+        .as_ref()
+    else {
+        panic!("expected Bool result");
+    };
+    assert_eq!(result.alternatives.len(), 2);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("product match should generate LLVM");
+    assert!(llvm.matches("match.element").count() >= 2);
+    assert!(llvm.contains("match.next"));
+}
+
+#[test]
+fn checks_product_match_coverage_and_reachability() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def incomplete = (left: Bool, right: Bool) => match (left, right) {\n",
+            "  (True(), True()) => True,\n",
+            "  (True(), False()) => False,\n",
+            "}\n",
+            "incomplete (True, True)\n",
+        )))
+        .expect_err("incomplete product match should fail");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("non-exhaustive match"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def duplicate = (left: Bool, right: Bool) => match (left, right) {\n",
+            "  (True(), True()) => True,\n",
+            "  (True(), True()) => False,\n",
+            "  _ => False,\n",
+            "}\n",
+            "duplicate (True, True)\n",
+        )))
+        .expect_err("duplicate product arm should fail");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unreachable match arm"))
     );
 }
 
@@ -574,6 +642,23 @@ fn compares_all_standard_library_integer_types() {
         assert!(llvm.contains(predicate), "missing `{predicate}` in LLVM");
     }
     assert!(llvm.contains("bool.tag"));
+}
+
+#[test]
+fn compares_library_defined_bool_values() {
+    let module = type_check(concat!(
+        "let yes: Bool = True\n",
+        "let no: Bool = False\n",
+        "let true_equals_true: Bool = yes == yes\n",
+        "let false_equals_false: Bool = no == no\n",
+        "let true_differs_false: Bool = yes != no\n",
+        "let false_differs_true: Bool = no != yes\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("Bool equality should dispatch through its standard-library implementation");
+    assert!(llvm.contains("match.tag.matches"));
 }
 
 #[test]

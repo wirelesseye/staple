@@ -36,14 +36,12 @@ pub struct CheckedPropagation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedMatch {
     pub source: CheckedType,
-    pub arms: Vec<CheckedMatchArm>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CheckedMatchArm {
-    Alternative(usize),
-    CatchAll,
-    Invalid,
+#[derive(Clone, Copy)]
+enum CoveragePattern<'a> {
+    Any,
+    Pattern(&'a Pattern),
 }
 
 #[derive(Debug, Clone)]
@@ -1567,82 +1565,30 @@ impl TypeChecker {
         if self.did_return {
             return CheckedType::empty_product();
         }
-        let CheckedType::Sum(sum) = &source else {
+        if !matches!(source, CheckedType::Sum(_) | CheckedType::Product(_)) {
             if source != CheckedType::Error {
                 self.diagnostics.push(Diagnostic::new(
                     match_.subject.syntax().span.clone(),
-                    format!("a match subject must have a sum type, found `{source}`"),
+                    format!("a match subject must have a sum or product type, found `{source}`"),
                 ));
             }
             return CheckedType::Error;
-        };
+        }
 
         let outer_reachable = self.return_reachable;
-        let mut covered = HashSet::new();
-        let mut catch_all = false;
-        let mut checked_arms = Vec::with_capacity(match_.arms.len());
+        let mut previous_patterns = Vec::new();
         let mut values = Vec::new();
         let mut every_arm_returns = true;
 
         for arm in &match_.arms {
-            let checked_arm = if catch_all {
+            self.check_match_pattern(module, &arm.pattern, &source);
+            if !Self::match_pattern_is_useful(module, &source, &previous_patterns, &arm.pattern) {
                 self.diagnostics.push(Diagnostic::new(
                     arm.pattern.syntax().span.clone(),
                     "unreachable match arm",
                 ));
-                CheckedMatchArm::Invalid
-            } else {
-                match &arm.pattern {
-                    Pattern::Binding(_) | Pattern::Wildcard(_) => {
-                        catch_all = true;
-                        self.bind_pattern_types(module, &arm.pattern, &source);
-                        CheckedMatchArm::CatchAll
-                    }
-                    Pattern::Nominal(pattern) => {
-                        if let Some(expected_id) = module.type_for_pattern(pattern.syntax.id) {
-                            let selected = sum.alternatives.iter().enumerate().find_map(
-                                |(index, alternative)| match alternative {
-                                    CheckedType::Distinct {
-                                        id, representation, ..
-                                    } if *id == expected_id => Some((index, representation)),
-                                    _ => None,
-                                },
-                            );
-                            if let Some((index, representation)) = selected {
-                                if !covered.insert(index) {
-                                    self.diagnostics.push(Diagnostic::new(
-                                        pattern.syntax.span.clone(),
-                                        format!(
-                                            "unreachable duplicate match arm for `{}`",
-                                            pattern.name
-                                        ),
-                                    ));
-                                }
-                                self.bind_pattern_types(module, &pattern.argument, representation);
-                                CheckedMatchArm::Alternative(index)
-                            } else {
-                                self.diagnostics.push(Diagnostic::new(
-                                    pattern.syntax.span.clone(),
-                                    format!(
-                                        "nominal pattern `{}` does not select an alternative of `{source}`",
-                                        pattern.name
-                                    ),
-                                ));
-                                CheckedMatchArm::Invalid
-                            }
-                        } else {
-                            CheckedMatchArm::Invalid
-                        }
-                    }
-                    Pattern::Product(_) => {
-                        self.diagnostics.push(Diagnostic::new(
-                            arm.pattern.syntax().span.clone(),
-                            "a match arm must begin with a nominal, binding, or wildcard pattern",
-                        ));
-                        CheckedMatchArm::Invalid
-                    }
-                }
-            };
+            }
+            previous_patterns.push(&arm.pattern);
 
             self.did_return = false;
             self.return_reachable = outer_reachable;
@@ -1657,21 +1603,52 @@ impl TypeChecker {
                     value_type,
                 });
             }
-            checked_arms.push(checked_arm);
         }
 
-        if !catch_all && covered.len() != sum.alternatives.len() {
-            let missing = sum
-                .alternatives
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| !covered.contains(index))
-                .map(|(_, alternative)| format!("`{alternative}`"))
-                .collect::<Vec<_>>()
-                .join(", ");
+        if Self::match_pattern_is_useful(
+            module,
+            &source,
+            &previous_patterns,
+            &Pattern::Wildcard(crate::WildcardPattern {
+                syntax: match_.syntax.clone(),
+            }),
+        ) {
+            let missing = if let CheckedType::Sum(sum) = &source {
+                let matrix = previous_patterns
+                    .iter()
+                    .map(|pattern| vec![CoveragePattern::Pattern(pattern)])
+                    .collect::<Vec<_>>();
+                let alternatives = sum
+                    .alternatives
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, alternative)| {
+                        let CheckedType::Distinct { representation, .. } = alternative else {
+                            return None;
+                        };
+                        let specialized = matrix
+                            .iter()
+                            .filter_map(|row| Self::specialize_sum_row(module, row, index, sum))
+                            .collect::<Vec<_>>();
+                        Self::coverage_is_useful(
+                            module,
+                            &[representation.as_ref().clone()],
+                            &specialized,
+                            &[CoveragePattern::Any],
+                        )
+                        .then(|| format!("`{alternative}`"))
+                    })
+                    .collect::<Vec<_>>();
+                (!alternatives.is_empty()).then(|| alternatives.join(", "))
+            } else {
+                None
+            };
             self.diagnostics.push(Diagnostic::new(
                 match_.syntax.span.clone(),
-                format!("non-exhaustive match; missing {missing}"),
+                missing.map_or_else(
+                    || "non-exhaustive match".to_owned(),
+                    |missing| format!("non-exhaustive match; missing {missing}"),
+                ),
             ));
         }
 
@@ -1692,16 +1669,293 @@ impl TypeChecker {
                 );
             }
         }
-        self.matches.insert(
-            match_.syntax.id,
-            CheckedMatch {
-                source,
-                arms: checked_arms,
-            },
-        );
+        self.matches
+            .insert(match_.syntax.id, CheckedMatch { source });
         self.did_return = every_arm_returns;
         self.return_reachable = outer_reachable;
         result
+    }
+
+    fn check_match_pattern(
+        &mut self,
+        module: &ResolvedModule,
+        pattern: &Pattern,
+        value_type: &CheckedType,
+    ) {
+        match pattern {
+            Pattern::Binding(_) | Pattern::Wildcard(_) => {
+                self.bind_pattern_types(module, pattern, value_type);
+            }
+            Pattern::Product(product) if product.elements.len() == 1 => {
+                self.check_match_pattern(module, &product.elements[0], value_type);
+            }
+            Pattern::Product(product) => {
+                let CheckedType::Product(value) = value_type else {
+                    if *value_type != CheckedType::Error {
+                        self.diagnostics.push(Diagnostic::new(
+                            product.syntax.span.clone(),
+                            format!("product pattern cannot match `{value_type}`"),
+                        ));
+                    }
+                    return;
+                };
+                if product.elements.len() != value.elements.len() {
+                    self.diagnostics.push(Diagnostic::new(
+                        product.syntax.span.clone(),
+                        format!(
+                            "product pattern has {} elements but value has {}",
+                            product.elements.len(),
+                            value.elements.len()
+                        ),
+                    ));
+                    return;
+                }
+                for (pattern, element) in product.elements.iter().zip(&value.elements) {
+                    self.check_match_pattern(module, pattern, &element.value_type);
+                }
+            }
+            Pattern::Nominal(pattern) => {
+                let Some(expected_id) = module.type_for_pattern(pattern.syntax.id) else {
+                    return;
+                };
+                let representation = match value_type {
+                    CheckedType::Sum(sum) => {
+                        sum.alternatives
+                            .iter()
+                            .find_map(|alternative| match alternative {
+                                CheckedType::Distinct {
+                                    id, representation, ..
+                                } if *id == expected_id => Some(representation.as_ref()),
+                                _ => None,
+                            })
+                    }
+                    CheckedType::Distinct {
+                        id, representation, ..
+                    } if *id == expected_id => Some(representation.as_ref()),
+                    _ => None,
+                };
+                if let Some(representation) = representation {
+                    self.check_match_pattern(module, &pattern.argument, representation);
+                } else if *value_type != CheckedType::Error {
+                    self.diagnostics.push(Diagnostic::new(
+                        pattern.syntax.span.clone(),
+                        format!(
+                            "nominal pattern `{}` cannot match `{value_type}`",
+                            pattern.name
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn match_pattern_is_useful<'a>(
+        module: &ResolvedModule,
+        value_type: &CheckedType,
+        previous: &[&'a Pattern],
+        candidate: &'a Pattern,
+    ) -> bool {
+        let matrix = previous
+            .iter()
+            .map(|pattern| vec![CoveragePattern::Pattern(pattern)])
+            .collect::<Vec<_>>();
+        Self::coverage_is_useful(
+            module,
+            std::slice::from_ref(value_type),
+            &matrix,
+            &[CoveragePattern::Pattern(candidate)],
+        )
+    }
+
+    fn coverage_is_useful<'a>(
+        module: &ResolvedModule,
+        types: &[CheckedType],
+        matrix: &[Vec<CoveragePattern<'a>>],
+        candidate: &[CoveragePattern<'a>],
+    ) -> bool {
+        if types.is_empty() {
+            return !matrix.iter().any(Vec::is_empty);
+        }
+        let first = Self::canonical_coverage_pattern(candidate[0]);
+        match &types[0] {
+            CheckedType::Sum(sum) => {
+                let alternatives = match first {
+                    CoveragePattern::Any => (0..sum.alternatives.len()).collect::<Vec<_>>(),
+                    CoveragePattern::Pattern(Pattern::Nominal(pattern)) => module
+                        .type_for_pattern(pattern.syntax.id)
+                        .and_then(|id| {
+                            sum.alternatives.iter().position(
+                                |alternative| matches!(alternative, CheckedType::Distinct { id: alternative_id, .. } if *alternative_id == id),
+                            )
+                        })
+                        .into_iter()
+                        .collect(),
+                    _ => return false,
+                };
+                alternatives.into_iter().any(|index| {
+                    let CheckedType::Distinct { representation, .. } = &sum.alternatives[index]
+                    else {
+                        return false;
+                    };
+                    let specialized_matrix = matrix
+                        .iter()
+                        .filter_map(|row| Self::specialize_sum_row(module, row, index, sum))
+                        .collect::<Vec<_>>();
+                    let Some(specialized_candidate) =
+                        Self::specialize_sum_row(module, candidate, index, sum)
+                    else {
+                        return false;
+                    };
+                    let mut specialized_types = vec![representation.as_ref().clone()];
+                    specialized_types.extend_from_slice(&types[1..]);
+                    Self::coverage_is_useful(
+                        module,
+                        &specialized_types,
+                        &specialized_matrix,
+                        &specialized_candidate,
+                    )
+                })
+            }
+            CheckedType::Product(product) => {
+                let Some(specialized_candidate) =
+                    Self::specialize_product_row(candidate, product.elements.len())
+                else {
+                    return false;
+                };
+                let specialized_matrix = matrix
+                    .iter()
+                    .filter_map(|row| Self::specialize_product_row(row, product.elements.len()))
+                    .collect::<Vec<_>>();
+                let mut specialized_types = product
+                    .elements
+                    .iter()
+                    .map(|element| element.value_type.clone())
+                    .collect::<Vec<_>>();
+                specialized_types.extend_from_slice(&types[1..]);
+                Self::coverage_is_useful(
+                    module,
+                    &specialized_types,
+                    &specialized_matrix,
+                    &specialized_candidate,
+                )
+            }
+            CheckedType::Distinct {
+                id, representation, ..
+            } => {
+                let Some(specialized_candidate) =
+                    Self::specialize_distinct_row(module, candidate, *id)
+                else {
+                    return false;
+                };
+                let specialized_matrix = matrix
+                    .iter()
+                    .filter_map(|row| Self::specialize_distinct_row(module, row, *id))
+                    .collect::<Vec<_>>();
+                let mut specialized_types = vec![representation.as_ref().clone()];
+                specialized_types.extend_from_slice(&types[1..]);
+                Self::coverage_is_useful(
+                    module,
+                    &specialized_types,
+                    &specialized_matrix,
+                    &specialized_candidate,
+                )
+            }
+            _ => {
+                if !matches!(first, CoveragePattern::Any) {
+                    return false;
+                }
+                let specialized_matrix = matrix
+                    .iter()
+                    .filter(|row| {
+                        matches!(
+                            Self::canonical_coverage_pattern(row[0]),
+                            CoveragePattern::Any
+                        )
+                    })
+                    .map(|row| row[1..].to_vec())
+                    .collect::<Vec<_>>();
+                Self::coverage_is_useful(module, &types[1..], &specialized_matrix, &candidate[1..])
+            }
+        }
+    }
+
+    fn canonical_coverage_pattern(pattern: CoveragePattern<'_>) -> CoveragePattern<'_> {
+        match pattern {
+            CoveragePattern::Pattern(Pattern::Binding(_) | Pattern::Wildcard(_)) => {
+                CoveragePattern::Any
+            }
+            CoveragePattern::Pattern(Pattern::Product(product)) if product.elements.len() == 1 => {
+                Self::canonical_coverage_pattern(CoveragePattern::Pattern(&product.elements[0]))
+            }
+            other => other,
+        }
+    }
+
+    fn specialize_sum_row<'a>(
+        module: &ResolvedModule,
+        row: &[CoveragePattern<'a>],
+        index: usize,
+        sum: &CheckedSumType,
+    ) -> Option<Vec<CoveragePattern<'a>>> {
+        let first = Self::canonical_coverage_pattern(row[0]);
+        let selected_id = match &sum.alternatives[index] {
+            CheckedType::Distinct { id, .. } => *id,
+            _ => return None,
+        };
+        let head = match first {
+            CoveragePattern::Any => CoveragePattern::Any,
+            CoveragePattern::Pattern(Pattern::Nominal(pattern))
+                if module.type_for_pattern(pattern.syntax.id) == Some(selected_id) =>
+            {
+                CoveragePattern::Pattern(&pattern.argument)
+            }
+            _ => return None,
+        };
+        let mut result = vec![head];
+        result.extend_from_slice(&row[1..]);
+        Some(result)
+    }
+
+    fn specialize_product_row<'a>(
+        row: &[CoveragePattern<'a>],
+        length: usize,
+    ) -> Option<Vec<CoveragePattern<'a>>> {
+        let first = Self::canonical_coverage_pattern(row[0]);
+        let mut result = match first {
+            CoveragePattern::Any => vec![CoveragePattern::Any; length],
+            CoveragePattern::Pattern(Pattern::Product(product))
+                if product.elements.len() == length =>
+            {
+                product
+                    .elements
+                    .iter()
+                    .map(CoveragePattern::Pattern)
+                    .collect()
+            }
+            _ => return None,
+        };
+        result.extend_from_slice(&row[1..]);
+        Some(result)
+    }
+
+    fn specialize_distinct_row<'a>(
+        module: &ResolvedModule,
+        row: &[CoveragePattern<'a>],
+        id: TypeId,
+    ) -> Option<Vec<CoveragePattern<'a>>> {
+        let first = Self::canonical_coverage_pattern(row[0]);
+        let head = match first {
+            CoveragePattern::Any => CoveragePattern::Any,
+            CoveragePattern::Pattern(Pattern::Nominal(pattern))
+                if module.type_for_pattern(pattern.syntax.id) == Some(id) =>
+            {
+                CoveragePattern::Pattern(&pattern.argument)
+            }
+            _ => return None,
+        };
+        let mut result = vec![head];
+        result.extend_from_slice(&row[1..]);
+        Some(result)
     }
 
     fn finish_expression_type(

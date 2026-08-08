@@ -16,11 +16,10 @@ use inkwell::{
 
 use crate::typecheck::{contains_type_parameter, infer_type_parameters, substitute_type};
 use crate::{
-    Accessor, CallExpression, CheckedFunctionType, CheckedMatchArm, CheckedProductType,
-    CheckedType, Diagnostic, Expression, FunctionId, IntegerBinaryOperation,
-    IntegerCompareOperation, IntegerType, IntrinsicFunction, Item, ModuleId, Pattern,
-    PatternBindingKind, ProductExpression, ResolvedFunction, Span, Statement, SymbolId,
-    TypeParameterId, TypedModule,
+    Accessor, CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic,
+    Expression, FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType,
+    IntrinsicFunction, Item, ModuleId, Pattern, PatternBindingKind, ProductExpression,
+    ResolvedFunction, Span, Statement, SymbolId, TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -1269,23 +1268,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .cloned()
             .ok_or_else(|| Diagnostic::new(match_.syntax.span.clone(), "missing checked match"))?;
         let source = substitute_type(checked.source, &self.active_type_substitutions);
-        let CheckedType::Sum(sum) = &source else {
+        let Some(subject) = value_as_basic(subject) else {
             return Err(Diagnostic::new(
                 match_.subject.syntax().span.clone(),
-                "match subject is not a checked sum",
+                "match subject is not first-class",
             ));
         };
-        let Some(BasicValueEnum::StructValue(sum_value)) = value_as_basic(subject) else {
-            return Err(Diagnostic::new(
-                match_.subject.syntax().span.clone(),
-                "match subject has an invalid sum representation",
-            ));
-        };
-        let tag = self
-            .builder
-            .build_extract_value(sum_value, 0, "match.tag")
-            .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?
-            .into_int_value();
         let function = self
             .builder
             .get_insert_block()
@@ -1294,67 +1282,20 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Diagnostic::new(match_.syntax.span.clone(), "match is not in a function")
             })?;
         let merge_block = self.context.append_basic_block(function, "match.merge");
-        let arm_blocks = match_
-            .arms
-            .iter()
-            .map(|_| self.context.append_basic_block(function, "match.arm"))
-            .collect::<Vec<_>>();
-        let catch_all = checked
-            .arms
-            .iter()
-            .position(|arm| *arm == CheckedMatchArm::CatchAll);
-        let default_block = catch_all.map(|index| arm_blocks[index]).unwrap_or_else(|| {
-            self.context
-                .append_basic_block(function, "match.unreachable")
-        });
-        let cases = checked
-            .arms
-            .iter()
-            .enumerate()
-            .filter_map(|(arm, checked)| match checked {
-                CheckedMatchArm::Alternative(index) => Some((
-                    self.context.i32_type().const_int(*index as u64, false),
-                    arm_blocks[arm],
-                )),
-                CheckedMatchArm::CatchAll | CheckedMatchArm::Invalid => None,
-            })
-            .collect::<Vec<_>>();
-        self.builder
-            .build_switch(tag, default_block, &cases)
-            .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?;
-
         let mut incoming = Vec::new();
-        for ((arm, checked_arm), arm_block) in
-            match_.arms.iter().zip(&checked.arms).zip(&arm_blocks)
-        {
-            self.builder.position_at_end(*arm_block);
+        for arm in &match_.arms {
+            let arm_block = self.context.append_basic_block(function, "match.arm");
+            let failure_block = self.context.append_basic_block(function, "match.next");
+            self.compile_match_pattern_branch(
+                environment,
+                &arm.pattern,
+                subject,
+                &source,
+                arm_block,
+                failure_block,
+            )?;
+            self.builder.position_at_end(arm_block);
             environment.did_return = false;
-            match checked_arm {
-                CheckedMatchArm::Alternative(index) => {
-                    let payload = self.extract_sum_alternative(
-                        sum_value,
-                        sum,
-                        *index,
-                        arm.pattern.syntax().span.clone(),
-                    )?;
-                    let Pattern::Nominal(pattern) = &arm.pattern else {
-                        return Err(Diagnostic::new(
-                            arm.pattern.syntax().span.clone(),
-                            "checked nominal match arm has a non-nominal pattern",
-                        ));
-                    };
-                    self.bind_pattern_value(environment, &pattern.argument, payload)?;
-                }
-                CheckedMatchArm::CatchAll => {
-                    self.bind_pattern_value(environment, &arm.pattern, sum_value.into())?;
-                }
-                CheckedMatchArm::Invalid => {
-                    return Err(Diagnostic::new(
-                        arm.pattern.syntax().span.clone(),
-                        "cannot generate an invalid match arm",
-                    ));
-                }
-            }
             let value = self.compile_expression(environment, &arm.body)?;
             if !environment.did_return {
                 let value = value_as_basic(value).ok_or_else(|| {
@@ -1369,14 +1310,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let predecessor = self.builder.get_insert_block().expect("match arm block");
                 incoming.push((value, predecessor));
             }
+            self.builder.position_at_end(failure_block);
         }
 
-        if catch_all.is_none() {
-            self.builder.position_at_end(default_block);
-            self.builder
-                .build_unreachable()
-                .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?;
-        }
+        self.builder
+            .build_unreachable()
+            .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?;
         self.builder.position_at_end(merge_block);
         if incoming.is_empty() {
             self.builder
@@ -1408,6 +1347,180 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .collect::<Vec<_>>();
         phi.add_incoming(&incoming);
         Ok(phi.as_basic_value().as_any_value_enum())
+    }
+
+    fn compile_match_pattern_branch(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        pattern: &Pattern,
+        value: BasicValueEnum<'context>,
+        value_type: &CheckedType,
+        success: inkwell::basic_block::BasicBlock<'context>,
+        failure: inkwell::basic_block::BasicBlock<'context>,
+    ) -> CodeGenerationResult<()> {
+        match pattern {
+            Pattern::Binding(_) | Pattern::Wildcard(_) => {
+                self.bind_pattern_value(environment, pattern, value)?;
+                self.builder
+                    .build_unconditional_branch(success)
+                    .map_err(compiler_diagnostic)?;
+            }
+            Pattern::Product(product) if product.elements.len() == 1 => {
+                self.compile_match_pattern_branch(
+                    environment,
+                    &product.elements[0],
+                    value,
+                    value_type,
+                    success,
+                    failure,
+                )?;
+            }
+            Pattern::Product(product) => {
+                let CheckedType::Product(product_type) = value_type else {
+                    return Err(Diagnostic::new(
+                        product.syntax.span.clone(),
+                        "checked product pattern has a non-product value",
+                    ));
+                };
+                let BasicValueEnum::StructValue(product_value) = value else {
+                    return Err(Diagnostic::new(
+                        product.syntax.span.clone(),
+                        "product match value has an invalid representation",
+                    ));
+                };
+                if product.elements.is_empty() {
+                    self.builder
+                        .build_unconditional_branch(success)
+                        .map_err(compiler_diagnostic)?;
+                    return Ok(());
+                }
+                for (index, (element_pattern, element_type)) in product
+                    .elements
+                    .iter()
+                    .zip(&product_type.elements)
+                    .enumerate()
+                {
+                    let element = self
+                        .builder
+                        .build_extract_value(product_value, index as u32, "match.element")
+                        .map_err(|error| {
+                            Diagnostic::new(product.syntax.span.clone(), error.to_string())
+                        })?;
+                    let next = if index + 1 == product.elements.len() {
+                        success
+                    } else {
+                        self.context.append_basic_block(
+                            success.get_parent().expect("match function"),
+                            "match.pattern",
+                        )
+                    };
+                    self.compile_match_pattern_branch(
+                        environment,
+                        element_pattern,
+                        element,
+                        &element_type.value_type,
+                        next,
+                        failure,
+                    )?;
+                    if next != success {
+                        self.builder.position_at_end(next);
+                    }
+                }
+            }
+            Pattern::Nominal(pattern) => match value_type {
+                CheckedType::Sum(sum) => {
+                    let expected_id = self
+                        .typed_module
+                        .resolved()
+                        .type_for_pattern(pattern.syntax.id)
+                        .ok_or_else(|| {
+                            Diagnostic::new(pattern.syntax.span.clone(), "unresolved match pattern")
+                        })?;
+                    let index = sum
+                        .alternatives
+                        .iter()
+                        .position(|alternative| matches!(alternative, CheckedType::Distinct { id, .. } if *id == expected_id))
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                pattern.syntax.span.clone(),
+                                "match pattern does not select a sum alternative",
+                            )
+                        })?;
+                    let BasicValueEnum::StructValue(sum_value) = value else {
+                        return Err(Diagnostic::new(
+                            pattern.syntax.span.clone(),
+                            "sum match value has an invalid representation",
+                        ));
+                    };
+                    let tag = self
+                        .builder
+                        .build_extract_value(sum_value, 0, "match.tag")
+                        .map_err(|error| {
+                            Diagnostic::new(pattern.syntax.span.clone(), error.to_string())
+                        })?
+                        .into_int_value();
+                    let selected = self.context.append_basic_block(
+                        success.get_parent().expect("match function"),
+                        "match.selected",
+                    );
+                    let matches = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::EQ,
+                            tag,
+                            self.context.i32_type().const_int(index as u64, false),
+                            "match.tag.matches",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    self.builder
+                        .build_conditional_branch(matches, selected, failure)
+                        .map_err(compiler_diagnostic)?;
+                    self.builder.position_at_end(selected);
+                    let payload = self.extract_sum_alternative(
+                        sum_value,
+                        sum,
+                        index,
+                        pattern.syntax.span.clone(),
+                    )?;
+                    let CheckedType::Distinct { representation, .. } = &sum.alternatives[index]
+                    else {
+                        unreachable!("checked sum alternative");
+                    };
+                    self.compile_match_pattern_branch(
+                        environment,
+                        &pattern.argument,
+                        payload,
+                        representation,
+                        success,
+                        failure,
+                    )?;
+                }
+                CheckedType::Distinct {
+                    id, representation, ..
+                } if self
+                    .typed_module
+                    .resolved()
+                    .type_for_pattern(pattern.syntax.id)
+                    == Some(*id) =>
+                {
+                    self.compile_match_pattern_branch(
+                        environment,
+                        &pattern.argument,
+                        value,
+                        representation,
+                        success,
+                        failure,
+                    )?;
+                }
+                _ => {
+                    return Err(Diagnostic::new(
+                        pattern.syntax.span.clone(),
+                        "checked nominal pattern has an incompatible value",
+                    ));
+                }
+            },
+        }
+        Ok(())
     }
 
     fn coerce_sum_value(

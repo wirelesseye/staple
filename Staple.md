@@ -632,10 +632,10 @@ def unwrap = result: Ok I32 | IOError => match result {
 }
 ```
 
-The subject is evaluated exactly once and must have a sum type. Every arm has
-the form `<pattern> => <expression>`. Arms are separated by commas, and a
-trailing comma is permitted. Each arm has its own scope, so names introduced by
-its pattern are visible only in that arm's expression.
+The subject is evaluated exactly once and must have a sum or product type.
+Every arm has the form `<pattern> => <expression>`. Arms are separated by
+commas, and a trailing comma is permitted. Each arm has its own scope, so names
+introduced by its pattern are visible only in that arm's expression.
 
 A nominal pattern selects one sum alternative and may recursively destructure
 its representation with binding, product, nominal, and wildcard patterns. The
@@ -649,14 +649,24 @@ match value {
 }
 ```
 
-A binding pattern at the root is a catch-all and binds the complete sum value.
+A binding pattern at the root is a catch-all and binds the complete subject value.
 `_` is a wildcard pattern which matches without binding a name; wildcards may
 also be used in function parameters and destructuring bindings.
 
-A match must cover every alternative, either with one nominal arm per
-alternative or with a catch-all. Duplicate alternatives and arms following a
-catch-all are errors. Literal patterns, alternative patterns, and match guards
-are not currently supported.
+Product subjects are matched structurally. Their element patterns may select
+sum alternatives, and coverage is checked across every possible combination:
+
+```staple
+def same = (left: Bool, right: Bool) => match (left, right) {
+    (True(), True()) => True,
+    (False(), False()) => True,
+    _ => False,
+}
+```
+
+A match must cover every possible sum alternative and product combination or
+include a catch-all. Duplicate or otherwise redundant arms are errors. Literal
+patterns, alternative patterns, and match guards are not currently supported.
 
 An expected type is applied to every arm. Without one, equal arm types remain
 that type; differing represented nominal results are joined into an open sum by
