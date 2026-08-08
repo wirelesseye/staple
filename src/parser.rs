@@ -5,7 +5,7 @@ use std::sync::Arc;
 /// Parses a complete Staple source file into a lossless syntax tree.
 pub fn parse(source: &str) -> Result<Module, ParseError> {
     let tokens = Arc::from(lex(source));
-    Grammar::new(tokens, source.len(), 0, None).parse_source_file()
+    Grammar::new(tokens, Arc::from(source), 0, None).parse_source_file()
 }
 
 /// Parses a named source while assigning syntax IDs from a shared sequence.
@@ -20,7 +20,7 @@ pub(crate) fn parse_with_syntax_ids(
     let tokens = Arc::from(lex(source));
     let module = Grammar::new(
         tokens,
-        source.len(),
+        Arc::from(source),
         *next_syntax_id,
         Some(Arc::from(source_name)),
     )
@@ -32,7 +32,9 @@ pub(crate) fn parse_with_syntax_ids(
 struct Grammar {
     tokens: Arc<[SyntaxToken]>,
     position: usize,
+    source: Arc<str>,
     source_len: usize,
+    line_starts: Vec<usize>,
     next_syntax_id: usize,
     newline_terminates_expression: bool,
     source_name: Option<Arc<str>>,
@@ -42,14 +44,18 @@ impl Grammar {
     /// Creates a grammar cursor over `tokens` with the given syntax metadata.
     fn new(
         tokens: Arc<[SyntaxToken]>,
-        source_len: usize,
+        source: Arc<str>,
         next_syntax_id: usize,
         source_name: Option<Arc<str>>,
     ) -> Self {
+        let line_starts = line_starts(&source);
+        let source_len = source.len();
         Self {
             tokens,
             position: 0,
+            source,
             source_len,
+            line_starts,
             next_syntax_id,
             newline_terminates_expression: false,
             source_name,
@@ -702,6 +708,10 @@ impl Grammar {
             .first()
             .map_or(self.source_len, |token| token.span.start);
         let span_end = tokens.last().map_or(span_start, |token| token.span.end);
+        let diagnostic_start = tokens
+            .iter()
+            .find(|token| !token.kind.is_trivia())
+            .map_or(span_start, |token| token.span.start);
         let id = SyntaxId(self.next_syntax_id);
         self.next_syntax_id += 1;
         Syntax {
@@ -709,6 +719,7 @@ impl Grammar {
             span: Span::User {
                 source: self.source_name.clone(),
                 range: span_start..span_end,
+                location: Some(self.location(diagnostic_start)),
             },
             tokens: Arc::clone(&self.tokens),
             token_range: start..self.position,
@@ -724,12 +735,43 @@ impl Grammar {
     /// Creates a parse error at the next non-trivia token.
     fn error(&self, message: impl Into<String>) -> ParseError {
         let position = self.next_non_trivia(self.position);
+        let offset = self
+            .tokens
+            .get(position)
+            .map_or(self.source_len, |token| token.span.start);
         ParseError {
-            offset: self
-                .tokens
-                .get(position)
-                .map_or(self.source_len, |token| token.span.start),
+            offset,
+            location: self.location(offset),
             message: message.into(),
         }
     }
+
+    fn location(&self, offset: usize) -> SourceLocation {
+        let line = self.line_starts.partition_point(|start| *start <= offset);
+        let line_start = self.line_starts[line - 1];
+        SourceLocation {
+            line,
+            column: self.source[line_start..offset].chars().count() + 1,
+        }
+    }
+}
+
+fn line_starts(source: &str) -> Vec<usize> {
+    let bytes = source.as_bytes();
+    let mut starts = vec![0];
+    let mut offset = 0;
+    while offset < bytes.len() {
+        match bytes[offset] {
+            b'\r' if bytes.get(offset + 1) == Some(&b'\n') => {
+                offset += 2;
+                starts.push(offset);
+            }
+            b'\r' | b'\n' => {
+                offset += 1;
+                starts.push(offset);
+            }
+            _ => offset += 1,
+        }
+    }
+    starts
 }

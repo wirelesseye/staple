@@ -26,6 +26,19 @@ fn resolves_names_in_function_parameters_and_binary_expressions() {
 }
 
 #[test]
+fn compiler_diagnostics_report_line_and_column() {
+    let syntax = parse("let value = 1\nmissing\n").expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve(&syntax)
+        .expect_err("unknown name should not resolve");
+
+    assert_eq!(
+        diagnostics[0].to_string(),
+        "unknown name `missing` at line 2, column 1"
+    );
+}
+
+#[test]
 fn infers_and_checks_function_return_types() {
     let module = type_check(concat!(
         "let add = (a: i32, b: i32) => a + b\n",

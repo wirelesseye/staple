@@ -129,12 +129,15 @@ impl ProgramLoader {
             .collect::<Vec<_>>();
         for declaration in uses {
             let path = use_path(root, &declaration);
-            let path = canonical_file(&path).map_err(|message| {
-                format!(
-                    "{} at byte {}",
-                    message,
-                    declaration.syntax.span.to_range().start
-                )
+            let path = canonical_file(&path).map_err(|message| match &declaration.syntax.span {
+                crate::Span::User {
+                    location: Some(location),
+                    ..
+                } => format!(
+                    "{} at line {}, column {}",
+                    message, location.line, location.column
+                ),
+                span => format!("{} at byte {}", message, span.to_range().start),
             })?;
             let imported = self.load_file(&path)?;
             self.imported_modules

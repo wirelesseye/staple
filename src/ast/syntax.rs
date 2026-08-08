@@ -1,6 +1,12 @@
 use std::ops::Range;
 use std::sync::Arc;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceLocation {
+    pub line: usize,
+    pub column: usize,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SyntaxId(pub usize);
 
@@ -57,6 +63,7 @@ pub enum Span {
     User {
         source: Option<Arc<str>>,
         range: Range<usize>,
+        location: Option<SourceLocation>,
     },
     Compiler,
 }
@@ -75,6 +82,7 @@ impl From<Range<usize>> for Span {
         Self::User {
             source: None,
             range: value,
+            location: None,
         }
     }
 }

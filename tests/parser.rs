@@ -126,6 +126,17 @@ fn rejects_the_old_function_body_arrow() {
 }
 
 #[test]
+fn parse_errors_report_one_based_line_and_character_column() {
+    let error =
+        parse("let first = 1\nlet café = ").expect_err("missing expression should not parse");
+
+    assert_eq!(
+        error.to_string(),
+        "expected expression at line 2, column 12"
+    );
+}
+
+#[test]
 fn parses_single_parameter_and_application() {
     let source = "def println: _ -> i32 = (s: string) => printf (\"%s\\n\", s)\n";
     let root = parse(source).expect("function should parse");
