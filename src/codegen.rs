@@ -17,9 +17,9 @@ use inkwell::{
 use crate::typecheck::{contains_type_parameter, infer_type_parameters, substitute_type};
 use crate::{
     Accessor, CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic,
-    Expression, FunctionId, IntegerBinaryOperation, IntegerType, IntrinsicFunction, Item, ModuleId,
-    Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, Span, Statement, SymbolId,
-    TypeParameterId, TypedModule,
+    Expression, FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType,
+    IntrinsicFunction, Item, ModuleId, Pattern, PatternBindingKind, ProductExpression,
+    ResolvedFunction, Span, Statement, SymbolId, TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -1803,12 +1803,78 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 *right,
                 &format!("{}.divide", integer.intrinsic_name()),
             ),
+            IntrinsicFunction::IntegerCompare { integer, operation } => {
+                let predicate = match (operation, integer.is_signed()) {
+                    (IntegerCompareOperation::Equal, _) => inkwell::IntPredicate::EQ,
+                    (IntegerCompareOperation::NotEqual, _) => inkwell::IntPredicate::NE,
+                    (IntegerCompareOperation::LessThan, true) => inkwell::IntPredicate::SLT,
+                    (IntegerCompareOperation::LessThan, false) => inkwell::IntPredicate::ULT,
+                    (IntegerCompareOperation::LessThanOrEqual, true) => inkwell::IntPredicate::SLE,
+                    (IntegerCompareOperation::LessThanOrEqual, false) => inkwell::IntPredicate::ULE,
+                    (IntegerCompareOperation::GreaterThan, true) => inkwell::IntPredicate::SGT,
+                    (IntegerCompareOperation::GreaterThan, false) => inkwell::IntPredicate::UGT,
+                    (IntegerCompareOperation::GreaterThanOrEqual, true) => {
+                        inkwell::IntPredicate::SGE
+                    }
+                    (IntegerCompareOperation::GreaterThanOrEqual, false) => {
+                        inkwell::IntPredicate::UGE
+                    }
+                };
+                let condition = self
+                    .builder
+                    .build_int_compare(
+                        predicate,
+                        *left,
+                        *right,
+                        &format!("{}.compare", integer.intrinsic_name()),
+                    )
+                    .map_err(|error| {
+                        Diagnostic::new(call.syntax.span.clone(), error.to_string())
+                    })?;
+                return self.compile_bool(condition, call.syntax.id, call.syntax.span.clone());
+            }
             IntrinsicFunction::StringFromCString | IntrinsicFunction::StringToCString => {
                 unreachable!()
             }
         }
         .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
         Ok(value.as_any_value_enum())
+    }
+
+    fn compile_bool(
+        &self,
+        condition: inkwell::values::IntValue<'context>,
+        syntax: crate::SyntaxId,
+        span: Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let CheckedType::Sum(sum) = self
+            .typed_module
+            .type_of_expression(syntax)
+            .cloned()
+            .unwrap_or(CheckedType::Error)
+        else {
+            return Err(Diagnostic::new(span, "comparison result must be Bool"));
+        };
+        if sum.alternatives.len() != 2 {
+            return Err(Diagnostic::new(span, "comparison result must be Bool"));
+        }
+        // `Bool` is declared as `True | False` in the standard-library contract.
+        let true_index = 0;
+        let false_index = 1;
+        let sum_type = self.compile_sum_type(&sum)?;
+        let tag = self
+            .builder
+            .build_select(
+                condition,
+                self.context.i32_type().const_int(true_index as u64, false),
+                self.context.i32_type().const_int(false_index as u64, false),
+                "bool.tag",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_insert_value(sum_type.const_zero(), tag, 0, "bool.value")
+            .map(|value| value.as_any_value_enum())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
     fn compile_string_from_c_string(

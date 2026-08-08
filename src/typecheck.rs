@@ -645,6 +645,33 @@ impl TypeChecker {
                         result: Box::new(integer),
                     })
                 }
+                crate::IntrinsicFunction::IntegerCompare { integer, .. } => {
+                    let integer = CheckedType::integer(*integer);
+                    let result = self.symbol_types.get(symbol).and_then(|value| match value {
+                        CheckedType::Function(function) => Some(function.result.as_ref().clone()),
+                        _ => None,
+                    }).filter(|value| matches!(value,
+                        CheckedType::Sum(sum) if sum.alternatives.len() == 2
+                            && matches!(&sum.alternatives[0], CheckedType::Distinct { name, .. } if name.ends_with("True"))
+                            && matches!(&sum.alternatives[1], CheckedType::Distinct { name, .. } if name.ends_with("False"))
+                    )).unwrap_or(CheckedType::Error);
+                    CheckedType::Function(CheckedFunctionType {
+                        parameter: Box::new(CheckedType::Product(CheckedProductType {
+                            elements: vec![
+                                CheckedTypeElement {
+                                    name: None,
+                                    value_type: integer.clone(),
+                                },
+                                CheckedTypeElement {
+                                    name: None,
+                                    value_type: integer,
+                                },
+                            ],
+                            variadic: false,
+                        })),
+                        result: Box::new(result),
+                    })
+                }
                 crate::IntrinsicFunction::StringFromCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::CString),
@@ -933,12 +960,13 @@ impl TypeChecker {
                             "external bindings cannot have compile-time parameters",
                         ));
                     }
-                    if binding
-                        .annotation
-                        .as_ref()
-                        .map(|annotation| self.resolve_source_type(module, annotation))
-                        .as_ref()
-                        .is_some_and(checked_type_contains_sum)
+                    if block.abi != "\"staple-intrinsic\""
+                        && binding
+                            .annotation
+                            .as_ref()
+                            .map(|annotation| self.resolve_source_type(module, annotation))
+                            .as_ref()
+                            .is_some_and(checked_type_contains_sum)
                     {
                         self.diagnostics.push(Diagnostic::new(
                             binding.syntax.span.clone(),

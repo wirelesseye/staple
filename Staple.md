@@ -657,7 +657,7 @@ CChar
 CPointer CChar
 ```
 
-The integer types, `Bool`, `String`, arithmetic traits, and arithmetic functions
+The integer types, `Bool`, `String`, arithmetic and comparison traits, and their functions
 from `std.core` are imported implicitly into every source module. These are
 ordinary type names rather than keywords, so a local declaration or explicit
 import can shadow a prelude name. Integer literals use an expected integer type
@@ -704,8 +704,13 @@ The fixed-width standard-library integers are `I8`, `I16`, `I32`, `I64`, `U8`,
 `U16`, `U32`, and `U64`. `ISize` and `USize` use the target pointer width.
 Arithmetic is homogeneous: both operands and the result have the same type.
 Signed integer division uses signed semantics, while unsigned integer division
-uses unsigned semantics. Staple does not currently provide implicit numeric
-conversions or floating-point types.
+uses unsigned semantics. All integer types implement `Eq` for `==` and `!=`, and
+`Compare` for `<`, `<=`, `>`, and `>=`. These operators compare homogeneous
+operands and return `Bool`. Ordering comparisons use signed semantics for signed
+types and unsigned semantics for unsigned types. `Compare` does not currently
+require `Eq`; trait prerequisites will provide that relationship in the future.
+Staple does not currently provide implicit numeric conversions or floating-point
+types.
 
 ### Type declarations
 

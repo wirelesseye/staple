@@ -138,6 +138,16 @@ pub enum IntegerBinaryOperation {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum IntegerCompareOperation {
+    Equal,
+    NotEqual,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimitiveMacro {
     CString,
 }
@@ -147,6 +157,10 @@ pub enum IntrinsicFunction {
     IntegerBinary {
         integer: IntegerType,
         operation: IntegerBinaryOperation,
+    },
+    IntegerCompare {
+        integer: IntegerType,
+        operation: IntegerCompareOperation,
     },
     StringFromCString,
     StringToCString,
@@ -501,6 +515,25 @@ impl NameResolver {
                 expected.push((
                     format!("__{}_{}", integer.intrinsic_name(), suffix),
                     IntrinsicFunction::IntegerBinary { integer, operation },
+                ));
+            }
+            for (suffix, operation) in [
+                ("equal", IntegerCompareOperation::Equal),
+                ("not_equal", IntegerCompareOperation::NotEqual),
+                ("less_than", IntegerCompareOperation::LessThan),
+                (
+                    "less_than_or_equal",
+                    IntegerCompareOperation::LessThanOrEqual,
+                ),
+                ("greater_than", IntegerCompareOperation::GreaterThan),
+                (
+                    "greater_than_or_equal",
+                    IntegerCompareOperation::GreaterThanOrEqual,
+                ),
+            ] {
+                expected.push((
+                    format!("__{}_{}", integer.intrinsic_name(), suffix),
+                    IntrinsicFunction::IntegerCompare { integer, operation },
                 ));
             }
         }

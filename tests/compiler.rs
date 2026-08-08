@@ -405,6 +405,42 @@ fn uses_regular_prelude_functions_for_i32_arithmetic() {
 }
 
 #[test]
+fn compares_all_standard_library_integer_types() {
+    let module = type_check(concat!(
+        "let equal: Bool = 1 == 1\n",
+        "let not_equal: Bool = 1 != 2\n",
+        "let less: Bool = 1 < 2\n",
+        "let less_equal: Bool = 1 <= 2\n",
+        "let greater: Bool = 2 > 1\n",
+        "let greater_equal: Bool = 2 >= 1\n",
+        "def same: T => Eq T => T -> T -> Bool = left => right => left == right\n",
+        "def before: T => Compare T => T -> T -> Bool = left => right => left < right\n",
+        "let generic_equal: Bool = same 1 1\n",
+        "let generic_order: Bool = before 1 2\n",
+        "def i8 = (x: I8, y: I8) => x < y\n",
+        "def i16 = (x: I16, y: I16) => x < y\n",
+        "def i64 = (x: I64, y: I64) => x < y\n",
+        "def u8 = (x: U8, y: U8) => x < y\n",
+        "def u16 = (x: U16, y: U16) => x < y\n",
+        "def u32 = (x: U32, y: U32) => x < y\n",
+        "def u64 = (x: U64, y: U64) => x < y\n",
+        "def isize = (x: ISize, y: ISize) => x < y\n",
+        "def usize = (x: USize, y: USize) => x < y\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("integer comparisons should compile");
+
+    for predicate in [
+        "icmp eq", "icmp ne", "icmp slt", "icmp sle", "icmp sgt", "icmp sge", "icmp ult",
+    ] {
+        assert!(llvm.contains(predicate), "missing `{predicate}` in LLVM");
+    }
+    assert!(llvm.contains("bool.tag"));
+}
+
+#[test]
 fn lowercase_i32_is_an_ordinary_unresolved_type_name() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
