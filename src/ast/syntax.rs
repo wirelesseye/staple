@@ -52,6 +52,7 @@ pub enum TokenKind {
     Arrow,
     FatArrow,
     Ellipsis,
+    Dollar,
     Backtick,
     Operator,
     Star,
@@ -110,6 +111,8 @@ pub struct Syntax {
     pub span: Span,
     pub(crate) tokens: Arc<[SyntaxToken]>,
     pub(crate) token_range: Range<usize>,
+    pub(crate) definition_module: Option<usize>,
+    pub(crate) expansion_mark: Option<u64>,
 }
 
 impl Syntax {
@@ -130,6 +133,8 @@ impl Syntax {
             span: Span::Compiler,
             tokens: Arc::from([]),
             token_range: 0..0,
+            definition_module: None,
+            expansion_mark: None,
         }
     }
 
@@ -139,6 +144,18 @@ impl Syntax {
             span,
             tokens: Arc::from([]),
             token_range: 0..0,
+            definition_module: None,
+            expansion_mark: None,
         }
+    }
+
+    pub(crate) fn generated(mut self, definition_module: usize, expansion_mark: u64) -> Self {
+        self.definition_module = Some(definition_module);
+        self.expansion_mark = Some(expansion_mark);
+        self
+    }
+
+    pub(crate) fn definition_module(&self) -> Option<usize> {
+        self.definition_module
     }
 }

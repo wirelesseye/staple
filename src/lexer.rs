@@ -84,6 +84,7 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
                 "+" => TokenKind::Plus,
                 "-" => TokenKind::Minus,
                 "/" => TokenKind::Slash,
+                "$" => TokenKind::Dollar,
                 _ => TokenKind::Operator,
             };
         }

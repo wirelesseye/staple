@@ -1215,6 +1215,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.build_string_value(pointer, length, string.syntax.span.clone())
                     .map(|value| value.as_any_value_enum())
             }
+            Expression::CString(string) => self.compile_c_string_literal(string),
+            Expression::Quote(quote) => Err(Diagnostic::new(
+                quote.syntax.span.clone(),
+                "unexpanded `quote` expression",
+            )),
+            Expression::Splice(splice) => Err(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "unexpanded splice expression",
+            )),
             Expression::Integer(integer) => {
                 let value = integer.literal.parse::<u64>().map_err(|_| {
                     Diagnostic::new(integer.syntax.span.clone(), "integer literal is too large")
@@ -1737,6 +1746,24 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "`c_string` requires a string literal",
             ));
         };
+        let value = decode_string_literal(&string.literal)
+            .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
+        if value.as_bytes().contains(&0) {
+            return Err(Diagnostic::new(
+                string.syntax.span.clone(),
+                "C string literals cannot contain an interior NUL byte",
+            ));
+        }
+        self.builder
+            .build_global_string_ptr(&value, "c_string")
+            .map(|global| global.as_any_value_enum())
+            .map_err(|error| Diagnostic::new(string.syntax.span.clone(), error.to_string()))
+    }
+
+    fn compile_c_string_literal(
+        &mut self,
+        string: &crate::CStringExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let value = decode_string_literal(&string.literal)
             .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
         if value.as_bytes().contains(&0) {

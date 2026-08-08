@@ -1525,7 +1525,9 @@ impl TypeChecker {
                 }
                 instantiated
             }
+            Expression::Quote(_) | Expression::Splice(_) => CheckedType::Error,
             Expression::String(_) => CheckedType::String,
+            Expression::CString(_) => CheckedType::CString,
             Expression::Integer(integer) => {
                 let integer_type = expected
                     .and_then(CheckedType::integer_type)

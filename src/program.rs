@@ -67,6 +67,10 @@ impl Program {
     pub fn initialization_order(&self) -> &[ModuleId] {
         &self.initialization_order
     }
+
+    pub(crate) fn modules_mut(&mut self) -> &mut [SourceModule] {
+        &mut self.modules
+    }
 }
 
 #[derive(Default)]

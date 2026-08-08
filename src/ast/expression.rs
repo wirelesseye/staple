@@ -9,8 +9,11 @@ pub enum Expression {
     Call(CallExpression),
     Access(AccessExpression),
     Infix(InfixExpression),
+    Quote(QuoteExpression),
+    Splice(SpliceExpression),
     Name(NameExpression),
     String(StringExpression),
+    CString(CStringExpression),
     Integer(IntegerExpression),
 }
 
@@ -24,11 +27,27 @@ impl Expression {
             Self::Call(expression) => &expression.syntax,
             Self::Access(expression) => &expression.syntax,
             Self::Infix(expression) => &expression.syntax,
+            Self::Quote(expression) => &expression.syntax,
+            Self::Splice(expression) => &expression.syntax,
             Self::Name(expression) => &expression.syntax,
             Self::String(expression) => &expression.syntax,
+            Self::CString(expression) => &expression.syntax,
             Self::Integer(expression) => &expression.syntax,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct QuoteExpression {
+    pub syntax: Syntax,
+    pub template: Box<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpliceExpression {
+    pub syntax: Syntax,
+    pub name: String,
+    pub repeated: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -125,6 +144,13 @@ pub struct NameExpression {
 pub struct StringExpression {
     pub syntax: Syntax,
     /// The literal exactly as written, including its quotes.
+    pub literal: String,
+}
+
+/// A C string literal emitted by the compiler-provided `c_string` macro.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CStringExpression {
+    pub syntax: Syntax,
     pub literal: String,
 }
 

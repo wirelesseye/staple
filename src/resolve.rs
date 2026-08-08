@@ -378,6 +378,11 @@ pub struct NameResolver {
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     interfaces: Vec<Interface>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
+    module_values: Vec<HashMap<String, SymbolId>>,
+    definition_context_values: Vec<HashMap<String, SymbolId>>,
+    definition_context_types: Vec<HashMap<String, TypeId>>,
+    definition_context_namespaces: Vec<HashMap<String, ModuleId>>,
+    definition_context_fixities: Vec<HashMap<String, Fixity>>,
     binding_type_parameters: HashMap<SyntaxId, Vec<TypeParameterPattern>>,
     binding_trait_bounds: HashMap<SyntaxId, Vec<crate::TraitBound>>,
     declared_types: Vec<HashMap<String, TypeId>>,
@@ -407,6 +412,7 @@ impl NameResolver {
     }
 
     pub fn resolve_program(mut self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
+        let program = crate::macro_expand::expand_program(program)?;
         self.standard_library_core = program.standard_library_core();
         self.standard_library_cinterop = program.standard_library_cinterop();
         self.multiple_modules = program
@@ -426,6 +432,7 @@ impl NameResolver {
             .unwrap_or(0)
             + 1;
         self.collect_interfaces(&program);
+        self.build_definition_context_values(&program);
         self.collect_standard_library_contract(&program);
         for source_module in program.modules() {
             self.current_module = source_module.id;
@@ -675,12 +682,17 @@ impl NameResolver {
         self.declared_fixities = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
+        self.module_values = (0..program.modules().len())
+            .map(|_| HashMap::new())
+            .collect();
         for source_module in program.modules() {
             for item in &source_module.syntax.items {
                 match item {
                     Item::ExternBlock(block) => {
                         for binding in &block.bindings {
                             let symbol = self.allocate_symbol(binding);
+                            self.module_values[source_module.id.0]
+                                .insert(binding.name.clone(), symbol);
                             let fixity = binding.fixity.unwrap_or_default();
                             self.declared_fixities[source_module.id.0]
                                 .insert(binding.name.clone(), fixity);
@@ -718,6 +730,8 @@ impl NameResolver {
                             self.next_symbol_id += 1;
                             self.symbol_owners.insert(symbol, None);
                             self.type_constructor_symbols.insert(id, symbol);
+                            self.module_values[source_module.id.0]
+                                .insert(declaration.name.clone(), symbol);
                             if declaration.kind == crate::TypeDeclarationKind::Singleton {
                                 self.singleton_values.insert(symbol, id);
                             } else {
@@ -818,6 +832,8 @@ impl NameResolver {
                     Item::Statement(statement) => match statement.as_ref() {
                         Statement::Binding(binding) => {
                             let symbol = self.allocate_symbol(binding);
+                            self.module_values[source_module.id.0]
+                                .insert(binding.name.clone(), symbol);
                             let fixity = binding.fixity.unwrap_or_default();
                             self.declared_fixities[source_module.id.0]
                                 .insert(binding.name.clone(), fixity);
@@ -839,6 +855,82 @@ impl NameResolver {
                         Statement::Return(_) | Statement::Expression(_) => {}
                     },
                     Item::UseDeclaration(_) => {}
+                }
+            }
+        }
+    }
+
+    fn build_definition_context_values(&mut self, program: &Program) {
+        self.definition_context_values = self.module_values.clone();
+        self.definition_context_types = self.declared_types.clone();
+        self.definition_context_fixities = self.declared_fixities.clone();
+        self.definition_context_namespaces = (0..program.modules().len())
+            .map(|_| HashMap::new())
+            .collect();
+        if let Some(core) = program.standard_library_core() {
+            for module in program.modules() {
+                if module.id != core {
+                    self.definition_context_values[module.id.0]
+                        .extend(self.interfaces[core.0].values.clone());
+                    self.definition_context_types[module.id.0]
+                        .extend(self.interfaces[core.0].types.clone());
+                    self.definition_context_fixities[module.id.0]
+                        .extend(self.interfaces[core.0].fixities.clone());
+                }
+            }
+        }
+        for module in program.modules() {
+            for item in &module.syntax.items {
+                let Item::UseDeclaration(use_) = item else {
+                    continue;
+                };
+                let Some(imported) = program.imported_module(use_.syntax.id) else {
+                    continue;
+                };
+                match &use_.kind {
+                    UseKind::Glob => {
+                        self.definition_context_values[module.id.0]
+                            .extend(self.interfaces[imported.0].values.clone());
+                        self.definition_context_types[module.id.0]
+                            .extend(self.interfaces[imported.0].types.clone());
+                        self.definition_context_fixities[module.id.0]
+                            .extend(self.interfaces[imported.0].fixities.clone());
+                    }
+                    UseKind::Selected(names) => {
+                        for name in names {
+                            if let Some(symbol) = self.interfaces[imported.0].values.get(name) {
+                                self.definition_context_values[module.id.0]
+                                    .insert(name.clone(), *symbol);
+                            }
+                            if let Some(ty) = self.interfaces[imported.0].types.get(name) {
+                                self.definition_context_types[module.id.0]
+                                    .insert(name.clone(), *ty);
+                            }
+                            if let Some(fixity) = self.interfaces[imported.0].fixities.get(name) {
+                                self.definition_context_fixities[module.id.0]
+                                    .insert(name.clone(), *fixity);
+                            }
+                        }
+                    }
+                    UseKind::Renamed { item, alias } => {
+                        if let Some(symbol) = self.interfaces[imported.0].values.get(item) {
+                            self.definition_context_values[module.id.0]
+                                .insert(alias.clone(), *symbol);
+                        }
+                        if let Some(ty) = self.interfaces[imported.0].types.get(item) {
+                            self.definition_context_types[module.id.0].insert(alias.clone(), *ty);
+                        }
+                        if let Some(fixity) = self.interfaces[imported.0].fixities.get(item) {
+                            self.definition_context_fixities[module.id.0]
+                                .insert(alias.clone(), *fixity);
+                        }
+                    }
+                    UseKind::Namespace => {
+                        if let Some(name) = use_.path.last() {
+                            self.definition_context_namespaces[module.id.0]
+                                .insert(name.clone(), imported);
+                        }
+                    }
                 }
             }
         }
@@ -1126,15 +1218,7 @@ impl NameResolver {
                 self.pop_type_parameter_scope();
             }
             Item::MacroDeclaration(declaration) => {
-                if !self
-                    .primitive_macros
-                    .contains_key(&self.declared_macros[self.current_module.0][&declaration.name])
-                {
-                    self.diagnostics.push(Diagnostic::new(
-                        declaration.syntax.span.clone(),
-                        "user-defined macros are not supported yet",
-                    ));
-                }
+                let _ = declaration;
             }
             Item::TraitDeclaration(declaration) => {
                 let Some(id) = self.declared_traits[self.current_module.0]
@@ -1443,7 +1527,16 @@ impl NameResolver {
                     }
                 } else if let Expression::Name(namespace) = access.value.as_ref()
                     && let crate::Accessor::Name(item) = &access.accessor
-                    && let Some(module) = self.namespaces.get(&namespace.name).copied()
+                    && let Some(module) = namespace
+                        .syntax
+                        .definition_module()
+                        .and_then(|context| {
+                            self.definition_context_namespaces
+                                .get(context)
+                                .and_then(|namespaces| namespaces.get(&namespace.name))
+                                .copied()
+                        })
+                        .or_else(|| self.namespaces.get(&namespace.name).copied())
                 {
                     if let Some(symbol) = self.interfaces[module.0].values.get(item).copied() {
                         self.symbols.insert(access.syntax.id, symbol);
@@ -1471,7 +1564,15 @@ impl NameResolver {
                 self.lowered_infix.insert(infix.syntax.id, lowered);
             }
             Expression::Name(name) => match (
-                self.lookup(&name.name),
+                name.syntax
+                    .definition_module()
+                    .and_then(|module| {
+                        self.definition_context_values
+                            .get(module)
+                            .and_then(|values| values.get(&name.name))
+                            .copied()
+                    })
+                    .or_else(|| self.lookup(&name.name)),
                 self.visible_trait_methods
                     .get(&name.name)
                     .cloned()
@@ -1507,7 +1608,15 @@ impl NameResolver {
                     format!("unknown name `{}`", name.name),
                 )),
             },
-            Expression::String(_) | Expression::Integer(_) => {}
+            Expression::Quote(quote) => self.diagnostics.push(Diagnostic::new(
+                quote.syntax.span.clone(),
+                "`quote` is only available during macro expansion",
+            )),
+            Expression::Splice(splice) => self.diagnostics.push(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "splices are only available during macro expansion",
+            )),
+            Expression::String(_) | Expression::CString(_) | Expression::Integer(_) => {}
         }
     }
 
@@ -1521,14 +1630,33 @@ impl NameResolver {
                     return;
                 }
                 let resolved = if let Some(namespace) = &named.namespace {
-                    self.namespaces
-                        .get(namespace)
+                    named
+                        .syntax
+                        .definition_module()
+                        .and_then(|context| {
+                            self.definition_context_namespaces
+                                .get(context)
+                                .and_then(|namespaces| namespaces.get(namespace))
+                                .copied()
+                        })
+                        .or_else(|| self.namespaces.get(namespace).copied())
                         .and_then(|module| self.interfaces[module.0].types.get(&named.name))
                         .copied()
                 } else {
-                    self.declared_types[self.current_module.0]
-                        .get(&named.name)
-                        .copied()
+                    named
+                        .syntax
+                        .definition_module()
+                        .and_then(|module| {
+                            self.definition_context_types
+                                .get(module)
+                                .and_then(|types| types.get(&named.name))
+                                .copied()
+                        })
+                        .or_else(|| {
+                            self.declared_types[self.current_module.0]
+                                .get(&named.name)
+                                .copied()
+                        })
                         .or_else(|| self.imported_types.get(&named.name).copied())
                         .or_else(|| self.prelude_types.get(&named.name).copied())
                 };
@@ -1728,14 +1856,25 @@ impl NameResolver {
     fn operator_fixity(&self, operator: &InfixOperator) -> Fixity {
         if let Some(namespace) = &operator.namespace {
             return self
-                .namespaces
-                .get(namespace)
+                .definition_context_namespaces
+                .get(
+                    operator
+                        .syntax
+                        .definition_module()
+                        .unwrap_or(self.current_module.0),
+                )
+                .and_then(|namespaces| namespaces.get(namespace))
+                .copied()
+                .or_else(|| self.namespaces.get(namespace).copied())
                 .and_then(|module| self.interfaces[module.0].fixities.get(&operator.name))
                 .copied()
                 .unwrap_or_default();
         }
-        self.declared_fixities[self.current_module.0]
-            .get(&operator.name)
+        operator
+            .syntax
+            .definition_module()
+            .and_then(|module| self.definition_context_fixities[module].get(&operator.name))
+            .or_else(|| self.declared_fixities[self.current_module.0].get(&operator.name))
             .or_else(|| self.imported_fixities.get(&operator.name))
             .or_else(|| self.prelude_fixities.get(&operator.name))
             .copied()
@@ -1744,7 +1883,9 @@ impl NameResolver {
 
     fn operator_value(&mut self, operator: InfixOperator) -> Expression {
         if let Some(namespace) = operator.namespace {
-            let namespace_syntax = self.fresh_syntax(operator.syntax.span.clone());
+            let mut namespace_syntax = operator.syntax.clone();
+            namespace_syntax.id = SyntaxId(self.next_syntax_id);
+            self.next_syntax_id += 1;
             Expression::Access(AccessExpression {
                 syntax: operator.syntax,
                 value: Box::new(Expression::Name(NameExpression {

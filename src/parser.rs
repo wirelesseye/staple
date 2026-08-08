@@ -39,6 +39,7 @@ struct Grammar {
     newline_terminates_expression: bool,
     newline_terminates_type: bool,
     brace_terminates_expression: bool,
+    quote_depth: usize,
     source_name: Option<Arc<str>>,
 }
 
@@ -62,6 +63,7 @@ impl Grammar {
             newline_terminates_expression: false,
             newline_terminates_type: false,
             brace_terminates_expression: false,
+            quote_depth: 0,
             source_name,
         }
     }
@@ -146,10 +148,26 @@ impl Grammar {
         let name = self
             .expect(TokenKind::Identifier, "expected macro name")?
             .text;
+        let annotation = if self.eat(TokenKind::Colon) {
+            let previous = self.newline_terminates_type;
+            self.newline_terminates_type = true;
+            let annotation = self.parse_type();
+            self.newline_terminates_type = previous;
+            Some(annotation?)
+        } else {
+            None
+        };
+        let value = if self.eat(TokenKind::Equals) {
+            Some(self.parse_expression()?)
+        } else {
+            None
+        };
         Ok(MacroDeclaration {
             syntax: self.syntax(start),
             visibility,
             name,
+            annotation,
+            value,
         })
     }
 
@@ -992,6 +1010,15 @@ impl Grammar {
 
     /// Parses a primary expression without call, access, or binary operators.
     fn parse_atom(&mut self) -> Result<Expression, ParseError> {
+        if self.peek() == Some(TokenKind::Identifier)
+            && self
+                .tokens
+                .get(self.next_non_trivia(self.position))
+                .is_some_and(|token| token.text == "quote")
+            && self.peek_n(1) == Some(TokenKind::LBrace)
+        {
+            return self.parse_quote_expression().map(Expression::Quote);
+        }
         match self.peek() {
             Some(TokenKind::Match) => self.parse_match_expression().map(Expression::Match),
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
@@ -1021,8 +1048,41 @@ impl Grammar {
                     literal,
                 }))
             }
+            Some(TokenKind::Dollar) if self.quote_depth > 0 => {
+                let start = self.position;
+                self.expect(TokenKind::Dollar, "expected `$`")?;
+                let name = self
+                    .expect(TokenKind::Identifier, "expected a splice name after `$`")?
+                    .text;
+                let repeated = self.eat(TokenKind::Ellipsis);
+                Ok(Expression::Splice(SpliceExpression {
+                    syntax: self.syntax(start),
+                    name,
+                    repeated,
+                }))
+            }
+            Some(TokenKind::Dollar) => Err(self.error("splices are only allowed inside `quote`")),
             _ => Err(self.error("expected expression")),
         }
+    }
+
+    fn parse_quote_expression(&mut self) -> Result<QuoteExpression, ParseError> {
+        let start = self.position;
+        let quote = self.expect(TokenKind::Identifier, "expected `quote`")?;
+        debug_assert_eq!(quote.text, "quote");
+        self.expect(TokenKind::LBrace, "expected `{` after `quote`")?;
+        self.quote_depth += 1;
+        let previous = self.brace_terminates_expression;
+        self.brace_terminates_expression = true;
+        let template = self.parse_expression();
+        self.brace_terminates_expression = previous;
+        self.quote_depth -= 1;
+        let template = Box::new(template?);
+        self.expect(TokenKind::RBrace, "expected `}` after quoted expression")?;
+        Ok(QuoteExpression {
+            syntax: self.syntax(start),
+            template,
+        })
     }
 
     fn parse_match_expression(&mut self) -> Result<MatchExpression, ParseError> {
@@ -1142,6 +1202,7 @@ impl Grammar {
                     | TokenKind::LParen
                     | TokenKind::Match
                     | TokenKind::Identifier
+                    | TokenKind::Dollar
                     | TokenKind::String
                     | TokenKind::Integer
             )
@@ -1327,6 +1388,8 @@ impl Grammar {
             },
             tokens: Arc::clone(&self.tokens),
             token_range: start..self.position,
+            definition_module: None,
+            expansion_mark: None,
         }
     }
 

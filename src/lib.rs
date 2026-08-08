@@ -3,6 +3,7 @@ mod codegen;
 mod combinator;
 mod diagnostic;
 mod lexer;
+mod macro_expand;
 mod parser;
 mod program;
 mod resolve;

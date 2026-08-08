@@ -822,14 +822,21 @@ fn c_string_is_an_imported_primitive_macro() {
 
 #[test]
 fn c_string_rejects_non_literal_arguments() {
-    let module = resolve(concat!(
-        "use std.cinterop.*\n",
-        "let text = \"hello\"\n",
-        "c_string text\n",
-    ));
-    let diagnostics = TypeChecker::new()
-        .check(module)
-        .expect_err("c_string should require a literal");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "use std.cinterop.*\n",
+                "let text = \"hello\"\n",
+                "c_string text\n",
+            ),
+            root,
+        )
+        .expect("source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("c_string should require a literal during expansion");
     assert!(
         diagnostics
             .iter()
@@ -850,19 +857,157 @@ fn c_string_rejects_interior_nul_bytes() {
 }
 
 #[test]
-fn user_defined_macros_are_reserved_for_future_support() {
+fn expands_user_defined_macros_hygienically() {
+    let module = type_check(concat!(
+        "macro keep = value => quote { { let temporary = 1; $value } }\n",
+        "let temporary = 2\n",
+        "let result: I32 = keep temporary\n",
+    ));
+    assert!(
+        module
+            .resolved()
+            .syntax()
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::MacroDeclaration(_)))
+    );
+}
+
+#[test]
+fn evaluates_pure_syntax_helpers_and_conditional_macros() {
+    let module = type_check(concat!(
+        "def syntax_identity: Syntax -> Syntax = value => value\n",
+        "macro choose = condition => then => else => quote {\n",
+        "    match $condition { True() => $then, False() => $else, }\n",
+        "}\n",
+        "macro passthrough = value => syntax_identity value\n",
+        "let condition: Bool = True\n",
+        "let result: I32 = passthrough (choose condition 1 2)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("expanded macros should generate code");
+}
+
+#[test]
+fn evaluates_pure_compile_time_control_flow_and_arithmetic() {
+    let module = type_check(concat!(
+        "macro computed = unused => match 1 + 1 == 2 {\n",
+        "    True() => quote { 42 },\n",
+        "    False() => quote { 0 },\n",
+        "}\n",
+        "let result: I32 = computed ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("pure compile-time arithmetic should select syntax");
+}
+
+#[test]
+fn composes_nested_macros_and_applies_excess_arguments() {
+    let module = type_check(concat!(
+        "macro inner = value => quote { $value }\n",
+        "macro outer = value => quote { inner $value }\n",
+        "macro identity = value => quote { $value }\n",
+        "def increment: I32 -> I32 = value => value + 1\n",
+        "let nested: I32 = outer 41\n",
+        "let applied: I32 = identity increment 41\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("nested and excess-argument macro calls should compile");
+}
+
+#[test]
+fn diagnoses_incomplete_and_non_syntax_macros() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let incomplete = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "macro pair = left => right => quote { ($left, $right) }\npair 1\n",
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(incomplete)
+        .expect_err("incomplete macro call should fail");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("requires 2 arguments"))
+    );
+
+    let invalid = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("macro invalid = value => 42\n", root)
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(invalid)
+        .expect_err("non-Syntax macro result should fail without invocation");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "macro `invalid` must return `Syntax`")
+    );
+}
+
+#[test]
+fn rejects_runtime_syntax_values() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("macro custom\n", root)
-        .expect("macro declaration should parse");
+        .load_source("let generated: Syntax\n", root)
+        .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("user macro should not resolve yet");
+        .expect_err("Syntax should not reach runtime checking");
     assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "user-defined macros are not supported yet"
-        })
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "`Syntax` values are compile-time-only")
+    );
+}
+
+#[test]
+fn diagnoses_recursive_macro_expansion() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "macro recursive = value => quote { recursive $value }\nrecursive 1\n",
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("recursive expansion should fail");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "recursive macro expansion of `recursive`")
+    );
+}
+
+#[test]
+fn rejects_repeated_splices_with_a_specific_diagnostic() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "macro many = values => quote { $values... }\nmany 1\n",
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("repeated splice should be reserved");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "repeated splices are not supported yet")
     );
 }
 

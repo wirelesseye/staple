@@ -2,7 +2,7 @@ pub type CChar = opaque
 pub type CPointer = Pointee => opaque
 pub type CString = opaque
 
-pub macro c_string
+pub macro c_string: Syntax -> Syntax
 
 extern "staple-intrinsic" {
     let __string_from_c_string: CString -> String

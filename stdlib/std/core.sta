@@ -12,6 +12,8 @@ pub type True
 pub type False
 pub type alias Bool = True | False
 pub type String = opaque
+pub type Syntax = opaque
+pub macro quote: Syntax -> Syntax
 
 pub(repr) type Ok = T => T
 

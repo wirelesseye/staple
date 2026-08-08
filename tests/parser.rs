@@ -184,12 +184,48 @@ fn rejects_removed_pointer_type_syntax() {
 
 #[test]
 fn parses_opaque_macro_declarations() {
-    let root = parse("pub macro c_string\n").expect("macro declaration should parse");
+    let root =
+        parse("pub macro c_string: Syntax -> Syntax\n").expect("macro declaration should parse");
     assert!(matches!(
         root.items[0],
         Item::MacroDeclaration(ref declaration)
-            if declaration.visibility == Visibility::Public && declaration.name == "c_string"
+            if declaration.visibility == Visibility::Public
+                && declaration.name == "c_string"
+                && declaration.annotation.is_some()
+                && declaration.value.is_none()
     ));
+}
+
+#[test]
+fn parses_macro_bodies_quotes_and_splices_losslessly() {
+    let source = concat!(
+        "macro choose = condition => then => else => quote {\n",
+        "    match $condition { True() => $then, False() => $else, }\n",
+        "}\n",
+    );
+    let root = parse(source).expect("user macro should parse");
+    assert_eq!(root.text(), source);
+    assert!(matches!(
+        root.items[0],
+        Item::MacroDeclaration(ref declaration)
+            if declaration.annotation.is_none() && declaration.value.is_some()
+    ));
+}
+
+#[test]
+fn reserves_repeated_splice_syntax() {
+    let root = parse("macro many = values => quote { $values... }\n")
+        .expect("reserved repeated splice should parse");
+    let Item::MacroDeclaration(declaration) = &root.items[0] else {
+        panic!("expected macro declaration");
+    };
+    let Some(Expression::Function(function)) = &declaration.value else {
+        panic!("expected macro function");
+    };
+    let Expression::Quote(quote) = function.body.as_ref() else {
+        panic!("expected quote");
+    };
+    assert!(matches!(quote.template.as_ref(), Expression::Splice(splice) if splice.repeated));
 }
 
 #[test]
@@ -198,11 +234,10 @@ fn parses_hello_world_losslessly() {
     let root = parse(source).expect("hello_world should parse");
 
     assert_eq!(root.text(), source);
-    assert_eq!(root.items.len(), 10);
+    assert_eq!(root.items.len(), 2);
     assert!(matches!(root.items[0], Item::UseDeclaration(_)));
-    assert!(matches!(root.items[1], Item::ExternBlock(_)));
     assert!(matches!(
-        root.items[4],
+        root.items[1],
         Item::Statement(ref statement)
             if matches!(statement.as_ref(), Statement::Expression(Expression::Call(_)))
     ));

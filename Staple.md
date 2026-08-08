@@ -59,25 +59,41 @@ code, including comments and formatting, can be represented as data rather than
 being reduced immediately to semantic values. Metaprograms should be able to
 work with structured syntax instead of assembling source-code strings.
 
-The eventual design should make common transformations concise, support
-composition between independently written metaprograms, and produce useful
-source locations and diagnostics. It should also define when generated code is
-expanded and how names are resolved, so metaprogramming remains predictable in
-larger programs.
+Expression macros transform compiler-owned `Syntax` values before ordinary name
+resolution and type checking. A macro body is a curried compile-time Staple
+function. Its parameters and result are `Syntax`; an explicit annotation is
+optional for user macros:
 
-The following details remain unspecified:
+```staple
+macro choose = condition => then => else => quote {
+    match $condition {
+        True() => $then,
+        False() => $else,
+    }
+}
+```
 
-- the syntax used to quote and construct code;
-- the representation exposed to metaprograms;
-- compile-time evaluation and staging rules;
-- macro hygiene and explicit name capture;
-- the boundary between macros and ordinary functions;
-- access to types and reactive dependency information during expansion; and
-- restrictions placed on compile-time effects.
+The braces in `quote { expression }` delimit one expression and are not part of
+the result. `$name` splices an expression supplied by the caller. `$names...`
+is reserved for future syntax sequences and is currently rejected.
 
-The only macro currently implemented is the compiler-provided `c_string` macro.
-The parser and module system recognize opaque declarations such as
-`pub macro c_string`, but user-defined macro bodies remain future work.
+Macros are hygienic. Names and bindings written in a quotation retain the
+definition module's environment and receive a fresh expansion identity, while
+spliced expressions retain their caller environment. A macro consumes the
+number of arguments described by its curried `Syntax` type; further call
+arguments apply to the expanded expression.
+
+Compile-time evaluation supports pure functions, bindings, products, matches,
+literals, recursion, and pure integer operations. It rejects external or
+runtime-only effects. Expansion is limited to 128 nested macros and each
+top-level invocation is limited to 1,000,000 evaluation steps. `Syntax` is
+opaque and compile-time-only. This release supports expression results and
+scalar splices; syntax inspection, repeated splices, and item, type, or pattern
+generation remain future work.
+
+Compiler-provided macros use typed bodyless contracts. `std.core` declares
+`pub macro quote: Syntax -> Syntax`, and `std.cinterop` declares
+`pub macro c_string: Syntax -> Syntax`.
 
 ## Source files
 
@@ -287,8 +303,8 @@ let message: CString = c_string "hello"
 ```
 
 Macros are module items and support the same namespace, glob, selected, and
-renamed import forms as values and types. User-defined macros are not yet
-supported.
+renamed import forms as values and types. Public macros retain their definition
+environment, including private helpers used by generated syntax.
 
 Operators are ordinary curried function values. The standard prelude provides
 `+`, `-`, `*`, and `/` through the `Add`, `Subtract`, `Multiply`, and `Divide`

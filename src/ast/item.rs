@@ -108,6 +108,8 @@ pub struct MacroDeclaration {
     pub syntax: Syntax,
     pub visibility: Visibility,
     pub name: String,
+    pub annotation: Option<Type>,
+    pub value: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

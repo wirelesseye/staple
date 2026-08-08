@@ -477,6 +477,52 @@ fn imports_primitive_macros_through_namespace_and_renaming() {
 }
 
 #[test]
+fn imports_user_macros_with_definition_site_hygiene() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use helpers\n",
+            "def private_identity: String -> String = value => value\n",
+            "let result: I32 = helpers.reveal 42\n",
+        ),
+    );
+    fixture.write(
+        "helpers.sta",
+        concat!(
+            "def private_identity: I32 -> I32 = value => value\n",
+            "pub macro reveal = value => quote { private_identity $value }\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("public macro should retain its definition-site environment");
+}
+
+#[test]
+fn imports_user_macros_through_selected_and_renamed_forms() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use helpers.reveal as renamed\n",
+            "use helpers.(reveal)\n",
+            "let first: I32 = renamed 1\n",
+            "let second: I32 = reveal 2\n",
+        ),
+    );
+    fixture.write(
+        "helpers.sta",
+        "pub macro reveal = value => quote { $value }\n",
+    );
+
+    fixture
+        .compile()
+        .expect("user macros should support selected and renamed imports");
+}
+
+#[test]
 fn rejects_user_declarations_with_the_intrinsic_abi() {
     let fixture = Fixture::new();
     fixture.write(
