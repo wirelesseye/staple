@@ -699,6 +699,136 @@ fn type_checks_generic_aliases_and_functions() {
 }
 
 #[test]
+fn type_checks_static_traits_and_bounded_generic_functions() {
+    let module = type_check(concat!(
+        "trait Increment = T => { increment: T -> T }\n",
+        "trait Echo = T => { echo: T -> T }\n",
+        "trait Swap = T => { swap: T -> T }\n",
+        "impl Increment I32 { def increment = value => value + 1 }\n",
+        "impl Echo I32 { def echo = value => value }\n",
+        "impl Swap (I32, I32) { def swap = (left, right) => (right, left) }\n",
+        "def increment_twice: T => Increment T => T -> T = value => increment (increment value)\n",
+        "def increment_echo: T => Increment T => Echo T => T -> T = value => echo (increment value)\n",
+        "let direct: I32 = Increment.increment 40\n",
+        "let answer: I32 = increment_twice direct\n",
+        "let bounded: I32 = increment_echo answer\n",
+        "let first_class: I32 -> I32 = Increment.increment\n",
+        "let other: I32 = first_class bounded\n",
+        "let swapped: (I32, I32) = Swap.swap (1, 2)\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("static trait calls should compile");
+    assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Increment = T => { increment: T -> T }\n",
+            "impl Increment I32 { }\n",
+        )))
+        .expect_err("implementations must be complete");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("missing member `increment`") })
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Increment = T => { increment: T -> T }\n",
+            "type alias Number = I32\n",
+            "impl Increment I32 { def increment = value => value }\n",
+            "impl Increment Number { def increment = value => value }\n",
+        )))
+        .expect_err("aliases may not create overlapping implementations");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate trait implementation")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Increment = T => { increment: T -> T }\n",
+            "impl Increment I32 { def increment = value => \"wrong\" }\n",
+        )))
+        .expect_err("implementation bodies must match their trait member types");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("expected `I32`, found `String`")),
+        "{diagnostics:?}"
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Increment = T => { increment: T -> T }\n",
+            "impl Increment I32 { def increment = value => value }\n",
+            "def invalid: T => T -> T = value => increment value\n",
+        )))
+        .expect_err("generic callers must propagate trait bounds");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("no trait implementation or matching bound")
+    }));
+}
+
+#[test]
+fn rejects_invalid_trait_member_signatures_and_non_concrete_targets() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("trait Invalid = T => { value: I32 }\n"))
+        .expect_err("trait members must be functions that mention the parameter");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("function types"))
+    );
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("must mention trait parameter"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Increment = T => { increment: T -> T }\n",
+            "impl Increment _ { def increment = value => value }\n",
+        )))
+        .expect_err("implementation targets must be concrete");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("target must be fully concrete") })
+    );
+}
+
+#[test]
+fn requires_qualification_for_ambiguous_trait_methods() {
+    let source = concat!(
+        "trait Left = T => { convert: T -> T }\n",
+        "trait Right = T => { convert: T -> T }\n",
+        "impl Left I32 { def convert = value => value }\n",
+        "impl Right I32 { def convert = value => value }\n",
+        "let left: I32 = Left.convert 1\n",
+        "let right: I32 = Right.convert 2\n",
+        "let ambiguous: I32 = convert 3\n",
+    );
+    let diagnostics = TypeChecker::new()
+        .check(resolve(source))
+        .expect_err("unqualified overlapping method names must be ambiguous");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("ambiguous trait method; qualify the trait name")
+    }));
+}
+
+#[test]
 fn constructs_distinct_and_generic_distinct_values() {
     let module = type_check(concat!(
         "type UserId = I32\n",

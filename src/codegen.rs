@@ -830,6 +830,36 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         expression: &Expression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let Some(dispatch) = self
+            .typed_module
+            .trait_dispatch_for(expression.syntax().id)
+            .cloned()
+        {
+            let target = substitute_type(dispatch.target, &self.active_type_substitutions);
+            if contains_type_parameter(&target) {
+                return Err(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    "trait method target is not fully specialized",
+                ));
+            }
+            let trait_id = self
+                .typed_module
+                .resolved()
+                .trait_for_method(dispatch.method)
+                .expect("trait method owner");
+            let function_id = self
+                .typed_module
+                .trait_impl_method(trait_id, &target, dispatch.method)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        format!("no trait implementation is available for `{target}`"),
+                    )
+                })?;
+            return self
+                .build_closure(environment, function_id, expression.syntax().span.clone())
+                .map(|closure| closure.as_any_value_enum());
+        }
         match expression {
             Expression::Function(function) => {
                 let id = self
@@ -1143,6 +1173,49 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         call: &CallExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let Some(dispatch) = self
+            .typed_module
+            .trait_dispatch_for(call.callee.syntax().id)
+            .cloned()
+        {
+            let target = substitute_type(dispatch.target, &self.active_type_substitutions);
+            let trait_id = self
+                .typed_module
+                .resolved()
+                .trait_for_method(dispatch.method)
+                .expect("trait method owner");
+            let function_id = self
+                .typed_module
+                .trait_impl_method(trait_id, &target, dispatch.method)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        call.callee.syntax().span.clone(),
+                        format!("no trait implementation is available for `{target}`"),
+                    )
+                })?;
+            let function = self.functions[&function_id];
+            let expected_count = function.count_params() as usize - 1;
+            let mut arguments =
+                self.compile_arguments(environment, &call.argument, expected_count, false)?;
+            if environment.did_return {
+                return Ok(self.unit_value());
+            }
+            arguments.insert(
+                0,
+                self.context
+                    .ptr_type(AddressSpace::default())
+                    .const_null()
+                    .into(),
+            );
+            let call_site = self
+                .builder
+                .build_direct_call(function, &arguments, "trait.call")
+                .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+            return Ok(call_site
+                .try_as_basic_value()
+                .unwrap_basic()
+                .as_any_value_enum());
+        }
         if let Some(symbol) = self.typed_module.symbol_for(call.callee.syntax().id)
             && let Some(intrinsic) = self.typed_module.resolved().intrinsic_function(symbol)
         {

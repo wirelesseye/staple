@@ -37,6 +37,7 @@ struct Grammar {
     line_starts: Vec<usize>,
     next_syntax_id: usize,
     newline_terminates_expression: bool,
+    newline_terminates_type: bool,
     source_name: Option<Arc<str>>,
 }
 
@@ -58,6 +59,7 @@ impl Grammar {
             line_starts,
             next_syntax_id,
             newline_terminates_expression: false,
+            newline_terminates_type: false,
             source_name,
         }
     }
@@ -118,6 +120,13 @@ impl Grammar {
             Some(TokenKind::Macro) => self
                 .parse_macro_declaration(visibility, item_start)
                 .map(Item::MacroDeclaration),
+            Some(TokenKind::Trait) => self
+                .parse_trait_declaration(visibility, item_start)
+                .map(Item::TraitDeclaration),
+            Some(TokenKind::Impl) if visibility == Visibility::Private => self
+                .parse_trait_implementation(item_start)
+                .map(Item::TraitImplementation),
+            Some(TokenKind::Impl) => Err(self.error("trait implementations cannot be public")),
             _ => self
                 .parse_statement_with_visibility(visibility, Some(item_start))
                 .map(|statement| Item::Statement(Box::new(statement))),
@@ -139,6 +148,122 @@ impl Grammar {
             syntax: self.syntax(start),
             visibility,
             name,
+        })
+    }
+
+    fn parse_trait_declaration(
+        &mut self,
+        visibility: Visibility,
+        start: usize,
+    ) -> Result<TraitDeclaration, ParseError> {
+        self.expect(TokenKind::Trait, "expected `trait`")?;
+        let name = self
+            .expect(TokenKind::Identifier, "expected trait name")?
+            .text;
+        self.expect(TokenKind::Equals, "expected `=` after trait name")?;
+        let parameter_start = self.position;
+        let parameter_name = self
+            .expect(TokenKind::Identifier, "expected trait type parameter")?
+            .text;
+        let parameter = TypeParameterBinding {
+            syntax: self.syntax(parameter_start),
+            name: parameter_name,
+        };
+        self.expect(
+            TokenKind::FatArrow,
+            "expected `=>` after trait type parameter",
+        )?;
+        self.expect(TokenKind::LBrace, "expected `{` before trait members")?;
+        let mut members = Vec::new();
+        while !self.at(TokenKind::RBrace) {
+            if self.peek().is_none() {
+                return Err(self.error("unterminated trait declaration"));
+            }
+            let member_start = self.position;
+            let member_name = self
+                .expect(TokenKind::Identifier, "expected trait member name")?
+                .text;
+            self.expect(TokenKind::Colon, "expected `:` after trait member name")?;
+            let previous = self.newline_terminates_type;
+            self.newline_terminates_type = true;
+            let annotation = self.parse_type();
+            self.newline_terminates_type = previous;
+            let annotation = annotation?;
+            members.push(TraitMember {
+                syntax: self.syntax(member_start),
+                name: member_name,
+                annotation,
+            });
+            self.eat(TokenKind::Semicolon);
+        }
+        self.expect(TokenKind::RBrace, "expected `}` after trait members")?;
+        Ok(TraitDeclaration {
+            syntax: self.syntax(start),
+            visibility,
+            name,
+            parameter,
+            members,
+        })
+    }
+
+    fn parse_trait_implementation(
+        &mut self,
+        start: usize,
+    ) -> Result<TraitImplementation, ParseError> {
+        self.expect(TokenKind::Impl, "expected `impl`")?;
+        let trait_start = self.position;
+        let first = self
+            .expect(TokenKind::Identifier, "expected trait name")?
+            .text;
+        let (namespace, name) = if self.eat(TokenKind::Dot) {
+            let name = self
+                .expect(TokenKind::Identifier, "expected trait name after namespace")?
+                .text;
+            (Some(first), name)
+        } else {
+            (None, first)
+        };
+        let trait_name = NamedType {
+            syntax: self.syntax(trait_start),
+            namespace,
+            name,
+        };
+        let target = self.parse_type()?;
+        self.expect(
+            TokenKind::LBrace,
+            "expected `{` before implementation members",
+        )?;
+        let mut members = Vec::new();
+        while !self.at(TokenKind::RBrace) {
+            if self.peek().is_none() {
+                return Err(self.error("unterminated trait implementation"));
+            }
+            let member_start = self.position;
+            self.expect(TokenKind::Def, "expected `def` in trait implementation")?;
+            let name = self
+                .expect(TokenKind::Identifier, "expected implementation member name")?
+                .text;
+            self.expect(
+                TokenKind::Equals,
+                "expected `=` after implementation member name",
+            )?;
+            let value = self.parse_expression()?;
+            members.push(ImplementationMember {
+                syntax: self.syntax(member_start),
+                name,
+                value,
+            });
+            self.eat(TokenKind::Semicolon);
+        }
+        self.expect(
+            TokenKind::RBrace,
+            "expected `}` after implementation members",
+        )?;
+        Ok(TraitImplementation {
+            syntax: self.syntax(start),
+            trait_name,
+            target,
+            members,
         })
     }
 
@@ -392,8 +517,12 @@ impl Grammar {
             None
         };
         let mut type_parameters = Vec::new();
+        let mut trait_bounds = Vec::new();
         let annotation = if annotation.is_some() {
             type_parameters = self.parse_type_parameters()?;
+            if !type_parameters.is_empty() {
+                trait_bounds = self.parse_trait_bounds()?;
+            }
             Some(self.parse_type()?)
         } else {
             None
@@ -413,6 +542,7 @@ impl Grammar {
             name,
             fixity,
             type_parameters,
+            trait_bounds,
             annotation,
             value,
         })
@@ -433,6 +563,50 @@ impl Grammar {
             parameters.push(parameter);
         }
         Ok(parameters)
+    }
+
+    fn parse_trait_bounds(&mut self) -> Result<Vec<TraitBound>, ParseError> {
+        let mut bounds = Vec::new();
+        loop {
+            let checkpoint = self.position;
+            let start = self.position;
+            let first = match self.expect(TokenKind::Identifier, "expected trait name") {
+                Ok(token) => token.text,
+                Err(_) => {
+                    self.position = checkpoint;
+                    break;
+                }
+            };
+            let (namespace, name) = if self.eat(TokenKind::Dot) {
+                let Ok(token) = self.expect(TokenKind::Identifier, "expected trait name") else {
+                    self.position = checkpoint;
+                    break;
+                };
+                (Some(first), token.text)
+            } else {
+                (None, first)
+            };
+            if !self.starts_type_atom() {
+                self.position = checkpoint;
+                break;
+            }
+            let argument = self.parse_type_application()?;
+            if !self.eat(TokenKind::FatArrow) {
+                self.position = checkpoint;
+                break;
+            }
+            let trait_syntax = self.syntax(start);
+            bounds.push(TraitBound {
+                syntax: trait_syntax.clone(),
+                trait_name: NamedType {
+                    syntax: trait_syntax,
+                    namespace,
+                    name,
+                },
+                argument,
+            });
+        }
+        Ok(bounds)
     }
 
     fn parse_type_parameter_pattern(&mut self) -> Result<TypeParameterPattern, ParseError> {
@@ -584,7 +758,12 @@ impl Grammar {
     fn parse_type_application(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
         let mut ty = self.parse_type_atom()?;
-        while self.starts_type_atom() {
+        while self.starts_type_atom()
+            && !(self.newline_terminates_type
+                && self.has_newline_before_next_token()
+                && self.peek() == Some(TokenKind::Identifier)
+                && self.peek_n(1) == Some(TokenKind::Colon))
+        {
             let argument = self.parse_type_atom()?;
             ty = Type::Application(TypeApplication {
                 syntax: self.syntax(start),

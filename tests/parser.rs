@@ -11,6 +11,41 @@ fn statement(item: &Item) -> &Statement {
 }
 
 #[test]
+fn parses_traits_implementations_and_bounds_losslessly() {
+    let source = concat!(
+        "pub trait ToString = T => {\n",
+        "  to_string: T -> String\n",
+        "}\n",
+        "impl ToString I32 {\n",
+        "  def to_string = number => \"number\"\n",
+        "}\n",
+        "def print: T => ToString T => T -> () = value => ()\n",
+    );
+    let root = parse(source).expect("trait syntax should parse");
+    assert_eq!(root.text(), source);
+    assert!(matches!(
+        &root.items[0],
+        Item::TraitDeclaration(declaration)
+            if declaration.visibility == Visibility::Public
+                && declaration.name == "ToString"
+                && declaration.parameter.name == "T"
+                && declaration.members.len() == 1
+    ));
+    assert!(matches!(
+        &root.items[1],
+        Item::TraitImplementation(implementation)
+            if implementation.trait_name.name == "ToString"
+                && implementation.members.len() == 1
+    ));
+    let Statement::Binding(binding) = statement(&root.items[2]) else {
+        panic!("expected bounded function binding")
+    };
+    assert_eq!(binding.type_parameters.len(), 1);
+    assert_eq!(binding.trait_bounds.len(), 1);
+    assert_eq!(binding.trait_bounds[0].trait_name.name, "ToString");
+}
+
+#[test]
 fn parses_use_declarations_and_public_items_losslessly() {
     let source = concat!(
         "use path.to.another_module\n",

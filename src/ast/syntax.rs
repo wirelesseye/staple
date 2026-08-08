@@ -25,6 +25,8 @@ pub enum TokenKind {
     Extern,
     Type,
     Macro,
+    Trait,
+    Impl,
     Alias,
     Opaque,
     Infix,

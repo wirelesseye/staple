@@ -3,9 +3,29 @@ use std::fmt;
 
 use crate::{
     Accessor, Binding, BuiltinType, Diagnostic, Expression, FunctionId, Item, Module, Pattern,
-    ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, Type,
-    TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
+    ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, TraitId,
+    TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId,
+    TypeParameterPattern,
 };
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedTraitBound {
+    pub trait_id: TraitId,
+    pub argument: CheckedType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedTraitDispatch {
+    pub method: TraitMethodId,
+    pub target: CheckedType,
+}
+
+#[derive(Debug, Clone)]
+struct CheckedTraitImplementation {
+    trait_id: TraitId,
+    target: CheckedType,
+    methods: HashMap<TraitMethodId, FunctionId>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckedType {
@@ -163,6 +183,9 @@ pub struct TypedModule {
     expression_types: HashMap<SyntaxId, CheckedType>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
+    function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
+    trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
+    trait_implementations: Vec<CheckedTraitImplementation>,
 }
 
 impl TypedModule {
@@ -197,6 +220,31 @@ impl TypedModule {
     pub fn type_of_function(&self, function: FunctionId) -> Option<&CheckedFunctionType> {
         self.function_types.get(&function)
     }
+
+    pub fn bounds_of_function(&self, function: FunctionId) -> &[CheckedTraitBound] {
+        self.function_bounds
+            .get(&function)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn trait_dispatch_for(&self, syntax: SyntaxId) -> Option<&CheckedTraitDispatch> {
+        self.trait_dispatches.get(&syntax)
+    }
+
+    pub(crate) fn trait_impl_method(
+        &self,
+        trait_id: TraitId,
+        target: &CheckedType,
+        method: TraitMethodId,
+    ) -> Option<FunctionId> {
+        self.trait_implementations
+            .iter()
+            .find(|implementation| {
+                implementation.trait_id == trait_id && &implementation.target == target
+            })
+            .and_then(|implementation| implementation.methods.get(&method).copied())
+    }
 }
 
 #[derive(Default)]
@@ -204,6 +252,12 @@ pub struct TypeChecker {
     expression_types: HashMap<SyntaxId, CheckedType>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
+    function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
+    trait_method_types: HashMap<TraitMethodId, CheckedType>,
+    trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
+    trait_implementations: Vec<CheckedTraitImplementation>,
+    impl_function_types: HashMap<FunctionId, CheckedFunctionType>,
+    active_function_bounds: Vec<Vec<CheckedTraitBound>>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     top_level_bindings: HashMap<SymbolId, Binding>,
     checking_bindings: HashSet<SymbolId>,
@@ -226,6 +280,8 @@ impl TypeChecker {
 
     pub fn check(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
         self.collect_type_declarations(&module);
+        self.collect_traits(&module);
+        self.collect_trait_implementations(&module);
         self.seed_constructors(&module);
         self.collect_top_level_bindings(&module);
         self.seed_declared_bindings(&module);
@@ -256,11 +312,93 @@ impl TypeChecker {
             expression_types: self.expression_types,
             symbol_types: self.symbol_types,
             function_types: self.function_types,
+            function_bounds: self.function_bounds,
+            trait_dispatches: self.trait_dispatches,
+            trait_implementations: self.trait_implementations,
         })
     }
 
     fn collect_type_declarations(&mut self, module: &ResolvedModule) {
         self.type_declarations = module.type_declarations().clone();
+    }
+
+    fn collect_traits(&mut self, module: &ResolvedModule) {
+        for resolved_trait in module.traits().values() {
+            for method in &resolved_trait.methods {
+                let member = module.trait_method(*method).expect("resolved trait member");
+                let value_type = self.resolve_source_type(module, &member.annotation);
+                if !matches!(value_type, CheckedType::Function(_)) {
+                    self.diagnostics.push(Diagnostic::new(
+                        member.syntax.span.clone(),
+                        "trait members must have function types",
+                    ));
+                }
+                if !contains_type_parameter_id(&value_type, resolved_trait.parameter) {
+                    self.diagnostics.push(Diagnostic::new(
+                        member.syntax.span.clone(),
+                        format!(
+                            "trait member `{}` must mention trait parameter `{}`",
+                            member.name, resolved_trait.declaration.parameter.name
+                        ),
+                    ));
+                }
+                if contains_inferred_type(&value_type) {
+                    self.diagnostics.push(Diagnostic::new(
+                        member.syntax.span.clone(),
+                        "trait member types cannot contain `_`",
+                    ));
+                }
+                self.trait_method_types.insert(*method, value_type);
+            }
+        }
+    }
+
+    fn collect_trait_implementations(&mut self, module: &ResolvedModule) {
+        for implementation in module.trait_implementations() {
+            let target = self.resolve_source_type(module, &implementation.target);
+            if contains_type_parameter(&target)
+                || contains_inferred_type(&target)
+                || !target.is_concrete()
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    implementation.target.syntax().span.clone(),
+                    "trait implementation target must be fully concrete",
+                ));
+                continue;
+            }
+            if self.trait_implementations.iter().any(|existing| {
+                existing.trait_id == implementation.trait_id && existing.target == target
+            }) {
+                self.diagnostics.push(Diagnostic::new(
+                    implementation.target.syntax().span.clone(),
+                    format!("duplicate trait implementation for `{target}`"),
+                ));
+                continue;
+            }
+            let resolved_trait = &module.traits()[&implementation.trait_id];
+            for method in &resolved_trait.methods {
+                let member = module.trait_method(*method).expect("resolved trait member");
+                let Some(function_id) = implementation.methods.get(method).copied() else {
+                    self.diagnostics.push(Diagnostic::new(
+                        implementation.target.syntax().span.clone(),
+                        format!("implementation is missing member `{}`", member.name),
+                    ));
+                    continue;
+                };
+                let mut substitutions = HashMap::new();
+                substitutions.insert(resolved_trait.parameter, target.clone());
+                let expected =
+                    substitute_type(self.trait_method_types[method].clone(), &substitutions);
+                if let CheckedType::Function(function_type) = expected {
+                    self.impl_function_types.insert(function_id, function_type);
+                }
+            }
+            self.trait_implementations.push(CheckedTraitImplementation {
+                trait_id: implementation.trait_id,
+                target,
+                methods: implementation.methods.clone(),
+            });
+        }
     }
 
     fn seed_constructors(&mut self, module: &ResolvedModule) {
@@ -344,7 +482,9 @@ impl TypeChecker {
                     }
                     Item::UseDeclaration(_)
                     | Item::TypeDeclaration(_)
-                    | Item::MacroDeclaration(_) => {}
+                    | Item::MacroDeclaration(_)
+                    | Item::TraitDeclaration(_)
+                    | Item::TraitImplementation(_) => {}
                 }
             }
         }
@@ -407,6 +547,10 @@ impl TypeChecker {
 
     fn seed_function_types(&mut self, module: &ResolvedModule) {
         for function in module.functions() {
+            if let Some(expected) = self.impl_function_types.get(&function.id).cloned() {
+                self.function_types.insert(function.id, expected);
+                continue;
+            }
             let mut parameter = self.resolve_source_type(module, &function.pattern.ty());
             if !parameter.is_concrete()
                 && let Some(annotation) = &function.binding_annotation
@@ -453,6 +597,19 @@ impl TypeChecker {
                     .insert(symbol, CheckedType::Function(function_type.clone()));
             }
             self.function_types.insert(function.id, function_type);
+            let bounds = function
+                .trait_bounds
+                .iter()
+                .filter_map(|bound| {
+                    Some(CheckedTraitBound {
+                        trait_id: module.trait_for(bound.syntax.id)?,
+                        argument: self.resolve_source_type(module, &bound.argument),
+                    })
+                })
+                .collect::<Vec<_>>();
+            if !bounds.is_empty() {
+                self.function_bounds.insert(function.id, bounds);
+            }
         }
     }
 
@@ -469,6 +626,12 @@ impl TypeChecker {
             .cloned()
             .expect("resolved function ID must be valid");
         let function_type = self.function_types[&function.id].clone();
+        self.active_function_bounds.push(
+            self.function_bounds
+                .get(&function.id)
+                .cloned()
+                .unwrap_or_default(),
+        );
         self.bind_pattern_types(module, &function.pattern, &function_type.parameter);
         let outer_did_return = self.did_return;
         let outer_return_reachable = self.return_reachable;
@@ -504,6 +667,7 @@ impl TypeChecker {
         }
         self.checking_functions.remove(&function_id);
         self.checked_functions.insert(function_id);
+        self.active_function_bounds.pop();
     }
 
     fn bind_pattern_types(
@@ -592,7 +756,11 @@ impl TypeChecker {
             Item::Statement(statement) => {
                 self.check_statement(module, statement);
             }
-            Item::UseDeclaration(_) | Item::TypeDeclaration(_) | Item::MacroDeclaration(_) => {}
+            Item::UseDeclaration(_)
+            | Item::TypeDeclaration(_)
+            | Item::MacroDeclaration(_)
+            | Item::TraitDeclaration(_)
+            | Item::TraitImplementation(_) => {}
         }
     }
 
@@ -741,6 +909,20 @@ impl TypeChecker {
         expression: &Expression,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        let trait_methods = module.trait_methods_for_expression(expression.syntax().id);
+        if !trait_methods.is_empty() && !matches!(expression, Expression::Call(_)) {
+            let value_type = self.resolve_trait_method_use(
+                module,
+                expression.syntax().id,
+                trait_methods,
+                None,
+                expected,
+                expression.syntax().span.clone(),
+            );
+            self.expression_types
+                .insert(expression.syntax().id, value_type.clone());
+            return value_type;
+        }
         let value_type = match expression {
             Expression::Function(function) => {
                 let Some(function_id) = module.function_for(function.syntax.id) else {
@@ -819,6 +1001,37 @@ impl TypeChecker {
                     }
                     CheckedType::CString
                 } else {
+                    let trait_methods =
+                        module.trait_methods_for_expression(call.callee.syntax().id);
+                    if !trait_methods.is_empty() {
+                        let argument_type = self.check_expression(module, &call.argument);
+                        if self.did_return {
+                            return CheckedType::empty_product();
+                        }
+                        let callee_type = self.resolve_trait_method_use(
+                            module,
+                            call.callee.syntax().id,
+                            trait_methods,
+                            Some(&argument_type),
+                            expected,
+                            call.callee.syntax().span.clone(),
+                        );
+                        self.expression_types
+                            .insert(call.callee.syntax().id, callee_type.clone());
+                        let result = match callee_type {
+                            CheckedType::Function(function) => {
+                                self.check_call_argument(
+                                    argument_type,
+                                    &function.parameter,
+                                    call.argument.syntax().span.clone(),
+                                );
+                                *function.result
+                            }
+                            other => other,
+                        };
+                        self.expression_types.insert(call.syntax.id, result.clone());
+                        return result;
+                    }
                     let mut raw_callee_type = self.check_expression(module, &call.callee);
                     if self.did_return {
                         return CheckedType::empty_product();
@@ -848,11 +1061,25 @@ impl TypeChecker {
                         );
                     }
                     let callee_type = self.instantiate_function_use(
-                        raw_callee_type,
+                        raw_callee_type.clone(),
                         Some(&argument_type),
                         expected,
                         call.callee.syntax().span.clone(),
                     );
+                    if let Some(function_id) = self.function_origin(module, &call.callee) {
+                        let bound_template = self
+                            .function_types
+                            .get(&function_id)
+                            .cloned()
+                            .map(CheckedType::Function)
+                            .unwrap_or_else(|| raw_callee_type.clone());
+                        self.check_function_bounds(
+                            function_id,
+                            &bound_template,
+                            &callee_type,
+                            call.callee.syntax().span.clone(),
+                        );
+                    }
                     self.expression_types
                         .insert(call.callee.syntax().id, callee_type.clone());
                     match callee_type {
@@ -957,7 +1184,24 @@ impl TypeChecker {
                         ));
                         CheckedType::Error
                     });
-                self.instantiate_function_use(raw, None, expected, name.syntax.span.clone())
+                let instantiated = self.instantiate_function_use(
+                    raw.clone(),
+                    None,
+                    expected,
+                    name.syntax.span.clone(),
+                );
+                if expected.is_some()
+                    && let Some(function_id) =
+                        symbol.and_then(|symbol| self.function_symbols.get(&symbol).copied())
+                {
+                    self.check_function_bounds(
+                        function_id,
+                        &raw,
+                        &instantiated,
+                        name.syntax.span.clone(),
+                    );
+                }
+                instantiated
             }
             Expression::String(_) => CheckedType::String,
             Expression::Integer(_) => CheckedType::I32,
@@ -965,6 +1209,135 @@ impl TypeChecker {
         self.expression_types
             .insert(expression.syntax().id, value_type.clone());
         value_type
+    }
+
+    fn resolve_trait_method_use(
+        &mut self,
+        module: &ResolvedModule,
+        syntax: SyntaxId,
+        candidates: &[TraitMethodId],
+        argument: Option<&CheckedType>,
+        expected: Option<&CheckedType>,
+        span: Span,
+    ) -> CheckedType {
+        let mut matches = Vec::new();
+        let mut unavailable = false;
+        for method in candidates {
+            let Some(template) = self.trait_method_types.get(method).cloned() else {
+                continue;
+            };
+            let CheckedType::Function(function) = &template else {
+                continue;
+            };
+            let mut substitutions = HashMap::new();
+            if let Some(argument) = argument
+                && !infer_type_parameters(&function.parameter, argument, &mut substitutions)
+            {
+                continue;
+            }
+            if let Some(expected) = expected {
+                let expected_template = if argument.is_some() {
+                    function.result.as_ref()
+                } else {
+                    &template
+                };
+                if !infer_type_parameters(expected_template, expected, &mut substitutions) {
+                    continue;
+                }
+            }
+            let trait_id = module
+                .trait_for_method(*method)
+                .expect("trait method owner");
+            let parameter = module.traits()[&trait_id].parameter;
+            let Some(target) = substitutions.get(&parameter).cloned() else {
+                continue;
+            };
+            if !self.trait_obligation_available(trait_id, &target) {
+                unavailable = true;
+                continue;
+            }
+            matches.push((*method, target, substitute_type(template, &substitutions)));
+        }
+        if matches.len() == 1 {
+            let (method, target, value_type) = matches.pop().expect("one method match");
+            self.trait_dispatches
+                .insert(syntax, CheckedTraitDispatch { method, target });
+            return value_type;
+        }
+        self.diagnostics.push(Diagnostic::new(
+            span,
+            if matches.len() > 1 {
+                "ambiguous trait method; qualify the trait name"
+            } else if unavailable {
+                "no trait implementation or matching bound is available"
+            } else {
+                "could not infer the trait method's target type"
+            },
+        ));
+        CheckedType::Error
+    }
+
+    fn trait_obligation_available(&self, trait_id: TraitId, target: &CheckedType) -> bool {
+        if !contains_type_parameter(target) {
+            return self.trait_implementations.iter().any(|implementation| {
+                implementation.trait_id == trait_id && &implementation.target == target
+            });
+        }
+        self.active_function_bounds.iter().rev().any(|bounds| {
+            bounds
+                .iter()
+                .any(|bound| bound.trait_id == trait_id && &bound.argument == target)
+        })
+    }
+
+    fn function_origin(
+        &self,
+        module: &ResolvedModule,
+        expression: &Expression,
+    ) -> Option<FunctionId> {
+        match expression {
+            Expression::Name(name) => module
+                .symbol_for(name.syntax.id)
+                .and_then(|symbol| self.function_symbols.get(&symbol).copied()),
+            Expression::Access(access) => module
+                .symbol_for(access.syntax.id)
+                .and_then(|symbol| self.function_symbols.get(&symbol).copied()),
+            Expression::Call(call) => self.function_origin(module, &call.callee),
+            Expression::Infix(infix) => module
+                .lowered_infix(infix.syntax.id)
+                .and_then(|expression| self.function_origin(module, expression)),
+            _ => None,
+        }
+    }
+
+    fn check_function_bounds(
+        &mut self,
+        function_id: FunctionId,
+        template: &CheckedType,
+        instantiated: &CheckedType,
+        span: Span,
+    ) {
+        let bounds = self
+            .function_bounds
+            .get(&function_id)
+            .cloned()
+            .unwrap_or_default();
+        if bounds.is_empty() {
+            return;
+        }
+        let mut substitutions = HashMap::new();
+        if !infer_type_parameters(template, instantiated, &mut substitutions) {
+            return;
+        }
+        for bound in bounds {
+            let argument = substitute_type(bound.argument, &substitutions);
+            if !self.trait_obligation_available(bound.trait_id, &argument) {
+                self.diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    format!("trait bound is not satisfied for `{argument}`"),
+                ));
+            }
+        }
     }
 
     fn instantiate_function_use(
@@ -1555,6 +1928,31 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
         CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(contains_type_parameter)
         }
+        _ => false,
+    }
+}
+
+fn contains_type_parameter_id(value_type: &CheckedType, expected: TypeParameterId) -> bool {
+    type_parameter_ids(value_type).contains(&expected)
+}
+
+fn contains_inferred_type(value_type: &CheckedType) -> bool {
+    match value_type {
+        CheckedType::Inferred | CheckedType::TypeConstructor { .. } => true,
+        CheckedType::CPointer { pointee } => contains_inferred_type(pointee),
+        CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_inferred_type),
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| contains_inferred_type(&element.value_type)),
+        CheckedType::Function(function) => {
+            contains_inferred_type(&function.parameter) || contains_inferred_type(&function.result)
+        }
+        CheckedType::Distinct {
+            arguments,
+            representation,
+            ..
+        } => arguments.iter().any(contains_inferred_type) || contains_inferred_type(representation),
         _ => false,
     }
 }

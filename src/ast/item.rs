@@ -1,4 +1,6 @@
-use super::{Expression, Syntax, Type, TypeParameterPattern};
+use super::{
+    Expression, NamedType, Syntax, TraitBound, Type, TypeParameterBinding, TypeParameterPattern,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
@@ -18,6 +20,8 @@ pub enum Item {
     ExternBlock(ExternBlock),
     TypeDeclaration(TypeDeclaration),
     MacroDeclaration(MacroDeclaration),
+    TraitDeclaration(TraitDeclaration),
+    TraitImplementation(TraitImplementation),
     Statement(Box<Statement>),
 }
 
@@ -98,6 +102,37 @@ pub struct MacroDeclaration {
     pub name: String,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitDeclaration {
+    pub syntax: Syntax,
+    pub visibility: Visibility,
+    pub name: String,
+    pub parameter: TypeParameterBinding,
+    pub members: Vec<TraitMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitMember {
+    pub syntax: Syntax,
+    pub name: String,
+    pub annotation: Type,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitImplementation {
+    pub syntax: Syntax,
+    pub trait_name: NamedType,
+    pub target: Type,
+    pub members: Vec<ImplementationMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImplementationMember {
+    pub syntax: Syntax,
+    pub name: String,
+    pub value: Expression,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BindingKind {
     Let,
@@ -134,6 +169,7 @@ pub struct Binding {
     pub name: String,
     pub fixity: Option<Fixity>,
     pub type_parameters: Vec<TypeParameterPattern>,
+    pub trait_bounds: Vec<TraitBound>,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
 }

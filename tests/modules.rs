@@ -96,6 +96,74 @@ fn imports_public_values_and_types_through_all_use_forms() {
 }
 
 #[test]
+fn imports_public_traits_and_discovers_loaded_global_implementations() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "traits.sta",
+        "pub trait Increment = T => { increment: T -> T }\n",
+    );
+    fixture.write(
+        "implementations.sta",
+        concat!(
+            "use traits\n",
+            "impl traits.Increment I32 { def increment = value => value + 1 }\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use traits.(Increment)\n",
+            "use implementations\n",
+            "def twice: T => Increment T => T -> T = value => increment (increment value)\n",
+            "let answer: I32 = twice 40\n",
+            "let qualified: I32 = Increment.increment answer\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("public traits and loaded global implementations should compile");
+
+    for source in [
+        concat!(
+            "use traits\n",
+            "use implementations\n",
+            "def apply: T => traits.Increment T => T -> T = value => traits.Increment.increment value\n",
+            "let answer: I32 = apply 41\n",
+        ),
+        concat!(
+            "use traits.Increment as Inc\n",
+            "use implementations\n",
+            "def apply: T => Inc T => T -> T = value => Inc.increment value\n",
+            "let answer: I32 = apply 41\n",
+        ),
+        concat!(
+            "use traits.*\n",
+            "use implementations\n",
+            "def apply: T => Increment T => T -> T = value => increment value\n",
+            "let answer: I32 = apply 41\n",
+        ),
+    ] {
+        fixture.write("main.sta", source);
+        fixture
+            .compile()
+            .expect("every public trait import form should compile");
+    }
+
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use traits.(Increment)\n",
+            "let answer: I32 = increment 41\n",
+        ),
+    );
+    let error = fixture
+        .compile()
+        .expect_err("implementations in unloaded modules must not be discovered");
+    assert!(error.contains("no trait implementation or matching bound"));
+}
+
+#[test]
 fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
     let fixture = Fixture::new();
     fixture.write(

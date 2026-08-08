@@ -112,3 +112,10 @@ pub struct TypeApplication {
     pub callee: Box<Type>,
     pub argument: Box<Type>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraitBound {
+    pub syntax: Syntax,
+    pub trait_name: NamedType,
+    pub argument: Type,
+}

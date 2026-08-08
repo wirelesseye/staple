@@ -17,10 +17,32 @@ pub struct FunctionId(pub usize);
 pub struct TypeId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TraitId(pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TraitMethodId(pub usize);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeParameterId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MacroId(pub usize);
+
+#[derive(Debug, Clone)]
+pub struct ResolvedTrait {
+    pub id: TraitId,
+    pub declaration: crate::TraitDeclaration,
+    pub parameter: TypeParameterId,
+    pub methods: Vec<TraitMethodId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResolvedTraitImplementation {
+    pub syntax: SyntaxId,
+    pub trait_id: TraitId,
+    pub target: Type,
+    pub methods: HashMap<TraitMethodId, FunctionId>,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinType {
@@ -56,6 +78,7 @@ pub struct ResolvedFunction {
     pub return_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
     pub type_parameters: Vec<TypeParameterPattern>,
+    pub trait_bounds: Vec<crate::TraitBound>,
     pub captures: Vec<SymbolId>,
     pub body: Expression,
 }
@@ -78,6 +101,12 @@ pub struct ResolvedModule {
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     constructors: HashMap<SymbolId, TypeId>,
     type_modules: HashMap<TypeId, ModuleId>,
+    traits: HashMap<TraitId, ResolvedTrait>,
+    trait_methods: HashMap<TraitMethodId, crate::TraitMember>,
+    trait_method_traits: HashMap<TraitMethodId, TraitId>,
+    trait_references: HashMap<SyntaxId, TraitId>,
+    trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
+    trait_implementations: Vec<ResolvedTraitImplementation>,
 }
 
 impl ResolvedModule {
@@ -157,6 +186,33 @@ impl ResolvedModule {
     pub fn constructors(&self) -> &HashMap<SymbolId, TypeId> {
         &self.constructors
     }
+
+    pub fn traits(&self) -> &HashMap<TraitId, ResolvedTrait> {
+        &self.traits
+    }
+
+    pub fn trait_method(&self, id: TraitMethodId) -> Option<&crate::TraitMember> {
+        self.trait_methods.get(&id)
+    }
+
+    pub fn trait_for_method(&self, id: TraitMethodId) -> Option<TraitId> {
+        self.trait_method_traits.get(&id).copied()
+    }
+
+    pub fn trait_for(&self, syntax: SyntaxId) -> Option<TraitId> {
+        self.trait_references.get(&syntax).copied()
+    }
+
+    pub fn trait_methods_for_expression(&self, syntax: SyntaxId) -> &[TraitMethodId] {
+        self.trait_method_references
+            .get(&syntax)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn trait_implementations(&self) -> &[ResolvedTraitImplementation] {
+        &self.trait_implementations
+    }
 }
 
 #[derive(Default)]
@@ -165,6 +221,7 @@ struct Interface {
     fixities: HashMap<String, Fixity>,
     types: HashMap<String, TypeId>,
     macros: HashMap<String, MacroId>,
+    traits: HashMap<String, TraitId>,
 }
 
 #[derive(Default)]
@@ -174,11 +231,14 @@ pub struct NameResolver {
     imported_types: HashMap<String, TypeId>,
     imported_fixities: HashMap<String, Fixity>,
     imported_macros: HashMap<String, MacroId>,
+    imported_traits: HashMap<String, TraitId>,
+    visible_trait_methods: HashMap<String, Vec<TraitMethodId>>,
     type_parameter_scopes: Vec<HashMap<String, TypeParameterId>>,
     prelude_values: HashMap<String, SymbolId>,
     prelude_types: HashMap<String, TypeId>,
     prelude_fixities: HashMap<String, Fixity>,
     prelude_macros: HashMap<String, MacroId>,
+    prelude_traits: HashMap<String, TraitId>,
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
@@ -200,16 +260,27 @@ pub struct NameResolver {
     type_parameters: HashMap<SyntaxId, TypeParameterId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
+    traits: HashMap<TraitId, ResolvedTrait>,
+    trait_methods: HashMap<TraitMethodId, crate::TraitMember>,
+    trait_method_traits: HashMap<TraitMethodId, TraitId>,
+    trait_member_ids: HashMap<(TraitId, String), TraitMethodId>,
+    trait_references: HashMap<SyntaxId, TraitId>,
+    trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
+    trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     interfaces: Vec<Interface>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
     binding_type_parameters: HashMap<SyntaxId, Vec<TypeParameterPattern>>,
+    binding_trait_bounds: HashMap<SyntaxId, Vec<crate::TraitBound>>,
     declared_types: Vec<HashMap<String, TypeId>>,
     declared_macros: Vec<HashMap<String, MacroId>>,
+    declared_traits: Vec<HashMap<String, TraitId>>,
     diagnostics: Vec<Diagnostic>,
     next_symbol_id: usize,
     next_function_id: usize,
     next_macro_id: usize,
+    next_trait_id: usize,
+    next_trait_method_id: usize,
     next_type_parameter_id: usize,
     next_syntax_id: usize,
     current_module: ModuleId,
@@ -255,13 +326,17 @@ impl NameResolver {
             self.imported_types.clear();
             self.imported_fixities.clear();
             self.imported_macros.clear();
+            self.imported_traits.clear();
+            self.visible_trait_methods.clear();
             self.prelude_values.clear();
             self.prelude_types.clear();
             self.prelude_fixities.clear();
             self.prelude_macros.clear();
+            self.prelude_traits.clear();
             self.push_scope();
             self.install_prelude(&program, source_module.id);
             self.install_imports(&program, source_module.id);
+            self.install_local_traits(source_module.id);
             self.predeclare_items(&source_module.syntax.items);
             for item in &source_module.syntax.items {
                 self.resolve_item(item);
@@ -290,6 +365,12 @@ impl NameResolver {
             macro_calls: self.macro_calls,
             constructors: self.constructors,
             type_modules: self.type_modules,
+            traits: self.traits,
+            trait_methods: self.trait_methods,
+            trait_method_traits: self.trait_method_traits,
+            trait_references: self.trait_references,
+            trait_method_references: self.trait_method_references,
+            trait_implementations: self.trait_implementations,
         })
     }
 
@@ -443,6 +524,9 @@ impl NameResolver {
         self.declared_macros = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
+        self.declared_traits = (0..program.modules().len())
+            .map(|_| HashMap::new())
+            .collect();
         self.declared_fixities = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
@@ -528,6 +612,56 @@ impl NameResolver {
                                 .insert(declaration.name.clone(), id);
                         }
                     }
+                    Item::TraitDeclaration(declaration) => {
+                        let id = TraitId(self.next_trait_id);
+                        self.next_trait_id += 1;
+                        if self.declared_traits[source_module.id.0]
+                            .insert(declaration.name.clone(), id)
+                            .is_some()
+                        {
+                            self.diagnostics.push(Diagnostic::new(
+                                declaration.syntax.span.clone(),
+                                format!("duplicate trait definition of `{}`", declaration.name),
+                            ));
+                        }
+                        let parameter = TypeParameterId(self.next_type_parameter_id);
+                        self.next_type_parameter_id += 1;
+                        self.type_parameters
+                            .insert(declaration.parameter.syntax.id, parameter);
+                        let mut methods = Vec::new();
+                        for member in &declaration.members {
+                            let method = TraitMethodId(self.next_trait_method_id);
+                            self.next_trait_method_id += 1;
+                            if self
+                                .trait_member_ids
+                                .insert((id, member.name.clone()), method)
+                                .is_some()
+                            {
+                                self.diagnostics.push(Diagnostic::new(
+                                    member.syntax.span.clone(),
+                                    format!("duplicate trait member `{}`", member.name),
+                                ));
+                            }
+                            self.trait_methods.insert(method, member.clone());
+                            self.trait_method_traits.insert(method, id);
+                            methods.push(method);
+                        }
+                        self.traits.insert(
+                            id,
+                            ResolvedTrait {
+                                id,
+                                declaration: declaration.clone(),
+                                parameter,
+                                methods,
+                            },
+                        );
+                        if declaration.visibility == Visibility::Public {
+                            self.interfaces[source_module.id.0]
+                                .traits
+                                .insert(declaration.name.clone(), id);
+                        }
+                    }
+                    Item::TraitImplementation(_) => {}
                     Item::Statement(statement) => match statement.as_ref() {
                         Statement::Binding(binding) => {
                             let symbol = self.allocate_symbol(binding);
@@ -563,6 +697,8 @@ impl NameResolver {
         self.declared_symbols.insert(binding.syntax.id, symbol);
         self.binding_type_parameters
             .insert(binding.syntax.id, binding.type_parameters.clone());
+        self.binding_trait_bounds
+            .insert(binding.syntax.id, binding.trait_bounds.clone());
         self.symbols.insert(binding.syntax.id, symbol);
         self.symbol_owners.insert(symbol, None);
         symbol
@@ -635,6 +771,9 @@ impl NameResolver {
                     for (name, macro_id) in self.interfaces[imported.0].macros.clone() {
                         self.insert_imported_macro(name, macro_id, declaration.syntax.span.clone());
                     }
+                    for (name, trait_id) in self.interfaces[imported.0].traits.clone() {
+                        self.insert_imported_trait(name, trait_id, declaration.syntax.span.clone());
+                    }
                 }
                 UseKind::Selected(names) => {
                     for name in names {
@@ -664,6 +803,10 @@ impl NameResolver {
         self.prelude_types = self.interfaces[core.0].types.clone();
         self.prelude_fixities = self.interfaces[core.0].fixities.clone();
         self.prelude_macros = self.interfaces[core.0].macros.clone();
+        self.prelude_traits = self.interfaces[core.0].traits.clone();
+        for trait_id in self.prelude_traits.values().copied().collect::<Vec<_>>() {
+            self.add_visible_trait_methods(trait_id);
+        }
     }
 
     fn install_selected(&mut self, module: ModuleId, item: &str, local: &str, span: Span) {
@@ -682,6 +825,10 @@ impl NameResolver {
         if let Some(macro_id) = self.interfaces[module.0].macros.get(item).copied() {
             found = true;
             self.insert_imported_macro(local.to_owned(), macro_id, span.clone());
+        }
+        if let Some(trait_id) = self.interfaces[module.0].traits.get(item).copied() {
+            found = true;
+            self.insert_imported_trait(local.to_owned(), trait_id, span.clone());
         }
         if !found {
             self.diagnostics.push(Diagnostic::new(
@@ -716,6 +863,37 @@ impl NameResolver {
         }
     }
 
+    fn insert_imported_trait(&mut self, name: String, id: TraitId, span: Span) {
+        if self.declared_traits[self.current_module.0].contains_key(&name)
+            || self.imported_traits.insert(name.clone(), id).is_some()
+        {
+            self.duplicate_import(&name, span);
+        } else {
+            self.add_visible_trait_methods(id);
+        }
+    }
+
+    fn install_local_traits(&mut self, module: ModuleId) {
+        for trait_id in self.declared_traits[module.0]
+            .values()
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            self.add_visible_trait_methods(trait_id);
+        }
+    }
+
+    fn add_visible_trait_methods(&mut self, trait_id: TraitId) {
+        let methods = self.traits[&trait_id].methods.clone();
+        for method in methods {
+            let name = self.trait_methods[&method].name.clone();
+            let candidates = self.visible_trait_methods.entry(name).or_default();
+            if !candidates.contains(&method) {
+                candidates.push(method);
+            }
+        }
+    }
+
     fn duplicate_import(&mut self, name: &str, span: Span) {
         self.diagnostics.push(Diagnostic::new(
             span,
@@ -738,7 +916,11 @@ impl NameResolver {
                         self.declare_allocated(binding);
                     }
                 }
-                Item::UseDeclaration(_) | Item::TypeDeclaration(_) | Item::MacroDeclaration(_) => {}
+                Item::UseDeclaration(_)
+                | Item::TypeDeclaration(_)
+                | Item::MacroDeclaration(_)
+                | Item::TraitDeclaration(_)
+                | Item::TraitImplementation(_) => {}
             }
         }
         for item in items {
@@ -800,6 +982,88 @@ impl NameResolver {
                     ));
                 }
             }
+            Item::TraitDeclaration(declaration) => {
+                let Some(id) = self.declared_traits[self.current_module.0]
+                    .get(&declaration.name)
+                    .copied()
+                else {
+                    return;
+                };
+                self.push_type_parameter_scope();
+                self.type_parameter_scopes
+                    .last_mut()
+                    .expect("trait parameter scope")
+                    .insert(
+                        declaration.parameter.name.clone(),
+                        self.traits[&id].parameter,
+                    );
+                for member in &declaration.members {
+                    self.resolve_type(&member.annotation);
+                    if declaration.visibility == Visibility::Public {
+                        self.validate_public_representation(&member.annotation);
+                    }
+                }
+                self.pop_type_parameter_scope();
+            }
+            Item::TraitImplementation(implementation) => {
+                let trait_id = self.resolve_trait_name(&implementation.trait_name);
+                self.resolve_type(&implementation.target);
+                let mut methods = HashMap::new();
+                for member in &implementation.members {
+                    let method = trait_id.and_then(|trait_id| {
+                        self.trait_member_ids
+                            .get(&(trait_id, member.name.clone()))
+                            .copied()
+                    });
+                    if trait_id.is_some() && method.is_none() {
+                        self.diagnostics.push(Diagnostic::new(
+                            member.syntax.span.clone(),
+                            format!("trait has no member named `{}`", member.name),
+                        ));
+                    }
+                    let function_name = trait_id
+                        .map(|id| {
+                            format!(
+                                "impl.{}.{}.{}",
+                                id.0, implementation.syntax.id.0, member.name
+                            )
+                        })
+                        .unwrap_or_else(|| format!("impl.unknown.{}", member.name));
+                    self.resolve_expression(
+                        &member.value,
+                        None,
+                        Some((&function_name, member.syntax.id)),
+                    );
+                    if let Some(method) = method {
+                        if let Some(function) = self
+                            .function_expressions
+                            .get(&member.value.syntax().id)
+                            .copied()
+                        {
+                            if methods.insert(method, function).is_some() {
+                                self.diagnostics.push(Diagnostic::new(
+                                    member.syntax.span.clone(),
+                                    format!("duplicate implementation member `{}`", member.name),
+                                ));
+                            }
+                        } else {
+                            self.diagnostics.push(Diagnostic::new(
+                                member.value.syntax().span.clone(),
+                                "trait implementation members must be function values",
+                            ));
+                        }
+                    }
+                }
+                if let Some(trait_id) = trait_id {
+                    self.trait_implementations
+                        .push(ResolvedTraitImplementation {
+                            syntax: implementation.syntax.id,
+                            trait_id,
+                            target: implementation.target.clone(),
+                            methods,
+                        });
+                }
+            }
             Item::Statement(statement) => self.resolve_statement(statement),
         }
     }
@@ -829,12 +1093,21 @@ impl NameResolver {
         self.binding_type_parameters
             .entry(binding.syntax.id)
             .or_insert_with(|| binding.type_parameters.clone());
+        self.binding_trait_bounds
+            .entry(binding.syntax.id)
+            .or_insert_with(|| binding.trait_bounds.clone());
         self.push_type_parameter_scope();
         for parameter in &binding.type_parameters {
             self.declare_type_parameter_pattern(parameter);
         }
         if let Some(annotation) = &binding.annotation {
             self.resolve_type(annotation);
+        }
+        for bound in &binding.trait_bounds {
+            if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
+                self.trait_references.insert(bound.syntax.id, trait_id);
+            }
+            self.resolve_type(&bound.argument);
         }
         if let Some(value) = &binding.value {
             self.resolve_expression(
@@ -951,6 +1224,9 @@ impl NameResolver {
                     type_parameters: suggested_function
                         .and_then(|(_, syntax)| self.binding_type_parameters.get(&syntax).cloned())
                         .unwrap_or_default(),
+                    trait_bounds: suggested_function
+                        .and_then(|(_, syntax)| self.binding_trait_bounds.get(&syntax).cloned())
+                        .unwrap_or_default(),
                     captures,
                     body: (*function.body).clone(),
                 });
@@ -971,7 +1247,23 @@ impl NameResolver {
                 self.resolve_expression(&call.argument, None, None);
             }
             Expression::Access(access) => {
-                if let Expression::Name(namespace) = access.value.as_ref()
+                if let Accessor::Name(member_name) = &access.accessor
+                    && let Some(trait_id) = self.trait_id_from_expression(&access.value)
+                {
+                    if let Some(method) = self
+                        .trait_member_ids
+                        .get(&(trait_id, member_name.clone()))
+                        .copied()
+                    {
+                        self.trait_method_references
+                            .insert(access.syntax.id, vec![method]);
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            format!("trait has no member named `{member_name}`"),
+                        ));
+                    }
+                } else if let Expression::Name(namespace) = access.value.as_ref()
                     && let crate::Accessor::Name(item) = &access.accessor
                     && let Some(module) = self.namespaces.get(&namespace.name).copied()
                 {
@@ -1000,24 +1292,39 @@ impl NameResolver {
                 self.resolve_expression(&lowered, expected_type, suggested_function);
                 self.lowered_infix.insert(infix.syntax.id, lowered);
             }
-            Expression::Name(name) => match self.lookup(&name.name) {
-                Some(symbol) => {
+            Expression::Name(name) => match (
+                self.lookup(&name.name),
+                self.visible_trait_methods
+                    .get(&name.name)
+                    .cloned()
+                    .unwrap_or_default(),
+            ) {
+                (Some(_), methods) if !methods.is_empty() => {
+                    self.diagnostics.push(Diagnostic::new(
+                        name.syntax.span.clone(),
+                        format!("ambiguous name `{}`; qualify the trait method", name.name),
+                    ))
+                }
+                (Some(symbol), _) => {
                     self.symbols.insert(name.syntax.id, symbol);
                     self.record_capture(symbol);
                 }
-                None if self.namespaces.contains_key(&name.name) => {
+                (None, methods) if !methods.is_empty() => {
+                    self.trait_method_references.insert(name.syntax.id, methods);
+                }
+                (None, _) if self.namespaces.contains_key(&name.name) => {
                     self.diagnostics.push(Diagnostic::new(
                         name.syntax.span.clone(),
                         format!("module namespace `{}` is not a value", name.name),
                     ))
                 }
-                None if self.lookup_macro(&name.name).is_some() => {
+                (None, _) if self.lookup_macro(&name.name).is_some() => {
                     self.diagnostics.push(Diagnostic::new(
                         name.syntax.span.clone(),
                         format!("macro `{}` must be invoked", name.name),
                     ))
                 }
-                None => self.diagnostics.push(Diagnostic::new(
+                (None, _) => self.diagnostics.push(Diagnostic::new(
                     name.syntax.span.clone(),
                     format!("unknown name `{}`", name.name),
                 )),
@@ -1070,6 +1377,53 @@ impl NameResolver {
                 self.resolve_type(&application.argument);
             }
             Type::Inferred(_) => {}
+        }
+    }
+
+    fn resolve_trait_name(&mut self, name: &crate::NamedType) -> Option<TraitId> {
+        let resolved = if let Some(namespace) = &name.namespace {
+            self.namespaces
+                .get(namespace)
+                .and_then(|module| self.interfaces[module.0].traits.get(&name.name))
+                .copied()
+        } else {
+            self.declared_traits[self.current_module.0]
+                .get(&name.name)
+                .copied()
+                .or_else(|| self.imported_traits.get(&name.name).copied())
+                .or_else(|| self.prelude_traits.get(&name.name).copied())
+        };
+        if let Some(id) = resolved {
+            self.trait_references.insert(name.syntax.id, id);
+        } else {
+            self.diagnostics.push(Diagnostic::new(
+                name.syntax.span.clone(),
+                format!("unknown trait `{}`", name.name),
+            ));
+        }
+        resolved
+    }
+
+    fn trait_id_from_expression(&self, expression: &Expression) -> Option<TraitId> {
+        match expression {
+            Expression::Name(name) => self.declared_traits[self.current_module.0]
+                .get(&name.name)
+                .copied()
+                .or_else(|| self.imported_traits.get(&name.name).copied())
+                .or_else(|| self.prelude_traits.get(&name.name).copied()),
+            Expression::Access(access) => {
+                let Expression::Name(namespace) = access.value.as_ref() else {
+                    return None;
+                };
+                let Accessor::Name(name) = &access.accessor else {
+                    return None;
+                };
+                self.namespaces
+                    .get(&namespace.name)
+                    .and_then(|module| self.interfaces[module.0].traits.get(name))
+                    .copied()
+            }
+            _ => None,
         }
     }
 

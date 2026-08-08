@@ -492,6 +492,59 @@ reachable concrete use is monomorphized, unused instantiations produce no code,
 and recursive calls must retain the current specialization. Generic `let` and
 `extern` declarations are not supported.
 
+### Traits and bounded generic functions
+
+A trait declares a set of functions for one type parameter:
+
+```staple
+trait ToString = T => {
+    to_string: T -> String
+}
+```
+
+Trait members must have function types, must mention the trait parameter, and
+cannot contain inferred types. Traits may be exported with `pub trait` and are
+imported with the same namespace, selected, renamed, and glob forms as other
+public declarations.
+
+An implementation supplies every trait member exactly once for a fully concrete
+type. Member types are taken from the trait and do not need to be repeated:
+
+```staple
+impl ToString I32 {
+    def to_string = number => {
+        // ...
+    }
+}
+```
+
+Implementation targets may be built-in, nominal, product, pointer, or function
+types. Implementations have no visibility modifier: every implementation in the
+loaded program is available globally. Defining the same trait/type pair twice,
+including through two aliases of the same type, is an error.
+
+A generic `def` adds one or more trait bounds between its compile-time parameter
+binder and its ordinary function type:
+
+```staple
+def print: T => ToString T => T -> () = value => {
+    print_string (to_string value)
+}
+```
+
+Bounds are explicit and must be propagated by other generic functions. A
+concrete use must have a matching implementation. Trait members are first-class
+function values and may be called unqualified when unambiguous or qualified as
+`ToString.to_string`; a namespace-qualified trait may be used as
+`strings.ToString.to_string`.
+
+Traits use static dispatch. Bounds and implementations add no runtime values or
+function parameters. During monomorphization, Stapler substitutes the concrete
+type arguments and emits a direct reference to the selected implementation
+member. Trait objects, runtime dictionaries, supertraits, associated items,
+default methods, generic implementations, and independently generic trait
+members are not currently supported.
+
 ## Function application
 
 Function application is written by placing the argument expression after the
