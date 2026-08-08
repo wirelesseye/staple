@@ -141,21 +141,32 @@ impl Grammar {
 
     fn parse_expression(&mut self) -> Result<Expression, ParseError> {
         let checkpoint = self.position;
-        if let Ok(function) = self.parse_function_expression() {
-            return Ok(Expression::Function(function));
-        }
+        let function_error = match self.parse_function_expression() {
+            Ok(function) => return Ok(Expression::Function(Box::new(function))),
+            Err(error) => error,
+        };
         self.position = checkpoint;
-        self.parse_binary_expression(0)
+        let expression = self.parse_binary_expression(0)?;
+        if matches!(self.peek(), Some(TokenKind::Arrow | TokenKind::FatArrow)) {
+            return Err(function_error);
+        }
+        Ok(expression)
     }
 
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
         let parameter = self.parse_parameter()?;
-        self.expect(TokenKind::Arrow, "expected `->` after function parameter")?;
+        let return_type = if self.eat(TokenKind::Arrow) {
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect(TokenKind::FatArrow, "expected `=>` before function body")?;
         let body = Box::new(self.parse_expression()?);
         Ok(FunctionExpression {
             syntax: self.syntax(start),
             parameter,
+            return_type,
             body,
         })
     }

@@ -1,5 +1,5 @@
 use inkwell::context::Context;
-use stapler::{CodeGenerator, NameResolver, parse};
+use stapler::{CheckedType, CodeGenerator, NameResolver, TypeChecker, parse};
 
 fn resolve(source: &str) -> stapler::ResolvedModule {
     let syntax = parse(source).expect("source should parse");
@@ -8,14 +8,93 @@ fn resolve(source: &str) -> stapler::ResolvedModule {
         .expect("source should resolve")
 }
 
+fn type_check(source: &str) -> stapler::TypedModule {
+    TypeChecker::new()
+        .check(resolve(source))
+        .expect("source should type-check")
+}
+
 #[test]
 fn resolves_names_in_function_parameters_and_binary_expressions() {
-    let source = "def add: _ -> i32 = (a: i32, b: i32) -> a + b\nadd (1, 2)\n";
+    let source = "def add: _ -> i32 = (a: i32, b: i32) => a + b\nadd (1, 2)\n";
     let module = resolve(source);
 
     assert_eq!(module.syntax().text(), source);
     assert_eq!(module.functions().len(), 1);
     assert_eq!(module.functions()[0].name, "add");
+}
+
+#[test]
+fn infers_and_checks_function_return_types() {
+    let module = type_check(concat!(
+        "let add = (a: i32, b: i32) => a + b\n",
+        "let subtract = (a: i32, b: i32) -> i32 => a - b\n",
+        "add (1, subtract (3, 2))\n",
+    ));
+
+    for function in module.functions() {
+        let function_type = module
+            .type_of_function(function.id)
+            .expect("function should have a checked type");
+        assert_eq!(*function_type.result, CheckedType::I32);
+    }
+}
+
+#[test]
+fn infers_return_types_through_forward_function_references() {
+    let module = type_check(concat!(
+        "def first = () => second ()\n",
+        "def second = () => 42\n",
+        "first ()\n",
+    ));
+
+    for function in module.functions() {
+        assert_eq!(
+            *module
+                .type_of_function(function.id)
+                .expect("function should have a checked type")
+                .result,
+            CheckedType::I32,
+        );
+    }
+}
+
+#[test]
+fn rejects_an_incorrect_function_result_type() {
+    let module = resolve("let answer = () -> string => 42\n");
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("incorrect return type should fail");
+
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("expected `string`, found `i32`")
+    );
+}
+
+#[test]
+fn rejects_incorrect_call_arguments() {
+    let module = resolve("let identity = (value: i32) => value\nidentity (\"wrong\")\n");
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("incorrect argument type should fail");
+
+    assert!(
+        diagnostics[0]
+            .message
+            .contains("expected `(value: i32)`, found `(string)`")
+    );
+}
+
+#[test]
+fn type_checks_transparent_aliases() {
+    type_check("type alias number = i32\nlet answer: number = 42\n");
+}
+
+#[test]
+fn type_checks_function_declarations_without_values() {
+    type_check("let add: (x: i32, y: i32) -> i32\n");
 }
 
 #[test]
@@ -42,7 +121,7 @@ fn reports_duplicate_definitions() {
 
 #[test]
 fn generates_a_named_function_after_predeclaring_it() {
-    let module = resolve("def add: _ -> i32 = (a: i32, b: i32) -> a + b\nadd (1, 2)\n");
+    let module = type_check("let add = (a: i32, b: i32) => a + b\nadd (1, 2)\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
@@ -55,7 +134,7 @@ fn generates_a_named_function_after_predeclaring_it() {
 
 #[test]
 fn predeclares_functions_for_recursion() {
-    let module = resolve("def recurse: i32 -> i32 = n: i32 -> recurse n\n");
+    let module = type_check("def recurse: (n: i32) -> i32 = (n: i32) => recurse (n)\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
@@ -68,9 +147,9 @@ fn predeclares_functions_for_recursion() {
 fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
         "extern \"c\" { let puts: (*const c_char) -> i32 }\n",
-        "puts \"hello\\n\"\n",
+        "puts (\"hello\\n\")\n",
     );
-    let module = resolve(source);
+    let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)

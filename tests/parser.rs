@@ -27,7 +27,7 @@ fn parses_hello_world_losslessly() {
 
 #[test]
 fn parses_list_parameter_and_expression_body() {
-    let source = "def add: _ -> i32 = (a: i32, b: i32) -> a + b\n";
+    let source = "def add: _ -> i32 = (a: i32, b: i32) => a + b\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
     let Statement::Binding(binding) = statement(&root.items[0]) else {
@@ -44,8 +44,33 @@ fn parses_list_parameter_and_expression_body() {
 }
 
 #[test]
+fn parses_function_result_annotation_before_body_arrow() {
+    let source = "let add = (a: i32, b: i32) -> i32 => a + b\n";
+    let root = parse(source).expect("function should parse");
+    let Statement::Binding(binding) = statement(&root.items[0]) else {
+        panic!("expected binding");
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("expected function");
+    };
+
+    assert!(matches!(
+        function.return_type,
+        Some(Type::Primitive(stapler::PrimitiveType::I32(_)))
+    ));
+    assert_eq!(root.text(), source);
+}
+
+#[test]
+fn rejects_the_old_function_body_arrow() {
+    let error = parse("let answer = () -> 42\n").expect_err("old syntax should not parse");
+
+    assert!(error.message.contains("expected type"));
+}
+
+#[test]
 fn parses_single_parameter_and_application() {
-    let source = "def println: _ -> i32 = s: string -> printf (\"%s\\n\", s)\n";
+    let source = "def println: _ -> i32 = (s: string) => printf (\"%s\\n\", s)\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
     let Statement::Binding(binding) = statement(&root.items[0]) else {
@@ -54,7 +79,9 @@ fn parses_single_parameter_and_application() {
     let Expression::Function(function) = binding.value.as_ref().expect("function value") else {
         panic!("expected function");
     };
-    assert!(matches!(function.parameter, Parameter::Value(ref value) if value.name == "s"));
+    assert!(
+        matches!(function.parameter, Parameter::List(ref list) if list.elements[0].name == "s")
+    );
     let Expression::Call(call) = function.body.as_ref() else {
         panic!("expected call");
     };
@@ -63,7 +90,7 @@ fn parses_single_parameter_and_application() {
 
 #[test]
 fn comments_and_crlf_are_preserved() {
-    let source = "// entry\r\ndef main: _ -> string = () -> {\r\n  \"ok\"\r\n}\r\n";
+    let source = "// entry\r\ndef main: _ -> string = () => {\r\n  \"ok\"\r\n}\r\n";
     let root = parse(source).expect("source should parse");
     assert_eq!(root.text(), source);
     assert!(
@@ -134,7 +161,7 @@ fn parses_named_list_types_values_and_access() {
 
 #[test]
 fn block_items_are_typed() {
-    let source = "def answer = () -> { let x = 40 }\n";
+    let source = "def answer = () => { let x = 40 }\n";
     let root = parse(source).expect("block should parse");
     let Statement::Binding(binding) = statement(&root.items[0]) else {
         panic!("expected binding");

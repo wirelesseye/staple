@@ -33,6 +33,7 @@ pub enum TokenKind {
     Dot,
     Equals,
     Arrow,
+    FatArrow,
     Ellipsis,
     Star,
     Plus,
@@ -263,7 +264,7 @@ impl PrimitiveType {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
-    Function(FunctionExpression),
+    Function(Box<FunctionExpression>),
     Block(BlockExpression),
     List(ListExpression),
     Call(CallExpression),
@@ -294,6 +295,7 @@ impl Expression {
 pub struct FunctionExpression {
     pub syntax: Syntax,
     pub parameter: Parameter,
+    pub return_type: Option<Type>,
     pub body: Box<Expression>,
 }
 

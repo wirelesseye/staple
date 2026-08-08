@@ -6,9 +6,9 @@ use inkwell::{
 };
 
 use crate::{
-    Accessor, BinaryExpression, BinaryOperator, Diagnostic, Expression, FunctionId, FunctionType,
-    Item, ListExpression, ListType, Parameter, PrimitiveType, ResolvedFunction, ResolvedModule,
-    Span, Statement, SymbolId, Type,
+    Accessor, BinaryExpression, BinaryOperator, CheckedFunctionType, CheckedListType, CheckedType,
+    Diagnostic, Expression, FunctionId, Item, ListExpression, Parameter, ResolvedFunction, Span,
+    Statement, SymbolId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -31,12 +31,12 @@ impl<'context> CodeGenerator<'context> {
         }
     }
 
-    pub fn compile_module(&self, module: &ResolvedModule) -> Result<String, Vec<Diagnostic>> {
+    pub fn compile_module(&self, module: &TypedModule) -> Result<String, Vec<Diagnostic>> {
         self.compile_module_inner(module)
             .map_err(|diagnostic| vec![diagnostic])
     }
 
-    fn compile_module_inner(&self, module: &ResolvedModule) -> CodeGenerationResult<String> {
+    fn compile_module_inner(&self, module: &TypedModule) -> CodeGenerationResult<String> {
         let llvm_module = self.context.create_module("staple");
         let mut module_context = ModuleContext {
             functions: HashMap::new(),
@@ -60,14 +60,18 @@ impl<'context> CodeGenerator<'context> {
         &self,
         llvm_module: &inkwell::module::Module<'context>,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
     ) -> CodeGenerationResult<()> {
         for item in &module.syntax().items {
             let Item::ExternBlock(block) = item else {
                 continue;
             };
             for binding in &block.bindings {
-                let Some(Type::Function(function_type)) = &binding.annotation else {
+                let symbol = module.symbol_for(binding.syntax.id).ok_or_else(|| {
+                    Diagnostic::new(binding.syntax.span.clone(), "unresolved external binding")
+                })?;
+                let Some(CheckedType::Function(function_type)) = module.type_of_symbol(symbol)
+                else {
                     return Err(Diagnostic::new(
                         binding.syntax.span.clone(),
                         "external bindings must have a function type",
@@ -75,9 +79,6 @@ impl<'context> CodeGenerator<'context> {
                 };
                 let llvm_type = self.compile_function_type(function_type)?;
                 let function = llvm_module.add_function(&binding.name, llvm_type, None);
-                let symbol = module.symbol_for(binding.syntax.id).ok_or_else(|| {
-                    Diagnostic::new(binding.syntax.span.clone(), "unresolved external binding")
-                })?;
                 module_context.values.insert(symbol, function.into());
             }
         }
@@ -88,10 +89,13 @@ impl<'context> CodeGenerator<'context> {
         &self,
         llvm_module: &inkwell::module::Module<'context>,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
     ) -> CodeGenerationResult<()> {
         for function in module.functions() {
-            let llvm_type = self.compile_function_type(&function.function_type)?;
+            let function_type = module.type_of_function(function.id).ok_or_else(|| {
+                Diagnostic::new(function.body.syntax().span.clone(), "unchecked function")
+            })?;
+            let llvm_type = self.compile_function_type(function_type)?;
             let llvm_function = llvm_module.add_function(&function.name, llvm_type, None);
             module_context.functions.insert(function.id, llvm_function);
             if let Some(binding_syntax) = function.binding_syntax
@@ -107,7 +111,7 @@ impl<'context> CodeGenerator<'context> {
         &self,
         llvm_module: &inkwell::module::Module<'context>,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
         function: &ResolvedFunction,
     ) -> CodeGenerationResult<()> {
         let llvm_function = module_context.functions[&function.id];
@@ -131,7 +135,7 @@ impl<'context> CodeGenerator<'context> {
     fn bind_function_parameters(
         &self,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
         function: &ResolvedFunction,
         llvm_function: inkwell::values::FunctionValue<'context>,
     ) -> CodeGenerationResult<()> {
@@ -142,7 +146,7 @@ impl<'context> CodeGenerator<'context> {
         };
         if parameters.len() != syntax_parameters.len() {
             return Err(Diagnostic::new(
-                function.function_type.syntax.span.clone(),
+                function.parameter.ty().syntax().span.clone(),
                 "function parameter layout does not match its declared type",
             ));
         }
@@ -165,7 +169,7 @@ impl<'context> CodeGenerator<'context> {
         &self,
         llvm_module: &inkwell::module::Module<'context>,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
     ) -> CodeGenerationResult<()> {
         let integer_type = self.context.i32_type();
         let function_type = integer_type.fn_type(&[], false);
@@ -188,7 +192,7 @@ impl<'context> CodeGenerator<'context> {
         &self,
         llvm_module: &inkwell::module::Module<'context>,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
         statement: &Statement,
     ) -> CodeGenerationResult<Option<AnyValueEnum<'context>>> {
         match statement {
@@ -213,7 +217,7 @@ impl<'context> CodeGenerator<'context> {
         &self,
         llvm_module: &inkwell::module::Module<'context>,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
         expression: &Expression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         match expression {
@@ -330,7 +334,7 @@ impl<'context> CodeGenerator<'context> {
         &self,
         llvm_module: &inkwell::module::Module<'context>,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
         binary: &BinaryExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let AnyValueEnum::IntValue(left) =
@@ -363,7 +367,7 @@ impl<'context> CodeGenerator<'context> {
         &self,
         llvm_module: &inkwell::module::Module<'context>,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
         list: &ListExpression,
     ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
         let values = list
@@ -400,7 +404,7 @@ impl<'context> CodeGenerator<'context> {
         &self,
         llvm_module: &inkwell::module::Module<'context>,
         module_context: &mut ModuleContext<'context>,
-        module: &ResolvedModule,
+        module: &TypedModule,
         argument: &Expression,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
         let expressions: Vec<&Expression> = match argument {
@@ -425,13 +429,13 @@ impl<'context> CodeGenerator<'context> {
 
     fn compile_function_type(
         &self,
-        function_type: &FunctionType,
+        function_type: &CheckedFunctionType,
     ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
         let return_type = self.compile_type(&function_type.result)?;
         let parameter_types = self.compile_parameter_types(&function_type.parameter)?;
         let variadic = matches!(
             &*function_type.parameter,
-            Type::List(list) if list.variadic
+            CheckedType::List(list) if list.variadic
         );
         Ok(match return_type {
             inkwell::types::BasicTypeEnum::ArrayType(value) => {
@@ -452,7 +456,7 @@ impl<'context> CodeGenerator<'context> {
             inkwell::types::BasicTypeEnum::VectorType(_)
             | inkwell::types::BasicTypeEnum::ScalableVectorType(_) => {
                 return Err(Diagnostic::new(
-                    function_type.result.syntax().span.clone(),
+                    Span::Compiler,
                     "vector return types are not supported",
                 ));
             }
@@ -461,13 +465,13 @@ impl<'context> CodeGenerator<'context> {
 
     fn compile_parameter_types(
         &self,
-        parameter_type: &Type,
+        parameter_type: &CheckedType,
     ) -> CodeGenerationResult<Vec<inkwell::types::BasicMetadataTypeEnum<'context>>> {
         match parameter_type {
-            Type::List(list) => list
+            CheckedType::List(list) => list
                 .elements
                 .iter()
-                .map(|element| self.compile_type(&element.ty).map(Into::into))
+                .map(|element| self.compile_type(&element.value_type).map(Into::into))
                 .collect(),
             other => Ok(vec![self.compile_type(other)?.into()]),
         }
@@ -475,39 +479,37 @@ impl<'context> CodeGenerator<'context> {
 
     fn compile_type(
         &self,
-        value_type: &Type,
+        value_type: &CheckedType,
     ) -> CodeGenerationResult<inkwell::types::BasicTypeEnum<'context>> {
         match value_type {
-            Type::Inferred(inferred) => Err(Diagnostic::new(
-                inferred.syntax.span.clone(),
+            CheckedType::Inferred => Err(Diagnostic::new(
+                Span::Compiler,
                 "cannot generate code for an inferred type before type checking",
             )),
-            Type::Named(named) => match named.name.as_str() {
-                "c_char" => Ok(self.context.i8_type().into()),
-                "int" => Ok(self.context.i32_type().into()),
-                "string" => Ok(self.context.ptr_type(AddressSpace::default()).into()),
-                _ => Err(Diagnostic::new(
-                    named.syntax.span.clone(),
-                    format!("unknown runtime representation for type `{}`", named.name),
-                )),
-            },
-            Type::Pointer(_) | Type::Function(_) => {
+            CheckedType::Error => Err(Diagnostic::new(
+                Span::Compiler,
+                "cannot generate code for an erroneous type",
+            )),
+            CheckedType::CChar => Ok(self.context.i8_type().into()),
+            CheckedType::String => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            CheckedType::Pointer { .. } | CheckedType::Function(_) => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
-            Type::List(list) => self.compile_list_type(list).map(Into::into),
-            Type::Primitive(PrimitiveType::I32(_)) => Ok(self.context.i32_type().into()),
-            Type::Primitive(PrimitiveType::Bool(_)) => Ok(self.context.bool_type().into()),
+            CheckedType::List(list) => self.compile_list_type(list).map(Into::into),
+            CheckedType::I32 => Ok(self.context.i32_type().into()),
+            CheckedType::Bool => Ok(self.context.bool_type().into()),
+            CheckedType::Distinct { representation, .. } => self.compile_type(representation),
         }
     }
 
     fn compile_list_type(
         &self,
-        list: &ListType,
+        list: &CheckedListType,
     ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
         let fields = list
             .elements
             .iter()
-            .map(|element| self.compile_type(&element.ty))
+            .map(|element| self.compile_type(&element.value_type))
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         Ok(self.context.struct_type(&fields, true))
     }

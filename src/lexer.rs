@@ -30,6 +30,7 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
             .or(whitespace)
             .or(comment)
             .or(string)
+            .or(tag("=>").map(|_| TokenKind::FatArrow))
             .or(tag("->").map(|_| TokenKind::Arrow))
             .or(tag("...").map(|_| TokenKind::Ellipsis))
             .or(identifier)

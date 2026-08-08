@@ -127,8 +127,9 @@ extern "c" {
 }
 ```
 
-Whether an ordinary, non-external `let` declaration may omit its value is
-currently unspecified.
+A function declaration may omit its value when its complete function type is
+given. Whether other ordinary, non-external `let` declarations may omit their
+value is currently unspecified.
 
 ### `def`
 
@@ -137,7 +138,7 @@ binding is available throughout its containing scope, rather than becoming
 available only after the definition.
 
 ```staple
-def greet = () -> {
+def greet = () => {
     printf ("hello, world!\n")
 }
 ```
@@ -151,11 +152,10 @@ evaluated is currently unspecified.
 ### Binding type annotations
 
 The optional type annotation on a binding describes the complete type of its
-value. Function result types are declared here rather than inside function-value
-syntax:
+value:
 
 ```staple
-def get_number: _ -> i32 = () -> {
+def get_number: _ -> i32 = () => {
     42
 }
 ```
@@ -248,10 +248,11 @@ compile time remains unspecified.
 
 ## Functions
 
-A function is a value with the following general form:
+A function value has one of the following forms:
 
 ```text
-<parameter> -> <body expression>
+<parameter> => <body expression>
+<parameter> -> <result type> => <body expression>
 ```
 
 There is no distinction between a top-level function and an inline function or
@@ -263,43 +264,50 @@ Every function takes exactly one parameter. That parameter can represent:
 - a nullary list; or
 - a list containing one or more values.
 
+`=>` introduces the body of the abstraction. `->`, when present, introduces an
+explicit result type. Without an explicit result type, stapler infers it from
+the body.
+
 An ordinary parameter has a name and a type:
 
 ```staple
-s: string -> printf ("%s\n", s)
+s: string => printf ("%s\n", s)
 ```
 
 A nullary-list parameter is written as `()`:
 
 ```staple
-() -> 42
+() => 42
 ```
 
 A list parameter names and types each of its elements:
 
 ```staple
-(a: i32, b: i32) -> a + b
+(a: i32, b: i32) => a + b
 ```
 
 Consequently, this definition does not define a function with two parameters:
 
 ```staple
-def add = (a: i32, b: i32) -> a + b
+let add = (a: i32, b: i32) => a + b
 ```
 
 It defines a function whose single parameter is a two-element list.
 
-A binding may constrain the complete type of a function value, including its
-result type:
+A function value may declare its result type directly:
 
 ```staple
-def get_number: _ -> i32 = () -> {
+let get_number = () -> i32 => {
     42
 }
 ```
 
-The result type is not part of the function value itself. This keeps the arrow
-unambiguous: everything following `->` is the body expression.
+A binding annotation may also constrain the complete function type. A function
+declaration uses the same function-type syntax and omits the value:
+
+```staple
+let add: (x: i32, y: i32) -> i32
+```
 
 ## Function application
 

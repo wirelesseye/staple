@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    Binding, BindingKind, BlockExpression, Diagnostic, Expression, FunctionType, Item, Module,
-    Parameter, Span, Statement, SyntaxId, Type,
+    Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, Module, Parameter, Span,
+    Statement, SyntaxId, Type,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -17,8 +17,9 @@ pub struct ResolvedFunction {
     pub name: String,
     pub binding_syntax: Option<SyntaxId>,
     pub parameter: Parameter,
+    pub return_annotation: Option<Type>,
+    pub binding_annotation: Option<Type>,
     pub body: Expression,
-    pub function_type: FunctionType,
 }
 
 #[derive(Debug, Clone)]
@@ -149,10 +150,6 @@ impl NameResolver {
                 self.resolve_expression(&function.body, None, None);
                 self.pop_scope();
 
-                let result_type = match expected_type {
-                    Some(Type::Function(function_type)) => (*function_type.result).clone(),
-                    _ => Type::Inferred(crate::InferredType::new()),
-                };
                 self.functions.push(ResolvedFunction {
                     id: function_id,
                     name: suggested_function
@@ -160,12 +157,9 @@ impl NameResolver {
                         .unwrap_or_else(|| format!("function.{}", function_id.0)),
                     binding_syntax: suggested_function.map(|(_, syntax_id)| syntax_id),
                     parameter: function.parameter.clone(),
+                    return_annotation: function.return_type.clone(),
+                    binding_annotation: expected_type.cloned(),
                     body: (*function.body).clone(),
-                    function_type: FunctionType {
-                        syntax: function.syntax.clone(),
-                        parameter: Box::new(function.parameter.ty()),
-                        result: Box::new(result_type),
-                    },
                 });
             }
             Expression::Block(block) => self.resolve_block(block),
