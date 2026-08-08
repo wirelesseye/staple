@@ -63,7 +63,7 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
                 "type" => TokenKind::Type,
                 "macro" => TokenKind::Macro,
                 "alias" => TokenKind::Alias,
-                "const" => TokenKind::Const,
+                "opaque" => TokenKind::Opaque,
                 "infix" => TokenKind::Infix,
                 "infixl" => TokenKind::Infixl,
                 "infixr" => TokenKind::Infixr,

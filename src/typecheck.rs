@@ -28,9 +28,9 @@ pub enum CheckedType {
     Opaque {
         id: TypeId,
         name: String,
+        arguments: Vec<CheckedType>,
     },
-    Pointer {
-        is_const: bool,
+    CPointer {
         pointee: Box<CheckedType>,
     },
     Product(CheckedProductType),
@@ -72,7 +72,7 @@ impl CheckedType {
     pub fn is_concrete(&self) -> bool {
         match self {
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => false,
-            Self::Pointer { pointee, .. } => pointee.is_concrete(),
+            Self::CPointer { pointee } => pointee.is_concrete(),
             Self::Product(product) => product
                 .elements
                 .iter()
@@ -112,14 +112,16 @@ impl fmt::Display for CheckedType {
                 }
                 Ok(())
             }
-            Self::Opaque { name, .. } => formatter.write_str(name),
-            Self::Pointer { is_const, pointee } => {
-                formatter.write_str("*")?;
-                if *is_const {
-                    formatter.write_str("const ")?;
+            Self::Opaque {
+                name, arguments, ..
+            } => {
+                formatter.write_str(name)?;
+                for argument in arguments {
+                    write!(formatter, " {argument}")?;
                 }
-                write!(formatter, "{pointee}")
+                Ok(())
             }
+            Self::CPointer { pointee } => write!(formatter, "CPointer {pointee}"),
             Self::Product(product) => {
                 formatter.write_str("(")?;
                 for (index, element) in product.elements.iter().enumerate() {
@@ -982,10 +984,6 @@ impl TypeChecker {
                     self.resolve_named_type(module, named)
                 }
             }
-            Type::Pointer(pointer) => CheckedType::Pointer {
-                is_const: pointer.is_const,
-                pointee: Box::new(self.resolve_source_type(module, &pointer.pointee)),
-            },
             Type::Product(product) => {
                 let product = self.resolve_product_type(module, product);
                 normalize_product_type(product.elements, product.variadic)
@@ -1054,6 +1052,18 @@ impl TypeChecker {
                 return CheckedType::Error;
             }
         }
+        if module.builtin_type(id) == Some(BuiltinType::CPointer) {
+            return CheckedType::CPointer {
+                pointee: Box::new(arguments[0].clone()),
+            };
+        }
+        if declaration.kind == TypeDeclarationKind::Opaque {
+            return CheckedType::Opaque {
+                id,
+                name: display_name,
+                arguments,
+            };
+        }
         if !self.resolving_named_types.insert(id) {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
@@ -1075,7 +1085,7 @@ impl TypeChecker {
                 arguments,
                 representation: Box::new(representation),
             },
-            TypeDeclarationKind::Opaque => CheckedType::Error,
+            TypeDeclarationKind::Opaque => unreachable!(),
         }
     }
 
@@ -1169,6 +1179,11 @@ impl TypeChecker {
                 BuiltinType::String => CheckedType::String,
                 BuiltinType::CChar => CheckedType::CChar,
                 BuiltinType::CString => CheckedType::CString,
+                BuiltinType::CPointer => CheckedType::TypeConstructor {
+                    id,
+                    name: "CPointer".to_owned(),
+                    arguments: Vec::new(),
+                },
             };
         }
         if let Some(value_type) = self.resolved_named_types.get(&id) {
@@ -1187,6 +1202,7 @@ impl TypeChecker {
             let value_type = CheckedType::Opaque {
                 id,
                 name: display_name,
+                arguments: Vec::new(),
             };
             self.resolved_named_types.insert(id, value_type.clone());
             return value_type;
@@ -1240,37 +1256,35 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             CheckedType::Opaque {
                 id: actual_id,
                 name: actual_name,
+                arguments: actual_arguments,
             },
             CheckedType::Opaque {
                 id: expected_id,
                 name: _,
+                arguments: expected_arguments,
             },
-        ) if actual_id == expected_id => Some(CheckedType::Opaque {
-            id: actual_id,
-            name: actual_name,
-        }),
-        (
-            CheckedType::CString,
-            CheckedType::Pointer {
-                is_const: true,
-                pointee,
-            },
-        ) if *pointee == CheckedType::CChar => Some(CheckedType::CString),
-        (
-            CheckedType::Pointer {
-                is_const: actual_const,
-                pointee: actual_pointee,
-            },
-            CheckedType::Pointer {
-                is_const: expected_const,
-                pointee: expected_pointee,
-            },
-        ) if actual_const == expected_const => {
-            merge_types(*actual_pointee, *expected_pointee).map(|pointee| CheckedType::Pointer {
-                is_const: actual_const,
-                pointee: Box::new(pointee),
+        ) if actual_id == expected_id && actual_arguments.len() == expected_arguments.len() => {
+            Some(CheckedType::Opaque {
+                id: actual_id,
+                name: actual_name,
+                arguments: actual_arguments
+                    .into_iter()
+                    .zip(expected_arguments)
+                    .map(|(actual, expected)| merge_types(actual, expected))
+                    .collect::<Option<Vec<_>>>()?,
             })
         }
+        (CheckedType::CString, CheckedType::CPointer { pointee })
+            if *pointee == CheckedType::CChar =>
+        {
+            Some(CheckedType::CString)
+        }
+        (
+            CheckedType::CPointer { pointee: actual },
+            CheckedType::CPointer { pointee: expected },
+        ) => merge_types(*actual, *expected).map(|pointee| CheckedType::CPointer {
+            pointee: Box::new(pointee),
+        }),
         (CheckedType::Product(actual), CheckedType::Product(expected))
             if actual.variadic == expected.variadic
                 && actual.elements.len() == expected.elements.len() =>
@@ -1333,9 +1347,20 @@ pub(crate) fn substitute_type(
             .get(&id)
             .cloned()
             .unwrap_or(CheckedType::Parameter { id, name }),
-        CheckedType::Pointer { is_const, pointee } => CheckedType::Pointer {
-            is_const,
+        CheckedType::CPointer { pointee } => CheckedType::CPointer {
             pointee: Box::new(substitute_type(*pointee, substitutions)),
+        },
+        CheckedType::Opaque {
+            id,
+            name,
+            arguments,
+        } => CheckedType::Opaque {
+            id,
+            name,
+            arguments: arguments
+                .into_iter()
+                .map(|argument| substitute_type(argument, substitutions))
+                .collect(),
         },
         CheckedType::Product(product) => CheckedType::Product(CheckedProductType {
             elements: product
@@ -1385,7 +1410,8 @@ pub(crate) fn substitute_type(
 pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Parameter { .. } => true,
-        CheckedType::Pointer { pointee, .. } => contains_type_parameter(pointee),
+        CheckedType::CPointer { pointee } => contains_type_parameter(pointee),
+        CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_type_parameter),
         CheckedType::Product(product) => product
             .elements
             .iter()
@@ -1414,7 +1440,12 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
             CheckedType::Parameter { id, .. } => {
                 ids.insert(*id);
             }
-            CheckedType::Pointer { pointee, .. } => collect(pointee, ids),
+            CheckedType::CPointer { pointee } => collect(pointee, ids),
+            CheckedType::Opaque { arguments, .. } => {
+                for argument in arguments {
+                    collect(argument, ids);
+                }
+            }
             CheckedType::Product(product) => {
                 for element in &product.elements {
                     collect(&element.value_type, ids);
@@ -1464,9 +1495,27 @@ pub(crate) fn infer_type_parameters(
                 true
             }
         },
-        CheckedType::Pointer { is_const, pointee } => {
-            matches!(actual, CheckedType::Pointer { is_const: actual_const, pointee: actual_pointee }
-            if is_const == actual_const && infer_type_parameters(pointee, actual_pointee, substitutions))
+        CheckedType::CPointer { pointee } => {
+            matches!(actual, CheckedType::CPointer { pointee: actual_pointee }
+            if infer_type_parameters(pointee, actual_pointee, substitutions))
+        }
+        CheckedType::Opaque { id, arguments, .. } => {
+            let CheckedType::Opaque {
+                id: actual_id,
+                arguments: actual_arguments,
+                ..
+            } = actual
+            else {
+                return false;
+            };
+            id == actual_id
+                && arguments.len() == actual_arguments.len()
+                && arguments
+                    .iter()
+                    .zip(actual_arguments)
+                    .all(|(template, actual)| {
+                        infer_type_parameters(template, actual, substitutions)
+                    })
         }
         CheckedType::Product(template) => {
             let CheckedType::Product(actual) = actual else {

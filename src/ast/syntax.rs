@@ -25,7 +25,7 @@ pub enum TokenKind {
     Type,
     Macro,
     Alias,
-    Const,
+    Opaque,
     Infix,
     Infixl,
     Infixr,

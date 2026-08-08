@@ -276,7 +276,46 @@ fn cinterop_types_require_an_explicit_import() {
             .any(|diagnostic| diagnostic.message == "unknown type `CString`")
     );
 
-    type_check("use std.cinterop.*\nlet character: CChar\nlet text: CString\n");
+    type_check(concat!(
+        "use std.cinterop.*\n",
+        "let character: CChar\n",
+        "let pointer: CPointer CChar\n",
+        "let text: CString\n",
+    ));
+}
+
+#[test]
+fn c_pointer_preserves_its_pointee_type() {
+    let module = resolve(concat!(
+        "use std.cinterop.*\n",
+        "extern \"c\" { let consume: (CPointer I32) -> I32 }\n",
+        "consume (c_string \"wrong pointee\")\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("CString should only coerce to CPointer CChar");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `CPointer I32`, found `CString`")
+    }));
+}
+
+#[test]
+fn generic_opaque_arguments_are_part_of_type_identity() {
+    let module = resolve(concat!(
+        "type Handle = T => opaque\n",
+        "let first: Handle I32\n",
+        "let second: Handle String = first\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("opaque applications with different arguments must differ");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `Handle String`, found `Handle I32`")
+    }));
 }
 
 #[test]
@@ -524,8 +563,8 @@ fn lowers_transitive_captures_across_curried_layers() {
 fn adapts_non_variadic_externs_used_as_function_values() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
-        "extern \"c\" { let puts: (*const CChar) -> I32 }\n",
-        "def apply: ((*const CChar) -> I32, *const CChar) -> I32 = (f, value) => f value\n",
+        "extern \"c\" { let puts: (CPointer CChar) -> I32 }\n",
+        "def apply: ((CPointer CChar) -> I32, CPointer CChar) -> I32 = (f, value) => f value\n",
         "apply (puts, c_string \"hello\")\n",
     ));
     let context = Context::create();
@@ -624,7 +663,7 @@ fn associates_infix_chains_using_inline_fixity() {
 fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
         "use std.cinterop.*\n",
-        "extern \"c\" { let puts: (*const CChar) -> I32 }\n",
+        "extern \"c\" { let puts: (CPointer CChar) -> I32 }\n",
         "puts (c_string \"hello\\n\")\n",
     );
     let module = type_check(source);

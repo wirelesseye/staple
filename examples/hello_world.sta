@@ -1,7 +1,7 @@
 use std.cinterop.*
 
 extern "c" {
-    let printf: (*const CChar, ...) -> I32
+    let printf: (CPointer CChar, ...) -> I32
 }
 
 def infixl 1 |>: I32 -> I32 -> I32 = left => right => right

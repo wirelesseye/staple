@@ -29,6 +29,7 @@ pub enum BuiltinType {
     String,
     CChar,
     CString,
+    CPointer,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -288,6 +289,7 @@ impl NameResolver {
         if let Some(cinterop) = program.standard_library_cinterop() {
             self.register_builtin_type(cinterop, "std.cinterop", "CChar", BuiltinType::CChar);
             self.register_builtin_type(cinterop, "std.cinterop", "CString", BuiltinType::CString);
+            self.register_builtin_type(cinterop, "std.cinterop", "CPointer", BuiltinType::CPointer);
             self.register_primitive_macro(cinterop, "c_string", PrimitiveMacro::CString);
         }
 
@@ -404,6 +406,12 @@ impl NameResolver {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 format!("standard library type `{name}` must be opaque"),
+            ));
+        }
+        if builtin == BuiltinType::CPointer && declaration.type_parameters.len() != 1 {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                "standard library type `CPointer` must accept one compile-time argument",
             ));
         }
         self.type_names.insert(id, name.to_owned());
@@ -985,7 +993,6 @@ impl NameResolver {
                     ));
                 }
             }
-            Type::Pointer(pointer) => self.resolve_type(&pointer.pointee),
             Type::Product(product) => {
                 for element in &product.elements {
                     self.resolve_type(&element.ty);

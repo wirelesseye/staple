@@ -241,24 +241,22 @@ impl Grammar {
         let name = self
             .expect(TokenKind::Identifier, "expected type name")?
             .text;
-        let underlying = if self.eat(TokenKind::Equals) {
-            Some(())
-        } else if kind == TypeDeclarationKind::Alias {
+        let has_body = self.eat(TokenKind::Equals);
+        if !has_body && kind == TypeDeclarationKind::Alias {
             return Err(self.error("expected `=` after type alias name"));
+        }
+        let type_parameters = if has_body {
+            self.parse_type_parameters()?
         } else {
-            None
+            Vec::new()
         };
-        let mut type_parameters = Vec::new();
-        let underlying = if underlying.is_some() {
-            type_parameters = self.parse_type_parameters()?;
-            Some(self.parse_type()?)
+        let (kind, underlying) = if !has_body || self.eat(TokenKind::Opaque) {
+            if kind == TypeDeclarationKind::Alias {
+                return Err(self.error("type aliases cannot be opaque"));
+            }
+            (TypeDeclarationKind::Opaque, None)
         } else {
-            None
-        };
-        let kind = if underlying.is_none() {
-            TypeDeclarationKind::Opaque
-        } else {
-            kind
+            (kind, Some(self.parse_type()?))
         };
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
@@ -508,27 +506,16 @@ impl Grammar {
     fn starts_type_atom(&self) -> bool {
         matches!(
             self.peek(),
-            Some(
-                TokenKind::Underscore | TokenKind::Star | TokenKind::LParen | TokenKind::Identifier
-            )
+            Some(TokenKind::Underscore | TokenKind::LParen | TokenKind::Identifier)
         )
     }
 
-    /// Parses a non-function type such as a primitive, pointer, product, or name.
+    /// Parses a non-function type such as an inferred type, product, or name.
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
         if self.eat(TokenKind::Underscore) {
             return Ok(Type::Inferred(InferredType {
                 syntax: self.syntax(start),
-            }));
-        }
-        if self.eat(TokenKind::Star) {
-            let is_const = self.eat(TokenKind::Const);
-            let pointee = self.parse_type_application()?;
-            return Ok(Type::Pointer(PointerType {
-                syntax: self.syntax(start),
-                is_const,
-                pointee: Box::new(pointee),
             }));
         }
         if self.eat(TokenKind::LParen) {
@@ -1034,6 +1021,6 @@ fn is_symbol_kind(kind: TokenKind) -> bool {
 fn is_type_atom_start(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Underscore | TokenKind::Star | TokenKind::LParen | TokenKind::Identifier
+        TokenKind::Underscore | TokenKind::LParen | TokenKind::Identifier
     )
 }

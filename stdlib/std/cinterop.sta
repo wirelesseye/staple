@@ -1,4 +1,5 @@
 pub type CChar
+pub type CPointer = Pointee => opaque
 pub type CString
 
 pub macro c_string

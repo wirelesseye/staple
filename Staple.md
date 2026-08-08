@@ -128,7 +128,7 @@ declarations, and foreign declarations:
 use std.cinterop.*
 
 extern "c" {
-    let printf: (*const CChar, ...) -> I32
+    let printf: (CPointer CChar, ...) -> I32
 }
 
 printf (c_string "hello, world!\n")
@@ -217,7 +217,7 @@ provided outside staple:
 use std.cinterop.*
 
 extern "c" {
-    let printf: (*const CChar, ...) -> I32
+    let printf: (CPointer CChar, ...) -> I32
 }
 ```
 
@@ -558,6 +558,7 @@ Bool
 String
 CString
 CChar
+CPointer CChar
 ```
 
 `I32`, `Bool`, `String`, and the arithmetic functions from `std.core` are imported
@@ -569,11 +570,18 @@ Integer literals have type `I32`.
 capacity. String literals have this canonical type. Until Staple gains
 move/drop semantics, allocated string buffers live until process exit.
 
-`CChar` and `CString` are public opaque types in `std.cinterop`. Source code
-must import them explicitly, for example with `use std.cinterop.*`. `CString`
-is a raw pointer to NUL-terminated bytes. `string_from_c_string` validates and
-copies UTF-8 into a `String`; `string_to_c_string` copies a `String`, appends a
-terminator, and traps on an interior NUL byte. Invalid UTF-8 also traps.
+`CChar`, `CString`, and the generic `CPointer` constructor are public opaque
+types in `std.cinterop`. Source code must import them explicitly, for example
+with `use std.cinterop.*`. `CPointer T` is the language's C pointer type; the
+pointee is a compile-time argument with no runtime field. There are no `*T` or
+`*const T` type forms and Staple does not distinguish mutable and const C
+pointers.
+
+`CString` remains a distinct raw pointer to NUL-terminated bytes. It is
+compatible with `CPointer CChar`, but an arbitrary `CPointer CChar` is not
+assumed to be NUL terminated. `string_from_c_string` validates and copies UTF-8
+into a `String`; `string_to_c_string` copies a `String`, appends a terminator,
+and traps on an interior NUL byte. Invalid UTF-8 also traps.
 
 An underscore asks stapler to infer a type:
 
@@ -582,21 +590,21 @@ _
 _ -> I32
 ```
 
-The currently supported type syntax also includes pointer types, product types,
-variadic markers in external function signatures, and function types:
+The currently supported type syntax also includes type application, product
+types, variadic markers in external function signatures, and function types:
 
 ```staple
-*const CChar
+CPointer CChar
 (I32, String)
-(*const CChar, ...) -> I32
+(CPointer CChar, ...) -> I32
 ```
 
 `...` denotes the variadic portion of an external function parameter product. Its
 meaning outside foreign declarations is currently unspecified.
 
 `I32` is currently the only standard-library numeric type. The future numeric
-type set, mutability model for pointers, type inference rules, and broader type
-compatibility rules remain unspecified.
+type set, type inference rules, and broader type compatibility rules remain
+unspecified.
 
 ### Type declarations
 
@@ -609,9 +617,17 @@ An opaque type has no source-level representation:
 pub type Handle
 ```
 
-Opaque values can be named and used behind pointers. A by-value use requires a
-representation supplied by the compiler or another future implementation
-mechanism. `std.core.I32` is an opaque declaration whose representation is
+An opaque type may also accept compile-time arguments when its body is the
+`opaque` marker:
+
+```staple
+pub type CPointer = Pointee => opaque
+```
+
+Arguments are part of nominal identity, so two applications with different
+arguments are distinct. A by-value use requires a representation supplied by
+the compiler or another future implementation mechanism. `std.core.I32` and
+`std.cinterop.CPointer` are opaque declarations whose representations are
 provided by Stapler.
 
 #### `type`
@@ -637,8 +653,8 @@ Construction is a zero-cost conversion into the nominal type. No unwrap
 operation is generated, and the constructor is not exported even when the type
 is public. Opaque declarations have no constructor.
 
-Represented types and aliases may introduce compile-time parameters using the
-same binder syntax as generic functions:
+Represented types, aliases, and explicitly opaque declarations may introduce
+compile-time parameters using the same binder syntax as generic functions:
 
 ```staple
 type Box = T => (value: T)
@@ -687,7 +703,7 @@ string following `extern`:
 use std.cinterop.*
 
 extern "c" {
-    let printf: (*const CChar, ...) -> I32
+    let printf: (CPointer CChar, ...) -> I32
 }
 ```
 

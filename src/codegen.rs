@@ -2031,7 +2031,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )),
             CheckedType::CString => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::String => Ok(self.string_type().into()),
-            CheckedType::Pointer { .. } => {
+            CheckedType::CPointer { .. } => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             CheckedType::Function(_) => Ok(self.closure_type().into()),

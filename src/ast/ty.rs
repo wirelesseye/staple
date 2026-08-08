@@ -4,7 +4,6 @@ use super::Syntax;
 pub enum Type {
     Inferred(InferredType),
     Named(NamedType),
-    Pointer(PointerType),
     Product(ProductType),
     Function(FunctionType),
     Application(TypeApplication),
@@ -15,7 +14,6 @@ impl Type {
         match self {
             Self::Inferred(ty) => &ty.syntax,
             Self::Named(ty) => &ty.syntax,
-            Self::Pointer(ty) => &ty.syntax,
             Self::Product(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
             Self::Application(ty) => &ty.syntax,
@@ -85,13 +83,6 @@ pub struct NamedType {
     pub syntax: Syntax,
     pub namespace: Option<String>,
     pub name: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PointerType {
-    pub syntax: Syntax,
-    pub is_const: bool,
-    pub pointee: Box<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

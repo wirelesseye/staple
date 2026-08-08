@@ -77,6 +77,25 @@ fn parses_opaque_type_declarations() {
 }
 
 #[test]
+fn parses_generic_opaque_type_declarations() {
+    let root =
+        parse("pub type CPointer = Pointee => opaque\n").expect("generic opaque type should parse");
+    assert!(matches!(
+        root.items[0],
+        Item::TypeDeclaration(ref declaration)
+            if declaration.kind == TypeDeclarationKind::Opaque
+                && declaration.type_parameters.len() == 1
+                && declaration.underlying.is_none()
+    ));
+}
+
+#[test]
+fn rejects_removed_pointer_type_syntax() {
+    assert!(parse("let pointer: *I32\n").is_err());
+    assert!(parse("let pointer: *const I32\n").is_err());
+}
+
+#[test]
 fn parses_opaque_macro_declarations() {
     let root = parse("pub macro c_string\n").expect("macro declaration should parse");
     assert!(matches!(
