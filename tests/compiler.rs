@@ -116,6 +116,142 @@ fn infers_and_lowers_nominal_sums_with_propagation() {
 }
 
 #[test]
+fn exhaustively_matches_sum_values_and_destructures_payloads() {
+    let module = type_check(concat!(
+        "pub(repr) type IOError = String\n",
+        "def choose = result: Ok I32 | IOError => match result {\n",
+        "  Ok value => value,\n",
+        "  IOError _ => 0,\n",
+        "}\n",
+        "choose (Ok 7)\n",
+    ));
+    let choose = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "choose")
+        .expect("choose function");
+    assert_eq!(
+        *module
+            .type_of_function(choose.id)
+            .expect("choose type")
+            .result,
+        CheckedType::I32
+    );
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("match should generate LLVM");
+    assert!(llvm.contains("match.tag"));
+    assert!(llvm.contains("switch i32"));
+    assert!(llvm.contains("match.value"));
+}
+
+#[test]
+fn matches_singletons_and_joins_nominal_arm_results() {
+    let module = type_check(concat!(
+        "pub(repr) type IOError = String\n",
+        "def choose = value: Bool => match value {\n",
+        "  True() => Ok(1),\n",
+        "  False() => IOError(\"no\"),\n",
+        "}\n",
+        "choose True\n",
+    ));
+    let choose = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "choose")
+        .expect("choose function");
+    let CheckedType::Sum(sum) = module
+        .type_of_function(choose.id)
+        .expect("choose type")
+        .result
+        .as_ref()
+    else {
+        panic!("expected inferred sum result");
+    };
+    assert_eq!(sum.alternatives.len(), 2);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("singleton match should generate LLVM");
+}
+
+#[test]
+fn supports_match_catch_alls_wildcard_parameters_and_returning_arms() {
+    let module = type_check(concat!(
+        "pub(repr) type IOError = String\n",
+        "def preserve: (Ok I32 | IOError) -> Ok I32 | IOError = result => match result {\n",
+        "  Ok value => Ok(value),\n",
+        "  other => other,\n",
+        "}\n",
+        "def discard: I32 -> () = _ => { let _ = 1; () }\n",
+        "def number = value: Bool => match value {\n",
+        "  True() => { return 1 },\n",
+        "  False() => { return 2 },\n",
+        "}\n",
+        "def subject_returns = () => match { return 3 } {\n",
+        "  True() => 1,\n",
+        "  False() => 2,\n",
+        "}\n",
+        "preserve (Ok 1)\n",
+        "discard 1\n",
+        "number False\n",
+        "subject_returns ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("catch-all and returning matches should generate LLVM");
+}
+
+#[test]
+fn rejects_invalid_match_subjects_and_coverage() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("match 1 { value => value, }\n"))
+        .expect_err("non-sum subjects should fail");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("match subject must have a sum type")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "pub(repr) type IOError = String\n",
+            "def invalid = result: Ok I32 | IOError => match result { Ok value => value, }\n",
+            "invalid (Ok 1)\n",
+        )))
+        .expect_err("non-exhaustive matches should fail");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("non-exhaustive match")
+            && diagnostic.message.contains("IOError")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "pub(repr) type IOError = String\n",
+            "def invalid = result: Ok I32 | IOError => match result {\n",
+            "  Ok value => value,\n",
+            "  Ok other => other,\n",
+            "  _ => 0,\n",
+            "  IOError _ => 1,\n",
+            "}\n",
+            "invalid (Ok 1)\n",
+        )))
+        .expect_err("unreachable match arms should fail");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("unreachable duplicate match arm")
+    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("unreachable match arm") })
+    );
+}
+
+#[test]
 fn injects_and_widens_sum_values() {
     let module = type_check(concat!(
         "pub(repr) type IOError = String\n",

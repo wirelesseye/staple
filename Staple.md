@@ -620,6 +620,50 @@ determines the block's value: a final expression supplies its value, while an
 empty block or a block ending in a non-expression supplies `()`. A semicolon
 after the final expression does not discard that value.
 
+## Match expressions
+
+`match` exhaustively selects an alternative of an open sum and produces a
+value:
+
+```staple
+def unwrap = result: Ok I32 | IOError => match result {
+    Ok value => value,
+    IOError _ => 0,
+}
+```
+
+The subject is evaluated exactly once and must have a sum type. Every arm has
+the form `<pattern> => <expression>`. Arms are separated by commas, and a
+trailing comma is permitted. Each arm has its own scope, so names introduced by
+its pattern are visible only in that arm's expression.
+
+A nominal pattern selects one sum alternative and may recursively destructure
+its representation with binding, product, nominal, and wildcard patterns. The
+existing empty representation syntax selects singleton alternatives, including
+the standard-library boolean values:
+
+```staple
+match value {
+    True() => "yes",
+    False() => "no",
+}
+```
+
+A binding pattern at the root is a catch-all and binds the complete sum value.
+`_` is a wildcard pattern which matches without binding a name; wildcards may
+also be used in function parameters and destructuring bindings.
+
+A match must cover every alternative, either with one nominal arm per
+alternative or with a catch-all. Duplicate alternatives and arms following a
+catch-all are errors. Literal patterns, alternative patterns, and match guards
+are not currently supported.
+
+An expected type is applied to every arm. Without one, equal arm types remain
+that type; differing represented nominal results are joined into an open sum by
+the same rules used for inferred function results. Arms which return from the
+enclosing function do not contribute to the match value type. If every arm
+returns, the match itself does not continue.
+
 ## Return statements
 
 `return` immediately exits the nearest enclosing function with the value of

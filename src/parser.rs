@@ -38,6 +38,7 @@ struct Grammar {
     next_syntax_id: usize,
     newline_terminates_expression: bool,
     newline_terminates_type: bool,
+    brace_terminates_expression: bool,
     source_name: Option<Arc<str>>,
 }
 
@@ -60,6 +61,7 @@ impl Grammar {
             next_syntax_id,
             newline_terminates_expression: false,
             newline_terminates_type: false,
+            brace_terminates_expression: false,
             source_name,
         }
     }
@@ -690,7 +692,11 @@ impl Grammar {
     /// Parses either a binding pattern or a nested product pattern.
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         let start = self.position;
-        if self.eat(TokenKind::LParen) {
+        if self.eat(TokenKind::Underscore) {
+            Ok(Pattern::Wildcard(WildcardPattern {
+                syntax: self.syntax(start),
+            }))
+        } else if self.eat(TokenKind::LParen) {
             let mut elements = Vec::new();
             if !self.at(TokenKind::RParen) {
                 loop {
@@ -723,7 +729,10 @@ impl Grammar {
         };
         let adjacent_argument = !(self.newline_terminates_expression
             && self.has_newline_before_next_token())
-            && matches!(self.peek(), Some(TokenKind::Identifier | TokenKind::LParen));
+            && matches!(
+                self.peek(),
+                Some(TokenKind::Identifier | TokenKind::Underscore | TokenKind::LParen)
+            );
         if namespace.is_some() && !adjacent_argument {
             return Err(self.error("expected an argument after nominal pattern"));
         }
@@ -984,6 +993,7 @@ impl Grammar {
     /// Parses a primary expression without call, access, or binary operators.
     fn parse_atom(&mut self) -> Result<Expression, ParseError> {
         match self.peek() {
+            Some(TokenKind::Match) => self.parse_match_expression().map(Expression::Match),
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
             Some(TokenKind::LParen) if self.parenthesized_operator() => self.parse_operator_value(),
             Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
@@ -1015,6 +1025,44 @@ impl Grammar {
         }
     }
 
+    fn parse_match_expression(&mut self) -> Result<MatchExpression, ParseError> {
+        let start = self.position;
+        self.expect(TokenKind::Match, "expected `match`")?;
+        let previous = self.brace_terminates_expression;
+        self.brace_terminates_expression = true;
+        let subject = self.parse_expression();
+        self.brace_terminates_expression = previous;
+        let subject = Box::new(subject?);
+        self.expect(TokenKind::LBrace, "expected `{` before match arms")?;
+        let mut arms = Vec::new();
+        while !self.at(TokenKind::RBrace) {
+            if self.peek().is_none() {
+                return Err(self.error("unterminated match expression"));
+            }
+            let arm_start = self.position;
+            let pattern = self.parse_pattern()?;
+            self.expect(TokenKind::FatArrow, "expected `=>` after match pattern")?;
+            let body = self.parse_expression()?;
+            arms.push(MatchArm {
+                syntax: self.syntax(arm_start),
+                pattern,
+                body,
+            });
+            if !self.eat(TokenKind::Comma) && !self.at(TokenKind::RBrace) {
+                return Err(self.error("expected `,` after match arm"));
+            }
+        }
+        self.expect(TokenKind::RBrace, "expected `}` after match arms")?;
+        if arms.is_empty() {
+            return Err(self.error("a match expression requires at least one arm"));
+        }
+        Ok(MatchExpression {
+            syntax: self.syntax(start),
+            subject,
+            arms,
+        })
+    }
+
     /// Parses a brace-delimited sequence of statements.
     fn parse_block_expression(&mut self) -> Result<BlockExpression, ParseError> {
         let start = self.position;
@@ -1038,6 +1086,8 @@ impl Grammar {
     fn parse_product_expression(&mut self) -> Result<ProductExpression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LParen, "expected `(`")?;
+        let previous_brace_termination = self.brace_terminates_expression;
+        self.brace_terminates_expression = false;
         let mut elements = Vec::new();
         if !self.at(TokenKind::RParen) {
             loop {
@@ -1062,7 +1112,9 @@ impl Grammar {
                 }
             }
         }
-        self.expect(TokenKind::RParen, "expected `)` after product")?;
+        let close = self.expect(TokenKind::RParen, "expected `)` after product");
+        self.brace_terminates_expression = previous_brace_termination;
+        close?;
         Ok(ProductExpression {
             syntax: self.syntax(start),
             elements,
@@ -1080,11 +1132,15 @@ impl Grammar {
         {
             return false;
         }
+        if self.brace_terminates_expression && self.peek() == Some(TokenKind::LBrace) {
+            return false;
+        }
         matches!(
             self.peek(),
             Some(
                 TokenKind::LBrace
                     | TokenKind::LParen
+                    | TokenKind::Match
                     | TokenKind::Identifier
                     | TokenKind::String
                     | TokenKind::Integer

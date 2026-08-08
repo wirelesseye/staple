@@ -33,6 +33,19 @@ pub struct CheckedPropagation {
     pub result: CheckedType,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedMatch {
+    pub source: CheckedType,
+    pub arms: Vec<CheckedMatchArm>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckedMatchArm {
+    Alternative(usize),
+    CatchAll,
+    Invalid,
+}
+
 #[derive(Debug, Clone)]
 struct ReturnContribution {
     syntax: Option<SyntaxId>,
@@ -287,6 +300,7 @@ pub struct TypedModule {
     trait_implementations: Vec<CheckedTraitImplementation>,
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
     propagations: HashMap<SyntaxId, CheckedPropagation>,
+    matches: HashMap<SyntaxId, CheckedMatch>,
 }
 
 impl TypedModule {
@@ -320,6 +334,10 @@ impl TypedModule {
 
     pub fn propagation_for(&self, syntax_id: SyntaxId) -> Option<&CheckedPropagation> {
         self.propagations.get(&syntax_id)
+    }
+
+    pub fn match_for(&self, syntax_id: SyntaxId) -> Option<&CheckedMatch> {
+        self.matches.get(&syntax_id)
     }
 
     pub fn type_of_symbol(&self, symbol: SymbolId) -> Option<&CheckedType> {
@@ -368,6 +386,7 @@ pub struct TypeChecker {
     impl_function_types: HashMap<FunctionId, CheckedFunctionType>,
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
     propagations: HashMap<SyntaxId, CheckedPropagation>,
+    matches: HashMap<SyntaxId, CheckedMatch>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     top_level_bindings: HashMap<SymbolId, Binding>,
@@ -431,6 +450,7 @@ impl TypeChecker {
             trait_implementations: self.trait_implementations,
             expression_coercions: self.expression_coercions,
             propagations: self.propagations,
+            matches: self.matches,
         })
     }
 
@@ -887,6 +907,7 @@ impl TypeChecker {
         value_type: &CheckedType,
     ) {
         match pattern {
+            Pattern::Wildcard(_) => {}
             Pattern::Binding(binding) => {
                 let value_type = if matches!(binding.ty, Type::Inferred(_)) {
                     value_type.clone()
@@ -1232,6 +1253,7 @@ impl TypeChecker {
                     .map(CheckedType::Function)
                     .unwrap_or(CheckedType::Error)
             }
+            Expression::Match(match_) => self.check_match_expression(module, match_, expected),
             Expression::Block(block) => {
                 let mut result = CheckedType::empty_product();
                 let mut block_returned = false;
@@ -1533,6 +1555,153 @@ impl TypeChecker {
             }
         };
         self.finish_expression_type(expression, natural_type, expected)
+    }
+
+    fn check_match_expression(
+        &mut self,
+        module: &ResolvedModule,
+        match_: &crate::MatchExpression,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        let source = self.check_expression(module, &match_.subject);
+        if self.did_return {
+            return CheckedType::empty_product();
+        }
+        let CheckedType::Sum(sum) = &source else {
+            if source != CheckedType::Error {
+                self.diagnostics.push(Diagnostic::new(
+                    match_.subject.syntax().span.clone(),
+                    format!("a match subject must have a sum type, found `{source}`"),
+                ));
+            }
+            return CheckedType::Error;
+        };
+
+        let outer_reachable = self.return_reachable;
+        let mut covered = HashSet::new();
+        let mut catch_all = false;
+        let mut checked_arms = Vec::with_capacity(match_.arms.len());
+        let mut values = Vec::new();
+        let mut every_arm_returns = true;
+
+        for arm in &match_.arms {
+            let checked_arm = if catch_all {
+                self.diagnostics.push(Diagnostic::new(
+                    arm.pattern.syntax().span.clone(),
+                    "unreachable match arm",
+                ));
+                CheckedMatchArm::Invalid
+            } else {
+                match &arm.pattern {
+                    Pattern::Binding(_) | Pattern::Wildcard(_) => {
+                        catch_all = true;
+                        self.bind_pattern_types(module, &arm.pattern, &source);
+                        CheckedMatchArm::CatchAll
+                    }
+                    Pattern::Nominal(pattern) => {
+                        if let Some(expected_id) = module.type_for_pattern(pattern.syntax.id) {
+                            let selected = sum.alternatives.iter().enumerate().find_map(
+                                |(index, alternative)| match alternative {
+                                    CheckedType::Distinct {
+                                        id, representation, ..
+                                    } if *id == expected_id => Some((index, representation)),
+                                    _ => None,
+                                },
+                            );
+                            if let Some((index, representation)) = selected {
+                                if !covered.insert(index) {
+                                    self.diagnostics.push(Diagnostic::new(
+                                        pattern.syntax.span.clone(),
+                                        format!(
+                                            "unreachable duplicate match arm for `{}`",
+                                            pattern.name
+                                        ),
+                                    ));
+                                }
+                                self.bind_pattern_types(module, &pattern.argument, representation);
+                                CheckedMatchArm::Alternative(index)
+                            } else {
+                                self.diagnostics.push(Diagnostic::new(
+                                    pattern.syntax.span.clone(),
+                                    format!(
+                                        "nominal pattern `{}` does not select an alternative of `{source}`",
+                                        pattern.name
+                                    ),
+                                ));
+                                CheckedMatchArm::Invalid
+                            }
+                        } else {
+                            CheckedMatchArm::Invalid
+                        }
+                    }
+                    Pattern::Product(_) => {
+                        self.diagnostics.push(Diagnostic::new(
+                            arm.pattern.syntax().span.clone(),
+                            "a match arm must begin with a nominal, binding, or wildcard pattern",
+                        ));
+                        CheckedMatchArm::Invalid
+                    }
+                }
+            };
+
+            self.did_return = false;
+            self.return_reachable = outer_reachable;
+            let value_type = self.check_expression_expected(module, &arm.body, expected);
+            if self.did_return {
+                // This arm contributes no value to the match result.
+            } else {
+                every_arm_returns = false;
+                values.push(ReturnContribution {
+                    syntax: Some(arm.body.syntax().id),
+                    span: arm.body.syntax().span.clone(),
+                    value_type,
+                });
+            }
+            checked_arms.push(checked_arm);
+        }
+
+        if !catch_all && covered.len() != sum.alternatives.len() {
+            let missing = sum
+                .alternatives
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !covered.contains(index))
+                .map(|(_, alternative)| format!("`{alternative}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            self.diagnostics.push(Diagnostic::new(
+                match_.syntax.span.clone(),
+                format!("non-exhaustive match; missing {missing}"),
+            ));
+        }
+
+        let result = if every_arm_returns {
+            CheckedType::empty_product()
+        } else if let Some(expected) = expected {
+            expected.clone()
+        } else {
+            self.join_return_contributions(&values, match_.syntax.span.clone())
+        };
+        if expected.is_none() {
+            for value in &values {
+                self.coerce_expression_type(
+                    value.syntax.expect("match arm expression"),
+                    value.value_type.clone(),
+                    &result,
+                    value.span.clone(),
+                );
+            }
+        }
+        self.matches.insert(
+            match_.syntax.id,
+            CheckedMatch {
+                source,
+                arms: checked_arms,
+            },
+        );
+        self.did_return = every_arm_returns;
+        self.return_reachable = outer_reachable;
+        result
     }
 
     fn finish_expression_type(

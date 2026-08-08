@@ -11,6 +11,47 @@ fn statement(item: &Item) -> &Statement {
 }
 
 #[test]
+fn parses_match_expressions_and_wildcards_losslessly() {
+    let source = concat!(
+        "def choose = result: Ok I32 | IOError => match result {\n",
+        "  Ok value => value,\n",
+        "  IOError (message, _) => { message },\n",
+        "}\n",
+        "def discard: I32 -> () = _ => ()\n",
+    );
+    let root = parse(source).expect("match expression should parse");
+    assert_eq!(root.text(), source);
+    let Statement::Binding(choose) = statement(&root.items[0]) else {
+        panic!("expected choose binding");
+    };
+    let Some(Expression::Function(function)) = &choose.value else {
+        panic!("expected choose function");
+    };
+    let Expression::Match(match_) = function.body.as_ref() else {
+        panic!("expected match expression");
+    };
+    assert_eq!(match_.arms.len(), 2);
+    assert!(matches!(match_.arms[0].pattern, Pattern::Nominal(_)));
+    assert!(matches!(match_.arms[1].pattern, Pattern::Nominal(_)));
+
+    let Statement::Binding(discard) = statement(&root.items[1]) else {
+        panic!("expected discard binding");
+    };
+    let Some(Expression::Function(function)) = &discard.value else {
+        panic!("expected discard function");
+    };
+    assert!(matches!(function.pattern, Pattern::Wildcard(_)));
+}
+
+#[test]
+fn rejects_malformed_match_expressions() {
+    assert!(parse("match value {}\n").is_err());
+    assert!(parse("match value { Ok x x, IOError y => y }\n").is_err());
+    assert!(parse("match value { Ok x => 1 IOError y => y }\n").is_err());
+    assert!(parse("match value { Ok x => x,\n").is_err());
+}
+
+#[test]
 fn parses_traits_implementations_and_bounds_losslessly() {
     let source = concat!(
         "pub trait ToString = T => {\n",

@@ -3,6 +3,7 @@ use super::{Pattern, Statement, Syntax, Type};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
     Function(Box<FunctionExpression>),
+    Match(MatchExpression),
     Block(BlockExpression),
     Product(ProductExpression),
     Call(CallExpression),
@@ -17,6 +18,7 @@ impl Expression {
     pub fn syntax(&self) -> &Syntax {
         match self {
             Self::Function(expression) => &expression.syntax,
+            Self::Match(expression) => &expression.syntax,
             Self::Block(expression) => &expression.syntax,
             Self::Product(expression) => &expression.syntax,
             Self::Call(expression) => &expression.syntax,
@@ -27,6 +29,20 @@ impl Expression {
             Self::Integer(expression) => &expression.syntax,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchExpression {
+    pub syntax: Syntax,
+    pub subject: Box<Expression>,
+    pub arms: Vec<MatchArm>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MatchArm {
+    pub syntax: Syntax,
+    pub pattern: Pattern,
+    pub body: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

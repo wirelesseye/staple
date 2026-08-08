@@ -27,6 +27,7 @@ pub enum TokenKind {
     Macro,
     Trait,
     Impl,
+    Match,
     Alias,
     Opaque,
     Infix,

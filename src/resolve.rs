@@ -859,6 +859,7 @@ impl NameResolver {
 
     fn allocate_pattern_symbols(&mut self, pattern: &Pattern) {
         match pattern {
+            Pattern::Wildcard(_) => {}
             Pattern::Binding(binding) => {
                 let symbol = SymbolId(self.next_symbol_id);
                 self.next_symbol_id += 1;
@@ -1398,6 +1399,16 @@ impl NameResolver {
                     body: (*function.body).clone(),
                 });
             }
+            Expression::Match(match_) => {
+                self.resolve_expression(&match_.subject, None, None);
+                for arm in &match_.arms {
+                    self.resolve_pattern_types(&arm.pattern);
+                    self.push_scope();
+                    self.declare_pattern(&arm.pattern);
+                    self.resolve_expression(&arm.body, expected_type, None);
+                    self.pop_scope();
+                }
+            }
             Expression::Block(block) => self.resolve_block(block),
             Expression::Product(product) => {
                 for element in &product.elements {
@@ -1601,6 +1612,7 @@ impl NameResolver {
 
     fn resolve_pattern_types(&mut self, pattern: &Pattern) {
         match pattern {
+            Pattern::Wildcard(_) => {}
             Pattern::Binding(binding) => self.resolve_type(&binding.ty),
             Pattern::Product(product) => {
                 for element in &product.elements {
@@ -1772,6 +1784,7 @@ impl NameResolver {
 
     fn declare_pattern(&mut self, pattern: &Pattern) {
         match pattern {
+            Pattern::Wildcard(_) => {}
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied() {
                     self.declare_symbol(

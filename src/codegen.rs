@@ -11,15 +11,16 @@ use inkwell::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
     },
     types::BasicType,
-    values::{AnyValue, AnyValueEnum, BasicValueEnum},
+    values::{AnyValue, AnyValueEnum, BasicValue, BasicValueEnum},
 };
 
 use crate::typecheck::{contains_type_parameter, infer_type_parameters, substitute_type};
 use crate::{
-    Accessor, CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic,
-    Expression, FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType,
-    IntrinsicFunction, Item, ModuleId, Pattern, PatternBindingKind, ProductExpression,
-    ResolvedFunction, Span, Statement, SymbolId, TypeParameterId, TypedModule,
+    Accessor, CallExpression, CheckedFunctionType, CheckedMatchArm, CheckedProductType,
+    CheckedType, Diagnostic, Expression, FunctionId, IntegerBinaryOperation,
+    IntegerCompareOperation, IntegerType, IntrinsicFunction, Item, ModuleId, Pattern,
+    PatternBindingKind, ProductExpression, ResolvedFunction, Span, Statement, SymbolId,
+    TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -288,6 +289,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pattern: &Pattern,
     ) -> CodeGenerationResult<()> {
         match pattern {
+            Pattern::Wildcard(_) => {}
             Pattern::Binding(binding) => {
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     return Ok(());
@@ -563,7 +565,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         values: &[BasicValueEnum<'context>],
     ) -> CodeGenerationResult<()> {
         match pattern {
-            Pattern::Binding(_) | Pattern::Nominal(_) => {
+            Pattern::Binding(_) | Pattern::Wildcard(_) | Pattern::Nominal(_) => {
                 let value = self.build_product_value(values, pattern.syntax().span.clone())?;
                 self.bind_pattern_value(environment, pattern, value)
             }
@@ -590,6 +592,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         value: BasicValueEnum<'context>,
     ) -> CodeGenerationResult<()> {
         match pattern {
+            Pattern::Wildcard(_) => Ok(()),
             Pattern::Binding(binding) => {
                 value.set_name(&binding.name);
                 let symbol = self
@@ -739,6 +742,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pattern: &Pattern,
     ) -> CodeGenerationResult<()> {
         match pattern {
+            Pattern::Wildcard(_) => {}
             Pattern::Binding(binding) => {
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     return Ok(());
@@ -1034,6 +1038,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.build_closure(environment, id, function.syntax.span.clone())
                     .map(|closure| closure.as_any_value_enum())
             }
+            Expression::Match(match_) => self.compile_match_expression(environment, match_),
             Expression::Block(block) => {
                 let mut value = None;
                 for statement in &block.statements {
@@ -1247,6 +1252,162 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .struct_type(&[], true)
             .const_zero()
             .as_any_value_enum()
+    }
+
+    fn compile_match_expression(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        match_: &crate::MatchExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let subject = self.compile_expression(environment, &match_.subject)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
+        let checked = self
+            .typed_module
+            .match_for(match_.syntax.id)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(match_.syntax.span.clone(), "missing checked match"))?;
+        let source = substitute_type(checked.source, &self.active_type_substitutions);
+        let CheckedType::Sum(sum) = &source else {
+            return Err(Diagnostic::new(
+                match_.subject.syntax().span.clone(),
+                "match subject is not a checked sum",
+            ));
+        };
+        let Some(BasicValueEnum::StructValue(sum_value)) = value_as_basic(subject) else {
+            return Err(Diagnostic::new(
+                match_.subject.syntax().span.clone(),
+                "match subject has an invalid sum representation",
+            ));
+        };
+        let tag = self
+            .builder
+            .build_extract_value(sum_value, 0, "match.tag")
+            .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?
+            .into_int_value();
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| {
+                Diagnostic::new(match_.syntax.span.clone(), "match is not in a function")
+            })?;
+        let merge_block = self.context.append_basic_block(function, "match.merge");
+        let arm_blocks = match_
+            .arms
+            .iter()
+            .map(|_| self.context.append_basic_block(function, "match.arm"))
+            .collect::<Vec<_>>();
+        let catch_all = checked
+            .arms
+            .iter()
+            .position(|arm| *arm == CheckedMatchArm::CatchAll);
+        let default_block = catch_all.map(|index| arm_blocks[index]).unwrap_or_else(|| {
+            self.context
+                .append_basic_block(function, "match.unreachable")
+        });
+        let cases = checked
+            .arms
+            .iter()
+            .enumerate()
+            .filter_map(|(arm, checked)| match checked {
+                CheckedMatchArm::Alternative(index) => Some((
+                    self.context.i32_type().const_int(*index as u64, false),
+                    arm_blocks[arm],
+                )),
+                CheckedMatchArm::CatchAll | CheckedMatchArm::Invalid => None,
+            })
+            .collect::<Vec<_>>();
+        self.builder
+            .build_switch(tag, default_block, &cases)
+            .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?;
+
+        let mut incoming = Vec::new();
+        for ((arm, checked_arm), arm_block) in
+            match_.arms.iter().zip(&checked.arms).zip(&arm_blocks)
+        {
+            self.builder.position_at_end(*arm_block);
+            environment.did_return = false;
+            match checked_arm {
+                CheckedMatchArm::Alternative(index) => {
+                    let payload = self.extract_sum_alternative(
+                        sum_value,
+                        sum,
+                        *index,
+                        arm.pattern.syntax().span.clone(),
+                    )?;
+                    let Pattern::Nominal(pattern) = &arm.pattern else {
+                        return Err(Diagnostic::new(
+                            arm.pattern.syntax().span.clone(),
+                            "checked nominal match arm has a non-nominal pattern",
+                        ));
+                    };
+                    self.bind_pattern_value(environment, &pattern.argument, payload)?;
+                }
+                CheckedMatchArm::CatchAll => {
+                    self.bind_pattern_value(environment, &arm.pattern, sum_value.into())?;
+                }
+                CheckedMatchArm::Invalid => {
+                    return Err(Diagnostic::new(
+                        arm.pattern.syntax().span.clone(),
+                        "cannot generate an invalid match arm",
+                    ));
+                }
+            }
+            let value = self.compile_expression(environment, &arm.body)?;
+            if !environment.did_return {
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        arm.body.syntax().span.clone(),
+                        "match arm result is not first-class",
+                    )
+                })?;
+                self.builder
+                    .build_unconditional_branch(merge_block)
+                    .map_err(|error| Diagnostic::new(arm.syntax.span.clone(), error.to_string()))?;
+                let predecessor = self.builder.get_insert_block().expect("match arm block");
+                incoming.push((value, predecessor));
+            }
+        }
+
+        if catch_all.is_none() {
+            self.builder.position_at_end(default_block);
+            self.builder
+                .build_unreachable()
+                .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?;
+        }
+        self.builder.position_at_end(merge_block);
+        if incoming.is_empty() {
+            self.builder
+                .build_unreachable()
+                .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?;
+            environment.did_return = true;
+            return Ok(self.unit_value());
+        }
+        environment.did_return = false;
+        let result = self
+            .typed_module
+            .type_of_expression(match_.syntax.id)
+            .cloned()
+            .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    match_.syntax.span.clone(),
+                    "match has no concrete result type",
+                )
+            })?;
+        let result_type = self.compile_type(&result)?;
+        let phi = self
+            .builder
+            .build_phi(result_type, "match.value")
+            .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?;
+        let incoming = incoming
+            .iter()
+            .map(|(value, block)| (value as &dyn BasicValue<'context>, *block))
+            .collect::<Vec<_>>();
+        phi.add_incoming(&incoming);
+        Ok(phi.as_basic_value().as_any_value_enum())
     }
 
     fn coerce_sum_value(

@@ -3,6 +3,7 @@ use super::{ProductType, Syntax, Type, TypeElement};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
     Binding(BindingPattern),
+    Wildcard(WildcardPattern),
     Product(ProductPattern),
     Nominal(NominalPattern),
 }
@@ -11,6 +12,7 @@ impl Pattern {
     pub fn syntax(&self) -> &Syntax {
         match self {
             Self::Binding(pattern) => &pattern.syntax,
+            Self::Wildcard(pattern) => &pattern.syntax,
             Self::Product(pattern) => &pattern.syntax,
             Self::Nominal(pattern) => &pattern.syntax,
         }
@@ -19,6 +21,9 @@ impl Pattern {
     pub fn ty(&self) -> Type {
         match self {
             Self::Binding(pattern) => pattern.ty.clone(),
+            Self::Wildcard(pattern) => Type::Inferred(super::InferredType {
+                syntax: pattern.syntax.clone(),
+            }),
             Self::Product(pattern) => {
                 let elements = pattern.elements.iter().map(Self::type_element).collect();
                 Type::Product(ProductType {
@@ -40,12 +45,18 @@ impl Pattern {
             syntax: self.syntax().clone(),
             name: match self {
                 Self::Binding(pattern) => Some(pattern.name.clone()),
+                Self::Wildcard(_) => None,
                 Self::Product(_) => None,
                 Self::Nominal(_) => None,
             },
             ty: self.ty(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WildcardPattern {
+    pub syntax: Syntax,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
