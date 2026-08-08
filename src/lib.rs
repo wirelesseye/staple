@@ -1,11 +1,13 @@
 mod ast;
 mod codegen;
 mod combinator;
+mod diagnostic;
 mod lexer;
 mod parser;
-mod normalise;
+mod resolve;
 
 pub use ast::*;
-pub use normalise::*;
 pub use codegen::*;
+pub use diagnostic::*;
 pub use parser::parse;
+pub use resolve::*;

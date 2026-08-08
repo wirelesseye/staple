@@ -1,5 +1,13 @@
 use std::fmt;
 use std::ops::Range;
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SyntaxId(pub usize);
+
+impl SyntaxId {
+    pub const COMPILER: Self = Self(usize::MAX);
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
@@ -58,7 +66,7 @@ impl Span {
 
 impl From<Range<usize>> for Span {
     fn from(value: Range<usize>) -> Self {
-        Self::User(value.into())
+        Self::User(value)
     }
 }
 
@@ -72,22 +80,30 @@ pub struct SyntaxToken {
 /// The exact source covered by an AST node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Syntax {
+    pub id: SyntaxId,
     pub span: Span,
-    pub tokens: Vec<SyntaxToken>,
+    pub(crate) tokens: Arc<[SyntaxToken]>,
+    pub(crate) token_range: Range<usize>,
 }
 
 impl Syntax {
     pub fn text(&self) -> String {
-        self.tokens
+        self.tokens()
             .iter()
             .map(|token| token.text.as_str())
             .collect()
     }
 
+    pub fn tokens(&self) -> &[SyntaxToken] {
+        &self.tokens[self.token_range.clone()]
+    }
+
     pub fn compiler() -> Self {
         Self {
+            id: SyntaxId::COMPILER,
             span: Span::Compiler,
-            tokens: vec![],
+            tokens: Arc::from([]),
+            token_range: 0..0,
         }
     }
 }
@@ -96,8 +112,6 @@ impl Syntax {
 pub struct Module {
     pub syntax: Syntax,
     pub items: Vec<Item>,
-    pub fn_decls: Vec<FunctionDefinition>,
-    pub top_stmts: Vec<Statement>,
 }
 
 impl Module {
@@ -110,7 +124,7 @@ impl Module {
 pub enum Item {
     ExternBlock(ExternBlock),
     TypeDeclaration(TypeDeclaration),
-    Statement(Statement),
+    Statement(Box<Statement>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -154,7 +168,6 @@ pub struct Binding {
     pub name: String,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
-    pub symbol_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -193,11 +206,16 @@ impl InferredType {
     }
 }
 
+impl Default for InferredType {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NamedType {
     pub syntax: Syntax,
     pub name: String,
-    pub symbol_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -270,10 +288,6 @@ impl Expression {
             Self::Integer(expression) => &expression.syntax,
         }
     }
-
-    pub fn ty(&self) -> Option<Type> {
-        None
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,7 +295,6 @@ pub struct FunctionExpression {
     pub syntax: Syntax,
     pub parameter: Parameter,
     pub body: Box<Expression>,
-    pub fn_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -343,7 +356,6 @@ pub struct BlockExpression {
 pub struct ListExpression {
     pub syntax: Syntax,
     pub elements: Vec<ListElement>,
-    pub ty: Option<ListType>,
 }
 
 impl ListExpression {
@@ -351,7 +363,6 @@ impl ListExpression {
         Self {
             syntax: Syntax::compiler(),
             elements: vec![],
-            ty: None,
         }
     }
 }
@@ -403,7 +414,6 @@ pub struct BinaryExpression {
 pub struct NameExpression {
     pub syntax: Syntax,
     pub name: String,
-    pub symbol_id: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -418,13 +428,6 @@ pub struct IntegerExpression {
     pub syntax: Syntax,
     /// The literal exactly as written.
     pub literal: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FunctionDefinition {
-    pub parameter: Parameter,
-    pub body: Box<Expression>,
-    pub ty: FunctionType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

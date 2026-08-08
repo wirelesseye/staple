@@ -1,25 +1,28 @@
 use crate::ast::*;
 use crate::lexer::lex;
+use std::sync::Arc;
 
 /// Parse a complete staple source file.
 pub fn parse(source: &str) -> Result<Module, ParseError> {
-    let tokens = lex(source);
+    let tokens = Arc::from(lex(source));
     Grammar::new(tokens, source.len()).parse_source_file()
 }
 
 struct Grammar {
-    tokens: Vec<SyntaxToken>,
+    tokens: Arc<[SyntaxToken]>,
     position: usize,
     source_len: usize,
+    next_syntax_id: usize,
     newline_terminates_expression: bool,
 }
 
 impl Grammar {
-    fn new(tokens: Vec<SyntaxToken>, source_len: usize) -> Self {
+    fn new(tokens: Arc<[SyntaxToken]>, source_len: usize) -> Self {
         Self {
             tokens,
             position: 0,
             source_len,
+            next_syntax_id: 0,
             newline_terminates_expression: false,
         }
     }
@@ -34,8 +37,6 @@ impl Grammar {
         Ok(Module {
             syntax: self.syntax(start),
             items,
-            fn_decls: Vec::new(),
-            top_stmts: Vec::new(),
         })
     }
 
@@ -45,7 +46,9 @@ impl Grammar {
         let item = match self.peek() {
             Some(TokenKind::Extern) => self.parse_extern_block().map(Item::ExternBlock),
             Some(TokenKind::Type) => self.parse_type_declaration().map(Item::TypeDeclaration),
-            _ => self.parse_statement().map(Item::Statement),
+            _ => self
+                .parse_statement()
+                .map(|statement| Item::Statement(Box::new(statement))),
         };
         self.newline_terminates_expression = previous;
         item
@@ -133,7 +136,6 @@ impl Grammar {
             name,
             annotation,
             value,
-            symbol_id: None,
         })
     }
 
@@ -155,7 +157,6 @@ impl Grammar {
             syntax: self.syntax(start),
             parameter,
             body,
-            fn_id: None,
         })
     }
 
@@ -275,7 +276,6 @@ impl Grammar {
         Ok(Type::Named(NamedType {
             syntax: self.syntax(start),
             name,
-            symbol_id: None,
         }))
     }
 
@@ -347,7 +347,6 @@ impl Grammar {
                 Ok(Expression::Name(NameExpression {
                     syntax: self.syntax(start),
                     name,
-                    symbol_id: None,
                 }))
             }
             Some(TokenKind::String) => {
@@ -418,7 +417,6 @@ impl Grammar {
         Ok(ListExpression {
             syntax: self.syntax(start),
             elements,
-            ty: None,
         })
     }
 
@@ -517,15 +515,19 @@ impl Grammar {
             .any(|token| token.kind == TokenKind::Newline)
     }
 
-    fn syntax(&self, start: usize) -> Syntax {
-        let tokens = self.tokens[start..self.position].to_vec();
+    fn syntax(&mut self, start: usize) -> Syntax {
+        let tokens = &self.tokens[start..self.position];
         let span_start = tokens
             .first()
             .map_or(self.source_len, |token| token.span.start);
         let span_end = tokens.last().map_or(span_start, |token| token.span.end);
+        let id = SyntaxId(self.next_syntax_id);
+        self.next_syntax_id += 1;
         Syntax {
+            id,
             span: (span_start..span_end).into(),
-            tokens,
+            tokens: Arc::clone(&self.tokens),
+            token_range: start..self.position,
         }
     }
 

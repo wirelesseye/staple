@@ -1,14 +1,16 @@
-use stapler::{CodeGen, Normaliser};
+use stapler::{CodeGenerator, NameResolver};
 
 fn main() {
     let source = include_str!("../examples/hello_world.sta");
-    let mut module = stapler::parse(source).unwrap();
-
-    let mut normaliser = Normaliser::new();
-    normaliser.normalise(&mut module);
+    let module = stapler::parse(source).expect("example should parse");
+    let module = NameResolver::new()
+        .resolve(&module)
+        .expect("example should resolve");
 
     let context = inkwell::context::Context::create();
-    let codegen = CodeGen::new(&context);
-    let result = codegen.compile_module(&module);
+    let code_generator = CodeGenerator::new(&context);
+    let result = code_generator
+        .compile_module(&module)
+        .expect("example should compile");
     println!("{}", result);
 }
