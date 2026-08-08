@@ -1,7 +1,12 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use inkwell::{
-    AddressSpace,
+    AddressSpace, OptimizationLevel,
+    module::Module as LlvmModule,
+    targets::{
+        CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
+    },
     values::{AnyValue, AnyValueEnum, BasicValueEnum},
 };
 
@@ -65,14 +70,58 @@ impl<'context> CodeGenerator<'context> {
     }
 
     pub fn compile_module(&self, module: &TypedModule) -> Result<String, Vec<Diagnostic>> {
+        self.compile_module_for_target(module, None)
+    }
+
+    pub fn compile_module_for_target(
+        &self,
+        module: &TypedModule,
+        target: Option<&str>,
+    ) -> Result<String, Vec<Diagnostic>> {
+        let target_machine =
+            create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
         ModuleEmitter::new(self.context, module)
-            .compile()
+            .compile(&target_machine)
+            .map(|module| module.print_to_string().to_string())
             .map_err(|diagnostic| vec![diagnostic])
+    }
+
+    pub fn emit_object(
+        &self,
+        module: &TypedModule,
+        path: &Path,
+        target: Option<&str>,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if path.to_str().is_none() {
+            return Err(vec![Diagnostic::new(
+                Span::Compiler,
+                "LLVM object output paths must be valid UTF-8",
+            )]);
+        }
+        let target_machine =
+            create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
+        let llvm_module = ModuleEmitter::new(self.context, module)
+            .compile(&target_machine)
+            .map_err(|diagnostic| vec![diagnostic])?;
+        target_machine
+            .write_to_file(&llvm_module, FileType::Object, path)
+            .map_err(|error| {
+                vec![Diagnostic::new(
+                    Span::Compiler,
+                    format!("could not emit `{}`: {error}", path.display()),
+                )]
+            })
     }
 }
 
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
-    fn compile(mut self) -> CodeGenerationResult<String> {
+    fn compile(
+        mut self,
+        target_machine: &TargetMachine,
+    ) -> CodeGenerationResult<LlvmModule<'context>> {
+        self.llvm_module.set_triple(&target_machine.get_triple());
+        self.llvm_module
+            .set_data_layout(&target_machine.get_target_data().get_data_layout());
         self.declare_external_functions()?;
         self.declare_functions()?;
         let typed_module = self.typed_module;
@@ -84,7 +133,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.llvm_module.verify().map_err(|message| {
             Diagnostic::new(Span::Compiler, format!("invalid LLVM module: {message}"))
         })?;
-        Ok(self.llvm_module.print_to_string().to_string())
+        Ok(self.llvm_module)
     }
 
     fn declare_external_functions(&mut self) -> CodeGenerationResult<()> {
@@ -626,6 +675,25 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .collect::<CodeGenerationResult<Vec<_>>>()?;
         Ok(self.context.struct_type(&fields, true))
     }
+}
+
+fn create_target_machine(target: Option<&str>) -> CodeGenerationResult<TargetMachine> {
+    Target::initialize_all(&InitializationConfig::default());
+    let triple = target
+        .map(TargetTriple::create)
+        .unwrap_or_else(TargetMachine::get_default_triple);
+    let target = Target::from_triple(&triple)
+        .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+    target
+        .create_target_machine(
+            &triple,
+            "generic",
+            "",
+            OptimizationLevel::Default,
+            RelocMode::PIC,
+            CodeModel::Default,
+        )
+        .ok_or_else(|| Diagnostic::new(Span::Compiler, "could not create LLVM target machine"))
 }
 
 fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {

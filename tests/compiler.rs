@@ -1,5 +1,6 @@
 use inkwell::context::Context;
 use stapler::{CheckedType, CodeGenerator, NameResolver, TypeChecker, parse};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 fn resolve(source: &str) -> stapler::ResolvedModule {
     let syntax = parse(source).expect("source should parse");
@@ -232,4 +233,25 @@ fn decodes_source_string_literals_before_llvm_generation() {
 
     assert!(llvm.contains("c\"hello\\0A\\00\""));
     assert!(!llvm.contains("\\22hello"));
+}
+
+#[test]
+fn emits_a_native_object_file() {
+    let module = type_check(include_str!("../examples/hello_world.sta"));
+    let context = Context::create();
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should follow the Unix epoch")
+        .as_nanos();
+    let output = std::env::temp_dir().join(format!("stapler-test-{nonce}.o"));
+
+    CodeGenerator::new(&context)
+        .emit_object(&module, &output, None)
+        .expect("native object emission should succeed");
+    let length = std::fs::metadata(&output)
+        .expect("object should exist")
+        .len();
+    std::fs::remove_file(&output).expect("temporary object should be removable");
+
+    assert!(length > 0);
 }

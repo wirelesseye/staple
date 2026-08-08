@@ -85,6 +85,30 @@ statements where they would otherwise form a single expression.
 
 Line comments begin with `//` and continue to the end of the line.
 
+### Compiler output
+
+`stapler` builds a native executable by default. Without `-o`, the output is
+written next to the source file without the `.sta` extension:
+
+```text
+stapler examples/hello_world.sta
+# writes examples/hello_world
+```
+
+It can explicitly write LLVM IR, a native object file, or a linked executable:
+
+```text
+stapler --emit llvm examples/hello_world.sta       # LLVM IR on stdout
+stapler --emit llvm -o hello_world.ll examples/hello_world.sta
+stapler --emit object -o hello_world.o examples/hello_world.sta
+stapler --emit exe -o hello_world examples/hello_world.sta
+```
+
+The native target is used unless `--target <triple>` is supplied. Executables
+are linked through `$CC`, or `cc` when `$CC` is unset. `--linker` selects a
+different linker driver. `-L <path>` and `-l <name>` add library search paths
+and libraries for executable output.
+
 ### Top-level statements
 
 A source file may contain expression statements alongside bindings, type
@@ -440,6 +464,7 @@ The example declares an immutable foreign value named `printf`. Its type is a
 function from one product parameter—containing a C string pointer followed by
 variadic values—to an `i32` result.
 
-Only the syntax of foreign declarations is currently defined. Linking,
-calling-convention details, supported ABI names, and foreign type layouts are
-unspecified.
+External symbols are resolved by the native linker when producing an
+executable. Libraries outside the platform defaults can be supplied to
+`stapler --emit exe` with `-L` and `-l`. Calling-convention details, supported
+ABI names, foreign symbol aliases, and foreign type layouts remain unspecified.
