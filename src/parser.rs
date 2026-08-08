@@ -405,9 +405,6 @@ impl Grammar {
     /// Parses a non-function type such as a primitive, pointer, product, or name.
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
-        if self.eat(TokenKind::Bool) {
-            return Ok(Type::Primitive(PrimitiveType::Bool(self.syntax(start))));
-        }
         if self.eat(TokenKind::Underscore) {
             return Ok(Type::Inferred(InferredType {
                 syntax: self.syntax(start),
@@ -925,10 +922,6 @@ fn is_symbol_kind(kind: TokenKind) -> bool {
 fn is_type_atom_start(kind: TokenKind) -> bool {
     matches!(
         kind,
-        TokenKind::Bool
-            | TokenKind::Underscore
-            | TokenKind::Star
-            | TokenKind::LParen
-            | TokenKind::Identifier
+        TokenKind::Underscore | TokenKind::Star | TokenKind::LParen | TokenKind::Identifier
     )
 }

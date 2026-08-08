@@ -1091,7 +1091,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Span::Compiler,
                 format!("opaque type `{name}` has no by-value representation"),
             )),
-            CheckedType::String => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            CheckedType::CString => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::Pointer { .. } => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }

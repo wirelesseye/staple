@@ -52,7 +52,6 @@ pub enum TokenKind {
     Plus,
     Minus,
     Slash,
-    Bool,
     Unknown,
 }
 

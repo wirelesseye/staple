@@ -82,10 +82,11 @@ fn parses_hello_world_losslessly() {
     let root = parse(source).expect("hello_world should parse");
 
     assert_eq!(root.text(), source);
-    assert_eq!(root.items.len(), 6);
-    assert!(matches!(root.items[0], Item::ExternBlock(_)));
+    assert_eq!(root.items.len(), 7);
+    assert!(matches!(root.items[0], Item::UseDeclaration(_)));
+    assert!(matches!(root.items[1], Item::ExternBlock(_)));
     assert!(matches!(
-        root.items[3],
+        root.items[4],
         Item::Statement(ref statement)
             if matches!(statement.as_ref(), Statement::Expression(Expression::Call(_)))
     ));
@@ -215,7 +216,7 @@ fn parse_errors_report_one_based_line_and_character_column() {
 
 #[test]
 fn parses_single_parameter_and_application() {
-    let source = "def println: _ -> I32 = (s: string) => printf (\"%s\\n\", s)\n";
+    let source = "def println: _ -> I32 = (s: CString) => printf (\"%s\\n\", s)\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
     let Statement::Binding(binding) = statement(&root.items[0]) else {
@@ -258,7 +259,7 @@ fn parses_nested_product_patterns_losslessly() {
 
 #[test]
 fn comments_and_crlf_are_preserved() {
-    let source = "// entry\r\ndef main: _ -> string = () => {\r\n  \"ok\"\r\n}\r\n";
+    let source = "// entry\r\ndef main: _ -> CString = () => {\r\n  \"ok\"\r\n}\r\n";
     let root = parse(source).expect("source should parse");
     assert_eq!(root.text(), source);
     assert!(
@@ -278,7 +279,7 @@ fn comments_and_crlf_are_preserved() {
 #[test]
 fn parses_named_product_types_values_and_access() {
     let source = concat!(
-        "let args: (name: string, int)\n",
+        "let args: (name: CString, int)\n",
         "type user_id = int\n",
         "def value = (name: \"staple\", 1)\n",
         "def by_name = args.name\n",

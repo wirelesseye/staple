@@ -109,7 +109,7 @@ fn infers_return_types_through_forward_function_references() {
 
 #[test]
 fn rejects_an_incorrect_function_result_type() {
-    let module = resolve("let answer = () -> string => 42\n");
+    let module = resolve("use std.cinterop.*\nlet answer = () -> CString => 42\n");
     let diagnostics = TypeChecker::new()
         .check(module)
         .expect_err("incorrect return type should fail");
@@ -117,7 +117,7 @@ fn rejects_an_incorrect_function_result_type() {
     assert!(
         diagnostics[0]
             .message
-            .contains("expected `string`, found `I32`")
+            .contains("expected `CString`, found `I32`")
     );
 }
 
@@ -131,7 +131,7 @@ fn rejects_incorrect_call_arguments() {
     assert!(
         diagnostics[0]
             .message
-            .contains("expected `I32`, found `string`")
+            .contains("expected `I32`, found `CString`")
     );
 }
 
@@ -234,6 +234,64 @@ fn lowercase_i32_is_an_ordinary_unresolved_type_name() {
         diagnostics
             .iter()
             .any(|diagnostic| diagnostic.message == "unknown type `i32`")
+    );
+}
+
+#[test]
+fn bool_is_an_auto_loaded_standard_library_type() {
+    type_check("let predicate: Bool\n");
+}
+
+#[test]
+fn lowercase_bool_is_an_ordinary_unresolved_type_name() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("let predicate: bool\n", root)
+        .expect("source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("lowercase bool should not name the builtin");
+
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "unknown type `bool`")
+    );
+}
+
+#[test]
+fn cinterop_types_require_an_explicit_import() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("let text: CString\n", root)
+        .expect("source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("CString should not be in the prelude");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "unknown type `CString`")
+    );
+
+    type_check("use std.cinterop.*\nlet character: CChar\nlet text: CString\n");
+}
+
+#[test]
+fn string_literals_have_the_canonical_cstring_type() {
+    let module = type_check("\"hello\"\n");
+    let Item::Statement(statement) = &module.syntax().items[0] else {
+        panic!("expected expression statement");
+    };
+    let Statement::Expression(expression) = statement.as_ref() else {
+        panic!("expected expression statement");
+    };
+
+    assert_eq!(
+        module.type_of_expression(expression.syntax().id),
+        Some(&CheckedType::CString)
     );
 }
 
@@ -398,8 +456,9 @@ fn lowers_transitive_captures_across_curried_layers() {
 #[test]
 fn adapts_non_variadic_externs_used_as_function_values() {
     let module = type_check(concat!(
-        "extern \"c\" { let puts: (*const c_char) -> I32 }\n",
-        "def apply: ((*const c_char) -> I32, *const c_char) -> I32 = (f, value) => f value\n",
+        "use std.cinterop.*\n",
+        "extern \"c\" { let puts: (*const CChar) -> I32 }\n",
+        "def apply: ((*const CChar) -> I32, *const CChar) -> I32 = (f, value) => f value\n",
         "apply (puts, \"hello\")\n",
     ));
     let context = Context::create();
@@ -497,7 +556,8 @@ fn associates_infix_chains_using_inline_fixity() {
 #[test]
 fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
-        "extern \"c\" { let puts: (*const c_char) -> I32 }\n",
+        "use std.cinterop.*\n",
+        "extern \"c\" { let puts: (*const CChar) -> I32 }\n",
         "puts (\"hello\\n\")\n",
     );
     let module = type_check(source);

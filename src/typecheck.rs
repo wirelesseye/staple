@@ -3,8 +3,8 @@ use std::fmt;
 
 use crate::{
     Accessor, Binding, BuiltinType, Diagnostic, Expression, FunctionId, Item, Module, Pattern,
-    PrimitiveType, ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId,
-    SyntaxId, Type, TypeDeclaration, TypeDeclarationKind, TypeId,
+    ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, Type,
+    TypeDeclaration, TypeDeclarationKind, TypeId,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -13,7 +13,7 @@ pub enum CheckedType {
     Error,
     I32,
     Bool,
-    String,
+    CString,
     CChar,
     Opaque {
         id: TypeId,
@@ -69,7 +69,7 @@ impl CheckedType {
                 function.parameter.is_concrete() && function.result.is_concrete()
             }
             Self::Distinct { representation, .. } => representation.is_concrete(),
-            Self::I32 | Self::Bool | Self::String | Self::CChar | Self::Opaque { .. } => true,
+            Self::I32 | Self::Bool | Self::CString | Self::CChar | Self::Opaque { .. } => true,
         }
     }
 }
@@ -80,9 +80,9 @@ impl fmt::Display for CheckedType {
             Self::Inferred => formatter.write_str("_"),
             Self::Error => formatter.write_str("<error>"),
             Self::I32 => formatter.write_str("I32"),
-            Self::Bool => formatter.write_str("bool"),
-            Self::String => formatter.write_str("string"),
-            Self::CChar => formatter.write_str("c_char"),
+            Self::Bool => formatter.write_str("Bool"),
+            Self::CString => formatter.write_str("CString"),
+            Self::CChar => formatter.write_str("CChar"),
             Self::Opaque { name, .. } => formatter.write_str(name),
             Self::Pointer { is_const, pointee } => {
                 formatter.write_str("*")?;
@@ -619,7 +619,7 @@ impl TypeChecker {
                         CheckedType::Error
                     })
             }
-            Expression::String(_) => CheckedType::String,
+            Expression::String(_) => CheckedType::CString,
             Expression::Integer(_) => CheckedType::I32,
         };
         self.expression_types
@@ -694,7 +694,6 @@ impl TypeChecker {
                 parameter: Box::new(self.resolve_source_type(module, &function.parameter)),
                 result: Box::new(self.resolve_source_type(module, &function.result)),
             }),
-            Type::Primitive(PrimitiveType::Bool(_)) => CheckedType::Bool,
         }
     }
 
@@ -721,17 +720,19 @@ impl TypeChecker {
         module: &ResolvedModule,
         named: &crate::NamedType,
     ) -> CheckedType {
-        match named.name.as_str() {
-            "int" => return CheckedType::I32,
-            "string" => return CheckedType::String,
-            "c_char" => return CheckedType::CChar,
-            _ => {}
+        if named.name == "int" {
+            return CheckedType::I32;
         }
         let Some(id) = module.type_for(named.syntax.id) else {
             return CheckedType::Error;
         };
-        if module.builtin_type(id) == Some(BuiltinType::I32) {
-            return CheckedType::I32;
+        if let Some(builtin) = module.builtin_type(id) {
+            return match builtin {
+                BuiltinType::I32 => CheckedType::I32,
+                BuiltinType::Bool => CheckedType::Bool,
+                BuiltinType::CChar => CheckedType::CChar,
+                BuiltinType::CString => CheckedType::CString,
+            };
         }
         if let Some(value_type) = self.resolved_named_types.get(&id) {
             return value_type.clone();
@@ -782,7 +783,7 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         }
         (CheckedType::I32, CheckedType::I32) => Some(CheckedType::I32),
         (CheckedType::Bool, CheckedType::Bool) => Some(CheckedType::Bool),
-        (CheckedType::String, CheckedType::String) => Some(CheckedType::String),
+        (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
         (
             CheckedType::Opaque {
@@ -798,12 +799,12 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             name: actual_name,
         }),
         (
-            CheckedType::String,
+            CheckedType::CString,
             CheckedType::Pointer {
                 is_const: true,
                 pointee,
             },
-        ) if *pointee == CheckedType::CChar => Some(CheckedType::String),
+        ) if *pointee == CheckedType::CChar => Some(CheckedType::CString),
         (
             CheckedType::Pointer {
                 is_const: actual_const,

@@ -7,7 +7,6 @@ pub enum Type {
     Pointer(PointerType),
     Product(ProductType),
     Function(FunctionType),
-    Primitive(PrimitiveType),
 }
 
 impl Type {
@@ -18,7 +17,6 @@ impl Type {
             Self::Pointer(ty) => &ty.syntax,
             Self::Product(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
-            Self::Primitive(ty) => ty.syntax(),
         }
     }
 }
@@ -75,17 +73,4 @@ pub struct FunctionType {
     pub syntax: Syntax,
     pub parameter: Box<Type>,
     pub result: Box<Type>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PrimitiveType {
-    Bool(Syntax),
-}
-
-impl PrimitiveType {
-    pub fn syntax(&self) -> &Syntax {
-        match self {
-            Self::Bool(syntax) => syntax,
-        }
-    }
 }

@@ -19,6 +19,9 @@ pub struct TypeId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinType {
     I32,
+    Bool,
+    CChar,
+    CString,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -151,6 +154,7 @@ pub struct NameResolver {
     current_module: ModuleId,
     multiple_modules: bool,
     standard_library_core: Option<ModuleId>,
+    standard_library_cinterop: Option<ModuleId>,
 }
 
 impl NameResolver {
@@ -164,10 +168,14 @@ impl NameResolver {
 
     pub fn resolve_program(mut self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
         self.standard_library_core = program.standard_library_core();
+        self.standard_library_cinterop = program.standard_library_cinterop();
         self.multiple_modules = program
             .modules()
             .iter()
-            .filter(|module| Some(module.id) != self.standard_library_core)
+            .filter(|module| {
+                Some(module.id) != self.standard_library_core
+                    && Some(module.id) != self.standard_library_cinterop
+            })
             .count()
             > 1;
         self.next_syntax_id = program
@@ -221,21 +229,13 @@ impl NameResolver {
         let Some(core) = program.standard_library_core() else {
             return;
         };
-        let Some(i32_id) = self.declared_types[core.0].get("I32").copied() else {
-            self.diagnostics.push(Diagnostic::new(
-                Span::Compiler,
-                "standard library `std.core` does not declare `I32`",
-            ));
-            return;
-        };
-        if self.type_declarations[&i32_id].kind != crate::TypeDeclarationKind::Opaque {
-            self.diagnostics.push(Diagnostic::new(
-                self.type_declarations[&i32_id].syntax.span.clone(),
-                "standard library type `I32` must be opaque",
-            ));
+        self.register_builtin_type(core, "std.core", "I32", BuiltinType::I32);
+        self.register_builtin_type(core, "std.core", "Bool", BuiltinType::Bool);
+
+        if let Some(cinterop) = program.standard_library_cinterop() {
+            self.register_builtin_type(cinterop, "std.cinterop", "CChar", BuiltinType::CChar);
+            self.register_builtin_type(cinterop, "std.cinterop", "CString", BuiltinType::CString);
         }
-        self.type_names.insert(i32_id, "I32".to_owned());
-        self.builtin_types.insert(i32_id, BuiltinType::I32);
 
         let expected = [
             ("__i32_add", IntrinsicFunction::I32Add),
@@ -289,6 +289,37 @@ impl NameResolver {
                 }
             }
         }
+    }
+
+    fn register_builtin_type(
+        &mut self,
+        module: ModuleId,
+        module_name: &str,
+        name: &str,
+        builtin: BuiltinType,
+    ) {
+        let Some(id) = self.declared_types[module.0].get(name).copied() else {
+            self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("standard library `{module_name}` does not declare `{name}`"),
+            ));
+            return;
+        };
+        let declaration = &self.type_declarations[&id];
+        if declaration.visibility != Visibility::Public {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("standard library type `{name}` must be public"),
+            ));
+        }
+        if declaration.kind != crate::TypeDeclarationKind::Opaque {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("standard library type `{name}` must be opaque"),
+            ));
+        }
+        self.type_names.insert(id, name.to_owned());
+        self.builtin_types.insert(id, builtin);
     }
 
     fn collect_interfaces(&mut self, program: &Program) {
@@ -600,6 +631,7 @@ impl NameResolver {
                 let name = if self.multiple_modules
                     || base_name == "main"
                     || Some(self.current_module) == self.standard_library_core
+                    || Some(self.current_module) == self.standard_library_cinterop
                 {
                     format!("__staple_m{}_{}", self.current_module.0, base_name)
                 } else {
@@ -697,7 +729,7 @@ impl NameResolver {
                 };
                 if let Some(id) = resolved {
                     self.named_types.insert(named.syntax.id, id);
-                } else if !matches!(named.name.as_str(), "int" | "string" | "c_char") {
+                } else if named.name != "int" {
                     self.diagnostics.push(Diagnostic::new(
                         named.syntax.span.clone(),
                         format!("unknown type `{}`", named.name),
@@ -714,7 +746,7 @@ impl NameResolver {
                 self.resolve_type(&function.parameter);
                 self.resolve_type(&function.result);
             }
-            Type::Inferred(_) | Type::Primitive(_) => {}
+            Type::Inferred(_) => {}
         }
     }
 

@@ -113,7 +113,7 @@ Stapler loads the standard library at compile time. `--stdlib <path>` selects
 its root explicitly, `STAPLE_STDLIB` provides the same path through the
 environment, and an installed compiler otherwise looks in
 `../lib/staple/stdlib` relative to its executable. The standard-library root
-contains `std/core.sta`.
+contains `std/core.sta` and `std/cinterop.sta`.
 
 ### Top-level statements
 
@@ -121,8 +121,10 @@ A source file may contain expression statements alongside bindings, type
 declarations, and foreign declarations:
 
 ```staple
+use std.cinterop.*
+
 extern "c" {
-    let printf: (*const c_char, ...) -> I32
+    let printf: (*const CChar, ...) -> I32
 }
 
 printf ("hello, world!\n")
@@ -208,8 +210,10 @@ An external declaration may omit its value because its implementation is
 provided outside staple:
 
 ```staple
+use std.cinterop.*
+
 extern "c" {
-    let printf: (*const c_char, ...) -> I32
+    let printf: (*const CChar, ...) -> I32
 }
 ```
 
@@ -311,11 +315,11 @@ Every product element may optionally have a name. Names are written before the
 element type in a product type:
 
 ```staple
-let args: (name: string, I32)
+let args: (name: CString, I32)
 ```
 
 Here, `args` is a two-element product. Its first element is named `name` and has
-type `string`; its second element is unnamed and has type `I32`.
+type `CString`; its second element is unnamed and has type `I32`.
 
 Names may likewise be supplied when constructing a product value:
 
@@ -333,7 +337,7 @@ Every element can be accessed by its zero-based index. A named element can also
 be accessed by name:
 
 ```staple
-let args: (name: string, I32)
+let args: (name: CString, I32)
 
 args.name // the first element, accessed by name
 args.0    // the first element, accessed by index
@@ -369,7 +373,7 @@ the body.
 A binding pattern normally has a name and a type:
 
 ```staple
-s: string => printf ("%s\n", s)
+s: CString => printf ("%s\n", s)
 ```
 
 The type may be omitted when a surrounding function type supplies it:
@@ -505,14 +509,20 @@ Named types are written as identifiers:
 
 ```staple
 I32
-string
-c_char
+Bool
+CString
+CChar
 ```
 
-`I32` and the arithmetic functions from `std.core` are imported implicitly into
-every source module. `I32` is an ordinary type name rather than a keyword, so a
-local declaration or explicit import can shadow the prelude name. Integer
-literals have type `I32`.
+`I32`, `Bool`, and the arithmetic functions from `std.core` are imported
+implicitly into every source module. These are ordinary type names rather than
+keywords, so a local declaration or explicit import can shadow a prelude name.
+Integer literals have type `I32`.
+
+`CChar` and `CString` are public opaque types in `std.cinterop`. Source code
+must import them explicitly, for example with `use std.cinterop.*`. String
+literals have the canonical `CString` type even in modules that do not bring
+the name into scope.
 
 An underscore asks stapler to infer a type:
 
@@ -525,9 +535,9 @@ The currently supported type syntax also includes pointer types, product types,
 variadic markers in external function signatures, and function types:
 
 ```staple
-*const c_char
-(I32, string)
-(*const c_char, ...) -> I32
+*const CChar
+(I32, CString)
+(*const CChar, ...) -> I32
 ```
 
 `...` denotes the variadic portion of an external function parameter product. Its
@@ -578,7 +588,7 @@ are interchangeable:
 
 ```staple
 type alias Person = (
-    name: string,
+    name: CString,
     age: I32,
 )
 ```
@@ -592,8 +602,10 @@ An `extern` block declares values supplied by a foreign ABI. The ABI name is a
 string following `extern`:
 
 ```staple
+use std.cinterop.*
+
 extern "c" {
-    let printf: (*const c_char, ...) -> I32
+    let printf: (*const CChar, ...) -> I32
 }
 ```
 

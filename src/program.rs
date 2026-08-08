@@ -18,6 +18,7 @@ pub struct SourceModule {
 pub struct Program {
     entry: ModuleId,
     standard_library_core: Option<ModuleId>,
+    standard_library_cinterop: Option<ModuleId>,
     modules: Vec<SourceModule>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
     initialization_order: Vec<ModuleId>,
@@ -28,6 +29,7 @@ impl Program {
         Self {
             entry: ModuleId(0),
             standard_library_core: None,
+            standard_library_cinterop: None,
             modules: vec![SourceModule {
                 id: ModuleId(0),
                 path: PathBuf::from("<memory>.sta"),
@@ -44,6 +46,10 @@ impl Program {
 
     pub fn standard_library_core(&self) -> Option<ModuleId> {
         self.standard_library_core
+    }
+
+    pub fn standard_library_cinterop(&self) -> Option<ModuleId> {
+        self.standard_library_cinterop
     }
 
     pub fn modules(&self) -> &[SourceModule] {
@@ -72,6 +78,7 @@ pub struct ProgramLoader {
     module_root: Option<PathBuf>,
     standard_library_root: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
+    standard_library_cinterop: Option<ModuleId>,
 }
 
 impl ProgramLoader {
@@ -88,7 +95,7 @@ impl ProgramLoader {
         let entry = canonical_file(entry)?;
         self.module_root = Some(entry.parent().unwrap_or_else(|| Path::new(".")).to_owned());
         let entry_id = self.load_file(&entry)?;
-        self.load_standard_library_core()?;
+        self.load_standard_library()?;
         Ok(self.finish(entry_id))
     }
 
@@ -103,7 +110,7 @@ impl ProgramLoader {
         let path = root.join("<stdin>.sta");
         let entry = self.insert_source(path, source)?;
         self.load_imports(entry, &root)?;
-        self.load_standard_library_core()?;
+        self.load_standard_library()?;
         Ok(self.finish(entry))
     }
 
@@ -166,10 +173,12 @@ impl ProgramLoader {
         Ok(())
     }
 
-    fn load_standard_library_core(&mut self) -> Result<(), String> {
+    fn load_standard_library(&mut self) -> Result<(), String> {
         let root = self.resolve_standard_library_root()?;
         let core = canonical_file(&root.join("std/core.sta"))?;
         self.standard_library_core = Some(self.load_file(&core)?);
+        let cinterop = canonical_file(&root.join("std/cinterop.sta"))?;
+        self.standard_library_cinterop = Some(self.load_file(&cinterop)?);
         Ok(())
     }
 
@@ -199,6 +208,7 @@ impl ProgramLoader {
         Program {
             entry,
             standard_library_core: self.standard_library_core,
+            standard_library_cinterop: self.standard_library_cinterop,
             modules: self.modules,
             imported_modules: self.imported_modules,
             initialization_order,
