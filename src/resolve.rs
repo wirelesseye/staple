@@ -184,6 +184,7 @@ pub struct ResolvedModule {
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     constructors: HashMap<SymbolId, TypeId>,
+    singleton_values: HashMap<SymbolId, TypeId>,
     type_modules: HashMap<TypeId, ModuleId>,
     traits: HashMap<TraitId, ResolvedTrait>,
     trait_methods: HashMap<TraitMethodId, crate::TraitMember>,
@@ -223,7 +224,8 @@ impl ResolvedModule {
     }
 
     pub fn representation_visible_from(&self, id: TypeId, module: ModuleId) -> bool {
-        self.type_modules.get(&id).copied() == Some(module)
+        self.type_declarations[&id].kind == crate::TypeDeclarationKind::Singleton
+            || self.type_modules.get(&id).copied() == Some(module)
             || self.type_declarations[&id].representation_visibility == Visibility::Public
     }
 
@@ -269,6 +271,14 @@ impl ResolvedModule {
 
     pub fn constructors(&self) -> &HashMap<SymbolId, TypeId> {
         &self.constructors
+    }
+
+    pub fn singleton_type(&self, symbol: SymbolId) -> Option<TypeId> {
+        self.singleton_values.get(&symbol).copied()
+    }
+
+    pub fn singleton_values(&self) -> &HashMap<SymbolId, TypeId> {
+        &self.singleton_values
     }
 
     pub fn traits(&self) -> &HashMap<TraitId, ResolvedTrait> {
@@ -336,6 +346,7 @@ pub struct NameResolver {
     primitive_macros: HashMap<MacroId, PrimitiveMacro>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     constructors: HashMap<SymbolId, TypeId>,
+    singleton_values: HashMap<SymbolId, TypeId>,
     nominal_patterns: HashMap<SyntaxId, TypeId>,
     type_modules: HashMap<TypeId, ModuleId>,
     type_constructor_symbols: HashMap<TypeId, SymbolId>,
@@ -448,6 +459,7 @@ impl NameResolver {
             intrinsic_functions: self.intrinsic_functions,
             macro_calls: self.macro_calls,
             constructors: self.constructors,
+            singleton_values: self.singleton_values,
             type_modules: self.type_modules,
             traits: self.traits,
             trait_methods: self.trait_methods,
@@ -667,15 +679,23 @@ impl NameResolver {
                         }
                         self.type_declarations.insert(id, declaration.clone());
                         self.type_modules.insert(id, source_module.id);
-                        if declaration.kind == crate::TypeDeclarationKind::Distinct
-                            && declaration.underlying.is_some()
+                        if (declaration.kind == crate::TypeDeclarationKind::Distinct
+                            && declaration.underlying.is_some())
+                            || declaration.kind == crate::TypeDeclarationKind::Singleton
                         {
                             let symbol = SymbolId(self.next_symbol_id);
                             self.next_symbol_id += 1;
                             self.symbol_owners.insert(symbol, None);
                             self.type_constructor_symbols.insert(id, symbol);
-                            self.constructors.insert(symbol, id);
-                            if declaration.representation_visibility == Visibility::Public {
+                            if declaration.kind == crate::TypeDeclarationKind::Singleton {
+                                self.singleton_values.insert(symbol, id);
+                            } else {
+                                self.constructors.insert(symbol, id);
+                            }
+                            if declaration.representation_visibility == Visibility::Public
+                                || (declaration.kind == crate::TypeDeclarationKind::Singleton
+                                    && declaration.visibility == Visibility::Public)
+                            {
                                 self.insert_public_value(
                                     source_module.id,
                                     &declaration.name,
@@ -1745,14 +1765,16 @@ impl NameResolver {
             Pattern::Nominal(pattern) => {
                 if let Some(id) = self.named_types.get(&pattern.syntax.id).copied() {
                     let declaration = &self.type_declarations[&id];
-                    if declaration.kind != crate::TypeDeclarationKind::Distinct
-                        || declaration.underlying.is_none()
-                    {
+                    let represented = (declaration.kind == crate::TypeDeclarationKind::Distinct
+                        && declaration.underlying.is_some())
+                        || declaration.kind == crate::TypeDeclarationKind::Singleton;
+                    if !represented {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
                             format!("`{}` is not a represented nominal type", pattern.name),
                         ));
-                    } else if self.type_modules.get(&id).copied() != Some(self.current_module)
+                    } else if declaration.kind != crate::TypeDeclarationKind::Singleton
+                        && self.type_modules.get(&id).copied() != Some(self.current_module)
                         && declaration.representation_visibility != Visibility::Public
                     {
                         self.diagnostics.push(Diagnostic::new(

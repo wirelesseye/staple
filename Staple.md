@@ -712,10 +712,11 @@ conversions or floating-point types.
 staple distinguishes transparent aliases, distinct type definitions, and
 opaque type declarations.
 
-An opaque type has no source-level representation:
+An opaque type has no source-level representation and uses the explicit
+`opaque` marker:
 
 ```staple
-pub type Handle
+pub type Handle = opaque
 ```
 
 An opaque type may also accept compile-time arguments when its body is the
@@ -730,6 +731,35 @@ arguments are distinct. A by-value use requires a representation supplied by
 the compiler or another future implementation mechanism. `std.core.I32` and
 `std.cinterop.CPointer` are opaque declarations whose representations are
 provided by Stapler.
+
+#### Singleton types
+
+A bodyless type declaration introduces both a nominal type and its unique
+value under the same name:
+
+```staple
+pub type Ready
+
+let state: Ready = Ready
+```
+
+Singleton values have the zero-sized representation `()` but remain nominally
+distinct from `()` and from every other singleton type. A public singleton
+exports its value together with its type; `pub(repr)` is neither needed nor
+accepted. A private singleton keeps both names private.
+
+The unique value is not a function and cannot be called. In a pattern, the
+nominal form uses an empty representation pattern:
+
+```staple
+let Ready() = state
+```
+
+The same form can select a singleton alternative in a propagating binding:
+
+```staple
+let Ready()? = operation()
+```
 
 #### `type`
 

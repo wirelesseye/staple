@@ -399,6 +399,7 @@ impl TypeChecker {
         self.collect_traits(&module);
         self.collect_trait_implementations(&module);
         self.seed_constructors(&module);
+        self.seed_singleton_values(&module);
         self.collect_top_level_bindings(&module);
         self.seed_declared_bindings(&module);
         self.validate_intrinsics(&module);
@@ -539,6 +540,13 @@ impl TypeChecker {
                     result: Box::new(result),
                 }),
             );
+        }
+    }
+
+    fn seed_singleton_values(&mut self, module: &ResolvedModule) {
+        for (symbol, id) in module.singleton_values() {
+            let value_type = self.instantiate_type_declaration(module, *id, Vec::new());
+            self.symbol_types.insert(*symbol, value_type);
         }
     }
 
@@ -1960,6 +1968,14 @@ impl TypeChecker {
                 arguments,
             };
         }
+        if declaration.kind == TypeDeclarationKind::Singleton {
+            return CheckedType::Distinct {
+                id,
+                name: display_name,
+                arguments,
+                representation: Box::new(CheckedType::empty_product()),
+            };
+        }
         if !self.resolving_named_types.insert(id) {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
@@ -1981,6 +1997,7 @@ impl TypeChecker {
                 arguments,
                 representation: Box::new(representation),
             },
+            TypeDeclarationKind::Singleton => unreachable!(),
             TypeDeclarationKind::Opaque => unreachable!(),
         }
     }
@@ -2103,6 +2120,16 @@ impl TypeChecker {
             self.resolved_named_types.insert(id, value_type.clone());
             return value_type;
         }
+        if declaration.kind == TypeDeclarationKind::Singleton {
+            let value_type = CheckedType::Distinct {
+                id,
+                name: display_name,
+                arguments: Vec::new(),
+                representation: Box::new(CheckedType::empty_product()),
+            };
+            self.resolved_named_types.insert(id, value_type.clone());
+            return value_type;
+        }
         if !self.resolving_named_types.insert(id) {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
@@ -2126,6 +2153,7 @@ impl TypeChecker {
                 arguments: Vec::new(),
                 representation: Box::new(representation),
             },
+            TypeDeclarationKind::Singleton => unreachable!(),
             TypeDeclarationKind::Opaque => unreachable!(),
         };
         self.resolved_named_types.insert(id, value_type.clone());

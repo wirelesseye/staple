@@ -74,6 +74,7 @@ pub struct ExternBlock {
 pub enum TypeDeclarationKind {
     Alias,
     Distinct,
+    Singleton,
     Opaque,
 }
 

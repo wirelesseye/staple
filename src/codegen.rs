@@ -1072,6 +1072,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Expression::Access(access) => {
                 if let Some(symbol) = self.typed_module.symbol_for(access.syntax.id) {
+                    if self
+                        .typed_module
+                        .resolved()
+                        .singleton_type(symbol)
+                        .is_some()
+                    {
+                        return Ok(self.unit_value());
+                    }
                     return self.compile_symbol_value(
                         environment,
                         symbol,
@@ -1123,6 +1131,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .symbol_for(name.syntax.id)
                     .ok_or_else(|| Diagnostic::new(name.syntax.span.clone(), "unresolved name"))?;
+                if self
+                    .typed_module
+                    .resolved()
+                    .singleton_type(symbol)
+                    .is_some()
+                {
+                    return Ok(self.unit_value());
+                }
                 if self
                     .typed_module
                     .resolved()
@@ -1228,7 +1244,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
     fn unit_value(&self) -> AnyValueEnum<'context> {
         self.context
-            .struct_type(&[], false)
+            .struct_type(&[], true)
             .const_zero()
             .as_any_value_enum()
     }

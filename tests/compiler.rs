@@ -1028,6 +1028,59 @@ fn constructs_distinct_and_generic_distinct_values() {
 }
 
 #[test]
+fn constructs_and_propagates_singleton_nominal_values() {
+    let module = type_check(concat!(
+        "pub type Foo\n",
+        "pub type Bar\n",
+        "let foo: Foo = Foo\n",
+        "let Foo() = foo\n",
+        "def identity: Foo -> Foo = value => value\n",
+        "let choice: Foo | Bar = Foo\n",
+        "def select = (value: Foo | Bar) => { let Foo()? = value; Foo }\n",
+        "identity(foo)\n",
+        "select(choice)\n",
+    ));
+    let select = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "select")
+        .expect("select function");
+    assert!(matches!(
+        module
+            .type_of_function(select.id)
+            .expect("select type")
+            .result
+            .as_ref(),
+        CheckedType::Sum(sum) if sum.alternatives.len() == 2
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("singleton values should generate valid LLVM");
+}
+
+#[test]
+fn opaque_types_do_not_introduce_values_and_singletons_are_not_callable() {
+    let diagnostics = NameResolver::new()
+        .resolve(&parse("pub type Secret = opaque\nSecret\n").expect("source should parse"))
+        .expect_err("opaque type should not introduce a value");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "unknown name `Secret`")
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("pub type Foo\nFoo()\n"))
+        .expect_err("singleton value should not be callable");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot call a value of type `Foo`")
+    }));
+}
+
+#[test]
 fn contextually_specializes_first_class_generic_functions() {
     let module = type_check(concat!(
         "def identity: T => T -> T = x => x\n",

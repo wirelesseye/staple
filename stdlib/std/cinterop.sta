@@ -1,6 +1,6 @@
-pub type CChar
+pub type CChar = opaque
 pub type CPointer = Pointee => opaque
-pub type CString
+pub type CString = opaque
 
 pub macro c_string
 

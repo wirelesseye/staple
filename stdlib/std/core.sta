@@ -1,15 +1,15 @@
-pub type I8
-pub type I16
-pub type I32
-pub type I64
-pub type U8
-pub type U16
-pub type U32
-pub type U64
-pub type ISize
-pub type USize
-pub type Bool
-pub type String
+pub type I8 = opaque
+pub type I16 = opaque
+pub type I32 = opaque
+pub type I64 = opaque
+pub type U8 = opaque
+pub type U16 = opaque
+pub type U32 = opaque
+pub type U64 = opaque
+pub type ISize = opaque
+pub type USize = opaque
+pub type Bool = opaque
+pub type String = opaque
 
 pub(repr) type Ok = T => T
 

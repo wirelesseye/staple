@@ -102,11 +102,22 @@ fn parses_namespace_qualified_types() {
 
 #[test]
 fn parses_opaque_type_declarations() {
-    let root = parse("pub type I32\n").expect("opaque type should parse");
+    let root = parse("pub type I32 = opaque\n").expect("opaque type should parse");
     assert!(matches!(
         root.items[0],
         Item::TypeDeclaration(ref declaration)
             if declaration.kind == TypeDeclarationKind::Opaque
+                && declaration.underlying.is_none()
+    ));
+}
+
+#[test]
+fn parses_bodyless_types_as_singletons() {
+    let root = parse("pub type Foo\n").expect("singleton type should parse");
+    assert!(matches!(
+        root.items[0],
+        Item::TypeDeclaration(ref declaration)
+            if declaration.kind == TypeDeclarationKind::Singleton
                 && declaration.underlying.is_none()
     ));
 }
@@ -454,6 +465,7 @@ fn parses_public_representations_and_nominal_patterns() {
 fn rejects_invalid_public_representation_and_pattern_visibility_syntax() {
     assert!(parse("pub(repr) type alias Number = I32\n").is_err());
     assert!(parse("pub(repr) type Handle = opaque\n").is_err());
+    assert!(parse("pub(repr) type Singleton\n").is_err());
     assert!(parse("pub let (a, b) = (1, 2)\n").is_err());
     assert!(parse("pub(repr) def value = 1\n").is_err());
 }

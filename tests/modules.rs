@@ -254,6 +254,37 @@ fn exports_constructors_and_destructors_for_public_representations() {
 }
 
 #[test]
+fn exports_public_singleton_types_as_values_without_public_repr() {
+    let fixture = Fixture::new();
+    fixture.write("markers.sta", "pub type Ready\ntype Hidden\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use markers\n",
+            "let ready: markers.Ready = markers.Ready\n",
+            "let markers.Ready() = ready\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("public singleton should export its unique value and pattern");
+
+    fixture.write(
+        "main.sta",
+        "use markers.(Ready)\nlet ready: Ready = Ready\nlet Ready() = ready\n",
+    );
+    fixture
+        .compile()
+        .expect("selected singleton import should include its type and value");
+
+    fixture.write("main.sta", "use markers.*\nlet hidden = Hidden\n");
+    let error = fixture
+        .compile()
+        .expect_err("private singleton value should not be exported");
+    assert!(error.contains("unknown name `Hidden`"));
+}
+
+#[test]
 fn composes_sum_variants_across_modules() {
     let fixture = Fixture::new();
     fixture.write(

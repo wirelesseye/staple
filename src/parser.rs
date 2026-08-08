@@ -450,7 +450,9 @@ impl Grammar {
         } else {
             Vec::new()
         };
-        let (kind, underlying) = if !has_body || self.eat(TokenKind::Opaque) {
+        let (kind, underlying) = if !has_body {
+            (TypeDeclarationKind::Singleton, None)
+        } else if self.eat(TokenKind::Opaque) {
             if kind == TypeDeclarationKind::Alias {
                 return Err(self.error("type aliases cannot be opaque"));
             }
