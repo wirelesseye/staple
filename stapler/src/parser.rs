@@ -305,6 +305,12 @@ impl Grammar {
             Some(TokenKind::Return) if visibility == Visibility::Private => {
                 self.parse_return_statement(start)
             }
+            Some(TokenKind::Break) if visibility == Visibility::Private => {
+                self.parse_break_statement(start)
+            }
+            Some(TokenKind::Continue) if visibility == Visibility::Private => {
+                self.parse_continue_statement(start)
+            }
             Some(TokenKind::Def) => self
                 .parse_binding(visibility, start, start.is_some())
                 .map(Statement::Binding),
@@ -338,6 +344,40 @@ impl Grammar {
         Ok(Statement::Return(ReturnStatement {
             syntax: self.syntax(start),
             value,
+        }))
+    }
+
+    fn parse_break_statement(&mut self, start: Option<usize>) -> Result<Statement, ParseError> {
+        let start = start.unwrap_or(self.position);
+        self.expect(TokenKind::Break, "expected `break`")?;
+        let value = if self.has_newline_before_next_token()
+            || matches!(
+                self.peek(),
+                None | Some(TokenKind::Semicolon | TokenKind::RBrace)
+            ) {
+            None
+        } else {
+            Some(self.parse_expression()?)
+        };
+        Ok(Statement::Break(BreakStatement {
+            syntax: self.syntax(start),
+            value,
+        }))
+    }
+
+    fn parse_continue_statement(&mut self, start: Option<usize>) -> Result<Statement, ParseError> {
+        let start = start.unwrap_or(self.position);
+        self.expect(TokenKind::Continue, "expected `continue`")?;
+        if !self.has_newline_before_next_token()
+            && !matches!(
+                self.peek(),
+                None | Some(TokenKind::Semicolon | TokenKind::RBrace)
+            )
+        {
+            return Err(self.error("expected a statement boundary after `continue`"));
+        }
+        Ok(Statement::Continue(ContinueStatement {
+            syntax: self.syntax(start),
         }))
     }
 
@@ -1200,6 +1240,7 @@ impl Grammar {
         }
         match self.peek() {
             Some(TokenKind::Match) => self.parse_match_expression().map(Expression::Match),
+            Some(TokenKind::Loop) => self.parse_loop_expression().map(Expression::Loop),
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
             Some(TokenKind::LParen) if self.parenthesized_operator() => self.parse_operator_value(),
             Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
@@ -1302,6 +1343,16 @@ impl Grammar {
         })
     }
 
+    fn parse_loop_expression(&mut self) -> Result<LoopExpression, ParseError> {
+        let start = self.position;
+        self.expect(TokenKind::Loop, "expected `loop`")?;
+        let body = self.parse_block_expression()?;
+        Ok(LoopExpression {
+            syntax: self.syntax(start),
+            body,
+        })
+    }
+
     /// Parses a brace-delimited sequence of statements.
     fn parse_block_expression(&mut self) -> Result<BlockExpression, ParseError> {
         let start = self.position;
@@ -1385,6 +1436,7 @@ impl Grammar {
                 TokenKind::LBrace
                     | TokenKind::LParen
                     | TokenKind::Match
+                    | TokenKind::Loop
                     | TokenKind::Identifier
                     | TokenKind::Dollar
                     | TokenKind::String

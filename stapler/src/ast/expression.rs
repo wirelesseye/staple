@@ -5,6 +5,7 @@ pub enum Expression {
     Function(Box<FunctionExpression>),
     Satisfies(Box<SatisfiesExpression>),
     Match(MatchExpression),
+    Loop(LoopExpression),
     Block(BlockExpression),
     Product(ProductExpression),
     Call(CallExpression),
@@ -25,6 +26,7 @@ impl Expression {
             Self::Function(expression) => &expression.syntax,
             Self::Satisfies(expression) => &expression.syntax,
             Self::Match(expression) => &expression.syntax,
+            Self::Loop(expression) => &expression.syntax,
             Self::Block(expression) => &expression.syntax,
             Self::Product(expression) => &expression.syntax,
             Self::Call(expression) => &expression.syntax,
@@ -39,6 +41,12 @@ impl Expression {
             Self::Integer(expression) => &expression.syntax,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopExpression {
+    pub syntax: Syntax,
+    pub body: BlockExpression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

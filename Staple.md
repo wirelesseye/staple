@@ -890,6 +890,28 @@ def answer = () => {
 Here `answer` returns `42`. Returning unit is written explicitly as `return ()`;
 `return` is not permitted outside a function.
 
+## Loop expressions
+
+`loop` repeatedly evaluates a block and is itself an expression. Falling through the
+body or executing `continue` starts the next iteration:
+
+```staple
+def answer = () => loop {
+    break 42
+}
+```
+
+`break value` exits the nearest enclosing loop and supplies its result. `break`
+without a value supplies `()`; a newline, semicolon, or closing brace terminates
+the unit form. All reachable breaks must produce compatible values, using the
+same result-joining rules as functions and match expressions. A loop with no
+reachable break diverges and may be used wherever an expected type is available.
+
+`break` and `continue` cannot cross a function boundary, and labeled loops are
+not supported. Values owned by an iteration are dropped before a break,
+continue, or implicit next iteration; a value moved out by `break` becomes the
+loop result and is preserved.
+
 ## Types
 
 Named types are written as identifiers:

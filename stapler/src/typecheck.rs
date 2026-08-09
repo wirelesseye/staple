@@ -74,6 +74,12 @@ struct ReturnContribution {
 }
 
 #[derive(Debug, Clone)]
+struct LoopCheckContext {
+    expected: Option<CheckedType>,
+    breaks: Vec<ReturnContribution>,
+}
+
+#[derive(Debug, Clone)]
 struct CheckedTraitImplementation {
     trait_id: TraitId,
     target: CheckedType,
@@ -609,6 +615,7 @@ pub struct TypeChecker {
     return_contexts: Vec<CheckedType>,
     return_contributions: Vec<Vec<ReturnContribution>>,
     pending_propagations: Vec<Vec<(SyntaxId, CheckedType, usize, Span)>>,
+    loop_contexts: Vec<LoopCheckContext>,
     did_return: bool,
     return_reachable: bool,
     diagnostics: Vec<Diagnostic>,
@@ -1516,6 +1523,51 @@ impl TypeChecker {
                 }
                 CheckedType::empty_product()
             }
+            Statement::Break(statement) => {
+                let expected = self
+                    .loop_contexts
+                    .last()
+                    .and_then(|context| context.expected.clone());
+                let contribution = if let Some(value) = &statement.value {
+                    let value_type =
+                        self.check_expression_expected(module, value, expected.as_ref());
+                    ReturnContribution {
+                        syntax: Some(value.syntax().id),
+                        span: value.syntax().span.clone(),
+                        value_type,
+                    }
+                } else {
+                    let value_type = if let Some(expected) = expected {
+                        self.require_compatible(
+                            CheckedType::empty_product(),
+                            expected,
+                            statement.syntax.span.clone(),
+                        )
+                    } else {
+                        CheckedType::empty_product()
+                    };
+                    ReturnContribution {
+                        syntax: None,
+                        span: statement.syntax.span.clone(),
+                        value_type,
+                    }
+                };
+                if !self.did_return && self.return_reachable {
+                    self.loop_contexts
+                        .last_mut()
+                        .expect("break inside loop")
+                        .breaks
+                        .push(contribution);
+                    self.did_return = true;
+                }
+                CheckedType::empty_product()
+            }
+            Statement::Continue(_) => {
+                if !self.did_return && self.return_reachable {
+                    self.did_return = true;
+                }
+                CheckedType::empty_product()
+            }
             Statement::Expression(expression) => self.check_expression(module, expression),
         }
     }
@@ -1789,6 +1841,7 @@ impl TypeChecker {
                 self.check_expression_expected(module, &satisfies.value, Some(&annotation))
             }
             Expression::Match(match_) => self.check_match_expression(module, match_, expected),
+            Expression::Loop(loop_) => self.check_loop_expression(module, loop_, expected),
             Expression::Block(block) => {
                 let mut result = CheckedType::empty_product();
                 let mut block_returned = false;
@@ -2417,6 +2470,53 @@ impl TypeChecker {
         self.matches
             .insert(match_.syntax.id, CheckedMatch { source });
         self.did_return = every_arm_returns;
+        self.return_reachable = outer_reachable;
+        result
+    }
+
+    fn check_loop_expression(
+        &mut self,
+        module: &ResolvedModule,
+        loop_: &crate::LoopExpression,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        let outer_reachable = self.return_reachable;
+        self.loop_contexts.push(LoopCheckContext {
+            expected: expected.cloned(),
+            breaks: Vec::new(),
+        });
+        self.did_return = false;
+        self.return_reachable = outer_reachable;
+        self.check_expression(module, &Expression::Block(loop_.body.clone()));
+        let context = self.loop_contexts.pop().expect("loop check context");
+
+        let result = if let Some(expected) = expected {
+            expected.clone()
+        } else if context.breaks.is_empty() {
+            CheckedType::empty_product()
+        } else {
+            self.join_return_contributions(&context.breaks, loop_.syntax.span.clone())
+        };
+
+        if expected.is_none() {
+            for contribution in &context.breaks {
+                if let Some(syntax) = contribution.syntax {
+                    self.coerce_expression_type(
+                        syntax,
+                        contribution.value_type.clone(),
+                        &result,
+                        contribution.span.clone(),
+                    );
+                } else if !can_coerce_type(&contribution.value_type, &result) {
+                    self.diagnostics.push(Diagnostic::new(
+                        contribution.span.clone(),
+                        format!("expected `{result}`, found `{}`", contribution.value_type),
+                    ));
+                }
+            }
+        }
+
+        self.did_return = context.breaks.is_empty();
         self.return_reachable = outer_reachable;
         result
     }

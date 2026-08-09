@@ -54,6 +54,8 @@ pub enum Statement {
     PatternBinding(PatternBinding),
     Assignment(Assignment),
     Return(ReturnStatement),
+    Break(BreakStatement),
+    Continue(ContinueStatement),
     Expression(Expression),
 }
 
@@ -68,6 +70,17 @@ pub struct Assignment {
 pub struct ReturnStatement {
     pub syntax: Syntax,
     pub value: Expression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BreakStatement {
+    pub syntax: Syntax,
+    pub value: Option<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContinueStatement {
+    pub syntax: Syntax,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

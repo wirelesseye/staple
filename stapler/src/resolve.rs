@@ -439,6 +439,7 @@ pub struct NameResolver {
     function_parents: HashMap<FunctionId, Option<FunctionId>>,
     function_captures: HashMap<FunctionId, Vec<SymbolId>>,
     function_stack: Vec<FunctionId>,
+    loop_depth: usize,
     declared_fixities: Vec<HashMap<String, Fixity>>,
     lowered_infix: HashMap<SyntaxId, Expression>,
     builtin_types: HashMap<TypeId, BuiltinType>,
@@ -1077,6 +1078,8 @@ impl NameResolver {
                         }
                         Statement::Assignment(_)
                         | Statement::Return(_)
+                        | Statement::Break(_)
+                        | Statement::Continue(_)
                         | Statement::Expression(_) => {}
                     },
                     Item::UseDeclaration(_) => {}
@@ -1583,6 +1586,25 @@ impl NameResolver {
                 }
                 self.resolve_expression(&statement.value, None, None);
             }
+            Statement::Break(statement) => {
+                if self.loop_depth == 0 {
+                    self.diagnostics.push(Diagnostic::new(
+                        statement.syntax.span.clone(),
+                        "`break` is only allowed inside a loop",
+                    ));
+                }
+                if let Some(value) = &statement.value {
+                    self.resolve_expression(value, None, None);
+                }
+            }
+            Statement::Continue(statement) => {
+                if self.loop_depth == 0 {
+                    self.diagnostics.push(Diagnostic::new(
+                        statement.syntax.span.clone(),
+                        "`continue` is only allowed inside a loop",
+                    ));
+                }
+            }
             Statement::Expression(expression) => self.resolve_expression(expression, None, None),
         }
     }
@@ -1683,6 +1705,8 @@ impl NameResolver {
                     .insert(function_id, self.function_stack.last().copied());
                 self.resolve_pattern_types(&function.pattern);
                 self.function_stack.push(function_id);
+                let outer_loop_depth = self.loop_depth;
+                self.loop_depth = 0;
                 self.push_scope();
                 self.declare_pattern(&function.pattern);
                 let expected_result = (|| {
@@ -1693,6 +1717,7 @@ impl NameResolver {
                 })();
                 self.resolve_expression(&function.body, expected_result, None);
                 self.pop_scope();
+                self.loop_depth = outer_loop_depth;
                 self.function_stack.pop();
                 let base_name = suggested_function
                     .map(|(name, _)| name.to_owned())
@@ -1744,6 +1769,11 @@ impl NameResolver {
                     self.resolve_expression(&arm.body, expected_type, None);
                     self.pop_scope();
                 }
+            }
+            Expression::Loop(loop_) => {
+                self.loop_depth += 1;
+                self.resolve_block(&loop_.body);
+                self.loop_depth -= 1;
             }
             Expression::Block(block) => self.resolve_block(block),
             Expression::Product(product) => {
@@ -2427,7 +2457,11 @@ impl<'a> InitializationAnalyzer<'a> {
                             &mut globals,
                         );
                     }
-                    Statement::Assignment(_) | Statement::Return(_) | Statement::Expression(_) => {}
+                    Statement::Assignment(_)
+                    | Statement::Return(_)
+                    | Statement::Break(_)
+                    | Statement::Continue(_)
+                    | Statement::Expression(_) => {}
                 }
             }
         }
@@ -2508,6 +2542,12 @@ impl<'a> InitializationAnalyzer<'a> {
                 self.expression(&assignment.value, local, outer);
             }
             Statement::Return(statement) => self.expression(&statement.value, local, outer),
+            Statement::Break(statement) => {
+                if let Some(value) = &statement.value {
+                    self.expression(value, local, outer);
+                }
+            }
+            Statement::Continue(_) => {}
             Statement::Expression(expression) => self.expression(expression, local, outer),
         }
     }
@@ -2542,6 +2582,9 @@ impl<'a> InitializationAnalyzer<'a> {
                     );
                     self.expression(&arm.body, &mut arm_local, outer);
                 }
+            }
+            Expression::Loop(loop_) => {
+                self.expression(&Expression::Block(loop_.body.clone()), local, outer);
             }
             Expression::Block(block) => {
                 let original = local.clone();

@@ -40,6 +40,13 @@ pub(crate) struct OwnershipChecker<'a> {
     states: HashMap<SymbolId, ValueState>,
     info: OwnershipInfo,
     diagnostics: Vec<Diagnostic>,
+    loops: Vec<LoopOwnershipContext>,
+}
+
+#[derive(Default)]
+struct LoopOwnershipContext {
+    breaks: Vec<HashMap<SymbolId, ValueState>>,
+    back_edges: Vec<HashMap<SymbolId, ValueState>>,
 }
 
 impl<'a> OwnershipChecker<'a> {
@@ -50,6 +57,7 @@ impl<'a> OwnershipChecker<'a> {
             states: HashMap::new(),
             info: OwnershipInfo::default(),
             diagnostics: vec![],
+            loops: vec![],
         };
         checker.check_globals();
 
@@ -120,6 +128,7 @@ impl<'a> OwnershipChecker<'a> {
     fn check_function(&mut self, function: &ResolvedFunction) {
         self.function = Some(function.id);
         self.states.clear();
+        self.loops.clear();
 
         let drop_method = self.module.is_drop_method(function.id);
         self.bind_pattern(&function.pattern, drop_method);
@@ -170,6 +179,35 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 self.states = merge_states(&outer, &continuing);
                 !continuing.is_empty()
+            }
+            Expression::Loop(value) => {
+                let entry = self.states.clone();
+                self.loops.push(LoopOwnershipContext::default());
+                if self.check_expression(&Expression::Block(value.body.clone()), false) {
+                    self.loops
+                        .last_mut()
+                        .expect("loop ownership context")
+                        .back_edges
+                        .push(self.states.clone());
+                }
+                let context = self.loops.pop().expect("loop ownership context");
+                for (symbol, initial) in &entry {
+                    if *initial == ValueState::Available
+                        && context.back_edges.iter().any(|state| {
+                            matches!(
+                                state.get(symbol),
+                                Some(ValueState::Moved | ValueState::MaybeMoved)
+                            )
+                        })
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            value.syntax.span.clone(),
+                            "move-only value may be moved before the next loop iteration",
+                        ));
+                    }
+                }
+                self.states = merge_states(&entry, &context.breaks);
+                !context.breaks.is_empty()
             }
             Expression::Block(value) => {
                 for statement in &value.statements {
@@ -289,6 +327,21 @@ impl<'a> OwnershipChecker<'a> {
             }
             Statement::Return(statement) => {
                 self.check_expression(&statement.value, true);
+                false
+            }
+            Statement::Break(statement) => {
+                if let Some(value) = &statement.value {
+                    self.check_expression(value, true);
+                }
+                if let Some(loop_) = self.loops.last_mut() {
+                    loop_.breaks.push(self.states.clone());
+                }
+                false
+            }
+            Statement::Continue(_) => {
+                if let Some(loop_) = self.loops.last_mut() {
+                    loop_.back_edges.push(self.states.clone());
+                }
                 false
             }
             Statement::Expression(expression) => self.check_expression(expression, true),

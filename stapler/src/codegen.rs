@@ -56,7 +56,7 @@ struct ModuleEmitter<'module, 'context> {
     target_data: TargetData,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct FunctionEnvironment<'context> {
     locals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
     owned: HashMap<
@@ -73,6 +73,28 @@ struct FunctionEnvironment<'context> {
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
     did_return: bool,
+    loops: Vec<LoopCodegenContext<'context>>,
+}
+
+impl<'context> FunctionEnvironment<'context> {
+    fn restore_local_state(&mut self, snapshot: &Self) {
+        self.locals = snapshot.locals.clone();
+        self.owned = snapshot.owned.clone();
+        self.owned_order = snapshot.owned_order.clone();
+        self.owned_mutable = snapshot.owned_mutable.clone();
+        self.binding_cells = snapshot.binding_cells.clone();
+    }
+}
+
+#[derive(Clone)]
+struct LoopCodegenContext<'context> {
+    header: inkwell::basic_block::BasicBlock<'context>,
+    exit: inkwell::basic_block::BasicBlock<'context>,
+    owned_before: usize,
+    incoming: Vec<(
+        inkwell::values::BasicValueEnum<'context>,
+        inkwell::basic_block::BasicBlock<'context>,
+    )>,
 }
 
 type CodeGenerationResult<T> = Result<T, Diagnostic>;
@@ -1189,6 +1211,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 statement.syntax.span.clone(),
                 "`return` is only allowed inside a function",
             )),
+            Statement::Break(statement) => Err(Diagnostic::new(
+                statement.syntax.span.clone(),
+                "`break` is only allowed inside a loop",
+            )),
+            Statement::Continue(statement) => Err(Diagnostic::new(
+                statement.syntax.span.clone(),
+                "`continue` is only allowed inside a loop",
+            )),
             Statement::Expression(expression) => {
                 let value = self.compile_expression(environment, expression)?;
                 let value_type = self
@@ -1560,6 +1590,57 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.builder
                     .build_return(Some(&value))
                     .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+                environment.did_return = true;
+                Ok(None)
+            }
+            Statement::Break(statement) => {
+                let value = if let Some(expression) = &statement.value {
+                    let value = self.compile_expression(environment, expression)?;
+                    if environment.did_return {
+                        return Ok(None);
+                    }
+                    value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(
+                            expression.syntax().span.clone(),
+                            "loop result is not a first-class value",
+                        )
+                    })?
+                } else {
+                    value_as_basic(self.unit_value()).expect("unit is a basic value")
+                };
+                let (exit, owned_before) = environment
+                    .loops
+                    .last()
+                    .map(|loop_| (loop_.exit, loop_.owned_before))
+                    .expect("break inside loop");
+                self.drop_owned_since(environment, owned_before, statement.syntax.span.clone())?;
+                self.builder
+                    .build_unconditional_branch(exit)
+                    .map_err(|error| {
+                        Diagnostic::new(statement.syntax.span.clone(), error.to_string())
+                    })?;
+                let predecessor = self.builder.get_insert_block().expect("break block");
+                environment
+                    .loops
+                    .last_mut()
+                    .expect("break inside loop")
+                    .incoming
+                    .push((value, predecessor));
+                environment.did_return = true;
+                Ok(None)
+            }
+            Statement::Continue(statement) => {
+                let (header, owned_before) = environment
+                    .loops
+                    .last()
+                    .map(|loop_| (loop_.header, loop_.owned_before))
+                    .expect("continue inside loop");
+                self.drop_owned_since(environment, owned_before, statement.syntax.span.clone())?;
+                self.builder
+                    .build_unconditional_branch(header)
+                    .map_err(|error| {
+                        Diagnostic::new(statement.syntax.span.clone(), error.to_string())
+                    })?;
                 environment.did_return = true;
                 Ok(None)
             }
@@ -2073,6 +2154,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.compile_expression(environment, &satisfies.value)
             }
             Expression::Match(match_) => self.compile_match_expression(environment, match_),
+            Expression::Loop(loop_) => self.compile_loop_expression(environment, loop_),
             Expression::Block(block) => {
                 let owned_before = environment.owned_order.len();
                 self.predeclare_checked_bindings(environment, &block.statements)?;
@@ -2441,6 +2523,77 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .as_any_value_enum()
     }
 
+    fn compile_loop_expression(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        loop_: &crate::LoopExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| {
+                Diagnostic::new(loop_.syntax.span.clone(), "loop is not in a function")
+            })?;
+        let header = self.context.append_basic_block(function, "loop.body");
+        let exit = self.context.append_basic_block(function, "loop.exit");
+        self.builder
+            .build_unconditional_branch(header)
+            .map_err(|error| Diagnostic::new(loop_.syntax.span.clone(), error.to_string()))?;
+        self.builder.position_at_end(header);
+
+        environment.loops.push(LoopCodegenContext {
+            header,
+            exit,
+            owned_before: environment.owned_order.len(),
+            incoming: Vec::new(),
+        });
+        environment.did_return = false;
+        self.compile_expression(environment, &Expression::Block(loop_.body.clone()))?;
+        if !environment.did_return {
+            self.builder
+                .build_unconditional_branch(header)
+                .map_err(|error| Diagnostic::new(loop_.syntax.span.clone(), error.to_string()))?;
+        }
+        let context = environment
+            .loops
+            .pop()
+            .expect("loop code generation context");
+        self.builder.position_at_end(exit);
+        if context.incoming.is_empty() {
+            self.builder
+                .build_unreachable()
+                .map_err(|error| Diagnostic::new(loop_.syntax.span.clone(), error.to_string()))?;
+            environment.did_return = true;
+            return Ok(self.unit_value());
+        }
+
+        environment.did_return = false;
+        let result = self
+            .typed_module
+            .type_of_expression(loop_.syntax.id)
+            .cloned()
+            .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    loop_.syntax.span.clone(),
+                    "loop has no concrete result type",
+                )
+            })?;
+        let result_type = self.compile_type(&result)?;
+        let phi = self
+            .builder
+            .build_phi(result_type, "loop.value")
+            .map_err(|error| Diagnostic::new(loop_.syntax.span.clone(), error.to_string()))?;
+        let incoming = context
+            .incoming
+            .iter()
+            .map(|(value, block)| (value as &dyn BasicValue<'context>, *block))
+            .collect::<Vec<_>>();
+        phi.add_incoming(&incoming);
+        Ok(phi.as_basic_value().as_any_value_enum())
+    }
+
     fn compile_match_expression(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
@@ -2471,7 +2624,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             })?;
         let merge_block = self.context.append_basic_block(function, "match.merge");
         let mut incoming = Vec::new();
+        let branch_base = environment.clone();
+        let mut continuing_state = None;
+        let mut terminating_state = None;
         for arm in &match_.arms {
+            environment.restore_local_state(&branch_base);
             let owned_before = environment.owned_order.len();
             let arm_block = self.context.append_basic_block(function, "match.arm");
             let failure_block = self.context.append_basic_block(function, "match.next");
@@ -2499,11 +2656,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map_err(|error| Diagnostic::new(arm.syntax.span.clone(), error.to_string()))?;
                 let predecessor = self.builder.get_insert_block().expect("match arm block");
                 incoming.push((value, predecessor));
+                continuing_state = Some(environment.clone());
             } else {
-                for symbol in &environment.owned_order[owned_before..] {
+                let cleanup_start = owned_before.min(environment.owned_order.len());
+                for symbol in &environment.owned_order[cleanup_start..] {
                     environment.owned.remove(symbol);
                 }
-                environment.owned_order.truncate(owned_before);
+                environment.owned_order.truncate(cleanup_start);
+                terminating_state = Some(environment.clone());
             }
             self.builder.position_at_end(failure_block);
         }
@@ -2517,7 +2677,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .build_unreachable()
                 .map_err(|error| Diagnostic::new(match_.syntax.span.clone(), error.to_string()))?;
             environment.did_return = true;
+            if let Some(state) = terminating_state {
+                environment.restore_local_state(&state);
+            }
             return Ok(self.unit_value());
+        }
+        if let Some(state) = continuing_state {
+            environment.restore_local_state(&state);
         }
         environment.did_return = false;
         let result = self

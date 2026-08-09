@@ -821,3 +821,76 @@ fn parses_mutable_patterns_and_assignment_statements_losslessly() {
     ));
     assert!(parse("extern \"c\" { let mut value: I32 }\n").is_err());
 }
+
+#[test]
+fn parses_loop_break_and_continue_losslessly() {
+    let source = concat!(
+        "def choose = () => loop {\n",
+        "  loop { break }\n",
+        "  break 42\n",
+        "  continue;\n",
+        "}\n",
+    );
+    let module = parse(source).expect("loop control should parse");
+    assert_eq!(module.text(), source);
+    let Statement::Binding(binding) = statement(&module.items[0]) else {
+        panic!("expected function binding");
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("expected function expression");
+    };
+    let Expression::Loop(loop_) = function.body.as_ref() else {
+        panic!("expected loop expression");
+    };
+    assert!(matches!(
+        loop_.body.statements[0],
+        Statement::Expression(Expression::Loop(_))
+    ));
+    assert!(matches!(
+        loop_.body.statements[1],
+        Statement::Break(ref break_) if break_.value.is_some()
+    ));
+    assert!(matches!(loop_.body.statements[2], Statement::Continue(_)));
+    assert!(
+        module
+            .syntax
+            .tokens()
+            .iter()
+            .any(|token| token.kind == TokenKind::Loop)
+    );
+    assert!(
+        module
+            .syntax
+            .tokens()
+            .iter()
+            .any(|token| token.kind == TokenKind::Break)
+    );
+    assert!(
+        module
+            .syntax
+            .tokens()
+            .iter()
+            .any(|token| token.kind == TokenKind::Continue)
+    );
+}
+
+#[test]
+fn uses_newline_as_the_unit_break_boundary() {
+    let module = parse("def value = () => loop { break\n42 }\n")
+        .expect("newline should terminate a unit break");
+    let Statement::Binding(binding) = statement(&module.items[0]) else {
+        panic!("expected binding");
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("expected function");
+    };
+    let Expression::Loop(loop_) = function.body.as_ref() else {
+        panic!("expected loop");
+    };
+    assert!(matches!(
+        loop_.body.statements[0],
+        Statement::Break(ref break_) if break_.value.is_none()
+    ));
+    assert!(matches!(loop_.body.statements[1], Statement::Expression(_)));
+    assert!(parse("def invalid = () => loop { continue 42 }\n").is_err());
+}

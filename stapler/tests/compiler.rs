@@ -968,8 +968,8 @@ fn captures_potentially_unsafe_local_defs_by_binding_cell() {
 fn applies_initialization_state_to_recursive_local_generics() {
     let module = type_check(concat!(
         "def outer: () -> I32 = () => {\n",
-        "  def loop: T => T -> T = value => loop value\n",
-        "  loop 1\n",
+        "  def recur: T => T -> T = value => recur value\n",
+        "  recur 1\n",
         "}\n",
     ));
     let context = Context::create();
@@ -2398,9 +2398,9 @@ fn monomorphizes_nested_and_recursive_generic_calls() {
     let module = type_check(concat!(
         "def identity: T => T -> T = x => x\n",
         "def copy: U => U -> U = x => identity x\n",
-        "def loop: V => V -> V = x => loop x\n",
+        "def recur: V => V -> V = x => recur x\n",
         "let answer: I32 = copy 42\n",
-        "let recurse: I32 = loop 1\n",
+        "let recurse: I32 = recur 1\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -2956,4 +2956,132 @@ fn rejects_refutable_string_literal_binding_patterns() {
     }));
 
     type_check("def valid: \"yes\" -> String = \"yes\" => \"matched\"\n");
+}
+
+#[test]
+fn infers_and_generates_loop_result_values() {
+    let module = type_check(concat!(
+        "def answer = () => loop { break 42 }\n",
+        "def nested = () => loop { loop { break () }; break 7 }\n",
+        "def unit = () => loop { break }\n",
+        "answer ()\n",
+        "nested ()\n",
+        "unit ()\n",
+    ));
+    for (name, expected) in [
+        ("answer", CheckedType::I32),
+        ("nested", CheckedType::I32),
+        ("unit", CheckedType::empty_product()),
+    ] {
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .expect("loop function should resolve");
+        assert_eq!(
+            *module
+                .type_of_function(function.id)
+                .expect("loop function should be typed")
+                .result,
+            expected,
+        );
+    }
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("loops should generate valid LLVM");
+    assert!(llvm.contains("loop.body"));
+    assert!(llvm.contains("loop.exit"));
+    assert!(llvm.contains("loop.value"));
+}
+
+#[test]
+fn supports_loop_control_through_matches_and_function_returns() {
+    let module = type_check(concat!(
+        "def select: Bool -> I32 = condition => loop {\n",
+        "  match condition { True() => { break 9 }, False() => { continue } }\n",
+        "}\n",
+        "def early: Bool -> I32 = condition => loop {\n",
+        "  match condition { True() => { return 5 }, False() => { break 6 } }\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("nested loop control should generate valid LLVM");
+}
+
+#[test]
+fn rejects_invalid_loop_control_and_break_types() {
+    for (source, expected) in [
+        ("break 1\n", "`break` is only allowed inside a loop"),
+        ("continue\n", "`continue` is only allowed inside a loop"),
+        (
+            "def invalid = () => loop { def nested = () => { break }; break () }\n",
+            "`break` is only allowed inside a loop",
+        ),
+    ] {
+        let diagnostics = NameResolver::new()
+            .resolve(&parse(source).expect("invalid loop control should still parse"))
+            .expect_err("loop control should fail resolution");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "missing `{expected}` in {diagnostics:?}",
+        );
+    }
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def invalid: () -> I32 = () => loop { break }\n"))
+        .expect_err("unit break should not satisfy I32");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("expected `I32`") && diagnostic.message.contains("found `()`")
+    }));
+}
+
+#[test]
+fn accepts_divergent_loops_in_typed_contexts() {
+    let module = type_check("def forever: () -> I32 = () => loop { continue }\n");
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a divergent loop should satisfy its expected type");
+}
+
+#[test]
+fn checks_ownership_across_loop_exits_and_back_edges() {
+    let module = type_check(concat!(
+        "type Resource = I32\n",
+        "impl Drop Resource { def drop = Resource _ => () }\n",
+        "def choose: Bool -> Resource = condition => loop {\n",
+        "  let value = Resource 1\n",
+        "  match condition {\n",
+        "    True() => { break value },\n",
+        "    False() => { continue },\n",
+        "  }\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("loop exits should preserve moved results and drop iteration locals");
+    assert!(llvm.contains("loop.value"));
+    assert!(llvm.contains("drop.call"));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Resource = I32\n",
+            "impl Drop Resource { def drop = Resource _ => () }\n",
+            "def invalid = (value: Resource) => loop {\n",
+            "  let consumed = value\n",
+            "  continue\n",
+            "}\n",
+        )))
+        .expect_err("an outer move-only value cannot be consumed before a back-edge");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("may be moved before the next loop iteration")
+    }));
 }

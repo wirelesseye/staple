@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
 use crate::{
-    Accessor, Binding, BindingKind, Diagnostic, Expression, Item, MacroDeclaration, ModuleId,
-    Pattern, Program, Span, Statement, Syntax, SyntaxId, Type, UseKind, Visibility,
+    Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
+    MacroDeclaration, ModuleId, Pattern, Program, Span, Statement, Syntax, SyntaxId, Type, UseKind,
+    Visibility,
 };
 
 const MAX_EXPANSION_DEPTH: usize = 128;
@@ -556,6 +557,12 @@ impl MacroExpander {
             Statement::Return(return_) => {
                 return_.value = self.expand_expression(module, return_.value.clone(), depth);
             }
+            Statement::Break(break_) => {
+                if let Some(value) = break_.value.take() {
+                    break_.value = Some(self.expand_expression(module, value, depth));
+                }
+            }
+            Statement::Continue(_) => {}
             Statement::Expression(expression) => {
                 *expression = self.expand_expression(module, expression.clone(), depth);
             }
@@ -644,6 +651,12 @@ impl MacroExpander {
                     arm.body = self.expand_expression(module, arm.body.clone(), depth);
                 }
                 Expression::Match(match_)
+            }
+            Expression::Loop(mut loop_) => {
+                for statement in &mut loop_.body.statements {
+                    self.expand_statement(module, statement, depth);
+                }
+                Expression::Loop(loop_)
             }
             Expression::Block(mut block) => {
                 for statement in &mut block.statements {
@@ -1137,6 +1150,13 @@ impl MacroExpander {
                 ));
                 None
             }
+            Expression::Loop(loop_) => {
+                self.diagnostics.push(Diagnostic::new(
+                    loop_.syntax.span.clone(),
+                    "loops are not supported during compile-time evaluation",
+                ));
+                None
+            }
             Expression::Block(block) => {
                 let mut local = environment.clone();
                 let mut result = Value::Product(Vec::new());
@@ -1171,6 +1191,20 @@ impl MacroExpander {
                         }
                         Statement::Return(return_) => {
                             return self.eval_expression(module, &return_.value, &mut local);
+                        }
+                        Statement::Break(break_) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                break_.syntax.span.clone(),
+                                "`break` is not supported during compile-time evaluation",
+                            ));
+                            return None;
+                        }
+                        Statement::Continue(continue_) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                continue_.syntax.span.clone(),
+                                "`continue` is not supported during compile-time evaluation",
+                            ));
+                            return None;
                         }
                     }
                 }
@@ -1302,6 +1336,12 @@ impl MacroExpander {
                     self.freshen_syntax(&mut arm.syntax, module, mark);
                     freshen_pattern(self, &mut arm.pattern, module, mark);
                     self.freshen_expression(&mut arm.body, module, mark);
+                }
+            }
+            Expression::Loop(loop_) => {
+                self.freshen_syntax(&mut loop_.body.syntax, module, mark);
+                for statement in &mut loop_.body.statements {
+                    freshen_statement(self, statement, module, mark);
                 }
             }
             Expression::Block(block) => {
@@ -1568,6 +1608,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
             .arms
             .iter()
             .any(|arm| obviously_not_syntax(&arm.body, 0)),
+        Expression::Loop(_) => true,
         Expression::Block(block) => {
             block
                 .statements
@@ -1577,7 +1618,9 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
                     Statement::Return(return_) => obviously_not_syntax(&return_.value, 0),
                     Statement::Binding(_)
                     | Statement::PatternBinding(_)
-                    | Statement::Assignment(_) => true,
+                    | Statement::Assignment(_)
+                    | Statement::Break(_)
+                    | Statement::Continue(_) => true,
                 })
         }
         Expression::Infix(_)
@@ -1724,6 +1767,11 @@ fn substitute_splices(
                 arm.body = substitute_splices(&arm.body, environment, diagnostics)?;
             }
         }
+        Expression::Loop(loop_) => {
+            for statement in &mut loop_.body.statements {
+                substitute_statement(statement, environment, diagnostics)?;
+            }
+        }
         Expression::Block(block) => {
             for statement in &mut block.statements {
                 substitute_statement(statement, environment, diagnostics)?;
@@ -1781,6 +1829,12 @@ fn substitute_statement(
         Statement::Return(return_) => {
             return_.value = substitute_splices(&return_.value, environment, diagnostics)?
         }
+        Statement::Break(break_) => {
+            if let Some(value) = &mut break_.value {
+                *value = substitute_splices(value, environment, diagnostics)?;
+            }
+        }
+        Statement::Continue(_) => {}
         Statement::Expression(expression) => {
             *expression = substitute_splices(expression, environment, diagnostics)?
         }
@@ -1840,42 +1894,11 @@ fn alpha_rename_expression(
                 scopes.pop();
             }
         }
+        Expression::Loop(loop_) => {
+            alpha_rename_block(&mut loop_.body, mark, scopes);
+        }
         Expression::Block(block) => {
-            scopes.push(HashMap::new());
-            for statement in &mut block.statements {
-                match statement {
-                    Statement::Binding(binding) => {
-                        if let Some(value) = &mut binding.value {
-                            alpha_rename_expression(value, mark, scopes);
-                        }
-                        let renamed = hygienic_name(&binding.name, mark);
-                        scopes
-                            .last_mut()
-                            .unwrap()
-                            .insert(binding.name.clone(), renamed.clone());
-                        binding.name = renamed;
-                    }
-                    Statement::PatternBinding(binding) => {
-                        alpha_rename_expression(&mut binding.value, mark, scopes);
-                        alpha_rename_pattern(
-                            &mut binding.pattern,
-                            mark,
-                            scopes.last_mut().unwrap(),
-                        );
-                    }
-                    Statement::Assignment(assignment) => {
-                        alpha_rename_expression(&mut assignment.target, mark, scopes);
-                        alpha_rename_expression(&mut assignment.value, mark, scopes);
-                    }
-                    Statement::Return(return_) => {
-                        alpha_rename_expression(&mut return_.value, mark, scopes)
-                    }
-                    Statement::Expression(expression) => {
-                        alpha_rename_expression(expression, mark, scopes)
-                    }
-                }
-            }
-            scopes.pop();
+            alpha_rename_block(block, mark, scopes);
         }
         Expression::Product(product) => {
             for element in &mut product.elements {
@@ -1904,11 +1927,52 @@ fn alpha_rename_expression(
     }
 }
 
+fn alpha_rename_block(
+    block: &mut BlockExpression,
+    mark: u64,
+    scopes: &mut Vec<HashMap<String, String>>,
+) {
+    scopes.push(HashMap::new());
+    for statement in &mut block.statements {
+        match statement {
+            Statement::Binding(binding) => {
+                if let Some(value) = &mut binding.value {
+                    alpha_rename_expression(value, mark, scopes);
+                }
+                let renamed = hygienic_name(&binding.name, mark);
+                scopes
+                    .last_mut()
+                    .unwrap()
+                    .insert(binding.name.clone(), renamed.clone());
+                binding.name = renamed;
+            }
+            Statement::PatternBinding(binding) => {
+                alpha_rename_expression(&mut binding.value, mark, scopes);
+                alpha_rename_pattern(&mut binding.pattern, mark, scopes.last_mut().unwrap());
+            }
+            Statement::Assignment(assignment) => {
+                alpha_rename_expression(&mut assignment.target, mark, scopes);
+                alpha_rename_expression(&mut assignment.value, mark, scopes);
+            }
+            Statement::Return(return_) => alpha_rename_expression(&mut return_.value, mark, scopes),
+            Statement::Break(break_) => {
+                if let Some(value) = &mut break_.value {
+                    alpha_rename_expression(value, mark, scopes);
+                }
+            }
+            Statement::Continue(_) => {}
+            Statement::Expression(expression) => alpha_rename_expression(expression, mark, scopes),
+        }
+    }
+    scopes.pop();
+}
+
 fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
     match expression {
         Expression::Function(value) => &mut value.syntax,
         Expression::Satisfies(value) => &mut value.syntax,
         Expression::Match(value) => &mut value.syntax,
+        Expression::Loop(value) => &mut value.syntax,
         Expression::Block(value) => &mut value.syntax,
         Expression::Product(value) => &mut value.syntax,
         Expression::Call(value) => &mut value.syntax,
@@ -1981,6 +2045,15 @@ fn freshen_statement(
         Statement::Return(return_) => {
             expander.freshen_syntax(&mut return_.syntax, module, mark);
             expander.freshen_expression(&mut return_.value, module, mark);
+        }
+        Statement::Break(break_) => {
+            expander.freshen_syntax(&mut break_.syntax, module, mark);
+            if let Some(value) = &mut break_.value {
+                expander.freshen_expression(value, module, mark);
+            }
+        }
+        Statement::Continue(continue_) => {
+            expander.freshen_syntax(&mut continue_.syntax, module, mark);
         }
         Statement::Expression(expression) => expander.freshen_expression(expression, module, mark),
     }
