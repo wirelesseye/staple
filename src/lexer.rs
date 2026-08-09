@@ -154,6 +154,8 @@ fn single_character_kind(character: char) -> TokenKind {
         ')' => TokenKind::RParen,
         '{' => TokenKind::LBrace,
         '}' => TokenKind::RBrace,
+        '[' => TokenKind::LBracket,
+        ']' => TokenKind::RBracket,
         ':' => TokenKind::Colon,
         ',' => TokenKind::Comma,
         ';' => TokenKind::Semicolon,

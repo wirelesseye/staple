@@ -403,6 +403,52 @@ change the order or size of a product. Accessing an absent name or an index outs
 the product's fixed bounds is an error. Whether that error is always detected at
 compile time remains unspecified.
 
+Fixed homogeneous products may be written with repetition syntax. `T[N]` is
+exactly equivalent to a product containing `N` copies of `T`, rather than a
+distinct array type. In particular, `T[0]` is `()` and `T[1]` is `T`. A fully
+expanded product may contain at most 65,535 elements.
+
+Product type elements can be flattened explicitly with `...`:
+
+```staple
+let values: (String, ...I32[3])
+// Equivalent to (String, I32, I32, I32)
+```
+
+A spread operand must be a fixed product. Explicit `...T[0]` and `...T[1]`
+contribute zero and one elements respectively. A bare trailing `...` retains
+its separate meaning in a C-variadic function parameter type.
+
+Homogeneous products support variable indexing with a `USize` expression:
+
+```staple
+let index: USize = 1
+let value = values[index]
+```
+
+The index is checked against the fixed product length. A statically known bad
+index is rejected; a dynamically out-of-bounds index traps.
+
+Products have a structural `Default` implementation when every element type
+implements `Default`. The expected type determines the result of `default ()`:
+
+```staple
+let zeros: I32[4] = default ()
+let mixed: (I32, Bool, String) = default ()
+```
+
+Each product element is initialized by a separate call to its element type's
+`Default.default` member. This is construction, not a `repeat` operation: it
+also works for heterogeneous and named products, and does not copy one value
+into every position. The standard integer defaults are zero, `Bool` defaults
+to `False`, and `String` defaults to the empty string.
+
+The empty product is default-constructible without an element constraint.
+Because `T[1]` is normalized to `T`, its default is simply the default of `T`.
+Distinct types can define their own explicit `Default` implementation, while
+product implementations are structural and cannot be overridden. `Ref T` does
+not implement `Default` merely because `T` does.
+
 ## Functions
 
 A function value has the following form:
@@ -789,6 +835,24 @@ type RefPoint = Ref (x: I32, y: I32)
 let point = RefPoint (Ref (x: 10, y: 20))
 let RefPoint (Ref (x, y)) = point
 ```
+
+The length of a homogeneous product can be erased behind `Ref`:
+
+```staple
+let fixed: Ref I32[3] = Ref (10, 20, 30)
+let values: Ref I32[] = fixed
+let count: USize = length values
+let second = values.1
+let index: USize = 2
+let third = values[index]
+```
+
+`Ref T[]` is a pointer-and-length view of an allocation whose concrete length
+is still fixed. It is not a dynamic array and is not equal to any `Ref T[N]`;
+fixed references are implicitly converted when an erased reference is
+expected. Literal and variable indexing perform runtime bounds checks. Erased
+products cannot be used by value, spread, destructured, or passed through a
+foreign ABI.
 
 Managed references use a non-moving, single-threaded, stop-the-world
 mark-and-sweep collector. Collection occurs automatically as the live heap

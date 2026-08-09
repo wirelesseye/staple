@@ -50,6 +50,7 @@ impl Pattern {
                 Self::Nominal(_) => None,
             },
             ty: self.ty(),
+            spread: false,
         }
     }
 }

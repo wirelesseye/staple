@@ -9,6 +9,7 @@ pub enum Expression {
     Product(ProductExpression),
     Call(CallExpression),
     Access(AccessExpression),
+    Index(IndexExpression),
     Infix(InfixExpression),
     Quote(QuoteExpression),
     Splice(SpliceExpression),
@@ -28,6 +29,7 @@ impl Expression {
             Self::Product(expression) => &expression.syntax,
             Self::Call(expression) => &expression.syntax,
             Self::Access(expression) => &expression.syntax,
+            Self::Index(expression) => &expression.syntax,
             Self::Infix(expression) => &expression.syntax,
             Self::Quote(expression) => &expression.syntax,
             Self::Splice(expression) => &expression.syntax,
@@ -120,6 +122,13 @@ pub struct AccessExpression {
     pub syntax: Syntax,
     pub value: Box<Expression>,
     pub accessor: Accessor,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexExpression {
+    pub syntax: Syntax,
+    pub value: Box<Expression>,
+    pub index: Box<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

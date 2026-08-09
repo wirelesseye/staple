@@ -656,3 +656,25 @@ fn parses_sum_types_and_propagating_patterns_losslessly() {
             if binding.kind == stapler::PatternBindingKind::Propagating
     ));
 }
+
+#[test]
+fn parses_repeated_spread_erased_and_variable_index_syntax() {
+    let source = concat!(
+        "let fixed: Ref I32[3]\n",
+        "let erased: Ref I32[]\n",
+        "let mixed: (String, ...I32[3], ...(I32, I32))\n",
+        "let value = erased[index].0\n",
+    );
+    let module = parse(source).expect("product extensions should parse");
+    assert_eq!(module.text(), source);
+
+    let Statement::Binding(fixed) = statement(&module.items[0]) else {
+        panic!("expected fixed binding");
+    };
+    assert!(matches!(fixed.annotation, Some(Type::Application(_))));
+
+    let Statement::Binding(value) = statement(&module.items[3]) else {
+        panic!("expected indexed binding");
+    };
+    assert!(matches!(value.value, Some(Expression::Access(_))));
+}

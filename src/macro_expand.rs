@@ -528,6 +528,11 @@ impl MacroExpander {
                 access.value = Box::new(self.expand_expression(module, *access.value, depth));
                 Expression::Access(access)
             }
+            Expression::Index(mut index) => {
+                index.value = Box::new(self.expand_expression(module, *index.value, depth));
+                index.index = Box::new(self.expand_expression(module, *index.index, depth));
+                Expression::Index(index)
+            }
             Expression::Infix(mut infix) => {
                 infix.operands = infix
                     .operands
@@ -800,6 +805,28 @@ impl MacroExpander {
                         .map(|(_, value)| value),
                 }
             }
+            Expression::Index(index) => {
+                let value = self.eval_expression(module, &index.value, environment)?;
+                let Value::Product(elements) = value else {
+                    self.diagnostics.push(Diagnostic::new(
+                        index.syntax.span.clone(),
+                        "compile-time indexing requires a product",
+                    ));
+                    return None;
+                };
+                let Value::Integer(position) =
+                    self.eval_expression(module, &index.index, environment)?
+                else {
+                    self.diagnostics.push(Diagnostic::new(
+                        index.index.syntax().span.clone(),
+                        "compile-time product index must be an integer",
+                    ));
+                    return None;
+                };
+                usize::try_from(position)
+                    .ok()
+                    .and_then(|position| elements.get(position).map(|(_, value)| value.clone()))
+            }
             Expression::Match(match_) => {
                 let subject = self.eval_expression(module, &match_.subject, environment)?;
                 for arm in &match_.arms {
@@ -992,6 +1019,10 @@ impl MacroExpander {
                 self.freshen_expression(&mut call.argument, module, mark);
             }
             Expression::Access(access) => self.freshen_expression(&mut access.value, module, mark),
+            Expression::Index(index) => {
+                self.freshen_expression(&mut index.value, module, mark);
+                self.freshen_expression(&mut index.index, module, mark);
+            }
             Expression::Infix(infix) => {
                 for operand in &mut infix.operands {
                     self.freshen_expression(operand, module, mark);
@@ -1042,6 +1073,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
         Type::Application(application) => {
             type_contains_syntax(&application.callee) || type_contains_syntax(&application.argument)
         }
+        Type::Repeated(repeated) => type_contains_syntax(&repeated.element),
         Type::Inferred(_) => false,
     }
 }
@@ -1094,7 +1126,8 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         | Expression::Splice(_)
         | Expression::Name(_)
         | Expression::Call(_)
-        | Expression::Access(_) => false,
+        | Expression::Access(_)
+        | Expression::Index(_) => false,
         Expression::Satisfies(satisfies) => obviously_not_syntax(&satisfies.value, 0),
         Expression::Match(match_) => match_
             .arms
@@ -1260,6 +1293,10 @@ fn substitute_splices(
         Expression::Access(access) => {
             *access.value = substitute_splices(&access.value, environment, diagnostics)?
         }
+        Expression::Index(index) => {
+            *index.value = substitute_splices(&index.value, environment, diagnostics)?;
+            *index.index = substitute_splices(&index.index, environment, diagnostics)?;
+        }
         Expression::Infix(infix) => {
             for operand in &mut infix.operands {
                 *operand = substitute_splices(operand, environment, diagnostics)?;
@@ -1394,6 +1431,10 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut call.argument, mark, scopes);
         }
         Expression::Access(access) => alpha_rename_expression(&mut access.value, mark, scopes),
+        Expression::Index(index) => {
+            alpha_rename_expression(&mut index.value, mark, scopes);
+            alpha_rename_expression(&mut index.index, mark, scopes);
+        }
         Expression::Infix(infix) => {
             for operand in &mut infix.operands {
                 alpha_rename_expression(operand, mark, scopes);
@@ -1416,6 +1457,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Product(value) => &mut value.syntax,
         Expression::Call(value) => &mut value.syntax,
         Expression::Access(value) => &mut value.syntax,
+        Expression::Index(value) => &mut value.syntax,
         Expression::Infix(value) => &mut value.syntax,
         Expression::Quote(value) => &mut value.syntax,
         Expression::Splice(value) => &mut value.syntax,
@@ -1488,6 +1530,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         Type::Sum(ty) => &mut ty.syntax,
         Type::Function(ty) => &mut ty.syntax,
         Type::Application(ty) => &mut ty.syntax,
+        Type::Repeated(ty) => &mut ty.syntax,
     };
     expander.freshen_syntax(syntax, module, mark);
     match ty {
@@ -1510,6 +1553,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
             freshen_type(expander, &mut application.callee, module, mark);
             freshen_type(expander, &mut application.argument, module, mark);
         }
+        Type::Repeated(repeated) => freshen_type(expander, &mut repeated.element, module, mark),
         Type::Inferred(_) | Type::Named(_) => {}
     }
 }

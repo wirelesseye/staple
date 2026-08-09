@@ -213,6 +213,21 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 true
             }
+            Expression::Index(value) => {
+                let result_is_copy = self
+                    .module
+                    .type_of_expression(value.syntax.id)
+                    .is_none_or(|ty| self.module.is_copy_in_function(ty, self.function));
+                if consume && !result_is_copy {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.syntax.span.clone(),
+                        "cannot move an element out through an index; destructure the whole value",
+                    ));
+                }
+                self.check_expression(&value.value, false);
+                self.check_expression(&value.index, true);
+                true
+            }
             Expression::Infix(value) => {
                 if let Some(lowered) = self.module.resolved().lowered_infix(value.syntax.id) {
                     self.check_expression(lowered, consume)

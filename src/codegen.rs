@@ -15,7 +15,9 @@ use inkwell::{
     values::{AnyValue, AnyValueEnum, BasicValue, BasicValueEnum},
 };
 
-use crate::typecheck::{contains_type_parameter, infer_type_parameters, substitute_type};
+use crate::typecheck::{
+    contains_type_parameter, erased_ref_length, infer_type_parameters, substitute_type,
+};
 use crate::{
     CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic, Expression,
     FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction,
@@ -1603,8 +1605,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         };
         let source = substitute_type(coercion.source, &self.active_type_substitutions);
         let target = substitute_type(coercion.target, &self.active_type_substitutions);
-        let value =
-            self.coerce_sum_value(value, &source, &target, expression.syntax().span.clone())?;
+        let value = if matches!(
+            (&source, &target),
+            (CheckedType::Ref(_), CheckedType::Ref(target))
+                if matches!(target.as_ref(), CheckedType::ErasedProduct(_))
+        ) {
+            self.coerce_erased_ref_value(value, &source, &target, expression.syntax().span.clone())?
+        } else {
+            self.coerce_sum_value(value, &source, &target, expression.syntax().span.clone())?
+        };
         self.release_moved_ownership(environment, expression.syntax().id)?;
         Ok(value)
     }
@@ -1720,13 +1729,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     if self.typed_module.resolved().builtin_type(type_id)
                         == Some(crate::BuiltinType::Ref)
                     {
-                        let CheckedType::Ref(payload) =
-                            self.concrete_expression_type(expression).ok_or_else(|| {
-                                Diagnostic::new(
-                                    call.syntax.span.clone(),
-                                    "Ref constructor has no concrete result type",
-                                )
-                            })?
+                        let constructor_type = self
+                            .typed_module
+                            .coercion_for(expression.syntax().id)
+                            .map(|coercion| coercion.source.clone())
+                            .or_else(|| self.concrete_expression_type(expression));
+                        let CheckedType::Ref(payload) = constructor_type.ok_or_else(|| {
+                            Diagnostic::new(
+                                call.syntax.span.clone(),
+                                "Ref constructor has no concrete result type",
+                            )
+                        })?
                         else {
                             return Err(Diagnostic::new(
                                 call.syntax.span.clone(),
@@ -1784,6 +1797,37 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "element access requires a product value",
                     )
                 })?;
+                if checked.erased {
+                    let BasicValueEnum::StructValue(reference) = value else {
+                        return Err(Diagnostic::new(
+                            access.value.syntax().span.clone(),
+                            "erased product reference has an invalid representation",
+                        ));
+                    };
+                    let pointer = self
+                        .builder
+                        .build_extract_value(reference, 0, "erased_ref.pointer")
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                    let length = self
+                        .builder
+                        .build_extract_value(reference, 1, "erased_ref.length")
+                        .map_err(compiler_diagnostic)?
+                        .into_int_value();
+                    let position = self.size_type.const_int(checked.index as u64, false);
+                    return self
+                        .compile_index_load(
+                            pointer,
+                            position,
+                            length,
+                            self.typed_module
+                                .type_of_expression(access.syntax.id)
+                                .cloned()
+                                .unwrap_or(CheckedType::Error),
+                            access.syntax.span.clone(),
+                        )
+                        .map(|value| value.as_any_value_enum());
+                }
                 let value = if let Some(payload) = &checked.dereference {
                     self.load_ref_payload(value, payload, access.syntax.span.clone())?
                 } else {
@@ -1800,6 +1844,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map(|value| value.as_any_value_enum())
                     .map_err(|error| Diagnostic::new(access.syntax.span.clone(), error.to_string()))
             }
+            Expression::Index(index) => self.compile_index_expression(environment, index),
             Expression::Infix(infix) => {
                 let lowered = self
                     .typed_module
@@ -1944,6 +1989,67 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Ok(llvm_type.const_int(value, false).as_any_value_enum())
             }
         }
+    }
+
+    fn compile_default_value(
+        &mut self,
+        value_type: &CheckedType,
+        default_trait: crate::TraitId,
+        method: crate::TraitMethodId,
+        span: Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let CheckedType::Product(product) = value_type {
+            if product.elements.is_empty() {
+                return Ok(self.unit_value());
+            }
+            let mut values = Vec::with_capacity(product.elements.len());
+            for element in &product.elements {
+                let value = self.compile_default_value(
+                    &element.value_type,
+                    default_trait,
+                    method,
+                    span.clone(),
+                )?;
+                values.push(value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "default product element is not first-class")
+                })?);
+            }
+            if let [value] = values.as_slice() {
+                return Ok(value.as_any_value_enum());
+            }
+            let fields = values
+                .iter()
+                .map(BasicValueEnum::get_type)
+                .collect::<Vec<_>>();
+            let mut result = self.context.struct_type(&fields, true).const_zero();
+            for (index, value) in values.into_iter().enumerate() {
+                result = self
+                    .builder
+                    .build_insert_value(result, value, index as u32, "default.element")
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+            }
+            return Ok(result.as_any_value_enum());
+        }
+
+        let function_id = self
+            .typed_module
+            .trait_impl_method(default_trait, value_type, method)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    span.clone(),
+                    format!("no `Default` implementation is available for `{value_type}`"),
+                )
+            })?;
+        let function = self.functions[&function_id];
+        let environment = self.context.ptr_type(AddressSpace::default()).const_null();
+        self.builder
+            .build_direct_call(function, &[environment.into()], "default.call")
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?
+            .try_as_basic_value()
+            .basic()
+            .map(AnyValueEnum::from)
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "default value is not first-class"))
     }
 
     fn unit_value(&self) -> AnyValueEnum<'context> {
@@ -2688,6 +2794,173 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map_err(compiler_diagnostic)
     }
 
+    fn erased_ref_type(&self) -> inkwell::types::StructType<'context> {
+        self.context.struct_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.size_type.into(),
+            ],
+            false,
+        )
+    }
+
+    fn coerce_erased_ref_value(
+        &self,
+        value: AnyValueEnum<'context>,
+        source: &CheckedType,
+        target: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let (CheckedType::Ref(source), CheckedType::Ref(target)) = (source, target) else {
+            return Err(Diagnostic::new(span, "invalid erased reference coercion"));
+        };
+        let length = erased_ref_length(source, target)
+            .filter(|length| *length != usize::MAX)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "invalid erased reference coercion"))?;
+        let BasicValueEnum::PointerValue(pointer) = value_as_basic(value).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "invalid fixed reference representation")
+        })?
+        else {
+            return Err(Diagnostic::new(
+                span,
+                "invalid fixed reference representation",
+            ));
+        };
+        let mut result = self.erased_ref_type().const_zero();
+        result = self
+            .builder
+            .build_insert_value(result, pointer, 0, "erased_ref.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        result = self
+            .builder
+            .build_insert_value(
+                result,
+                self.size_type.const_int(length as u64, false),
+                1,
+                "erased_ref.length",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        Ok(result.as_any_value_enum())
+    }
+
+    fn compile_index_expression(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        index: &crate::IndexExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let value = self.compile_expression(environment, &index.value)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
+        let position = self.compile_expression(environment, &index.index)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
+        let value = value_as_basic(value).ok_or_else(|| {
+            Diagnostic::new(
+                index.value.syntax().span.clone(),
+                "indexed value is not first-class",
+            )
+        })?;
+        let BasicValueEnum::IntValue(position) = value_as_basic(position).ok_or_else(|| {
+            Diagnostic::new(
+                index.index.syntax().span.clone(),
+                "product index is not an integer",
+            )
+        })?
+        else {
+            return Err(Diagnostic::new(
+                index.index.syntax().span.clone(),
+                "product index is not an integer",
+            ));
+        };
+        let checked = self
+            .typed_module
+            .index_for(index.syntax.id)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(index.syntax.span.clone(), "missing checked index"))?;
+        let (pointer, length) = match checked.kind {
+            crate::CheckedIndexKind::ErasedRef => {
+                let BasicValueEnum::StructValue(reference) = value else {
+                    return Err(Diagnostic::new(
+                        index.value.syntax().span.clone(),
+                        "erased reference has an invalid representation",
+                    ));
+                };
+                let pointer = self
+                    .builder
+                    .build_extract_value(reference, 0, "index.pointer")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let length = self
+                    .builder
+                    .build_extract_value(reference, 1, "index.length")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                (pointer, length)
+            }
+            crate::CheckedIndexKind::Ref { length } => {
+                let BasicValueEnum::PointerValue(pointer) = value else {
+                    return Err(Diagnostic::new(
+                        index.value.syntax().span.clone(),
+                        "reference has an invalid representation",
+                    ));
+                };
+                (pointer, self.size_type.const_int(length as u64, false))
+            }
+            crate::CheckedIndexKind::Value { length } => {
+                let value_type = value.get_type();
+                let pointer = self
+                    .builder
+                    .build_alloca(value_type, "index.product")
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_store(pointer, value)
+                    .map_err(compiler_diagnostic)?;
+                (pointer, self.size_type.const_int(length as u64, false))
+            }
+        };
+        self.compile_index_load(
+            pointer,
+            position,
+            length,
+            checked.element,
+            index.syntax.span.clone(),
+        )
+        .map(|value| value.as_any_value_enum())
+    }
+
+    fn compile_index_load(
+        &mut self,
+        pointer: inkwell::values::PointerValue<'context>,
+        position: inkwell::values::IntValue<'context>,
+        length: inkwell::values::IntValue<'context>,
+        element: CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let out_of_bounds = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGE,
+                position,
+                length,
+                "index.out_of_bounds",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(out_of_bounds, span.clone())?;
+        let element_type = self.compile_type(&element)?;
+        let pointer = unsafe {
+            self.builder
+                .build_gep(element_type, pointer, &[position], "index.element")
+        }
+        .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_load(element_type, pointer, "index.value")
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
     fn compile_symbol_value(
         &mut self,
         environment: &FunctionEnvironment<'context>,
@@ -2829,6 +3102,20 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .resolved()
                 .trait_for_method(dispatch.method)
                 .expect("trait method owner");
+            if self.typed_module.is_default_trait(trait_id)
+                && matches!(target, CheckedType::Product(_))
+            {
+                self.compile_expression(environment, &call.argument)?;
+                if environment.did_return {
+                    return Ok(self.unit_value());
+                }
+                return self.compile_default_value(
+                    &target,
+                    trait_id,
+                    dispatch.method,
+                    call.syntax.span.clone(),
+                );
+            }
             let function_id = self
                 .typed_module
                 .trait_impl_method(trait_id, &target, dispatch.method)
@@ -3054,6 +3341,20 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 return Ok(self.unit_value());
             }
+            IntrinsicFunction::ErasedProductLength => {
+                let value = self.compile_expression(environment, &call.argument)?;
+                let Some(BasicValueEnum::StructValue(reference)) = value_as_basic(value) else {
+                    return Err(Diagnostic::new(
+                        call.argument.syntax().span.clone(),
+                        "length requires an erased product reference",
+                    ));
+                };
+                return self
+                    .builder
+                    .build_extract_value(reference, 1, "erased_ref.length")
+                    .map(|value| value.as_any_value_enum())
+                    .map_err(compiler_diagnostic);
+            }
             _ => {}
         }
         let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
@@ -3143,6 +3444,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             IntrinsicFunction::StringFromCString
             | IntrinsicFunction::StringToCString
+            | IntrinsicFunction::ErasedProductLength
             | IntrinsicFunction::Drop => {
                 unreachable!()
             }
@@ -4160,7 +4462,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )),
             CheckedType::CString => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::String => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            CheckedType::Ref(payload)
+                if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)) =>
+            {
+                Ok(self.erased_ref_type().into())
+            }
             CheckedType::Ref(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            CheckedType::ErasedProduct(_) => Err(Diagnostic::new(
+                Span::Compiler,
+                "an erased product cannot be represented by value",
+            )),
             CheckedType::CPointer { .. } => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }

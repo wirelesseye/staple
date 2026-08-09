@@ -26,6 +26,10 @@ pub trait Drop = T => {
 
 pub def drop: T => T -> () = value => ()
 
+pub trait Default = T => {
+    default: () -> T
+}
+
 pub trait Add = T => {
     add: T -> T -> T
 }
@@ -156,6 +160,21 @@ extern "staple-intrinsic" {
     let __usize_greater_than: (USize, USize) -> Bool
     let __usize_greater_than_or_equal: (USize, USize) -> Bool
 }
+
+pub def length: T => Ref T[] -> USize = value => 0
+
+impl Default I8 { def default = () => 0 }
+impl Default I16 { def default = () => 0 }
+impl Default I32 { def default = () => 0 }
+impl Default I64 { def default = () => 0 }
+impl Default U8 { def default = () => 0 }
+impl Default U16 { def default = () => 0 }
+impl Default U32 { def default = () => 0 }
+impl Default U64 { def default = () => 0 }
+impl Default ISize { def default = () => 0 }
+impl Default USize { def default = () => 0 }
+impl Default Bool { def default = () => False }
+impl Default String { def default = () => "" }
 
 impl Add I8 {
     def add = left => right => __i8_add (left, right)

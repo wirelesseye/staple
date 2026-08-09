@@ -8,6 +8,7 @@ pub enum Type {
     Sum(SumType),
     Function(FunctionType),
     Application(TypeApplication),
+    Repeated(RepeatedType),
 }
 
 impl Type {
@@ -19,6 +20,7 @@ impl Type {
             Self::Sum(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
             Self::Application(ty) => &ty.syntax,
+            Self::Repeated(ty) => &ty.syntax,
         }
     }
 }
@@ -105,6 +107,15 @@ pub struct TypeElement {
     pub syntax: Syntax,
     pub name: Option<String>,
     pub ty: Type,
+    pub spread: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatedType {
+    pub syntax: Syntax,
+    pub element: Box<Type>,
+    /// `None` denotes an erased length (`T[]`).
+    pub count: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

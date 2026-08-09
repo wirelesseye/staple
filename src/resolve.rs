@@ -165,6 +165,7 @@ pub enum IntrinsicFunction {
     },
     StringFromCString,
     StringToCString,
+    ErasedProductLength,
     Drop,
 }
 
@@ -631,6 +632,12 @@ impl NameResolver {
             {
                 self.intrinsic_functions
                     .insert(symbol, IntrinsicFunction::Drop);
+            }
+            if binding.name == "length"
+                && let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied()
+            {
+                self.intrinsic_functions
+                    .insert(symbol, IntrinsicFunction::ErasedProductLength);
             }
         }
         for (name, _) in expected {
@@ -1628,6 +1635,10 @@ impl NameResolver {
                     self.resolve_expression(&access.value, None, None);
                 }
             }
+            Expression::Index(index) => {
+                self.resolve_expression(&index.value, None, None);
+                self.resolve_expression(&index.index, None, None);
+            }
             Expression::Infix(infix) => {
                 let lowered = self.lower_infix(infix);
                 self.resolve_expression(&lowered, expected_type, suggested_function);
@@ -1761,6 +1772,7 @@ impl NameResolver {
                 self.resolve_type(&application.callee);
                 self.resolve_type(&application.argument);
             }
+            Type::Repeated(repeated) => self.resolve_type(&repeated.element),
             Type::Inferred(_) => {}
         }
     }
@@ -1868,6 +1880,7 @@ impl NameResolver {
                 self.validate_public_representation(&application.callee);
                 self.validate_public_representation(&application.argument);
             }
+            Type::Repeated(repeated) => self.validate_public_representation(&repeated.element),
             Type::Inferred(_) => {}
         }
     }
@@ -2362,6 +2375,10 @@ impl<'a> InitializationAnalyzer<'a> {
                 } else {
                     self.expression(&access.value, local, outer);
                 }
+            }
+            Expression::Index(index) => {
+                self.expression(&index.value, local, outer);
+                self.expression(&index.index, local, outer);
             }
             Expression::Infix(infix) => {
                 if let Some(lowered) = self.module.lowered_infix(infix.syntax.id).cloned() {

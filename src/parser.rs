@@ -823,7 +823,7 @@ impl Grammar {
 
     fn parse_type_application(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
-        let mut ty = self.parse_type_atom()?;
+        let mut ty = self.parse_type_postfix()?;
         while self.starts_type_atom()
             && !(self.newline_terminates_type
                 && self.has_newline_before_next_token()
@@ -831,11 +831,33 @@ impl Grammar {
                     || (self.peek() == Some(TokenKind::Identifier)
                         && self.peek_n(1) == Some(TokenKind::Colon))))
         {
-            let argument = self.parse_type_atom()?;
+            let argument = self.parse_type_postfix()?;
             ty = Type::Application(TypeApplication {
                 syntax: self.syntax(start),
                 callee: Box::new(ty),
                 argument: Box::new(argument),
+            });
+        }
+        Ok(ty)
+    }
+
+    fn parse_type_postfix(&mut self) -> Result<Type, ParseError> {
+        let start = self.position;
+        let mut ty = self.parse_type_atom()?;
+        while self.eat(TokenKind::LBracket) {
+            let count = if self.at(TokenKind::RBracket) {
+                None
+            } else {
+                Some(
+                    self.expect(TokenKind::Integer, "expected a product repetition count")?
+                        .text,
+                )
+            };
+            self.expect(TokenKind::RBracket, "expected `]` after product repetition")?;
+            ty = Type::Repeated(crate::RepeatedType {
+                syntax: self.syntax(start),
+                element: Box::new(ty),
+                count,
             });
         }
         Ok(ty)
@@ -873,13 +895,33 @@ impl Grammar {
                     };
 
                     if self.eat(TokenKind::Ellipsis) {
-                        variadic = true;
+                        if self.at(TokenKind::RParen)
+                            || (self.at(TokenKind::Comma)
+                                && self.peek_n(1) == Some(TokenKind::RParen))
+                        {
+                            if name.is_some() {
+                                return Err(self.error("a variadic marker cannot be named"));
+                            }
+                            variadic = true;
+                        } else {
+                            if name.is_some() {
+                                return Err(self.error("a product spread cannot be named"));
+                            }
+                            let ty = self.parse_type()?;
+                            elements.push(TypeElement {
+                                syntax: self.syntax(element_start),
+                                name: None,
+                                ty,
+                                spread: true,
+                            });
+                        }
                     } else {
                         let ty = self.parse_type()?;
                         elements.push(TypeElement {
                             syntax: self.syntax(element_start),
                             name,
                             ty,
+                            spread: false,
                         });
                     }
 
@@ -1001,21 +1043,37 @@ impl Grammar {
     fn parse_access_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_atom()?;
-        while self.eat(TokenKind::Dot) {
-            let accessor = match self.peek() {
-                Some(TokenKind::Identifier) => {
-                    Accessor::Name(self.bump_token().expect("peeked name").text)
-                }
-                Some(TokenKind::Integer) => {
-                    Accessor::Index(self.bump_token().expect("peeked index").text)
-                }
-                _ => return Err(self.error("expected a product element name or index after `.`")),
-            };
-            expression = Expression::Access(AccessExpression {
-                syntax: self.syntax(start),
-                value: Box::new(expression),
-                accessor,
-            });
+        loop {
+            if self.eat(TokenKind::Dot) {
+                let accessor = match self.peek() {
+                    Some(TokenKind::Identifier) => {
+                        Accessor::Name(self.bump_token().expect("peeked name").text)
+                    }
+                    Some(TokenKind::Integer) => {
+                        Accessor::Index(self.bump_token().expect("peeked index").text)
+                    }
+                    _ => {
+                        return Err(
+                            self.error("expected a product element name or index after `.`")
+                        );
+                    }
+                };
+                expression = Expression::Access(AccessExpression {
+                    syntax: self.syntax(start),
+                    value: Box::new(expression),
+                    accessor,
+                });
+            } else if self.eat(TokenKind::LBracket) {
+                let index = self.parse_expression()?;
+                self.expect(TokenKind::RBracket, "expected `]` after product index")?;
+                expression = Expression::Index(crate::IndexExpression {
+                    syntax: self.syntax(start),
+                    value: Box::new(expression),
+                    index: Box::new(index),
+                });
+            } else {
+                break;
+            }
         }
         Ok(expression)
     }

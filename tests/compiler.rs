@@ -22,6 +22,166 @@ fn type_check(source: &str) -> stapler::TypedModule {
         .expect("source should type-check")
 }
 
+#[test]
+fn supports_repeated_spread_and_erased_product_references() {
+    let source = concat!(
+        "let explicit: I32[3] = (1, 2, 3)\n",
+        "let spread: (String, ...I32[2]) = (\"x\", 4, 5)\n",
+        "let fixed: Ref I32[3] = Ref explicit\n",
+        "let erased: Ref I32[] = fixed\n",
+        "let constructed: Ref I32[] = Ref (6, 7)\n",
+        "let singleton: Ref I32[] = Ref 8\n",
+        "let empty: Ref I32[] = Ref ()\n",
+        "let count: USize = length erased\n",
+        "let fixed_count: USize = length fixed\n",
+        "let literal: I32 = erased.1\n",
+        "let index: USize = 2\n",
+        "let dynamic: I32 = erased[index]\n",
+        "let fixed_dynamic: I32 = fixed[index]\n",
+        "let direct: I32 = explicit[index]\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let generator = CodeGenerator::new(&context);
+    let llvm = generator
+        .compile_module(&module)
+        .expect("product extensions should generate LLVM");
+    assert!(llvm.contains("erased_ref.length"));
+    assert!(llvm.contains("index.out_of_bounds"));
+    assert!(llvm.contains("llvm.trap"));
+}
+
+#[test]
+fn rejects_invalid_product_spreads_and_indices() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let invalid: (...I32)\n"))
+        .expect_err("a scalar cannot be spread");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot spread non-product type")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "let pair = (1, \"two\")\nlet index: USize = 0\nlet invalid = pair[index]\n",
+        ))
+        .expect_err("a heterogeneous product cannot be indexed dynamically");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("homogeneous product") })
+    );
+}
+
+#[test]
+fn rejects_erased_products_outside_refs_and_ref_destructuring() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let invalid: I32[]\n"))
+        .expect_err("an erased product cannot be used by value");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("direct payload of `Ref`") })
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "let fixed: Ref I32[2] = Ref (1, 2)\nlet erased: Ref I32[] = fixed\nlet Ref values = erased\n",
+        ))
+        .expect_err("an erased reference cannot be destructured");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("cannot be destructured") })
+    );
+}
+
+#[test]
+fn handles_product_repetition_edges_and_limits() {
+    type_check("let value: (...I32[0], ...I32[1], I32) = (1, 2)\n");
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let too_large: I32[65536]\n"))
+        .expect_err("oversized repeated products must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("limit of 65535") })
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "let pair: I32[2] = (1, 2)\nlet invalid = pair[2]\n",
+        ))
+        .expect_err("known out-of-bounds indices must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("out of bounds") })
+    );
+}
+
+#[test]
+fn aliases_complete_erased_references_but_rejects_bare_erased_aliases_and_ffi() {
+    type_check(concat!(
+        "type alias Ints = Ref I32[]\n",
+        "let fixed: Ref I32[2] = Ref (1, 2)\n",
+        "let values: Ints = fixed\n",
+        "let count: USize = length values\n",
+    ));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("type alias Invalid = I32[]\n"))
+        .expect_err("bare erased aliases must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("direct payload of `Ref`") })
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("extern \"c\" { let invalid: Ref I32[] -> I32 }\n"))
+        .expect_err("erased references must not cross the FFI");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("external binding types cannot contain erased products")
+    }));
+}
+
+#[test]
+fn derives_default_structurally_for_products() {
+    let source = concat!(
+        "type Seed = I32\n",
+        "impl Default Seed { def default = () => Seed 7 }\n",
+        "let integers: I32[3] = default ()\n",
+        "let mixed: (I32, Bool, String) = default ()\n",
+        "let nested: I32[2][2] = default ()\n",
+        "let seeds: Seed[2] = default ()\n",
+        "let answer: I32 = integers.0 + integers.1 + integers.2\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("derived product defaults should generate LLVM");
+    assert!(llvm.contains("default.element"));
+    assert!(llvm.contains("default.call"));
+}
+
+#[test]
+fn rejects_default_for_products_with_non_default_elements() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let invalid: (Ref I32)[2] = default ()\n"))
+        .expect_err("Ref has no Default implementation");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
+    );
+}
+
 fn infix_call(
     expression: &stapler::Expression,
 ) -> (&str, &stapler::Expression, &stapler::Expression) {
