@@ -1,4 +1,5 @@
 mod staple_lsp {
+    pub mod hover;
     pub mod semantic;
 }
 
@@ -10,8 +11,9 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{Request as _, SemanticTokensFullRequest};
+use lsp_types::request::{HoverRequest, Request as _, SemanticTokensFullRequest};
 use lsp_types::*;
+use staple_lsp::hover::{self, HoverEntry};
 use staple_lsp::semantic;
 use stapler::{Diagnostic as StapleDiagnostic, NameResolver, ProgramLoader, Span, TypeChecker};
 
@@ -20,6 +22,7 @@ struct Document {
     text: String,
     version: i32,
     semantic_tokens: Vec<SemanticToken>,
+    hover_entries: Vec<HoverEntry>,
 }
 
 struct Server {
@@ -68,6 +71,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
                 work_done_progress_options: WorkDoneProgressOptions::default(),
             },
         )),
+        hover_provider: Some(HoverProviderCapability::Simple(true)),
         ..ServerCapabilities::default()
     };
     let result = InitializeResult {
@@ -149,6 +153,39 @@ impl Server {
                     serde_json::to_value(result).unwrap(),
                 )))
                 .map_err(|error| error.to_string())?;
+        } else if request.method == HoverRequest::METHOD {
+            let params: HoverParams =
+                serde_json::from_value(request.params).map_err(|error| error.to_string())?;
+            let uri = &params.text_document_position_params.text_document.uri;
+            let requested_position = params.text_document_position_params.position;
+            let result = self.documents.get(uri).and_then(|document| {
+                let offset = semantic::offset(&document.text, requested_position)?;
+                let entry = document
+                    .hover_entries
+                    .iter()
+                    .filter(|entry| entry.range.start <= offset && offset < entry.range.end)
+                    .min_by_key(|entry| entry.range.end - entry.range.start)?;
+                let (start_line, start_character) =
+                    semantic::position(&document.text, entry.range.start);
+                let (end_line, end_character) = semantic::position(&document.text, entry.range.end);
+                Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value: format!("```staple\n{}\n```", entry.value_type),
+                    }),
+                    range: Some(Range::new(
+                        Position::new(start_line, start_character),
+                        Position::new(end_line, end_character),
+                    )),
+                })
+            });
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(
+                    request.id,
+                    serde_json::to_value(result).unwrap(),
+                )))
+                .map_err(|error| error.to_string())?;
         } else {
             self.connection
                 .sender
@@ -174,6 +211,7 @@ impl Server {
                         text: params.text_document.text,
                         version: params.text_document.version,
                         semantic_tokens: Vec::new(),
+                        hover_entries: Vec::new(),
                     },
                 );
                 self.analyze(&uri)?;
@@ -212,6 +250,7 @@ impl Server {
         let Some(path) = uri_to_path(uri) else {
             let tokens = semantic::tokens(&text, stapler::parse(&text).ok().as_ref(), None);
             self.documents.get_mut(uri).unwrap().semantic_tokens = tokens;
+            self.documents.get_mut(uri).unwrap().hover_entries.clear();
             return self.publish(
                 uri.clone(),
                 vec![lsp_diagnostic(
@@ -226,7 +265,8 @@ impl Server {
         let parsed = stapler::parse(&text).ok();
         let mut grouped: HashMap<Uri, Vec<lsp_types::Diagnostic>> = HashMap::new();
         let mut resolved_for_tokens = None;
-        if parsed.is_some() {
+        let mut hover_entries = Vec::new();
+        if let Some(module) = &parsed {
             let mut loader = ProgramLoader::new();
             if let Some(stdlib) = &self.stdlib {
                 loader = loader.with_standard_library_root(stdlib);
@@ -254,8 +294,11 @@ impl Server {
                     }
                     Ok(resolved) => {
                         resolved_for_tokens = Some(resolved.clone());
-                        if let Err(diagnostics) = TypeChecker::new().check(resolved) {
-                            add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text);
+                        match TypeChecker::new().check(resolved) {
+                            Ok(typed) => hover_entries = hover::entries(module, &typed),
+                            Err(diagnostics) => {
+                                add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text)
+                            }
                         }
                     }
                 },
@@ -270,6 +313,7 @@ impl Server {
 
         let tokens = semantic::tokens(&text, parsed.as_ref(), resolved_for_tokens.as_ref());
         self.documents.get_mut(uri).unwrap().semantic_tokens = tokens;
+        self.documents.get_mut(uri).unwrap().hover_entries = hover_entries;
 
         let old = self.published_by_root.remove(uri).unwrap_or_default();
         let new = grouped.keys().cloned().collect::<HashSet<_>>();
@@ -478,6 +522,10 @@ mod tests {
             Some(PositionEncodingKind::UTF16)
         );
         assert!(result.capabilities.semantic_tokens_provider.is_some());
+        assert_eq!(
+            result.capabilities.hover_provider,
+            Some(HoverProviderCapability::Simple(true))
+        );
         client
             .sender
             .send(Message::Notification(Notification::new(
@@ -548,6 +596,30 @@ mod tests {
         let diagnostics: PublishDiagnosticsParams =
             serde_json::from_value(notification.params).unwrap();
         assert!(diagnostics.diagnostics.is_empty());
+
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: 4.into(),
+                method: HoverRequest::METHOD.to_owned(),
+                params: serde_json::to_value(HoverParams {
+                    text_document_position_params: TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(uri.clone()),
+                        Position::new(0, 5),
+                    ),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                })
+                .unwrap(),
+            }))
+            .unwrap();
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected hover response")
+        };
+        assert_eq!(response.id, 4.into());
+        let hover: Option<Hover> = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(
+            matches!(hover, Some(Hover { contents: HoverContents::Markup(content), .. }) if content.value.contains("I32"))
+        );
 
         client
             .sender

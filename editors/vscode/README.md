@@ -11,8 +11,9 @@ Basic Visual Studio Code support for the Staple programming language.
 - Semantic highlighting for namespaces, types, traits, macros, functions,
   parameters, variables, and properties
 - Live parse, import, name-resolution, type, and ownership diagnostics
+- Hover information for inferred expression, binding, and parameter types
 
-Completion, formatting, navigation, hover, and rename are not yet provided.
+Completion, formatting, navigation, and rename are not yet provided.
 
 ## Language server
 

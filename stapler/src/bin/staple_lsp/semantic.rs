@@ -712,6 +712,44 @@ pub fn position(source: &str, offset: usize) -> (u32, u32) {
     (line, column)
 }
 
+pub fn offset(source: &str, position: lsp_types::Position) -> Option<usize> {
+    let mut line = 0;
+    let mut column = 0;
+    let mut end = 0;
+    let mut characters = source.char_indices().peekable();
+    while let Some((index, character)) = characters.next() {
+        if line == position.line && column == position.character {
+            return Some(index);
+        }
+        match character {
+            '\r' => {
+                line += 1;
+                column = 0;
+                end = index + 1;
+                if characters.peek().is_some_and(|(_, next)| *next == '\n') {
+                    end = characters
+                        .next()
+                        .map_or(source.len(), |(index, _)| index + 1);
+                }
+            }
+            '\n' => {
+                line += 1;
+                column = 0;
+                end = index + 1;
+            }
+            _ => {
+                let width = character.len_utf16() as u32;
+                if line == position.line && position.character < column + width {
+                    return None;
+                }
+                column += width;
+                end = index + character.len_utf8();
+            }
+        }
+    }
+    (line == position.line && column == position.character).then_some(end)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -746,6 +784,14 @@ mod tests {
         assert_eq!(position("😀x\r\ny", "😀".len()), (0, 2));
         assert_eq!(position("😀x\r\ny", "😀x\r\n".len()), (1, 0));
         assert_eq!(position("x\ry", "x\r".len()), (1, 0));
+        assert_eq!(
+            offset("😀x\r\ny", lsp_types::Position::new(0, 2)),
+            Some("😀".len())
+        );
+        assert_eq!(
+            offset("😀x\r\ny", lsp_types::Position::new(1, 0)),
+            Some("😀x\r\n".len())
+        );
     }
 
     #[test]
