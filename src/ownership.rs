@@ -113,7 +113,7 @@ impl<'a> OwnershipChecker<'a> {
                 }
             }
             Pattern::Nominal(nominal) => self.check_global_pattern(&nominal.argument),
-            Pattern::Wildcard(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
         }
     }
 
@@ -336,7 +336,7 @@ impl<'a> OwnershipChecker<'a> {
                 );
                 self.bind_pattern(&value.argument, freeze || dereferences_ref);
             }
-            Pattern::Wildcard(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
         }
     }
 

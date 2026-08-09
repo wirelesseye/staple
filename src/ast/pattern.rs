@@ -4,6 +4,7 @@ use super::{ProductType, Syntax, Type, TypeElement};
 pub enum Pattern {
     Binding(BindingPattern),
     Wildcard(WildcardPattern),
+    StringLiteral(StringLiteralPattern),
     Product(ProductPattern),
     Nominal(NominalPattern),
 }
@@ -13,6 +14,7 @@ impl Pattern {
         match self {
             Self::Binding(pattern) => &pattern.syntax,
             Self::Wildcard(pattern) => &pattern.syntax,
+            Self::StringLiteral(pattern) => &pattern.syntax,
             Self::Product(pattern) => &pattern.syntax,
             Self::Nominal(pattern) => &pattern.syntax,
         }
@@ -23,6 +25,10 @@ impl Pattern {
             Self::Binding(pattern) => pattern.ty.clone(),
             Self::Wildcard(pattern) => Type::Inferred(super::InferredType {
                 syntax: pattern.syntax.clone(),
+            }),
+            Self::StringLiteral(pattern) => Type::StringLiteral(super::StringLiteralType {
+                syntax: pattern.syntax.clone(),
+                literal: pattern.literal.clone(),
             }),
             Self::Product(pattern) => {
                 let elements = pattern.elements.iter().map(Self::type_element).collect();
@@ -46,6 +52,7 @@ impl Pattern {
             name: match self {
                 Self::Binding(pattern) => Some(pattern.name.clone()),
                 Self::Wildcard(_) => None,
+                Self::StringLiteral(_) => None,
                 Self::Product(_) => None,
                 Self::Nominal(_) => None,
             },
@@ -53,6 +60,13 @@ impl Pattern {
             spread: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringLiteralPattern {
+    pub syntax: Syntax,
+    /// The literal exactly as written, including its quotes.
+    pub literal: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

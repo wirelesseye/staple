@@ -682,4 +682,52 @@ mod tests {
         let _ = std::fs::remove_file(output);
         assert!(status.success());
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn runs_string_literal_and_mixed_union_matches() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-string-literals-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-string-literals-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "type Some = String\n",
+                "def pure: (\"yes\" | \"no\") -> I32 = value => match value {\n",
+                "  \"yes\" => 1,\n",
+                "  \"no\" => 2,\n",
+                "}\n",
+                "def mixed: Some | \"yes\" | \"no\" -> I32 = value => match value {\n",
+                "  Some _ => 4,\n",
+                "  \"yes\" => 5,\n",
+                "  \"no\" => 3,\n",
+                "}\n",
+                "let literal: \"yes\" | \"no\" = \"no\"\n",
+                "let injected: Some | \"yes\" | \"no\" = literal\n",
+                "exit (pure \"yes\" + pure literal + mixed injected + mixed (Some \"value\") - 10)\n",
+            ),
+        )
+        .expect("temporary string-literal source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("string-literal executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("string-literal executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
 }

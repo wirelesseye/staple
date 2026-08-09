@@ -95,6 +95,7 @@ pub enum CheckedType {
     ISize,
     USize,
     String,
+    StringLiteralSet(Vec<String>),
     Ref(Box<CheckedType>),
     ErasedProduct(Box<CheckedType>),
     CString,
@@ -229,6 +230,7 @@ impl CheckedType {
             | Self::ISize
             | Self::USize
             | Self::String
+            | Self::StringLiteralSet(_)
             | Self::CString
             | Self::CChar
             | Self::Opaque { .. }
@@ -265,6 +267,7 @@ impl CheckedType {
             | Self::ISize
             | Self::USize
             | Self::String
+            | Self::StringLiteralSet(_)
             | Self::CString
             | Self::CChar
             | Self::Opaque { .. } => true,
@@ -288,6 +291,15 @@ impl fmt::Display for CheckedType {
             Self::ISize => formatter.write_str("ISize"),
             Self::USize => formatter.write_str("USize"),
             Self::String => formatter.write_str("String"),
+            Self::StringLiteralSet(values) => {
+                for (index, value) in values.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(" | ")?;
+                    }
+                    formatter.write_str(&crate::string_literal::encode(value))?;
+                }
+                Ok(())
+            }
             Self::Ref(value) => format_type_application(formatter, "Ref", value),
             Self::ErasedProduct(value) => write!(formatter, "{value}[]"),
             Self::CString => formatter.write_str("CString"),
@@ -357,7 +369,9 @@ impl fmt::Display for CheckedType {
 }
 
 fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &CheckedType) -> fmt::Result {
-    if matches!(argument, CheckedType::Sum(_) | CheckedType::Function(_)) {
+    if matches!(argument, CheckedType::Sum(_) | CheckedType::Function(_))
+        || matches!(argument, CheckedType::StringLiteralSet(values) if values.len() > 1)
+    {
         write!(formatter, " ({argument})")
     } else {
         write!(formatter, " {argument}")
@@ -1242,6 +1256,18 @@ impl TypeChecker {
             .insert(pattern.syntax().id, value_type.clone());
         match pattern {
             Pattern::Wildcard(_) => {}
+            Pattern::StringLiteral(pattern) => {
+                let Ok(value) = crate::string_literal::decode(&pattern.literal) else {
+                    return;
+                };
+                if !matches!(value_type, CheckedType::StringLiteralSet(values) if values.as_slice() == [value])
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        pattern.syntax.span.clone(),
+                        "a string literal binding pattern must have the same singleton literal type",
+                    ));
+                }
+            }
             Pattern::Binding(binding) => {
                 let value_type = if matches!(binding.ty, Type::Inferred(_)) {
                     value_type.clone()
@@ -2152,7 +2178,21 @@ impl TypeChecker {
                 instantiated
             }
             Expression::Quote(_) | Expression::Splice(_) => CheckedType::Error,
-            Expression::String(_) => CheckedType::String,
+            Expression::String(string) => {
+                let decoded = match crate::string_literal::decode(&string.literal) {
+                    Ok(value) => value,
+                    Err(message) => {
+                        self.diagnostics
+                            .push(Diagnostic::new(string.syntax.span.clone(), message));
+                        return CheckedType::Error;
+                    }
+                };
+                if expected.is_some_and(|expected| literal_is_admitted(expected, &decoded)) {
+                    CheckedType::StringLiteralSet(vec![decoded])
+                } else {
+                    CheckedType::String
+                }
+            }
             Expression::CString(_) => CheckedType::CString,
             Expression::Integer(integer) => {
                 let integer_type = expected
@@ -2195,7 +2235,11 @@ impl TypeChecker {
         }
         if !matches!(
             source,
-            CheckedType::Sum(_) | CheckedType::Product(_) | CheckedType::Ref(_)
+            CheckedType::Sum(_)
+                | CheckedType::Product(_)
+                | CheckedType::Ref(_)
+                | CheckedType::String
+                | CheckedType::StringLiteralSet(_)
         ) {
             if source != CheckedType::Error {
                 self.diagnostics.push(Diagnostic::new(
@@ -2319,6 +2363,20 @@ impl TypeChecker {
             Pattern::Binding(_) | Pattern::Wildcard(_) => {
                 self.bind_pattern_types(module, pattern, value_type);
             }
+            Pattern::StringLiteral(pattern) => {
+                let Ok(value) = crate::string_literal::decode(&pattern.literal) else {
+                    return;
+                };
+                if *value_type != CheckedType::String && !literal_is_admitted(value_type, &value) {
+                    self.diagnostics.push(Diagnostic::new(
+                        pattern.syntax.span.clone(),
+                        format!(
+                            "string pattern `{}` cannot match `{value_type}`",
+                            crate::string_literal::encode(&value)
+                        ),
+                    ));
+                }
+            }
             Pattern::Product(product) if product.elements.len() == 1 => {
                 self.check_match_pattern(module, &product.elements[0], value_type);
             }
@@ -2435,12 +2493,28 @@ impl TypeChecker {
                         })
                         .into_iter()
                         .collect(),
+                    CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
+                        crate::string_literal::decode(&pattern.literal)
+                            .ok()
+                            .and_then(|value| {
+                                sum.alternatives.iter().position(|alternative| {
+                                    literal_is_admitted(alternative, &value)
+                                })
+                            })
+                            .into_iter()
+                            .collect()
+                    }
                     _ => return false,
                 };
                 alternatives.into_iter().any(|index| {
-                    let CheckedType::Distinct { representation, .. } = &sum.alternatives[index]
-                    else {
-                        return false;
+                    let representation = match &sum.alternatives[index] {
+                        CheckedType::Distinct { representation, .. } => {
+                            representation.as_ref().clone()
+                        }
+                        CheckedType::StringLiteralSet(values) => {
+                            CheckedType::StringLiteralSet(values.clone())
+                        }
+                        _ => return false,
                     };
                     let specialized_matrix = matrix
                         .iter()
@@ -2451,7 +2525,7 @@ impl TypeChecker {
                     else {
                         return false;
                     };
-                    let mut specialized_types = vec![representation.as_ref().clone()];
+                    let mut specialized_types = vec![representation];
                     specialized_types.extend_from_slice(&types[1..]);
                     Self::coverage_is_useful(
                         module,
@@ -2523,6 +2597,77 @@ impl TypeChecker {
                     &specialized_candidate,
                 )
             }
+            CheckedType::StringLiteralSet(values) => {
+                let candidates = match first {
+                    CoveragePattern::Any => values.iter().map(String::as_str).collect::<Vec<_>>(),
+                    CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
+                        let Ok(value) = crate::string_literal::decode(&pattern.literal) else {
+                            return false;
+                        };
+                        if !values.contains(&value) {
+                            return false;
+                        }
+                        vec![
+                            values
+                                .iter()
+                                .find(|candidate| **candidate == value)
+                                .unwrap()
+                                .as_str(),
+                        ]
+                    }
+                    _ => return false,
+                };
+                candidates.into_iter().any(|literal| {
+                    let specialized_matrix = matrix
+                        .iter()
+                        .filter(|row| coverage_pattern_matches_literal(row[0], literal))
+                        .map(|row| row[1..].to_vec())
+                        .collect::<Vec<_>>();
+                    Self::coverage_is_useful(
+                        module,
+                        &types[1..],
+                        &specialized_matrix,
+                        &candidate[1..],
+                    )
+                })
+            }
+            CheckedType::String => match first {
+                CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
+                    let Ok(literal) = crate::string_literal::decode(&pattern.literal) else {
+                        return false;
+                    };
+                    let specialized_matrix = matrix
+                        .iter()
+                        .filter(|row| coverage_pattern_matches_literal(row[0], &literal))
+                        .map(|row| row[1..].to_vec())
+                        .collect::<Vec<_>>();
+                    Self::coverage_is_useful(
+                        module,
+                        &types[1..],
+                        &specialized_matrix,
+                        &candidate[1..],
+                    )
+                }
+                CoveragePattern::Any => {
+                    let specialized_matrix = matrix
+                        .iter()
+                        .filter(|row| {
+                            matches!(
+                                Self::canonical_coverage_pattern(row[0]),
+                                CoveragePattern::Any
+                            )
+                        })
+                        .map(|row| row[1..].to_vec())
+                        .collect::<Vec<_>>();
+                    Self::coverage_is_useful(
+                        module,
+                        &types[1..],
+                        &specialized_matrix,
+                        &candidate[1..],
+                    )
+                }
+                _ => false,
+            },
             _ => {
                 if !matches!(first, CoveragePattern::Any) {
                     return false;
@@ -2563,6 +2708,16 @@ impl TypeChecker {
         let first = Self::canonical_coverage_pattern(row[0]);
         let selected_id = match &sum.alternatives[index] {
             CheckedType::Distinct { id, .. } => *id,
+            CheckedType::StringLiteralSet(_) => {
+                let head = match first {
+                    CoveragePattern::Any => CoveragePattern::Any,
+                    CoveragePattern::Pattern(Pattern::StringLiteral(_)) => first,
+                    _ => return None,
+                };
+                let mut result = vec![head];
+                result.extend_from_slice(&row[1..]);
+                return Some(result);
+            }
             _ => return None,
         };
         let head = match first {
@@ -2678,10 +2833,18 @@ impl TypeChecker {
             (CheckedType::Distinct { .. }, CheckedType::Sum(sum)) => {
                 sum.alternatives.contains(&actual)
             }
-            (CheckedType::Sum(actual), CheckedType::Sum(expected)) => actual
+            (CheckedType::StringLiteralSet(actual), CheckedType::Sum(sum)) => sum
                 .alternatives
                 .iter()
-                .all(|alternative| expected.alternatives.contains(alternative)),
+                .any(|expected| literal_set_is_subset_of(actual, expected)),
+            (CheckedType::Sum(actual), CheckedType::Sum(expected)) => {
+                actual.alternatives.iter().all(|actual| {
+                    expected
+                        .alternatives
+                        .iter()
+                        .any(|expected| sum_alternative_can_coerce(actual, expected))
+                })
+            }
             (CheckedType::Ref(actual), CheckedType::Ref(expected))
                 if matches!(expected.as_ref(), CheckedType::ErasedProduct(_)) =>
             {
@@ -3029,6 +3192,14 @@ impl TypeChecker {
     ) -> CheckedType {
         match source_type {
             Type::Inferred(_) => CheckedType::Inferred,
+            Type::StringLiteral(literal) => match crate::string_literal::decode(&literal.literal) {
+                Ok(value) => CheckedType::StringLiteralSet(vec![value]),
+                Err(message) => {
+                    self.diagnostics
+                        .push(Diagnostic::new(literal.syntax.span.clone(), message));
+                    CheckedType::Error
+                }
+            },
             Type::Named(named) => {
                 if let Some(id) = module.type_parameter_for(named.syntax.id) {
                     CheckedType::Parameter {
@@ -3126,18 +3297,41 @@ impl TypeChecker {
 
     fn normalize_sum_type(&mut self, alternatives: Vec<CheckedType>, span: Span) -> CheckedType {
         let mut flattened = Vec::new();
-        for alternative in alternatives {
+        let mut literals = Vec::new();
+        let mut contains_string = false;
+        let mut pending = alternatives;
+        while let Some(alternative) = pending.pop() {
             match alternative {
-                CheckedType::Sum(sum) => flattened.extend(sum.alternatives),
+                CheckedType::Sum(sum) => pending.extend(sum.alternatives),
+                CheckedType::StringLiteralSet(values) => literals.extend(values),
+                CheckedType::String => contains_string = true,
                 other => flattened.push(other),
             }
         }
         flattened.retain(|alternative| *alternative != CheckedType::Error);
+        literals.sort();
+        literals.dedup();
+        if contains_string {
+            if flattened.is_empty() {
+                return CheckedType::String;
+            }
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                "unrestricted `String` cannot be mixed with nominal sum alternatives",
+            ));
+            return CheckedType::Error;
+        }
+        if !literals.is_empty() {
+            flattened.push(CheckedType::StringLiteralSet(literals));
+        }
         flattened.sort_by_key(checked_type_sort_key);
         flattened.dedup();
         let mut heads = HashMap::<TypeId, CheckedType>::new();
         for alternative in &flattened {
             let CheckedType::Distinct { id, .. } = alternative else {
+                if matches!(alternative, CheckedType::StringLiteralSet(_)) {
+                    continue;
+                }
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
                     format!("sum alternative `{alternative}` is not a represented nominal type"),
@@ -3541,6 +3735,12 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             Some(actual)
         }
         (CheckedType::String, CheckedType::String) => Some(CheckedType::String),
+        (CheckedType::StringLiteralSet(_), CheckedType::String) => Some(CheckedType::String),
+        (CheckedType::StringLiteralSet(actual), CheckedType::StringLiteralSet(expected))
+            if actual.iter().all(|value| expected.contains(value)) =>
+        {
+            Some(CheckedType::StringLiteralSet(expected))
+        }
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
         (
@@ -3664,12 +3864,60 @@ fn can_coerce_type(actual: &CheckedType, expected: &CheckedType) -> bool {
     }
     match (actual, expected) {
         (CheckedType::Distinct { .. }, CheckedType::Sum(sum)) => sum.alternatives.contains(actual),
-        (CheckedType::Sum(actual), CheckedType::Sum(expected)) => actual
+        (CheckedType::StringLiteralSet(actual), CheckedType::Sum(sum)) => sum
             .alternatives
             .iter()
-            .all(|alternative| expected.alternatives.contains(alternative)),
+            .any(|alternative| matches!(alternative, CheckedType::StringLiteralSet(expected) if actual.iter().all(|value| expected.contains(value)))),
+        (CheckedType::Sum(actual), CheckedType::Sum(expected)) => actual.alternatives.iter().all(
+            |actual| {
+                expected
+                    .alternatives
+                    .iter()
+                    .any(|expected| sum_alternative_can_coerce(actual, expected))
+            },
+        ),
         _ => false,
     }
+}
+
+fn literal_is_admitted(value_type: &CheckedType, value: &str) -> bool {
+    match value_type {
+        CheckedType::StringLiteralSet(values) => values.iter().any(|candidate| candidate == value),
+        CheckedType::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .any(|alternative| literal_is_admitted(alternative, value)),
+        _ => false,
+    }
+}
+
+fn coverage_pattern_matches_literal(pattern: CoveragePattern<'_>, literal: &str) -> bool {
+    match pattern {
+        CoveragePattern::Any
+        | CoveragePattern::Pattern(Pattern::Binding(_) | Pattern::Wildcard(_)) => true,
+        CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
+            crate::string_literal::decode(&pattern.literal)
+                .is_ok_and(|candidate| candidate == literal)
+        }
+        CoveragePattern::Pattern(Pattern::Product(product)) if product.elements.len() == 1 => {
+            coverage_pattern_matches_literal(
+                CoveragePattern::Pattern(&product.elements[0]),
+                literal,
+            )
+        }
+        _ => false,
+    }
+}
+
+fn literal_set_is_subset_of(actual: &[String], expected: &CheckedType) -> bool {
+    matches!(expected, CheckedType::StringLiteralSet(values) if actual.iter().all(|value| values.contains(value)))
+}
+
+fn sum_alternative_can_coerce(actual: &CheckedType, expected: &CheckedType) -> bool {
+    actual == expected
+        || matches!((actual, expected),
+            (CheckedType::StringLiteralSet(actual), CheckedType::StringLiteralSet(expected))
+                if actual.iter().all(|value| expected.contains(value)))
 }
 
 pub(crate) fn substitute_type(
@@ -4194,6 +4442,7 @@ fn is_copy_type(
         | CheckedType::ISize
         | CheckedType::USize
         | CheckedType::String
+        | CheckedType::StringLiteralSet(_)
         | CheckedType::CChar
         | CheckedType::CPointer { .. }
         | CheckedType::Ref(_)

@@ -1156,7 +1156,7 @@ impl NameResolver {
 
     fn allocate_pattern_symbols(&mut self, pattern: &Pattern) {
         match pattern {
-            Pattern::Wildcard(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
             Pattern::Binding(binding) => {
                 let symbol = SymbolId(self.next_symbol_id);
                 self.next_symbol_id += 1;
@@ -1927,7 +1927,7 @@ impl NameResolver {
                 self.resolve_type(&application.argument);
             }
             Type::Repeated(repeated) => self.resolve_type(&repeated.element),
-            Type::Inferred(_) => {}
+            Type::Inferred(_) | Type::StringLiteral(_) => {}
         }
     }
 
@@ -1980,7 +1980,7 @@ impl NameResolver {
 
     fn resolve_pattern_types(&mut self, pattern: &Pattern) {
         match pattern {
-            Pattern::Wildcard(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
             Pattern::Binding(binding) => self.resolve_type(&binding.ty),
             Pattern::Product(product) => {
                 for element in &product.elements {
@@ -2035,7 +2035,7 @@ impl NameResolver {
                 self.validate_public_representation(&application.argument);
             }
             Type::Repeated(repeated) => self.validate_public_representation(&repeated.element),
-            Type::Inferred(_) => {}
+            Type::Inferred(_) | Type::StringLiteral(_) => {}
         }
     }
 
@@ -2166,7 +2166,7 @@ impl NameResolver {
 
     fn declare_pattern(&mut self, pattern: &Pattern) {
         match pattern {
-            Pattern::Wildcard(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied() {
                     self.declare_symbol(
@@ -2608,7 +2608,7 @@ impl<'a> InitializationAnalyzer<'a> {
         states: &mut HashMap<SymbolId, InitializationState>,
     ) {
         match pattern {
-            Pattern::Wildcard(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
                     states.insert(symbol, state);

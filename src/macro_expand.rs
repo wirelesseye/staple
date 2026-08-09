@@ -1154,7 +1154,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
             type_contains_syntax(&application.callee) || type_contains_syntax(&application.argument)
         }
         Type::Repeated(repeated) => type_contains_syntax(&repeated.element),
-        Type::Inferred(_) => false,
+        Type::Inferred(_) | Type::StringLiteral(_) => false,
     }
 }
 
@@ -1189,7 +1189,7 @@ fn pattern_contains_syntax(pattern: &Pattern) -> bool {
         Pattern::Binding(binding) => type_contains_syntax(&binding.ty),
         Pattern::Product(product) => product.elements.iter().any(pattern_contains_syntax),
         Pattern::Nominal(pattern) => pattern_contains_syntax(&pattern.argument),
-        Pattern::Wildcard(_) => false,
+        Pattern::Wildcard(_) | Pattern::StringLiteral(_) => false,
     }
 }
 
@@ -1259,7 +1259,7 @@ fn valid_macro_parameter_patterns(expression: &Expression, arity: usize) -> bool
             matches!(binding.ty, Type::Inferred(_)) || is_syntax_type(&binding.ty)
         }
         Pattern::Wildcard(_) => true,
-        Pattern::Product(_) | Pattern::Nominal(_) => false,
+        Pattern::Product(_) | Pattern::Nominal(_) | Pattern::StringLiteral(_) => false,
     };
     valid_pattern && valid_macro_parameter_patterns(&function.body, arity - 1)
 }
@@ -1285,6 +1285,12 @@ fn bool_value(value: bool) -> Value {
 fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) -> bool {
     match pattern {
         Pattern::Wildcard(_) => true,
+        Pattern::StringLiteral(pattern) => {
+            let Value::String(value) = value else {
+                return false;
+            };
+            crate::string_literal::decode(&pattern.literal).is_ok_and(|literal| literal == value)
+        }
         Pattern::Binding(binding) => {
             environment.insert(binding.name.clone(), value);
             true
@@ -1439,7 +1445,7 @@ fn alpha_rename_pattern(pattern: &mut Pattern, mark: u64, names: &mut HashMap<St
             }
         }
         Pattern::Nominal(pattern) => alpha_rename_pattern(&mut pattern.argument, mark, names),
-        Pattern::Wildcard(_) => {}
+        Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
     }
 }
 
@@ -1570,6 +1576,9 @@ fn freshen_pattern(
             freshen_type(expander, &mut binding.ty, module, mark);
         }
         Pattern::Wildcard(wildcard) => expander.freshen_syntax(&mut wildcard.syntax, module, mark),
+        Pattern::StringLiteral(literal) => {
+            expander.freshen_syntax(&mut literal.syntax, module, mark)
+        }
         Pattern::Product(product) => {
             expander.freshen_syntax(&mut product.syntax, module, mark);
             for element in &mut product.elements {
@@ -1620,6 +1629,7 @@ fn freshen_statement(
 fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, mark: u64) {
     let syntax = match ty {
         Type::Inferred(ty) => &mut ty.syntax,
+        Type::StringLiteral(ty) => &mut ty.syntax,
         Type::Named(ty) => &mut ty.syntax,
         Type::Product(ty) => &mut ty.syntax,
         Type::Sum(ty) => &mut ty.syntax,
@@ -1649,6 +1659,6 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
             freshen_type(expander, &mut application.argument, module, mark);
         }
         Type::Repeated(repeated) => freshen_type(expander, &mut repeated.element, module, mark),
-        Type::Inferred(_) | Type::Named(_) => {}
+        Type::Inferred(_) | Type::StringLiteral(_) | Type::Named(_) => {}
     }
 }

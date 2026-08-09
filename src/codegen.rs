@@ -367,7 +367,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pattern: &Pattern,
     ) -> CodeGenerationResult<()> {
         match pattern {
-            Pattern::Wildcard(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
             Pattern::Binding(binding) => {
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     return Ok(());
@@ -720,6 +720,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(())
             }
+            Pattern::StringLiteral(_) => Ok(()),
             Pattern::Binding(binding) => {
                 value.set_name(&binding.name);
                 let symbol = self
@@ -1209,7 +1210,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pattern: &Pattern,
     ) -> CodeGenerationResult<()> {
         match pattern {
-            Pattern::Wildcard(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
             Pattern::Binding(binding) => {
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     return Ok(());
@@ -1245,7 +1246,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         state: u64,
     ) -> CodeGenerationResult<()> {
         match pattern {
-            Pattern::Wildcard(_) => Ok(()),
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => Ok(()),
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) {
                     self.store_global_initialization_state(
@@ -2306,7 +2307,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 )
             }
             Expression::String(string) => {
-                let value = decode_string_literal(&string.literal)
+                let value = crate::string_literal::decode(&string.literal)
                     .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
                 let source = self
                     .builder
@@ -2553,6 +2554,82 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .build_unconditional_branch(success)
                     .map_err(compiler_diagnostic)?;
             }
+            Pattern::StringLiteral(pattern) => {
+                let literal = crate::string_literal::decode(&pattern.literal)
+                    .map_err(|message| Diagnostic::new(pattern.syntax.span.clone(), message))?;
+                match value_type {
+                    CheckedType::String | CheckedType::StringLiteralSet(_) => {
+                        self.compile_string_literal_pattern_branch(
+                            value,
+                            &literal,
+                            success,
+                            failure,
+                            pattern.syntax.span.clone(),
+                        )?;
+                    }
+                    CheckedType::Sum(sum) => {
+                        let index = sum
+                            .alternatives
+                            .iter()
+                            .position(|alternative| {
+                                matches!(alternative, CheckedType::StringLiteralSet(_))
+                            })
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    pattern.syntax.span.clone(),
+                                    "checked sum has no string literal alternative",
+                                )
+                            })?;
+                        let BasicValueEnum::StructValue(sum_value) = value else {
+                            return Err(Diagnostic::new(
+                                pattern.syntax.span.clone(),
+                                "sum match value has an invalid representation",
+                            ));
+                        };
+                        let tag = self
+                            .builder
+                            .build_extract_value(sum_value, 0, "match.tag")
+                            .map_err(compiler_diagnostic)?
+                            .into_int_value();
+                        let selected = self.context.append_basic_block(
+                            success.get_parent().expect("match function"),
+                            "match.string.selected",
+                        );
+                        let matches = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                tag,
+                                self.context.i32_type().const_int(index as u64, false),
+                                "match.string.tag",
+                            )
+                            .map_err(compiler_diagnostic)?;
+                        self.builder
+                            .build_conditional_branch(matches, selected, failure)
+                            .map_err(compiler_diagnostic)?;
+                        self.builder.position_at_end(selected);
+                        let payload = self.extract_sum_alternative(
+                            sum_value,
+                            sum,
+                            index,
+                            pattern.syntax.span.clone(),
+                        )?;
+                        self.compile_string_literal_pattern_branch(
+                            payload,
+                            &literal,
+                            success,
+                            failure,
+                            pattern.syntax.span.clone(),
+                        )?;
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            pattern.syntax.span.clone(),
+                            "checked string pattern has an incompatible value",
+                        ));
+                    }
+                }
+            }
             Pattern::Product(product) if product.elements.len() == 1 => {
                 self.compile_match_pattern_branch(
                     environment,
@@ -2732,6 +2809,96 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(())
     }
 
+    fn compile_string_literal_pattern_branch(
+        &mut self,
+        value: BasicValueEnum<'context>,
+        literal: &str,
+        success: inkwell::basic_block::BasicBlock<'context>,
+        failure: inkwell::basic_block::BasicBlock<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let BasicValueEnum::PointerValue(string_pointer) = value else {
+            return Err(Diagnostic::new(
+                span,
+                "string match value has an invalid representation",
+            ));
+        };
+        let string = self
+            .builder
+            .build_load(self.string_type(), string_pointer, "match.string")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        let pointer = self
+            .builder
+            .build_extract_value(string, 0, "match.string.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let length = self
+            .builder
+            .build_extract_value(string, 1, "match.string.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let expected_length = self.size_type.const_int(literal.len() as u64, false);
+        let length_matches = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                length,
+                expected_length,
+                "match.string.length_matches",
+            )
+            .map_err(compiler_diagnostic)?;
+        let compare = self.context.append_basic_block(
+            success.get_parent().expect("match function"),
+            "match.string.compare",
+        );
+        self.builder
+            .build_conditional_branch(length_matches, compare, failure)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(compare);
+        let expected = self
+            .builder
+            .build_global_string_ptr(literal, "match.string.literal")
+            .map_err(compiler_diagnostic)?
+            .as_pointer_value();
+        let memcmp_type = self.context.i32_type().fn_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.size_type.into(),
+            ],
+            false,
+        );
+        let memcmp = self
+            .llvm_module
+            .get_function("memcmp")
+            .unwrap_or_else(|| self.llvm_module.add_function("memcmp", memcmp_type, None));
+        let comparison = self
+            .builder
+            .build_direct_call(
+                memcmp,
+                &[pointer.into(), expected.into(), expected_length.into()],
+                "match.string.bytes",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let matches = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                comparison,
+                self.context.i32_type().const_zero(),
+                "match.string.matches",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(matches, success, failure)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
     fn coerce_sum_value(
         &mut self,
         value: AnyValueEnum<'context>,
@@ -2764,11 +2931,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let target_alignment = self.target_data.get_abi_alignment(&target_payload_type);
 
         match source {
-            CheckedType::Distinct { .. } => {
+            CheckedType::Distinct { .. } | CheckedType::StringLiteralSet(_) => {
                 let index = target_sum
                     .alternatives
                     .iter()
-                    .position(|alternative| alternative == source)
+                    .position(|alternative| sum_alternative_accepts(source, alternative))
                     .ok_or_else(|| {
                         Diagnostic::new(
                             span.clone(),
@@ -2839,7 +3006,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     let Some(target_index) = target_sum
                         .alternatives
                         .iter()
-                        .position(|candidate| candidate == alternative)
+                        .position(|candidate| sum_alternative_accepts(alternative, candidate))
                     else {
                         continue;
                     };
@@ -2946,7 +3113,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "`c_string` requires a string literal",
             ));
         };
-        let value = decode_string_literal(&string.literal)
+        let value = crate::string_literal::decode(&string.literal)
             .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
         if value.as_bytes().contains(&0) {
             return Err(Diagnostic::new(
@@ -2961,7 +3128,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         &mut self,
         string: &crate::CStringExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let value = decode_string_literal(&string.literal)
+        let value = crate::string_literal::decode(&string.literal)
             .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
         if value.as_bytes().contains(&0) {
             return Err(Diagnostic::new(
@@ -5009,7 +5176,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 format!("opaque type `{name}` has no by-value representation"),
             )),
             CheckedType::CString => Ok(self.context.ptr_type(AddressSpace::default()).into()),
-            CheckedType::String => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            CheckedType::String | CheckedType::StringLiteralSet(_) => {
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
             CheckedType::Ref(payload)
                 if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)) =>
             {
@@ -5139,6 +5308,13 @@ fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {
     }
 }
 
+fn sum_alternative_accepts(source: &CheckedType, target: &CheckedType) -> bool {
+    source == target
+        || matches!((source, target),
+            (CheckedType::StringLiteralSet(source), CheckedType::StringLiteralSet(target))
+                if source.iter().all(|value| target.contains(value)))
+}
+
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Ref(_) => true,
@@ -5176,44 +5352,6 @@ fn strip_place_wrappers(mut value_type: CheckedType) -> CheckedType {
     }
 }
 
-fn decode_string_literal(literal: &str) -> Result<String, String> {
-    let content = literal
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .ok_or_else(|| "unterminated string literal".to_owned())?;
-    let mut output = String::new();
-    let mut characters = content.chars();
-    while let Some(character) = characters.next() {
-        if character != '\\' {
-            output.push(character);
-            continue;
-        }
-        let escaped = characters
-            .next()
-            .ok_or_else(|| "unterminated string escape".to_owned())?;
-        output.push(match escaped {
-            'n' => '\n',
-            'r' => '\r',
-            't' => '\t',
-            '0' => '\0',
-            '\\' => '\\',
-            '"' => '"',
-            other => return Err(format!("unknown string escape `\\{other}`")),
-        });
-    }
-    Ok(output)
-}
-
 fn compiler_diagnostic(error: inkwell::builder::BuilderError) -> Diagnostic {
     Diagnostic::new(Span::Compiler, error.to_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::decode_string_literal;
-
-    #[test]
-    fn decodes_string_quotes_and_escapes() {
-        assert_eq!(decode_string_literal("\"hello\\n\"").unwrap(), "hello\n");
-    }
 }

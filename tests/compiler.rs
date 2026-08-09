@@ -2548,3 +2548,141 @@ fn lowers_path_sensitive_drop_flags() {
     assert!(llvm.contains("drop.is_live"));
     assert!(llvm.contains("drop.call"));
 }
+
+#[test]
+fn supports_contextual_string_literal_types_and_widening() {
+    let module = type_check(concat!(
+        "type alias Answer = \"yes\" | \"no\"\n",
+        "def inferred = () => \"yes\"\n",
+        "def narrow: () -> Answer = () => \"yes\"\n",
+        "let answer: Answer = narrow()\n",
+        "let widened: String = answer\n",
+        "let absorbed: \"yes\" | String = \"anything\"\n",
+    ));
+    let inferred = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "inferred")
+        .expect("inferred function");
+    assert_eq!(
+        *module.type_of_function(inferred.id).unwrap().result,
+        CheckedType::String
+    );
+    let narrow = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "narrow")
+        .expect("narrow function");
+    assert_eq!(
+        *module.type_of_function(narrow.id).unwrap().result,
+        CheckedType::StringLiteralSet(vec!["no".to_owned(), "yes".to_owned()])
+    );
+}
+
+#[test]
+fn rejects_invalid_string_literal_narrowing_and_unrestricted_mixed_sums() {
+    for (source, expected) in [
+        (
+            "def invalid: () -> \"yes\" | \"no\" = () => \"maybe\"\n",
+            "expected `\"no\" | \"yes\"`, found `String`",
+        ),
+        (
+            "let broad: String = \"yes\"\nlet narrow: \"yes\" | \"no\" = broad\n",
+            "expected `\"no\" | \"yes\"`, found `String`",
+        ),
+        (
+            "type Some = String\nlet value: Some | String\n",
+            "unrestricted `String` cannot be mixed",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err("invalid literal refinement should be rejected");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "missing `{expected}` in {diagnostics:?}",
+        );
+    }
+}
+
+#[test]
+fn matches_literal_sets_strings_and_mixed_nominal_unions() {
+    let module = type_check(concat!(
+        "type Some = String\n",
+        "def pure: (\"yes\" | \"no\") -> String = value => match value {\n",
+        "  \"yes\" => \"affirmative\",\n",
+        "  \"no\" => \"negative\",\n",
+        "}\n",
+        "def broad: String -> String = value => match value {\n",
+        "  \"yes\" => \"affirmative\",\n",
+        "  _ => \"other\",\n",
+        "}\n",
+        "def mixed: Some | \"yes\" | \"no\" -> String = value => match value {\n",
+        "  Some text => text,\n",
+        "  \"yes\" => \"affirmative\",\n",
+        "  \"no\" => \"negative\",\n",
+        "}\n",
+        "let small: \"yes\" = \"yes\"\n",
+        "let larger: \"yes\" | \"no\" = small\n",
+        "let injected: Some | \"yes\" | \"no\" = larger\n",
+        "pure small\n",
+        "broad \"other\"\n",
+        "mixed injected\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("literal and mixed matches should generate LLVM");
+    assert!(llvm.contains("match.string.length_matches"));
+    assert!(llvm.contains("@memcmp"));
+    assert!(llvm.contains("sum.target.tag"));
+}
+
+#[test]
+fn checks_literal_match_exhaustiveness_and_reachability() {
+    let missing = TypeChecker::new()
+        .check(resolve(concat!(
+            "def invalid: (\"yes\" | \"no\") -> String = value => match value {\n",
+            "  \"yes\" => \"only\",\n",
+            "}\n",
+        )))
+        .expect_err("a literal alternative is missing");
+    assert!(
+        missing
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("non-exhaustive match"))
+    );
+
+    let duplicate = TypeChecker::new()
+        .check(resolve(concat!(
+            "def invalid: String -> String = value => match value {\n",
+            "  \"yes\" => \"first\",\n",
+            "  \"yes\" => \"second\",\n",
+            "  _ => \"other\",\n",
+            "}\n",
+        )))
+        .expect_err("a duplicate literal arm is unreachable");
+    assert!(
+        duplicate
+            .iter()
+            .any(|diagnostic| diagnostic.message == "unreachable match arm")
+    );
+}
+
+#[test]
+fn rejects_refutable_string_literal_binding_patterns() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def invalid: String -> String = \"yes\" => \"matched\"\n",
+        )))
+        .expect_err("literal function patterns must be irrefutable");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("string literal binding pattern must have the same singleton literal type")
+    }));
+
+    type_check("def valid: \"yes\" -> String = \"yes\" => \"matched\"\n");
+}

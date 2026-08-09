@@ -3,6 +3,7 @@ use super::Syntax;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Inferred(InferredType),
+    StringLiteral(StringLiteralType),
     Named(NamedType),
     Product(ProductType),
     Sum(SumType),
@@ -15,6 +16,7 @@ impl Type {
     pub fn syntax(&self) -> &Syntax {
         match self {
             Self::Inferred(ty) => &ty.syntax,
+            Self::StringLiteral(ty) => &ty.syntax,
             Self::Named(ty) => &ty.syntax,
             Self::Product(ty) => &ty.syntax,
             Self::Sum(ty) => &ty.syntax,
@@ -23,6 +25,13 @@ impl Type {
             Self::Repeated(ty) => &ty.syntax,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringLiteralType {
+    pub syntax: Syntax,
+    /// The literal exactly as written, including its quotes.
+    pub literal: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

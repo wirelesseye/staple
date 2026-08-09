@@ -789,6 +789,12 @@ impl Grammar {
             Ok(Pattern::Wildcard(WildcardPattern {
                 syntax: self.syntax(start),
             }))
+        } else if self.peek() == Some(TokenKind::String) {
+            let literal = self.bump_token().expect("peeked string").text;
+            Ok(Pattern::StringLiteral(crate::StringLiteralPattern {
+                syntax: self.syntax(start),
+                literal,
+            }))
         } else if self.eat(TokenKind::LParen) {
             let mut elements = Vec::new();
             if !self.at(TokenKind::RParen) {
@@ -947,7 +953,12 @@ impl Grammar {
     fn starts_type_atom(&self) -> bool {
         matches!(
             self.peek(),
-            Some(TokenKind::Underscore | TokenKind::LParen | TokenKind::Identifier)
+            Some(
+                TokenKind::Underscore
+                    | TokenKind::LParen
+                    | TokenKind::Identifier
+                    | TokenKind::String
+            )
         )
     }
 
@@ -957,6 +968,13 @@ impl Grammar {
         if self.eat(TokenKind::Underscore) {
             return Ok(Type::Inferred(InferredType {
                 syntax: self.syntax(start),
+            }));
+        }
+        if self.peek() == Some(TokenKind::String) {
+            let literal = self.bump_token().expect("peeked string").text;
+            return Ok(Type::StringLiteral(crate::StringLiteralType {
+                syntax: self.syntax(start),
+                literal,
             }));
         }
         if self.eat(TokenKind::LParen) {

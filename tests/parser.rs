@@ -52,6 +52,38 @@ fn rejects_malformed_match_expressions() {
 }
 
 #[test]
+fn parses_string_literal_types_and_patterns_losslessly() {
+    let source = concat!(
+        "type alias Answer = \"yes\" | \"no\"\n",
+        "def render: Answer -> String = value => match value {\n",
+        "  \"yes\" => \"affirmative\",\n",
+        "  \"no\" => \"negative\",\n",
+        "}\n",
+    );
+    let root = parse(source).expect("string literal types and patterns should parse");
+    assert_eq!(root.text(), source);
+    let Item::TypeDeclaration(answer) = &root.items[0] else {
+        panic!("expected Answer type alias");
+    };
+    assert!(matches!(answer.underlying, Some(Type::Sum(_))));
+    let Statement::Binding(render) = statement(&root.items[1]) else {
+        panic!("expected render binding");
+    };
+    let Some(Expression::Function(function)) = &render.value else {
+        panic!("expected render function");
+    };
+    let Expression::Match(match_) = function.body.as_ref() else {
+        panic!("expected match body");
+    };
+    assert!(
+        match_
+            .arms
+            .iter()
+            .all(|arm| matches!(arm.pattern, Pattern::StringLiteral(_)))
+    );
+}
+
+#[test]
 fn parses_traits_implementations_and_bounds_losslessly() {
     let source = concat!(
         "pub trait ToString = T => {\n",

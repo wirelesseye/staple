@@ -8,6 +8,7 @@ mod ownership;
 mod parser;
 mod program;
 mod resolve;
+mod string_literal;
 mod typecheck;
 
 pub use ast::*;
