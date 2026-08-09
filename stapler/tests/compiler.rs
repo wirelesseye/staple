@@ -1463,6 +1463,23 @@ fn expands_standard_if_overloads_and_nested_forms() {
 }
 
 #[test]
+fn expands_standard_while_with_loop_control() {
+    let module = type_check(concat!(
+        "def run = () => {\n",
+        "  let mut keep_going: Bool = True\n",
+        "  while keep_going { keep_going = False; continue }\n",
+        "}\n",
+        "run ()\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("standard while should expand and generate valid LLVM");
+    assert!(llvm.contains("loop.body"));
+    assert!(llvm.contains("loop.exit"));
+}
+
+#[test]
 fn macro_overloads_choose_longest_then_most_specific() {
     let module = type_check(concat!(
         "macro select = value: Expr => quote { 10 }\n",

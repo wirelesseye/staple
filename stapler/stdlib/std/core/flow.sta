@@ -1,0 +1,35 @@
+use std.core.boolean (True, False)
+
+pub macro if =
+    condition: Expr =>
+    then_branch: Expr =>
+    quote {
+        match $condition {
+            True() => $then_branch,
+            False() => (),
+        }
+    }
+
+pub macro if =
+    condition: Expr =>
+    then_branch: Expr =>
+    Ident "else" =>
+    else_branch: Expr =>
+    quote {
+        match $condition {
+            True() => $then_branch,
+            False() => $else_branch,
+        }
+    }
+
+pub macro while =
+    condition: Expr =>
+    body: Expr =>
+    quote {
+        loop {
+            match $condition {
+                True() => $body,
+                False() => { break },
+            }
+        }
+    }

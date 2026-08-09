@@ -126,7 +126,15 @@ if condition then_branch else else_branch
 ```
 
 The first form is intended for a unit-valued branch; the second joins the types
-of both branches normally.
+of both branches normally. It also supplies a `while` form implemented in
+`std.core.flow` using `loop`, `break`, and a boolean match:
+
+```staple
+while condition body
+```
+
+The condition is evaluated before every iteration, and the loop returns `()`
+when it becomes `False`.
 
 Compile-time evaluation supports pure functions, bindings, products, matches,
 literals, recursion, and pure integer operations. It rejects external or
