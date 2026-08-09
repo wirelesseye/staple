@@ -11,7 +11,7 @@ def lookup: Bool -> Found I32 | Missing | Invalid = available => match available
 }
 
 // `?` unwraps Found and immediately returns either residual alternative.
-def doubled: Bool -> Found I32 | Missing | Invalid = available => {
+def doubled = available: Bool => {
     let Found(value)? = lookup available
     Found(value + value)
 }
