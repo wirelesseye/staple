@@ -314,20 +314,39 @@ impl ProgramLoader {
             self.standard_library_root = Some(root.clone());
             return Ok(root);
         }
-        let executable = std::env::current_exe().map_err(|error| {
-            LoadDiagnostic::compiler(format!(
-                "could not locate the Staple standard library: {error}"
-            ))
-        })?;
-        let prefix = executable.parent().and_then(Path::parent).ok_or_else(|| {
-            LoadDiagnostic::compiler("could not determine the Stapler installation prefix")
-        })?;
-        let root = prefix.join("lib/staple/stdlib");
-        canonical_directory(&root, "standard library").map_err(|error| {
-            LoadDiagnostic::compiler(format!(
-                "{error}; pass `--stdlib <path>` or set `STAPLE_STDLIB`"
-            ))
-        })
+        let executable_root = std::env::current_exe().ok().and_then(|executable| {
+            executable
+                .parent()
+                .and_then(Path::parent)
+                .map(|prefix| prefix.join("lib/staple/stdlib"))
+        });
+        if let Some(root) = executable_root.as_deref()
+            && let Ok(root) = canonical_directory(root, "standard library")
+        {
+            self.standard_library_root = Some(root.clone());
+            return Ok(root);
+        }
+        if let Some(root) = default_standard_library_root()
+            && let Ok(root) = canonical_directory(&root, "standard library")
+        {
+            self.standard_library_root = Some(root.clone());
+            return Ok(root);
+        }
+
+        let searched = [executable_root, default_standard_library_root()]
+            .into_iter()
+            .flatten()
+            .map(|path| format!("`{}`", path.display()))
+            .collect::<Vec<_>>()
+            .join(" and ");
+        let searched = if searched.is_empty() {
+            "the default locations".to_owned()
+        } else {
+            searched
+        };
+        Err(LoadDiagnostic::compiler(format!(
+            "could not locate the Staple standard library in {searched}; run `install-stdlib.sh` from the Staple source tree, pass `--stdlib <path>`, or set `STAPLE_STDLIB`"
+        )))
     }
 
     fn finish_ref(&mut self, entry: ModuleId) -> Program {
@@ -346,6 +365,19 @@ impl ProgramLoader {
             initialization_order,
         }
     }
+}
+
+/// Returns the per-user standard-library installation path.
+///
+/// The installation script uses the same location by default.
+pub fn default_standard_library_root() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(|home| standard_library_root_for_home(Path::new(&home)))
+}
+
+fn standard_library_root_for_home(home: &Path) -> PathBuf {
+    home.join(".local/lib/staple/stdlib")
 }
 
 fn canonical_directory(path: &Path, description: &str) -> Result<PathBuf, String> {
@@ -496,5 +528,13 @@ mod tests {
         );
         assert!(error.range.is_some());
         assert!(error.message.contains("module_that_does_not_exist"));
+    }
+
+    #[test]
+    fn user_standard_library_has_a_stable_default_location() {
+        assert_eq!(
+            standard_library_root_for_home(Path::new("/home/staple")),
+            PathBuf::from("/home/staple/.local/lib/staple/stdlib")
+        );
     }
 }

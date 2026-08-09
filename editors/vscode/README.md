@@ -16,16 +16,18 @@ Completion, formatting, navigation, hover, and rename are not yet provided.
 
 ## Language server
 
-Build the server from the repository:
+Install the standard library and build the server from the repository:
 
 ```sh
+./stapler/scripts/install-stdlib.sh
 cd stapler
 cargo build --bin staple-lsp
 ```
 
 Install `staple-lsp` on `PATH`, or set `staple.languageServer.path` to the
 absolute path of the built executable. If the compiler cannot discover the
-standard library from its installation or `STAPLE_STDLIB`, set
+standard library from its executable-relative or per-user installation, or
+from `STAPLE_STDLIB`, set
 `staple.standardLibrary.path` to the repository's `stapler/stdlib` directory.
 
 ## Local development

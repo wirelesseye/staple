@@ -184,10 +184,18 @@ are linked through `$CC`, or `cc` when `$CC` is unset. `--linker` selects a
 different linker driver. `-L <path>` and `-l <name>` add library search paths
 and libraries for executable output.
 
-Stapler loads the standard library at compile time. `--stdlib <path>` selects
-its root explicitly, `STAPLE_STDLIB` provides the same path through the
-environment, and an installed compiler otherwise looks in
-`../lib/staple/stdlib` relative to its executable. The standard-library root
+Stapler loads the standard library at compile time. Install the repository copy
+to the default per-user location with:
+
+```sh
+./stapler/scripts/install-stdlib.sh
+```
+
+This installs to `~/.local/lib/staple/stdlib`; an optional first argument selects
+a different destination. `--stdlib <path>` selects the root explicitly and
+`STAPLE_STDLIB` provides the same path through the environment. Otherwise both
+the compiler and language server look in `../lib/staple/stdlib` relative to
+their executable and then in the per-user default location. The standard-library root
 contains `std/core.sta`, feature modules under `std/core/`, and
 `std/cinterop.sta`. Core features include numbers, booleans, strings,
 references, results, syntax, equality, copying, dropping, and defaults.
