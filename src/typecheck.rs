@@ -38,6 +38,12 @@ pub struct CheckedMatch {
     pub source: CheckedType,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedAccess {
+    pub index: usize,
+    pub dereference: Option<CheckedType>,
+}
+
 #[derive(Clone, Copy)]
 enum CoveragePattern<'a> {
     Any,
@@ -73,6 +79,7 @@ pub enum CheckedType {
     ISize,
     USize,
     String,
+    Ref(Box<CheckedType>),
     CString,
     CChar,
     Parameter {
@@ -169,6 +176,7 @@ impl CheckedType {
         match self {
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => false,
             Self::CPointer { pointee } => pointee.is_concrete(),
+            Self::Ref(value) => value.is_concrete(),
             Self::Product(product) => product
                 .elements
                 .iter()
@@ -213,6 +221,7 @@ impl fmt::Display for CheckedType {
             Self::ISize => formatter.write_str("ISize"),
             Self::USize => formatter.write_str("USize"),
             Self::String => formatter.write_str("String"),
+            Self::Ref(value) => format_type_application(formatter, "Ref", value),
             Self::CString => formatter.write_str("CString"),
             Self::CChar => formatter.write_str("CChar"),
             Self::Parameter { name, .. } => formatter.write_str(name),
@@ -287,6 +296,15 @@ fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &CheckedTy
     }
 }
 
+fn format_type_application(
+    formatter: &mut fmt::Formatter<'_>,
+    name: &str,
+    argument: &CheckedType,
+) -> fmt::Result {
+    formatter.write_str(name)?;
+    format_type_argument(formatter, argument)
+}
+
 #[derive(Debug, Clone)]
 pub struct TypedModule {
     resolved: ResolvedModule,
@@ -299,6 +317,8 @@ pub struct TypedModule {
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
     propagations: HashMap<SyntaxId, CheckedPropagation>,
     matches: HashMap<SyntaxId, CheckedMatch>,
+    accesses: HashMap<SyntaxId, CheckedAccess>,
+    pattern_types: HashMap<SyntaxId, CheckedType>,
 }
 
 impl TypedModule {
@@ -336,6 +356,14 @@ impl TypedModule {
 
     pub fn match_for(&self, syntax_id: SyntaxId) -> Option<&CheckedMatch> {
         self.matches.get(&syntax_id)
+    }
+
+    pub fn access_for(&self, syntax_id: SyntaxId) -> Option<&CheckedAccess> {
+        self.accesses.get(&syntax_id)
+    }
+
+    pub fn type_of_pattern(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
+        self.pattern_types.get(&syntax_id)
     }
 
     pub fn type_of_symbol(&self, symbol: SymbolId) -> Option<&CheckedType> {
@@ -385,6 +413,8 @@ pub struct TypeChecker {
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
     propagations: HashMap<SyntaxId, CheckedPropagation>,
     matches: HashMap<SyntaxId, CheckedMatch>,
+    accesses: HashMap<SyntaxId, CheckedAccess>,
+    pattern_types: HashMap<SyntaxId, CheckedType>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     top_level_bindings: HashMap<SymbolId, Binding>,
@@ -449,6 +479,8 @@ impl TypeChecker {
             expression_coercions: self.expression_coercions,
             propagations: self.propagations,
             matches: self.matches,
+            accesses: self.accesses,
+            pattern_types: self.pattern_types,
         })
     }
 
@@ -904,6 +936,8 @@ impl TypeChecker {
         pattern: &Pattern,
         value_type: &CheckedType,
     ) {
+        self.pattern_types
+            .insert(pattern.syntax().id, value_type.clone());
         match pattern {
             Pattern::Wildcard(_) => {}
             Pattern::Binding(binding) => {
@@ -954,6 +988,11 @@ impl TypeChecker {
                     return;
                 };
                 match value_type {
+                    CheckedType::Ref(payload)
+                        if module.builtin_type(expected_id) == Some(BuiltinType::Ref) =>
+                    {
+                        self.bind_pattern_types(module, &pattern.argument, payload);
+                    }
                     CheckedType::Distinct {
                         id, representation, ..
                     } if *id == expected_id => {
@@ -1449,33 +1488,54 @@ impl TypeChecker {
                 if self.did_return {
                     return CheckedType::empty_product();
                 }
-                match value_type {
-                    CheckedType::Product(product) => match &access.accessor {
-                        Accessor::Index(index) => index
-                            .parse::<usize>()
-                            .ok()
-                            .and_then(|index| product.elements.get(index))
-                            .map(|element| element.value_type.clone())
-                            .unwrap_or_else(|| {
-                                self.diagnostics.push(Diagnostic::new(
-                                    access.syntax.span.clone(),
-                                    format!("product index `{index}` is out of bounds"),
-                                ));
-                                CheckedType::Error
-                            }),
-                        Accessor::Name(name) => product
-                            .elements
-                            .iter()
-                            .find(|element| element.name.as_deref() == Some(name))
-                            .map(|element| element.value_type.clone())
-                            .unwrap_or_else(|| {
-                                self.diagnostics.push(Diagnostic::new(
-                                    access.syntax.span.clone(),
-                                    format!("product has no element named `{name}`"),
-                                ));
-                                CheckedType::Error
-                            }),
-                    },
+                let mut accessible = value_type.clone();
+                let mut dereference = None;
+                accessible = loop {
+                    match accessible {
+                        CheckedType::Distinct { representation, .. } => {
+                            accessible = *representation;
+                        }
+                        CheckedType::Ref(payload) if dereference.is_none() => {
+                            dereference = Some(payload.as_ref().clone());
+                            accessible = *payload;
+                        }
+                        other => break other,
+                    }
+                };
+                match accessible {
+                    CheckedType::Product(product) => {
+                        let index = match &access.accessor {
+                            Accessor::Index(index) => index.parse::<usize>().ok(),
+                            Accessor::Name(name) => product
+                                .elements
+                                .iter()
+                                .position(|element| element.name.as_deref() == Some(name)),
+                        };
+                        let Some(index) = index else {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                match &access.accessor {
+                                    Accessor::Index(index) => {
+                                        format!("product index `{index}` is out of bounds")
+                                    }
+                                    Accessor::Name(name) => {
+                                        format!("product has no element named `{name}`")
+                                    }
+                                },
+                            ));
+                            return CheckedType::Error;
+                        };
+                        let Some(element) = product.elements.get(index) else {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                format!("product index `{index}` is out of bounds"),
+                            ));
+                            return CheckedType::Error;
+                        };
+                        self.accesses
+                            .insert(access.syntax.id, CheckedAccess { index, dereference });
+                        element.value_type.clone()
+                    }
                     CheckedType::Error => CheckedType::Error,
                     other => {
                         self.diagnostics.push(Diagnostic::new(
@@ -1571,7 +1631,10 @@ impl TypeChecker {
         if self.did_return {
             return CheckedType::empty_product();
         }
-        if !matches!(source, CheckedType::Sum(_) | CheckedType::Product(_)) {
+        if !matches!(
+            source,
+            CheckedType::Sum(_) | CheckedType::Product(_) | CheckedType::Ref(_)
+        ) {
             if source != CheckedType::Error {
                 self.diagnostics.push(Diagnostic::new(
                     match_.subject.syntax().span.clone(),
@@ -1688,6 +1751,8 @@ impl TypeChecker {
         pattern: &Pattern,
         value_type: &CheckedType,
     ) {
+        self.pattern_types
+            .insert(pattern.syntax().id, value_type.clone());
         match pattern {
             Pattern::Binding(_) | Pattern::Wildcard(_) => {
                 self.bind_pattern_types(module, pattern, value_type);
@@ -1725,6 +1790,11 @@ impl TypeChecker {
                     return;
                 };
                 let representation = match value_type {
+                    CheckedType::Ref(payload)
+                        if module.builtin_type(expected_id) == Some(BuiltinType::Ref) =>
+                    {
+                        Some(payload.as_ref())
+                    }
                     CheckedType::Sum(sum) => {
                         sum.alternatives
                             .iter()
@@ -1866,6 +1936,24 @@ impl TypeChecker {
                     &specialized_candidate,
                 )
             }
+            CheckedType::Ref(payload) => {
+                let Some(specialized_candidate) = Self::specialize_ref_row(module, candidate)
+                else {
+                    return false;
+                };
+                let specialized_matrix = matrix
+                    .iter()
+                    .filter_map(|row| Self::specialize_ref_row(module, row))
+                    .collect::<Vec<_>>();
+                let mut specialized_types = vec![payload.as_ref().clone()];
+                specialized_types.extend_from_slice(&types[1..]);
+                Self::coverage_is_useful(
+                    module,
+                    &specialized_types,
+                    &specialized_matrix,
+                    &specialized_candidate,
+                )
+            }
             _ => {
                 if !matches!(first, CoveragePattern::Any) {
                     return false;
@@ -1954,6 +2042,27 @@ impl TypeChecker {
             CoveragePattern::Any => CoveragePattern::Any,
             CoveragePattern::Pattern(Pattern::Nominal(pattern))
                 if module.type_for_pattern(pattern.syntax.id) == Some(id) =>
+            {
+                CoveragePattern::Pattern(&pattern.argument)
+            }
+            _ => return None,
+        };
+        let mut result = vec![head];
+        result.extend_from_slice(&row[1..]);
+        Some(result)
+    }
+
+    fn specialize_ref_row<'a>(
+        module: &ResolvedModule,
+        row: &[CoveragePattern<'a>],
+    ) -> Option<Vec<CoveragePattern<'a>>> {
+        let first = Self::canonical_coverage_pattern(row[0]);
+        let head = match first {
+            CoveragePattern::Any => CoveragePattern::Any,
+            CoveragePattern::Pattern(Pattern::Nominal(pattern))
+                if module
+                    .type_for_pattern(pattern.syntax.id)
+                    .is_some_and(|id| module.builtin_type(id) == Some(BuiltinType::Ref)) =>
             {
                 CoveragePattern::Pattern(&pattern.argument)
             }
@@ -2415,6 +2524,9 @@ impl TypeChecker {
                 pointee: Box::new(arguments[0].clone()),
             };
         }
+        if module.builtin_type(id) == Some(BuiltinType::Ref) {
+            return CheckedType::Ref(Box::new(arguments[0].clone()));
+        }
         if declaration.kind == TypeDeclarationKind::Opaque {
             return CheckedType::Opaque {
                 id,
@@ -2543,6 +2655,11 @@ impl TypeChecker {
             return match builtin {
                 BuiltinType::Integer(integer) => CheckedType::integer(integer),
                 BuiltinType::String => CheckedType::String,
+                BuiltinType::Ref => CheckedType::TypeConstructor {
+                    id,
+                    name: "Ref".to_owned(),
+                    arguments: Vec::new(),
+                },
                 BuiltinType::CChar => CheckedType::CChar,
                 BuiltinType::CString => CheckedType::CString,
                 BuiltinType::CPointer => CheckedType::TypeConstructor {
@@ -2666,6 +2783,9 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         ) => merge_types(*actual, *expected).map(|pointee| CheckedType::CPointer {
             pointee: Box::new(pointee),
         }),
+        (CheckedType::Ref(actual), CheckedType::Ref(expected)) => {
+            merge_types(*actual, *expected).map(|value| CheckedType::Ref(Box::new(value)))
+        }
         (CheckedType::Product(actual), CheckedType::Product(expected))
             if actual.variadic == expected.variadic
                 && actual.elements.len() == expected.elements.len() =>
@@ -2756,6 +2876,9 @@ pub(crate) fn substitute_type(
         CheckedType::CPointer { pointee } => CheckedType::CPointer {
             pointee: Box::new(substitute_type(*pointee, substitutions)),
         },
+        CheckedType::Ref(value) => {
+            CheckedType::Ref(Box::new(substitute_type(*value, substitutions)))
+        }
         CheckedType::Opaque {
             id,
             name,
@@ -2824,6 +2947,7 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Parameter { .. } => true,
         CheckedType::CPointer { pointee } => contains_type_parameter(pointee),
+        CheckedType::Ref(value) => contains_type_parameter(value),
         CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_type_parameter),
         CheckedType::Product(product) => product
             .elements
@@ -2856,6 +2980,7 @@ fn contains_inferred_type(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::TypeConstructor { .. } => true,
         CheckedType::CPointer { pointee } => contains_inferred_type(pointee),
+        CheckedType::Ref(value) => contains_inferred_type(value),
         CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_inferred_type),
         CheckedType::Product(product) => product
             .elements
@@ -2881,6 +3006,7 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
                 ids.insert(*id);
             }
             CheckedType::CPointer { pointee } => collect(pointee, ids),
+            CheckedType::Ref(value) => collect(value, ids),
             CheckedType::Opaque { arguments, .. } => {
                 for argument in arguments {
                     collect(argument, ids);
@@ -2943,6 +3069,10 @@ pub(crate) fn infer_type_parameters(
         CheckedType::CPointer { pointee } => {
             matches!(actual, CheckedType::CPointer { pointee: actual_pointee }
             if infer_type_parameters(pointee, actual_pointee, substitutions))
+        }
+        CheckedType::Ref(value) => {
+            matches!(actual, CheckedType::Ref(actual_value)
+                if infer_type_parameters(value, actual_value, substitutions))
         }
         CheckedType::Opaque { id, arguments, .. } => {
             let CheckedType::Opaque {
@@ -3081,6 +3211,7 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
                 || checked_type_contains_sum(&function.result)
         }
         CheckedType::CPointer { pointee } => checked_type_contains_sum(pointee),
+        CheckedType::Ref(value) => checked_type_contains_sum(value),
         CheckedType::Distinct {
             arguments,
             representation,

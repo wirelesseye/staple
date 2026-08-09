@@ -1192,6 +1192,62 @@ fn lowers_captured_locals_into_closure_environments() {
 }
 
 #[test]
+fn type_checks_and_lowers_managed_refs() {
+    let module = type_check(concat!(
+        "let point: Ref (x: I32, y: I32) = Ref (x: 1, y: 2)\n",
+        "let copy = point\n",
+        "let x: I32 = copy.x\n",
+        "let Ref (captured_x, captured_y) = point\n",
+        "def sum_ref: (Ref (x: I32, y: I32)) -> I32 = value => match value {\n",
+        "  Ref (x, y) => x + y,\n",
+        "}\n",
+        "let nested: Ref (Ref I32) = Ref (Ref 9)\n",
+        "let empty: Ref () = Ref ()\n",
+        "let total: I32 = captured_x + captured_y\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("Ref values should generate valid LLVM");
+    assert!(llvm.contains("call ptr @__staple_gc_alloc"));
+    assert!(llvm.contains("ref.payload"));
+    assert!(llvm.contains("@__staple_gc_collect"));
+    assert!(llvm.contains("call void @__staple_gc_register_root"));
+}
+
+#[test]
+fn preserves_literal_nominal_ref_container_semantics() {
+    let module = type_check(concat!(
+        "type RefPoint = Ref (x: I32, y: I32)\n",
+        "let point: RefPoint = RefPoint (Ref (x: 3, y: 4))\n",
+        "let x: I32 = point.x\n",
+        "let RefPoint (Ref (captured_x, captured_y)) = point\n",
+        "let y: I32 = captured_y\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("nominal Ref containers should compile");
+}
+
+#[test]
+fn rejects_incomplete_and_overapplied_ref_types() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let value: Ref\n"))
+        .expect_err("Ref requires a payload type");
+    assert!(!diagnostics.is_empty());
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let value: Ref I32 I32\n"))
+        .expect_err("Ref accepts exactly one payload type");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("does not accept compile-time arguments")
+    }));
+}
+
+#[test]
 fn type_checks_and_generates_curried_functions() {
     let module = type_check(concat!(
         "def inferred = a: I32 => b: I32 => a\n",

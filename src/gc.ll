@@ -1,0 +1,447 @@
+%GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, {{SIZE}} }
+%GcRoot = type { ptr, {{SIZE}}, ptr }
+
+@__staple_gc_head = internal global ptr null
+@__staple_gc_roots = internal global ptr null
+@__staple_gc_bytes = internal global {{SIZE}} 0
+@__staple_gc_threshold = internal global {{SIZE}} 1048576
+@__staple_gc_stack_bottom = internal global ptr null
+@__staple_gc_table = internal global ptr null
+@__staple_gc_table_capacity = internal global {{SIZE}} 0
+@__staple_gc_table_count = internal global {{SIZE}} 0
+
+declare ptr @malloc({{SIZE}})
+declare ptr @calloc({{SIZE}}, {{SIZE}})
+declare void @free(ptr)
+declare i32 @setjmp(ptr) returns_twice
+declare void @llvm.trap()
+
+define internal void @__staple_gc_hash_insert_into(ptr %table, {{SIZE}} %capacity, ptr %payload) {
+entry:
+  %integer = ptrtoint ptr %payload to {{SIZE}}
+  %shifted = lshr {{SIZE}} %integer, {{PTR_SHIFT}}
+  %initial = urem {{SIZE}} %shifted, %capacity
+  br label %loop
+
+loop:
+  %index = phi {{SIZE}} [ %initial, %entry ], [ %next, %occupied ]
+  %slot = getelementptr ptr, ptr %table, {{SIZE}} %index
+  %value = load ptr, ptr %slot
+  %empty = icmp eq ptr %value, null
+  %tombstone = icmp eq ptr %value, inttoptr ({{SIZE}} 1 to ptr)
+  %available = or i1 %empty, %tombstone
+  br i1 %available, label %insert, label %occupied
+
+occupied:
+  %incremented = add {{SIZE}} %index, 1
+  %next = urem {{SIZE}} %incremented, %capacity
+  br label %loop
+
+insert:
+  store ptr %payload, ptr %slot
+  ret void
+}
+
+define internal void @__staple_gc_hash_grow() {
+entry:
+  %old.table = load ptr, ptr @__staple_gc_table
+  %old.capacity = load {{SIZE}}, ptr @__staple_gc_table_capacity
+  %uninitialized = icmp eq {{SIZE}} %old.capacity, 0
+  %doubled = shl {{SIZE}} %old.capacity, 1
+  %new.capacity = select i1 %uninitialized, {{SIZE}} 65536, {{SIZE}} %doubled
+  %overflow = icmp eq {{SIZE}} %new.capacity, 0
+  br i1 %overflow, label %trap, label %allocate
+
+allocate:
+  %new.table = call ptr @calloc({{SIZE}} %new.capacity, {{SIZE}} {{PTR_BYTES}})
+  %failed = icmp eq ptr %new.table, null
+  br i1 %failed, label %trap, label %install
+
+install:
+  store ptr %new.table, ptr @__staple_gc_table
+  store {{SIZE}} %new.capacity, ptr @__staple_gc_table_capacity
+  br i1 %uninitialized, label %return, label %rehash.loop
+
+rehash.loop:
+  %index = phi {{SIZE}} [ 0, %install ], [ %next, %rehash.next ]
+  %done = icmp eq {{SIZE}} %index, %old.capacity
+  br i1 %done, label %release, label %rehash.body
+
+rehash.body:
+  %old.slot = getelementptr ptr, ptr %old.table, {{SIZE}} %index
+  %payload = load ptr, ptr %old.slot
+  %empty = icmp eq ptr %payload, null
+  %tombstone = icmp eq ptr %payload, inttoptr ({{SIZE}} 1 to ptr)
+  %skip = or i1 %empty, %tombstone
+  br i1 %skip, label %rehash.next, label %rehash.insert
+
+rehash.insert:
+  call void @__staple_gc_hash_insert_into(ptr %new.table, {{SIZE}} %new.capacity, ptr %payload)
+  br label %rehash.next
+
+rehash.next:
+  %next = add {{SIZE}} %index, 1
+  br label %rehash.loop
+
+release:
+  call void @free(ptr %old.table)
+  br label %return
+
+return:
+  ret void
+
+trap:
+  call void @llvm.trap()
+  unreachable
+}
+
+define internal void @__staple_gc_hash_insert(ptr %payload) {
+entry:
+  %capacity = load {{SIZE}}, ptr @__staple_gc_table_capacity
+  %count = load {{SIZE}}, ptr @__staple_gc_table_count
+  %twice.count = shl {{SIZE}} %count, 1
+  %grow = icmp uge {{SIZE}} %twice.count, %capacity
+  br i1 %grow, label %resize, label %insert
+
+resize:
+  call void @__staple_gc_hash_grow()
+  br label %insert
+
+insert:
+  %table = load ptr, ptr @__staple_gc_table
+  %active.capacity = load {{SIZE}}, ptr @__staple_gc_table_capacity
+  call void @__staple_gc_hash_insert_into(ptr %table, {{SIZE}} %active.capacity, ptr %payload)
+  %old.count = load {{SIZE}}, ptr @__staple_gc_table_count
+  %new.count = add {{SIZE}} %old.count, 1
+  store {{SIZE}} %new.count, ptr @__staple_gc_table_count
+  ret void
+}
+
+define internal ptr @__staple_gc_hash_lookup({{SIZE}} %candidate) {
+entry:
+  %table = load ptr, ptr @__staple_gc_table
+  %capacity = load {{SIZE}}, ptr @__staple_gc_table_capacity
+  %uninitialized = icmp eq {{SIZE}} %capacity, 0
+  br i1 %uninitialized, label %not.found, label %start
+
+start:
+  %shifted = lshr {{SIZE}} %candidate, {{PTR_SHIFT}}
+  %initial = urem {{SIZE}} %shifted, %capacity
+  br label %loop
+
+loop:
+  %index = phi {{SIZE}} [ %initial, %start ], [ %next, %continue ]
+  %probes = phi {{SIZE}} [ 0, %start ], [ %next.probes, %continue ]
+  %slot = getelementptr ptr, ptr %table, {{SIZE}} %index
+  %payload = load ptr, ptr %slot
+  %empty = icmp eq ptr %payload, null
+  br i1 %empty, label %not.found, label %check
+
+check:
+  %tombstone = icmp eq ptr %payload, inttoptr ({{SIZE}} 1 to ptr)
+  br i1 %tombstone, label %continue, label %compare
+
+compare:
+  %integer = ptrtoint ptr %payload to {{SIZE}}
+  %matches = icmp eq {{SIZE}} %integer, %candidate
+  br i1 %matches, label %found, label %continue
+
+continue:
+  %incremented = add {{SIZE}} %index, 1
+  %next = urem {{SIZE}} %incremented, %capacity
+  %next.probes = add {{SIZE}} %probes, 1
+  %exhausted = icmp eq {{SIZE}} %next.probes, %capacity
+  br i1 %exhausted, label %not.found, label %loop
+
+found:
+  ret ptr %payload
+
+not.found:
+  ret ptr null
+}
+
+define internal void @__staple_gc_hash_remove(ptr %payload) {
+entry:
+  %candidate = ptrtoint ptr %payload to {{SIZE}}
+  %table = load ptr, ptr @__staple_gc_table
+  %capacity = load {{SIZE}}, ptr @__staple_gc_table_capacity
+  %shifted = lshr {{SIZE}} %candidate, {{PTR_SHIFT}}
+  %initial = urem {{SIZE}} %shifted, %capacity
+  br label %loop
+
+loop:
+  %index = phi {{SIZE}} [ %initial, %entry ], [ %next, %continue ]
+  %probes = phi {{SIZE}} [ 0, %entry ], [ %next.probes, %continue ]
+  %slot = getelementptr ptr, ptr %table, {{SIZE}} %index
+  %value = load ptr, ptr %slot
+  %integer = ptrtoint ptr %value to {{SIZE}}
+  %matches = icmp eq {{SIZE}} %integer, %candidate
+  br i1 %matches, label %remove, label %continue
+
+continue:
+  %incremented = add {{SIZE}} %index, 1
+  %next = urem {{SIZE}} %incremented, %capacity
+  %next.probes = add {{SIZE}} %probes, 1
+  %exhausted = icmp eq {{SIZE}} %next.probes, %capacity
+  br i1 %exhausted, label %return, label %loop
+
+remove:
+  store ptr inttoptr ({{SIZE}} 1 to ptr), ptr %slot
+  %count = load {{SIZE}}, ptr @__staple_gc_table_count
+  %new.count = sub {{SIZE}} %count, 1
+  store {{SIZE}} %new.count, ptr @__staple_gc_table_count
+  br label %return
+
+return:
+  ret void
+}
+
+define internal void @__staple_gc_mark_candidate({{SIZE}} %candidate) {
+entry:
+  %payload = call ptr @__staple_gc_hash_lookup({{SIZE}} %candidate)
+  %found = icmp ne ptr %payload, null
+  br i1 %found, label %mark.check, label %return
+
+mark.check:
+  %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
+  %mark.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
+  %mark = load {{SIZE}}, ptr %mark.slot
+  %already.marked = icmp ne {{SIZE}} %mark, 0
+  br i1 %already.marked, label %return, label %mark.object
+
+mark.object:
+  store {{SIZE}} 1, ptr %mark.slot
+  %size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
+  %size = load {{SIZE}}, ptr %size.slot
+  call void @__staple_gc_scan_region(ptr %payload, {{SIZE}} %size)
+  br label %return
+
+return:
+  ret void
+}
+
+define internal void @__staple_gc_scan_region(ptr %start, {{SIZE}} %size) {
+entry:
+  %large.enough = icmp uge {{SIZE}} %size, {{PTR_BYTES}}
+  br i1 %large.enough, label %loop, label %return
+
+loop:
+  %offset = phi {{SIZE}} [ 0, %entry ], [ %next, %body ]
+  %remaining = sub {{SIZE}} %size, %offset
+  %has.word = icmp uge {{SIZE}} %remaining, {{PTR_BYTES}}
+  br i1 %has.word, label %body, label %return
+
+body:
+  %slot = getelementptr i8, ptr %start, {{SIZE}} %offset
+  %candidate = load {{SIZE}}, ptr %slot, align 1
+  call void @__staple_gc_mark_candidate({{SIZE}} %candidate)
+  %next = add {{SIZE}} %offset, 1
+  br label %loop
+
+return:
+  ret void
+}
+
+define internal void @__staple_gc_collect() {
+entry:
+  %stack.bottom = load ptr, ptr @__staple_gc_stack_bottom
+  %initialized = icmp ne ptr %stack.bottom, null
+  br i1 %initialized, label %clear.start, label %return
+
+clear.start:
+  %head = load ptr, ptr @__staple_gc_head
+  br label %clear.loop
+
+clear.loop:
+  %clear.header = phi ptr [ %head, %clear.start ], [ %clear.next, %clear.body ]
+  %clear.done = icmp eq ptr %clear.header, null
+  br i1 %clear.done, label %roots.start, label %clear.body
+
+clear.body:
+  %clear.mark = getelementptr %GcHeader, ptr %clear.header, i32 0, i32 2
+  store {{SIZE}} 0, ptr %clear.mark
+  %clear.next.slot = getelementptr %GcHeader, ptr %clear.header, i32 0, i32 0
+  %clear.next = load ptr, ptr %clear.next.slot
+  br label %clear.loop
+
+roots.start:
+  %registers = alloca [64 x {{SIZE}}], align {{PTR_BYTES}}
+  %registers.pointer = getelementptr [64 x {{SIZE}}], ptr %registers, i32 0, i32 0
+  %ignored = call i32 @setjmp(ptr %registers.pointer)
+  call void @__staple_gc_scan_region(ptr %registers.pointer, {{SIZE}} {{REGISTER_BYTES}})
+  %stack.current.integer = ptrtoint ptr %registers.pointer to {{SIZE}}
+  %stack.bottom.integer = ptrtoint ptr %stack.bottom to {{SIZE}}
+  %stack.grows.down = icmp ule {{SIZE}} %stack.current.integer, %stack.bottom.integer
+  %stack.start = select i1 %stack.grows.down, ptr %registers.pointer, ptr %stack.bottom
+  %stack.low = select i1 %stack.grows.down, {{SIZE}} %stack.current.integer, {{SIZE}} %stack.bottom.integer
+  %stack.high = select i1 %stack.grows.down, {{SIZE}} %stack.bottom.integer, {{SIZE}} %stack.current.integer
+  %stack.size = sub {{SIZE}} %stack.high, %stack.low
+  call void @__staple_gc_scan_region(ptr %stack.start, {{SIZE}} %stack.size)
+  %roots = load ptr, ptr @__staple_gc_roots
+  br label %roots.loop
+
+roots.loop:
+  %root = phi ptr [ %roots, %roots.start ], [ %root.next, %roots.body ]
+  %roots.done = icmp eq ptr %root, null
+  br i1 %roots.done, label %sweep.start, label %roots.body
+
+roots.body:
+  %root.start.slot = getelementptr %GcRoot, ptr %root, i32 0, i32 0
+  %root.start = load ptr, ptr %root.start.slot
+  %root.size.slot = getelementptr %GcRoot, ptr %root, i32 0, i32 1
+  %root.size = load {{SIZE}}, ptr %root.size.slot
+  call void @__staple_gc_scan_region(ptr %root.start, {{SIZE}} %root.size)
+  %root.next.slot = getelementptr %GcRoot, ptr %root, i32 0, i32 2
+  %root.next = load ptr, ptr %root.next.slot
+  br label %roots.loop
+
+sweep.start:
+  br label %sweep.loop
+
+sweep.loop:
+  %link = phi ptr [ @__staple_gc_head, %sweep.start ], [ %next.link, %keep ], [ %link, %discard ]
+  %header = load ptr, ptr %link
+  %sweep.done = icmp eq ptr %header, null
+  br i1 %sweep.done, label %threshold, label %sweep.check
+
+sweep.check:
+  %mark.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
+  %mark = load {{SIZE}}, ptr %mark.slot
+  %live = icmp ne {{SIZE}} %mark, 0
+  br i1 %live, label %keep, label %discard
+
+keep:
+  %next.link = getelementptr %GcHeader, ptr %header, i32 0, i32 0
+  br label %sweep.loop
+
+discard:
+  %dead.next.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 0
+  %dead.next = load ptr, ptr %dead.next.slot
+  store ptr %dead.next, ptr %link
+  %dead.size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
+  %dead.size = load {{SIZE}}, ptr %dead.size.slot
+  %dead.payload = getelementptr i8, ptr %header, {{SIZE}} {{HEADER_BYTES}}
+  call void @__staple_gc_hash_remove(ptr %dead.payload)
+  %dead.has.payload = icmp ne {{SIZE}} %dead.size, 0
+  %dead.payload.size = select i1 %dead.has.payload, {{SIZE}} %dead.size, {{SIZE}} 1
+  %dead.charge = add {{SIZE}} %dead.payload.size, {{HEADER_BYTES}}
+  %bytes = load {{SIZE}}, ptr @__staple_gc_bytes
+  %remaining.bytes = sub {{SIZE}} %bytes, %dead.charge
+  store {{SIZE}} %remaining.bytes, ptr @__staple_gc_bytes
+  call void @free(ptr %header)
+  br label %sweep.loop
+
+threshold:
+  %live.bytes = load {{SIZE}}, ptr @__staple_gc_bytes
+  %can.double = icmp ule {{SIZE}} %live.bytes, {{MAX_HALF}}
+  %doubled = shl {{SIZE}} %live.bytes, 1
+  %grown = select i1 %can.double, {{SIZE}} %doubled, {{SIZE}} {{MAX}}
+  %small = icmp ult {{SIZE}} %grown, 1048576
+  %next.threshold = select i1 %small, {{SIZE}} 1048576, {{SIZE}} %grown
+  store {{SIZE}} %next.threshold, ptr @__staple_gc_threshold
+  br label %return
+
+return:
+  ret void
+}
+
+define internal ptr @__staple_gc_try_allocate({{SIZE}} %size) {
+entry:
+  %has.payload = icmp ne {{SIZE}} %size, 0
+  %payload.size = select i1 %has.payload, {{SIZE}} %size, {{SIZE}} 1
+  %fits = icmp ule {{SIZE}} %payload.size, {{MAX_ALLOC}}
+  br i1 %fits, label %allocate, label %trap
+
+allocate:
+  %total = add {{SIZE}} %payload.size, {{HEADER_BYTES}}
+  %header = call ptr @malloc({{SIZE}} %total)
+  ret ptr %header
+
+trap:
+  call void @llvm.trap()
+  unreachable
+}
+
+define ptr @__staple_gc_alloc({{SIZE}} %size) {
+entry:
+  %has.payload = icmp ne {{SIZE}} %size, 0
+  %payload.size = select i1 %has.payload, {{SIZE}} %size, {{SIZE}} 1
+  %fits = icmp ule {{SIZE}} %payload.size, {{MAX_ALLOC}}
+  br i1 %fits, label %threshold.check, label %trap
+
+threshold.check:
+  %charge = add {{SIZE}} %payload.size, {{HEADER_BYTES}}
+  %bytes = load {{SIZE}}, ptr @__staple_gc_bytes
+  %threshold = load {{SIZE}}, ptr @__staple_gc_threshold
+  %at.limit = icmp uge {{SIZE}} %bytes, %threshold
+  %remaining = sub {{SIZE}} %threshold, %bytes
+  %exceeds.remaining = icmp ugt {{SIZE}} %charge, %remaining
+  %crosses = or i1 %at.limit, %exceeds.remaining
+  br i1 %crosses, label %collect.first, label %allocate.first
+
+collect.first:
+  call void @__staple_gc_collect()
+  br label %allocate.first
+
+allocate.first:
+  %first = call ptr @__staple_gc_try_allocate({{SIZE}} %size)
+  %first.failed = icmp eq ptr %first, null
+  br i1 %first.failed, label %retry, label %initialize
+
+retry:
+  call void @__staple_gc_collect()
+  %second = call ptr @__staple_gc_try_allocate({{SIZE}} %size)
+  %second.failed = icmp eq ptr %second, null
+  br i1 %second.failed, label %trap, label %initialize
+
+initialize:
+  %header = phi ptr [ %first, %allocate.first ], [ %second, %retry ]
+  %head = load ptr, ptr @__staple_gc_head
+  %next.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 0
+  store ptr %head, ptr %next.slot
+  %size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
+  store {{SIZE}} %size, ptr %size.slot
+  %mark.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
+  store {{SIZE}} 0, ptr %mark.slot
+  %reserved.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 3
+  store {{SIZE}} 0, ptr %reserved.slot
+  store ptr %header, ptr @__staple_gc_head
+  %old.bytes = load {{SIZE}}, ptr @__staple_gc_bytes
+  %new.bytes = add {{SIZE}} %old.bytes, %charge
+  store {{SIZE}} %new.bytes, ptr @__staple_gc_bytes
+  %payload = getelementptr i8, ptr %header, {{SIZE}} {{HEADER_BYTES}}
+  call void @__staple_gc_hash_insert(ptr %payload)
+  ret ptr %payload
+
+trap:
+  call void @llvm.trap()
+  unreachable
+}
+
+define void @__staple_gc_set_stack_bottom(ptr %bottom) {
+entry:
+  store ptr %bottom, ptr @__staple_gc_stack_bottom
+  ret void
+}
+
+define void @__staple_gc_register_root(ptr %start, {{SIZE}} %size) {
+entry:
+  %node = call ptr @malloc({{SIZE}} {{ROOT_BYTES}})
+  %failed = icmp eq ptr %node, null
+  br i1 %failed, label %trap, label %initialize
+
+initialize:
+  %start.slot = getelementptr %GcRoot, ptr %node, i32 0, i32 0
+  store ptr %start, ptr %start.slot
+  %size.slot = getelementptr %GcRoot, ptr %node, i32 0, i32 1
+  store {{SIZE}} %size, ptr %size.slot
+  %roots = load ptr, ptr @__staple_gc_roots
+  %next.slot = getelementptr %GcRoot, ptr %node, i32 0, i32 2
+  store ptr %roots, ptr %next.slot
+  store ptr %node, ptr @__staple_gc_roots
+  ret void
+
+trap:
+  call void @llvm.trap()
+  unreachable
+}

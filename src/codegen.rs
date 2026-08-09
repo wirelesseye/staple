@@ -5,6 +5,7 @@ use std::path::Path;
 
 use inkwell::{
     AddressSpace, OptimizationLevel,
+    memory_buffer::MemoryBuffer,
     module::Module as LlvmModule,
     targets::TargetData,
     targets::{
@@ -16,10 +17,10 @@ use inkwell::{
 
 use crate::typecheck::{contains_type_parameter, infer_type_parameters, substitute_type};
 use crate::{
-    Accessor, CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic,
-    Expression, FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType,
-    IntrinsicFunction, Item, ModuleId, Pattern, PatternBindingKind, ProductExpression,
-    ResolvedFunction, Span, Statement, SymbolId, TypeParameterId, TypedModule,
+    CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic, Expression,
+    FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction,
+    Item, ModuleId, Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, Span,
+    Statement, SymbolId, TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -149,6 +150,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.llvm_module.set_triple(&target_machine.get_triple());
         self.llvm_module
             .set_data_layout(&target_machine.get_target_data().get_data_layout());
+        self.install_gc_runtime()?;
         self.declare_external_functions()?;
         self.declare_functions()?;
         self.declare_top_level_storage()?;
@@ -171,6 +173,54 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Diagnostic::new(Span::Compiler, format!("invalid LLVM module: {message}"))
         })?;
         Ok(self.llvm_module)
+    }
+
+    fn install_gc_runtime(&self) -> CodeGenerationResult<()> {
+        let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
+        let pointer_shift = pointer_bytes.trailing_zeros();
+        let bits = pointer_bytes * 8;
+        let size = format!("i{bits}");
+        let maximum = if bits == 64 {
+            u64::MAX.to_string()
+        } else {
+            ((1_u64 << bits) - 1).to_string()
+        };
+        let maximum_half = if bits == 64 {
+            (u64::MAX / 2).to_string()
+        } else {
+            (((1_u64 << bits) - 1) / 2).to_string()
+        };
+        let maximum_allocation = if bits == 64 {
+            (u64::MAX - pointer_bytes * 4).to_string()
+        } else {
+            (((1_u64 << bits) - 1) - pointer_bytes * 4).to_string()
+        };
+        let runtime = include_str!("gc.ll")
+            .replace("{{SIZE}}", &size)
+            .replace("{{PTR_BYTES}}", &pointer_bytes.to_string())
+            .replace("{{PTR_SHIFT}}", &pointer_shift.to_string())
+            .replace("{{HEADER_BYTES}}", &(pointer_bytes * 4).to_string())
+            .replace("{{ROOT_BYTES}}", &(pointer_bytes * 3).to_string())
+            .replace("{{REGISTER_BYTES}}", &(pointer_bytes * 64).to_string())
+            .replace("{{MAX_HALF}}", &maximum_half)
+            .replace("{{MAX_ALLOC}}", &maximum_allocation)
+            .replace("{{MAX}}", &maximum);
+        let buffer = MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-gc");
+        let module = self
+            .context
+            .create_module_from_ir(buffer)
+            .map_err(|error| {
+                Diagnostic::new(
+                    Span::Compiler,
+                    format!("could not build garbage collector runtime: {error}"),
+                )
+            })?;
+        self.llvm_module.link_in_module(module).map_err(|error| {
+            Diagnostic::new(
+                Span::Compiler,
+                format!("could not link garbage collector runtime: {error}"),
+            )
+        })
     }
 
     fn declare_external_functions(&mut self) -> CodeGenerationResult<()> {
@@ -510,6 +560,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder.position_at_end(entry);
         let parameters = function.get_params();
         let value = self.build_product_value(&parameters[1..], Span::Compiler)?;
+        let value = if let CheckedType::Ref(payload) = function_type.result.as_ref() {
+            self.build_ref_value(value, payload, Span::Compiler)?
+                .as_basic_value_enum()
+        } else {
+            value
+        };
         self.builder
             .build_return(Some(&value))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
@@ -658,6 +714,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Ok(())
             }
             Pattern::Nominal(pattern) => {
+                let value = match self
+                    .typed_module
+                    .type_of_pattern(pattern.syntax.id)
+                    .cloned()
+                    .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
+                {
+                    Some(CheckedType::Ref(payload)) => {
+                        self.load_ref_payload(value, &payload, pattern.syntax.span.clone())?
+                    }
+                    _ => value,
+                };
                 self.bind_pattern_value(environment, &pattern.argument, value)
             }
         }
@@ -669,6 +736,37 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let function = self.llvm_module.add_function("main", function_type, None);
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
+
+        let stack_bottom = self
+            .builder
+            .build_alloca(self.context.i8_type(), "gc.stack.bottom")
+            .map_err(compiler_diagnostic)?;
+        let set_stack_bottom = self
+            .llvm_module
+            .get_function("__staple_gc_set_stack_bottom")
+            .expect("GC runtime stack initializer");
+        self.builder
+            .build_direct_call(set_stack_bottom, &[stack_bottom.into()], "")
+            .map_err(compiler_diagnostic)?;
+
+        let global_roots = self
+            .storage
+            .iter()
+            .filter_map(|(symbol, global)| {
+                self.typed_module
+                    .type_of_symbol(*symbol)
+                    .filter(|value_type| checked_type_contains_ref(value_type))
+                    .map(|value_type| (*global, value_type.clone()))
+            })
+            .collect::<Vec<_>>();
+        for (global, value_type) in global_roots {
+            let llvm_type = self.compile_type(&value_type)?;
+            self.register_gc_root_region(
+                global.as_pointer_value(),
+                self.target_data.get_store_size(&llvm_type),
+                Span::Compiler,
+            )?;
+        }
 
         for module in self
             .typed_module
@@ -684,6 +782,26 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_return(Some(&integer_type.const_zero()))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         Ok(())
+    }
+
+    fn register_gc_root_region(
+        &self,
+        pointer: inkwell::values::PointerValue<'context>,
+        size: u64,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let register = self
+            .llvm_module
+            .get_function("__staple_gc_register_root")
+            .expect("GC root registration function");
+        self.builder
+            .build_direct_call(
+                register,
+                &[pointer.into(), self.size_type.const_int(size, false).into()],
+                "",
+            )
+            .map(|_| ())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
     fn compile_module_initializers(&mut self) -> CodeGenerationResult<()> {
@@ -890,6 +1008,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map_err(|error| {
                         Diagnostic::new(binding.syntax.span.clone(), error.to_string())
                     })?;
+                self.register_gc_root_region(state, 1, binding.syntax.span.clone())?;
                 (state, state)
             } else {
                 let cell_type = self.compile_binding_cell_type(symbol)?;
@@ -899,6 +1018,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map_err(|error| {
                         Diagnostic::new(binding.syntax.span.clone(), error.to_string())
                     })?;
+                self.register_gc_root_region(
+                    cell,
+                    self.target_data.get_store_size(&cell_type),
+                    binding.syntax.span.clone(),
+                )?;
                 let state = self
                     .builder
                     .build_struct_gep(cell_type, cell, 1, "binding.state")
@@ -1298,18 +1422,39 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     return self.compile_c_string_macro(call);
                 }
                 if let Some(symbol) = self.typed_module.symbol_for(call.callee.syntax().id)
-                    && self
-                        .typed_module
-                        .resolved()
-                        .constructor_type(symbol)
-                        .is_some()
+                    && let Some(type_id) = self.typed_module.resolved().constructor_type(symbol)
                 {
                     let value = self.compile_expression(environment, &call.argument)?;
-                    return Ok(if environment.did_return {
-                        self.unit_value()
-                    } else {
-                        value
-                    });
+                    if environment.did_return {
+                        return Ok(self.unit_value());
+                    }
+                    if self.typed_module.resolved().builtin_type(type_id)
+                        == Some(crate::BuiltinType::Ref)
+                    {
+                        let CheckedType::Ref(payload) =
+                            self.concrete_expression_type(expression).ok_or_else(|| {
+                                Diagnostic::new(
+                                    call.syntax.span.clone(),
+                                    "Ref constructor has no concrete result type",
+                                )
+                            })?
+                        else {
+                            return Err(Diagnostic::new(
+                                call.syntax.span.clone(),
+                                "Ref constructor has an invalid result type",
+                            ));
+                        };
+                        let value = value_as_basic(value).ok_or_else(|| {
+                            Diagnostic::new(
+                                call.argument.syntax().span.clone(),
+                                "Ref payload is not first-class",
+                            )
+                        })?;
+                        return self
+                            .build_ref_value(value, &payload, call.syntax.span.clone())
+                            .map(|value| value.as_any_value_enum());
+                    }
+                    return Ok(value);
                 }
                 self.compile_call_expression(environment, call)
             }
@@ -1337,27 +1482,32 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 if environment.did_return {
                     return Ok(self.unit_value());
                 }
-                let Some(BasicValueEnum::StructValue(value)) = value_as_basic(value) else {
+                let checked = self
+                    .typed_module
+                    .access_for(access.syntax.id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(access.syntax.span.clone(), "missing checked access")
+                    })?;
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        access.value.syntax().span.clone(),
+                        "element access requires a product value",
+                    )
+                })?;
+                let value = if let Some(payload) = &checked.dereference {
+                    self.load_ref_payload(value, payload, access.syntax.span.clone())?
+                } else {
+                    value
+                };
+                let BasicValueEnum::StructValue(value) = value else {
                     return Err(Diagnostic::new(
                         access.value.syntax().span.clone(),
                         "element access requires a product value",
                     ));
                 };
-                let index = match &access.accessor {
-                    Accessor::Index(index) => index.parse::<u32>().map_err(|_| {
-                        Diagnostic::new(access.syntax.span.clone(), "invalid product index")
-                    })?,
-                    Accessor::Name(name) => {
-                        product_element_index(&access.value, name).ok_or_else(|| {
-                            Diagnostic::new(
-                                access.syntax.span.clone(),
-                                format!("cannot determine index of product element `{name}`"),
-                            )
-                        })?
-                    }
-                };
                 self.builder
-                    .build_extract_value(value, index, "element")
+                    .build_extract_value(value, checked.index as u32, "element")
                     .map(|value| value.as_any_value_enum())
                     .map_err(|error| Diagnostic::new(access.syntax.span.clone(), error.to_string()))
             }
@@ -1693,6 +1843,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
             }
             Pattern::Nominal(pattern) => match value_type {
+                CheckedType::Ref(payload)
+                    if self
+                        .typed_module
+                        .resolved()
+                        .type_for_pattern(pattern.syntax.id)
+                        .is_some_and(|id| {
+                            self.typed_module.resolved().builtin_type(id)
+                                == Some(crate::BuiltinType::Ref)
+                        }) =>
+                {
+                    let payload_value =
+                        self.load_ref_payload(value, payload, pattern.syntax.span.clone())?;
+                    self.compile_match_pattern_branch(
+                        environment,
+                        &pattern.argument,
+                        payload_value,
+                        payload,
+                        success,
+                        failure,
+                    )?;
+                }
                 CheckedType::Sum(sum) => {
                     let expected_id = self
                         .typed_module
@@ -2055,6 +2226,60 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_insert_value(value, length, 2, "string.capacity")
             .map(|value| value.into_struct_value())
             .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    fn build_ref_value(
+        &mut self,
+        value: BasicValueEnum<'context>,
+        payload: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let payload_type = self.compile_type(payload)?;
+        let size = self.target_data.get_store_size(&payload_type);
+        let allocator = self
+            .llvm_module
+            .get_function("__staple_gc_alloc")
+            .unwrap_or_else(|| {
+                let function_type = self
+                    .context
+                    .ptr_type(AddressSpace::default())
+                    .fn_type(&[self.size_type.into()], false);
+                self.llvm_module
+                    .add_function("__staple_gc_alloc", function_type, None)
+            });
+        let pointer = self
+            .builder
+            .build_direct_call(
+                allocator,
+                &[self.size_type.const_int(size, false).into()],
+                "ref.allocate",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_pointer_value();
+        self.builder
+            .build_store(pointer, value)
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(pointer)
+    }
+
+    fn load_ref_payload(
+        &self,
+        value: BasicValueEnum<'context>,
+        payload: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let BasicValueEnum::PointerValue(pointer) = value else {
+            return Err(Diagnostic::new(
+                span,
+                "Ref value has an invalid representation",
+            ));
+        };
+        let payload_type = self.compile_type(payload)?;
+        self.builder
+            .build_load(payload_type, pointer, "ref.payload")
+            .map_err(compiler_diagnostic)
     }
 
     fn compile_symbol_value(
@@ -3133,6 +3358,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .builder
                 .build_malloc(environment_type, "closure.environment")
                 .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            self.register_gc_root_region(
+                pointer,
+                self.target_data.get_store_size(&environment_type),
+                span.clone(),
+            )?;
             self.builder
                 .build_store(pointer, environment_value)
                 .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
@@ -3407,6 +3637,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )),
             CheckedType::CString => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::String => Ok(self.string_type().into()),
+            CheckedType::Ref(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::CPointer { .. } => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
@@ -3526,15 +3757,32 @@ fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {
     }
 }
 
-fn product_element_index(expression: &Expression, name: &str) -> Option<u32> {
-    let Expression::Product(product) = expression else {
-        return None;
-    };
-    product
-        .elements
-        .iter()
-        .position(|element| element.name.as_deref() == Some(name))
-        .and_then(|index| u32::try_from(index).ok())
+fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
+    match value_type {
+        CheckedType::Ref(_) => true,
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| checked_type_contains_ref(&element.value_type)),
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(checked_type_contains_ref),
+        CheckedType::Function(function) => {
+            checked_type_contains_ref(&function.parameter)
+                || checked_type_contains_ref(&function.result)
+        }
+        CheckedType::Distinct {
+            arguments,
+            representation,
+            ..
+        } => {
+            arguments.iter().any(checked_type_contains_ref)
+                || checked_type_contains_ref(representation)
+        }
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
+            arguments.iter().any(checked_type_contains_ref)
+        }
+        CheckedType::CPointer { pointee } => checked_type_contains_ref(pointee),
+        _ => false,
+    }
 }
 
 fn decode_string_literal(literal: &str) -> Result<String, String> {

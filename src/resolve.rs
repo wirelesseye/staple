@@ -48,6 +48,7 @@ pub struct ResolvedTraitImplementation {
 pub enum BuiltinType {
     Integer(IntegerType),
     String,
+    Ref,
     CChar,
     CString,
     CPointer,
@@ -522,6 +523,7 @@ impl NameResolver {
             );
         }
         self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
+        self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
 
         if let Some(cinterop) = program.standard_library_cinterop() {
             self.register_builtin_type(cinterop, "std.cinterop", "CChar", BuiltinType::CChar);
@@ -669,16 +671,24 @@ impl NameResolver {
                 format!("standard library type `{name}` must be public"),
             ));
         }
-        if declaration.kind != crate::TypeDeclarationKind::Opaque {
+        let valid_kind = if builtin == BuiltinType::Ref {
+            declaration.kind == crate::TypeDeclarationKind::Distinct
+                && declaration.representation_visibility == Visibility::Public
+        } else {
+            declaration.kind == crate::TypeDeclarationKind::Opaque
+        };
+        if !valid_kind {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
-                format!("standard library type `{name}` must be opaque"),
+                format!("standard library type `{name}` has an invalid representation"),
             ));
         }
-        if builtin == BuiltinType::CPointer && declaration.type_parameters.len() != 1 {
+        if matches!(builtin, BuiltinType::CPointer | BuiltinType::Ref)
+            && declaration.type_parameters.len() != 1
+        {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
-                "standard library type `CPointer` must accept one compile-time argument",
+                format!("standard library type `{name}` must accept one compile-time argument"),
             ));
         }
         self.type_names.insert(id, name.to_owned());

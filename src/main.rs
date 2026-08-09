@@ -333,6 +333,8 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::{EmitKind, compile, parse_options, run};
+    use std::process::Command;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
     fn requires_exactly_one_input() {
@@ -401,5 +403,54 @@ mod tests {
 
         assert!(llvm.contains("define i32 @main()"));
         assert!(llvm.contains("target triple"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runs_refs_across_automatic_collection() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-ref-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-ref-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "def churn: I32 -> () = n => match n == 0 {\n",
+                "  True() => (),\n",
+                "  False() => { Ref n; churn (n - 1) },\n",
+                "}\n",
+                "def make_reader = () => {\n",
+                "  def captured = Ref 42\n",
+                "  () => captured\n",
+                "}\n",
+                "let keep = Ref (x: 42, y: 7)\n",
+                "let read = make_reader ()\n",
+                "churn 40000\n",
+                "churn 40000\n",
+                "let Ref captured = read ()\n",
+                "exit ((keep.x - 42) + (captured - 42))\n",
+            ),
+        )
+        .expect("temporary Ref source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("Ref executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("Ref executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
     }
 }

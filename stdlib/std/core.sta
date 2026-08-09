@@ -12,6 +12,7 @@ pub type True
 pub type False
 pub type alias Bool = True | False
 pub type String = opaque
+pub(repr) type Ref = T => T
 pub type Syntax = opaque
 pub macro quote: Syntax -> Syntax
 

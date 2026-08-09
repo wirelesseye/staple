@@ -753,6 +753,7 @@ ISize
 USize
 Bool
 String
+Ref T
 CString
 CChar
 CPointer CChar
@@ -768,6 +769,42 @@ not implicit.
 `String` is an owned UTF-8 buffer represented by a pointer, byte length, and
 capacity. String literals have this canonical type. Until Staple gains
 move/drop semantics, allocated string buffers live until process exit.
+
+`Ref T` is an immutable garbage-collected reference to a value of type `T`.
+Constructing `Ref value` copies or moves `value` into a managed allocation;
+copying a `Ref` copies only its non-null handle. Product fields and indices can
+be accessed directly through the handle:
+
+```staple
+let point: Ref (x: I32, y: I32) = Ref (x: 10, y: 20)
+let x = point.x
+let Ref (captured_x, captured_y) = point
+```
+
+`Ref` follows the ordinary literal representation rules when nested inside a
+nominal type. For example, this declaration retains both constructor layers:
+
+```staple
+type RefPoint = Ref (x: I32, y: I32)
+let point = RefPoint (Ref (x: 10, y: 20))
+let RefPoint (Ref (x, y)) = point
+```
+
+Managed references use a non-moving, single-threaded, stop-the-world
+mark-and-sweep collector. Collection occurs automatically as the live heap
+crosses a growing allocation threshold. Stack/register values, module globals,
+managed payloads, closure environments, and recursive binding cells are
+scanned conservatively, so an integer or raw bit pattern that resembles a
+managed address can keep an otherwise unreachable object alive temporarily.
+There are currently no null, weak, mutable, finalizable, manual-collection, or
+collector-statistics operations.
+
+Closure environments and recursive binding cells are registered as permanent
+root regions for correctness but retain their existing allocation behavior, so
+they still live until process exit. `String` buffers likewise remain unmanaged.
+Migrating those allocations is future work. Deterministic drop semantics are
+also deferred until Staple has resource-owning values such as files or foreign
+allocations; garbage collection does not provide deterministic destruction.
 
 `CChar`, `CString`, and the generic `CPointer` constructor are public opaque
 types in `std.cinterop`. Source code must import them explicitly, for example
