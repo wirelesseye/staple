@@ -45,6 +45,7 @@ struct ModuleEmitter<'module, 'context> {
     closure_codes: HashMap<SymbolId, inkwell::values::FunctionValue<'context>>,
     external_symbols: HashSet<SymbolId>,
     storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
+    initialization_states: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initializers: HashMap<ModuleId, inkwell::values::FunctionValue<'context>>,
     size_type: inkwell::types::IntType<'context>,
     target_data: TargetData,
@@ -53,6 +54,7 @@ struct ModuleEmitter<'module, 'context> {
 #[derive(Default)]
 struct FunctionEnvironment<'context> {
     locals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
+    binding_cells: HashMap<SymbolId, inkwell::values::PointerValue<'context>>,
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
     did_return: bool,
@@ -81,6 +83,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             closure_codes: HashMap::new(),
             external_symbols: HashSet::new(),
             storage: HashMap::new(),
+            initialization_states: HashMap::new(),
             initializers: HashMap::new(),
             size_type: context.ptr_sized_int_type(&target_machine.get_target_data(), None),
             target_data: target_machine.get_target_data(),
@@ -258,12 +261,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let Statement::Binding(binding) = statement.as_ref() else {
                     continue;
                 };
-                if !binding.type_parameters.is_empty() {
-                    continue;
-                }
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     continue;
                 };
+                self.declare_initialization_state(
+                    symbol,
+                    &format!("__staple_m{}_{}_state", source_module.id.0, binding.name),
+                );
+                if !binding.type_parameters.is_empty() {
+                    continue;
+                }
                 if self.globals.contains_key(&symbol) {
                     continue;
                 }
@@ -296,6 +303,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let Some(value_type) = self.typed_module.type_of_symbol(symbol) else {
                     return Ok(());
                 };
+                self.declare_initialization_state(
+                    symbol,
+                    &format!("__staple_m{}_{}_state", module.0, binding.name),
+                );
                 let llvm_type = self.compile_type(value_type)?;
                 let global = self.llvm_module.add_global(
                     llvm_type,
@@ -316,6 +327,23 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
         }
         Ok(())
+    }
+
+    fn declare_initialization_state(&mut self, symbol: SymbolId, name: &str) {
+        if !self
+            .typed_module
+            .resolved()
+            .requires_initialization_state(symbol)
+            || self.initialization_states.contains_key(&symbol)
+        {
+            return;
+        }
+        let state = self
+            .llvm_module
+            .add_global(self.context.i8_type(), None, name);
+        state.set_initializer(&self.context.i8_type().const_zero());
+        state.set_linkage(inkwell::module::Linkage::Internal);
+        self.initialization_states.insert(symbol, state);
     }
 
     fn declare_initializers(&mut self) {
@@ -351,12 +379,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .llvm_module
                 .add_function(&function.name, llvm_type, None);
             self.functions.insert(function.id, llvm_function);
-            if let Some(binding_syntax) = function.binding_syntax
-                && let Some(symbol) = self.typed_module.symbol_for(binding_syntax)
-            {
-                self.globals.insert(symbol, llvm_function.into());
-                self.closure_codes.insert(symbol, llvm_function);
-            }
         }
         Ok(())
     }
@@ -551,7 +573,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .builder
                     .build_extract_value(environment_value, index as u32, "capture")
                     .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
-                environment.locals.insert(symbol, value.as_any_value_enum());
+                if self
+                    .typed_module
+                    .resolved()
+                    .requires_initialization_state(symbol)
+                {
+                    environment
+                        .binding_cells
+                        .insert(symbol, value.into_pointer_value());
+                } else {
+                    environment.locals.insert(symbol, value.as_any_value_enum());
+                }
             }
         }
         self.bind_top_level_pattern(environment, &function.pattern, &parameters[1..])
@@ -687,19 +719,22 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<()> {
         match statement {
             Statement::Binding(binding) => {
-                if !binding.type_parameters.is_empty() {
-                    return Ok(());
-                }
-                let Some(expression) = &binding.value else {
-                    return Ok(());
-                };
-                let value = self.compile_expression(environment, expression)?;
                 let symbol = self
                     .typed_module
                     .symbol_for(binding.syntax.id)
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
                     })?;
+                if !binding.type_parameters.is_empty() {
+                    self.store_global_initialization_state(symbol, 1, binding.syntax.span.clone())?;
+                    self.store_global_initialization_state(symbol, 2, binding.syntax.span.clone())?;
+                    return Ok(());
+                }
+                let Some(expression) = &binding.value else {
+                    return Ok(());
+                };
+                self.store_global_initialization_state(symbol, 1, binding.syntax.span.clone())?;
+                let value = self.compile_expression(environment, expression)?;
                 if let Some(global) = self.storage.get(&symbol) {
                     let value = value_as_basic(value).ok_or_else(|| {
                         Diagnostic::new(
@@ -711,9 +746,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .build_store(global.as_pointer_value(), value)
                         .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
                 }
+                self.store_global_initialization_state(symbol, 2, binding.syntax.span.clone())?;
                 Ok(())
             }
             Statement::PatternBinding(binding) => {
+                self.store_pattern_initialization_state(&binding.pattern, 1)?;
                 let value = self.compile_expression(environment, &binding.value)?;
                 let value = value_as_basic(value).ok_or_else(|| {
                     Diagnostic::new(
@@ -722,7 +759,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     )
                 })?;
                 self.bind_pattern_value(environment, &binding.pattern, value)?;
-                self.store_pattern_globals(environment, &binding.pattern)
+                self.store_pattern_globals(environment, &binding.pattern)?;
+                self.store_pattern_initialization_state(&binding.pattern, 2)
             }
             Statement::Return(statement) => Err(Diagnostic::new(
                 statement.syntax.span.clone(),
@@ -771,6 +809,156 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(())
     }
 
+    fn store_pattern_initialization_state(
+        &mut self,
+        pattern: &Pattern,
+        state: u64,
+    ) -> CodeGenerationResult<()> {
+        match pattern {
+            Pattern::Wildcard(_) => Ok(()),
+            Pattern::Binding(binding) => {
+                if let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) {
+                    self.store_global_initialization_state(
+                        symbol,
+                        state,
+                        binding.syntax.span.clone(),
+                    )?;
+                }
+                Ok(())
+            }
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    self.store_pattern_initialization_state(element, state)?;
+                }
+                Ok(())
+            }
+            Pattern::Nominal(pattern) => {
+                self.store_pattern_initialization_state(&pattern.argument, state)
+            }
+        }
+    }
+
+    fn store_global_initialization_state(
+        &mut self,
+        symbol: SymbolId,
+        state: u64,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let Some(slot) = self.initialization_states.get(&symbol) else {
+            return Ok(());
+        };
+        self.builder
+            .build_store(
+                slot.as_pointer_value(),
+                self.context.i8_type().const_int(state, false),
+            )
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(())
+    }
+
+    fn predeclare_checked_bindings(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        statements: &[Statement],
+    ) -> CodeGenerationResult<()> {
+        for statement in statements {
+            let Statement::Binding(binding) = statement else {
+                continue;
+            };
+            if binding.kind != crate::BindingKind::Def {
+                continue;
+            }
+            let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
+                continue;
+            };
+            if !self
+                .typed_module
+                .resolved()
+                .requires_initialization_state(symbol)
+                || environment.binding_cells.contains_key(&symbol)
+            {
+                continue;
+            }
+            let generic = self
+                .typed_module
+                .type_of_symbol(symbol)
+                .is_some_and(contains_type_parameter);
+            let (cell, state_slot) = if generic {
+                let state = self
+                    .builder
+                    .build_malloc(self.context.i8_type(), "binding.state.cell")
+                    .map_err(|error| {
+                        Diagnostic::new(binding.syntax.span.clone(), error.to_string())
+                    })?;
+                (state, state)
+            } else {
+                let cell_type = self.compile_binding_cell_type(symbol)?;
+                let cell = self
+                    .builder
+                    .build_malloc(cell_type, "binding.cell")
+                    .map_err(|error| {
+                        Diagnostic::new(binding.syntax.span.clone(), error.to_string())
+                    })?;
+                let state = self
+                    .builder
+                    .build_struct_gep(cell_type, cell, 1, "binding.state")
+                    .map_err(|error| {
+                        Diagnostic::new(binding.syntax.span.clone(), error.to_string())
+                    })?;
+                (cell, state)
+            };
+            self.builder
+                .build_store(state_slot, self.context.i8_type().const_zero())
+                .map_err(|error| Diagnostic::new(binding.syntax.span.clone(), error.to_string()))?;
+            environment.binding_cells.insert(symbol, cell);
+        }
+        Ok(())
+    }
+
+    fn compile_binding_cell_type(
+        &self,
+        symbol: SymbolId,
+    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
+        let value_type = self
+            .typed_module
+            .type_of_symbol(symbol)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked binding cell"))?;
+        let value_type = substitute_type(value_type, &self.active_type_substitutions);
+        let llvm_type = self.compile_type(&value_type)?;
+        Ok(self
+            .context
+            .struct_type(&[llvm_type, self.context.i8_type().into()], false))
+    }
+
+    fn store_local_initialization_state(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        state: u64,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let Some(cell) = environment.binding_cells.get(&symbol).copied() else {
+            return Ok(());
+        };
+        let generic = self
+            .typed_module
+            .type_of_symbol(symbol)
+            .is_some_and(contains_type_parameter);
+        let state_slot = if generic {
+            cell
+        } else {
+            let cell_type = self.compile_binding_cell_type(symbol)?;
+            self.builder
+                .build_struct_gep(cell_type, cell, 1, "binding.state")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+        };
+        self.builder
+            .build_store(state_slot, self.context.i8_type().const_int(state, false))
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(())
+    }
+
     fn compile_statement(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
@@ -779,20 +967,67 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         match statement {
             Statement::Binding(binding) => {
                 if !binding.type_parameters.is_empty() {
+                    if let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) {
+                        self.store_local_initialization_state(
+                            environment,
+                            symbol,
+                            1,
+                            binding.syntax.span.clone(),
+                        )?;
+                        self.store_local_initialization_state(
+                            environment,
+                            symbol,
+                            2,
+                            binding.syntax.span.clone(),
+                        )?;
+                    }
                     return Ok(None);
+                }
+                let symbol = self
+                    .typed_module
+                    .symbol_for(binding.syntax.id)
+                    .ok_or_else(|| {
+                        Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
+                    })?;
+                if environment.binding_cells.contains_key(&symbol) {
+                    self.store_local_initialization_state(
+                        environment,
+                        symbol,
+                        1,
+                        binding.syntax.span.clone(),
+                    )?;
                 }
                 if let Some(expression) = &binding.value {
                     let value = self.compile_expression(environment, expression)?;
                     if environment.did_return {
                         return Ok(None);
                     }
-                    let symbol =
-                        self.typed_module
-                            .symbol_for(binding.syntax.id)
-                            .ok_or_else(|| {
-                                Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
+                    if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+                        let value = value_as_basic(value).ok_or_else(|| {
+                            Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                "binding value is not storable",
+                            )
+                        })?;
+                        let cell_type = self.compile_binding_cell_type(symbol)?;
+                        let slot = self
+                            .builder
+                            .build_struct_gep(cell_type, cell, 0, "binding.value")
+                            .map_err(|error| {
+                                Diagnostic::new(binding.syntax.span.clone(), error.to_string())
                             })?;
-                    environment.locals.insert(symbol, value);
+                        self.builder.build_store(slot, value).map_err(|error| {
+                            Diagnostic::new(binding.syntax.span.clone(), error.to_string())
+                        })?;
+                        self.store_local_initialization_state(
+                            environment,
+                            symbol,
+                            2,
+                            binding.syntax.span.clone(),
+                        )?;
+                    } else {
+                        environment.locals.insert(symbol, value);
+                    }
                 }
                 Ok(None)
             }
@@ -1039,6 +1274,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Expression::Match(match_) => self.compile_match_expression(environment, match_),
             Expression::Block(block) => {
+                self.predeclare_checked_bindings(environment, &block.statements)?;
                 let mut value = None;
                 for statement in &block.statements {
                     value = self.compile_statement(environment, statement)?;
@@ -1087,6 +1323,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     return self.compile_symbol_value(
                         environment,
                         symbol,
+                        self.typed_module
+                            .resolved()
+                            .requires_initialization_check(access.syntax.id),
                         access.syntax.span.clone(),
                         "value is not available here".to_owned(),
                     );
@@ -1173,6 +1412,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             .clone(),
                     ))
                 {
+                    if self
+                        .typed_module
+                        .resolved()
+                        .requires_initialization_check(name.syntax.id)
+                    {
+                        self.check_symbol_initialization(
+                            environment,
+                            symbol,
+                            name.syntax.span.clone(),
+                        )?;
+                    }
                     let code = self.ensure_function_specialization(function_id, &function_type)?;
                     return self
                         .build_closure_with_code(
@@ -1186,6 +1436,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.compile_symbol_value(
                     environment,
                     symbol,
+                    self.typed_module
+                        .resolved()
+                        .requires_initialization_check(name.syntax.id),
                     name.syntax.span.clone(),
                     format!("value `{}` is not available here", name.name),
                 )
@@ -1805,11 +2058,38 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         &mut self,
         environment: &FunctionEnvironment<'context>,
         symbol: SymbolId,
+        check_initialization: bool,
         span: Span,
         unavailable: String,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         if let Some(value) = environment.locals.get(&symbol).copied() {
             return Ok(value);
+        }
+        if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+            let cell_type = self.compile_binding_cell_type(symbol)?;
+            let state = self
+                .builder
+                .build_struct_gep(cell_type, cell, 1, "binding.state")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            if check_initialization {
+                self.build_initialization_check(state, span.clone())?;
+            }
+            let value_slot = self
+                .builder
+                .build_struct_gep(cell_type, cell, 0, "binding.value")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+            let value_type = self
+                .typed_module
+                .type_of_symbol(symbol)
+                .cloned()
+                .ok_or_else(|| Diagnostic::new(span.clone(), "unchecked local binding"))?;
+            let value_type = substitute_type(value_type, &self.active_type_substitutions);
+            let llvm_type = self.compile_type(&value_type)?;
+            return self
+                .builder
+                .build_load(llvm_type, value_slot, "binding")
+                .map(|value| value.as_any_value_enum())
+                .map_err(|error| Diagnostic::new(span, error.to_string()));
         }
         if let Some(code) = self.closure_codes.get(&symbol).copied() {
             let closure_environment =
@@ -1830,7 +2110,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "variadic external functions cannot be used as first-class values",
             ));
         }
-        if let Some(global) = self.storage.get(&symbol) {
+        if let Some(global) = self.storage.get(&symbol).copied() {
+            if check_initialization
+                && let Some(state) = self.initialization_states.get(&symbol).copied()
+            {
+                self.build_initialization_check(state.as_pointer_value(), span.clone())?;
+            }
             let value_type = self
                 .typed_module
                 .type_of_symbol(symbol)
@@ -1843,6 +2128,55 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(|error| Diagnostic::new(span, error.to_string()));
         }
         Err(Diagnostic::new(span, unavailable))
+    }
+
+    fn build_initialization_check(
+        &mut self,
+        state_slot: inkwell::values::PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let state = self
+            .builder
+            .build_load(self.context.i8_type(), state_slot, "binding.state")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_int_value();
+        let invalid = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                state,
+                self.context.i8_type().const_int(2, false),
+                "binding.uninitialized",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.build_trap_if(invalid, span)
+    }
+
+    fn check_symbol_initialization(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+            let generic = self
+                .typed_module
+                .type_of_symbol(symbol)
+                .is_some_and(contains_type_parameter);
+            let state = if generic {
+                cell
+            } else {
+                let cell_type = self.compile_binding_cell_type(symbol)?;
+                self.builder
+                    .build_struct_gep(cell_type, cell, 1, "binding.state")
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            };
+            return self.build_initialization_check(state, span);
+        }
+        if let Some(state) = self.initialization_states.get(&symbol).copied() {
+            return self.build_initialization_check(state.as_pointer_value(), span);
+        }
+        Ok(())
     }
 
     fn compile_call_expression(
@@ -1914,6 +2248,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .clone(),
             ))
         {
+            if self
+                .typed_module
+                .resolved()
+                .requires_initialization_check(call.callee.syntax().id)
+            {
+                self.check_symbol_initialization(
+                    environment,
+                    symbol,
+                    call.callee.syntax().span.clone(),
+                )?;
+            }
             let Some(CheckedType::Function(function_type)) =
                 self.concrete_expression_type(&call.callee)
             else {
@@ -2750,15 +3095,31 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let environment_type = self.compile_capture_type(&function)?;
             let mut environment_value = environment_type.const_zero();
             for (index, symbol) in function.captures.iter().copied().enumerate() {
-                let value = self.compile_symbol_value(
-                    environment,
-                    symbol,
-                    span.clone(),
-                    "captured value is not available here".to_owned(),
-                )?;
-                let value = value_as_basic(value).ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "captured value is not first-class")
-                })?;
+                let value = if self
+                    .typed_module
+                    .resolved()
+                    .requires_initialization_state(symbol)
+                {
+                    environment
+                        .binding_cells
+                        .get(&symbol)
+                        .copied()
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "captured binding cell is not available")
+                        })?
+                        .into()
+                } else {
+                    let value = self.compile_symbol_value(
+                        environment,
+                        symbol,
+                        false,
+                        span.clone(),
+                        "captured value is not available here".to_owned(),
+                    )?;
+                    value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "captured value is not first-class")
+                    })?
+                };
                 environment_value = self
                     .builder
                     .build_insert_value(environment_value, value, index as u32, "capture")
@@ -2807,6 +3168,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .captures
             .iter()
             .map(|symbol| {
+                if self
+                    .typed_module
+                    .resolved()
+                    .requires_initialization_state(*symbol)
+                {
+                    return Ok(self.context.ptr_type(AddressSpace::default()).into());
+                }
                 self.typed_module
                     .type_of_symbol(*symbol)
                     .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked capture"))

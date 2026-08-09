@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
     AccessExpression, Accessor, Associativity, Binding, BindingKind, BlockExpression,
@@ -205,6 +205,8 @@ pub struct ResolvedModule {
     trait_references: HashMap<SyntaxId, TraitId>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
+    checked_initialization_symbols: HashSet<SymbolId>,
+    checked_initialization_reads: HashSet<SyntaxId>,
 }
 
 impl ResolvedModule {
@@ -319,6 +321,14 @@ impl ResolvedModule {
 
     pub fn trait_implementations(&self) -> &[ResolvedTraitImplementation] {
         &self.trait_implementations
+    }
+
+    pub fn requires_initialization_state(&self, symbol: SymbolId) -> bool {
+        self.checked_initialization_symbols.contains(&symbol)
+    }
+
+    pub fn requires_initialization_check(&self, syntax: SyntaxId) -> bool {
+        self.checked_initialization_reads.contains(&syntax)
     }
 }
 
@@ -463,7 +473,7 @@ impl NameResolver {
             return Err(self.diagnostics);
         }
         self.functions.sort_by_key(|function| function.id.0);
-        Ok(ResolvedModule {
+        let mut resolved = ResolvedModule {
             program,
             functions: self.functions,
             symbols: self.symbols,
@@ -487,7 +497,16 @@ impl NameResolver {
             trait_references: self.trait_references,
             trait_method_references: self.trait_method_references,
             trait_implementations: self.trait_implementations,
-        })
+            checked_initialization_symbols: HashSet::new(),
+            checked_initialization_reads: HashSet::new(),
+        };
+        let analysis = InitializationAnalyzer::new(&resolved).analyze();
+        if !analysis.diagnostics.is_empty() {
+            return Err(analysis.diagnostics);
+        }
+        resolved.checked_initialization_symbols = analysis.checked_symbols;
+        resolved.checked_initialization_reads = analysis.checked_reads;
+        Ok(resolved)
     }
 
     fn collect_standard_library_contract(&mut self, program: &Program) {
@@ -1457,15 +1476,10 @@ impl NameResolver {
                 } else {
                     base_name
                 };
-                let mut captures = self
+                let captures = self
                     .function_captures
                     .remove(&function_id)
                     .unwrap_or_default();
-                if let Some((_, binding_syntax)) = suggested_function
-                    && let Some(self_symbol) = self.symbols.get(&binding_syntax)
-                {
-                    captures.retain(|capture| capture != self_symbol);
-                }
                 self.functions.push(ResolvedFunction {
                     id: function_id,
                     name,
@@ -2085,6 +2099,281 @@ impl NameResolver {
     }
     fn current_scope_mut(&mut self) -> &mut HashMap<String, SymbolId> {
         self.scopes.last_mut().expect("resolver scope")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InitializationState {
+    Declared,
+    Initializing,
+    Initialized,
+}
+
+struct InitializationAnalysis {
+    checked_symbols: HashSet<SymbolId>,
+    checked_reads: HashSet<SyntaxId>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+struct InitializationAnalyzer<'a> {
+    module: &'a ResolvedModule,
+    checked_symbols: HashSet<SymbolId>,
+    checked_reads: HashSet<SyntaxId>,
+    diagnosed_reads: HashSet<SyntaxId>,
+    diagnostics: Vec<Diagnostic>,
+}
+
+impl<'a> InitializationAnalyzer<'a> {
+    fn new(module: &'a ResolvedModule) -> Self {
+        Self {
+            module,
+            checked_symbols: HashSet::new(),
+            checked_reads: HashSet::new(),
+            diagnosed_reads: HashSet::new(),
+            diagnostics: Vec::new(),
+        }
+    }
+
+    fn analyze(mut self) -> InitializationAnalysis {
+        let mut globals = HashMap::new();
+        for source_module in self.module.program().modules() {
+            for item in &source_module.syntax.items {
+                let Item::Statement(statement) = item else {
+                    continue;
+                };
+                match statement.as_ref() {
+                    Statement::Binding(binding) => {
+                        if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
+                            globals.insert(symbol, InitializationState::Declared);
+                        }
+                    }
+                    Statement::PatternBinding(binding) => {
+                        self.set_pattern_state(
+                            &binding.pattern,
+                            InitializationState::Declared,
+                            &mut globals,
+                        );
+                    }
+                    Statement::Return(_) | Statement::Expression(_) => {}
+                }
+            }
+        }
+
+        for module_id in self.module.program().initialization_order() {
+            let items = self
+                .module
+                .program()
+                .module(*module_id)
+                .syntax
+                .items
+                .clone();
+            for item in &items {
+                if let Item::Statement(statement) = item {
+                    self.statement(statement, &mut globals, &HashMap::new(), true);
+                }
+            }
+        }
+
+        InitializationAnalysis {
+            checked_symbols: self.checked_symbols,
+            checked_reads: self.checked_reads,
+            diagnostics: self.diagnostics,
+        }
+    }
+
+    fn statement(
+        &mut self,
+        statement: &Statement,
+        local: &mut HashMap<SymbolId, InitializationState>,
+        outer: &HashMap<SymbolId, InitializationState>,
+        module_level: bool,
+    ) {
+        match statement {
+            Statement::Binding(binding) => {
+                let symbol = self.module.symbol_for(binding.syntax.id);
+                if binding.kind == BindingKind::Def {
+                    if let Some(symbol) = symbol
+                        && binding.value.is_some()
+                    {
+                        local.insert(symbol, InitializationState::Initializing);
+                    }
+                    if let Some(value) = &binding.value {
+                        self.expression(value, local, outer);
+                        if let Some(symbol) = symbol {
+                            local.insert(symbol, InitializationState::Initialized);
+                        }
+                    }
+                } else {
+                    if let Some(value) = &binding.value {
+                        self.expression(value, local, outer);
+                    }
+                    if let Some(symbol) = symbol {
+                        local.insert(
+                            symbol,
+                            if binding.value.is_some() {
+                                InitializationState::Initialized
+                            } else {
+                                InitializationState::Declared
+                            },
+                        );
+                    }
+                }
+            }
+            Statement::PatternBinding(binding) => {
+                if module_level {
+                    self.set_pattern_state(
+                        &binding.pattern,
+                        InitializationState::Initializing,
+                        local,
+                    );
+                }
+                self.expression(&binding.value, local, outer);
+                self.set_pattern_state(&binding.pattern, InitializationState::Initialized, local);
+            }
+            Statement::Return(statement) => self.expression(&statement.value, local, outer),
+            Statement::Expression(expression) => self.expression(expression, local, outer),
+        }
+    }
+
+    fn expression(
+        &mut self,
+        expression: &Expression,
+        local: &mut HashMap<SymbolId, InitializationState>,
+        outer: &HashMap<SymbolId, InitializationState>,
+    ) {
+        match expression {
+            Expression::Function(function) => {
+                let mut snapshot = outer.clone();
+                snapshot.extend(local.iter().map(|(symbol, state)| (*symbol, *state)));
+                let mut function_local = HashMap::new();
+                self.set_pattern_state(
+                    &function.pattern,
+                    InitializationState::Initialized,
+                    &mut function_local,
+                );
+                self.expression(&function.body, &mut function_local, &snapshot);
+            }
+            Expression::Match(match_) => {
+                self.expression(&match_.subject, local, outer);
+                for arm in &match_.arms {
+                    let mut arm_local = local.clone();
+                    self.set_pattern_state(
+                        &arm.pattern,
+                        InitializationState::Initialized,
+                        &mut arm_local,
+                    );
+                    self.expression(&arm.body, &mut arm_local, outer);
+                }
+            }
+            Expression::Block(block) => {
+                let original = local.clone();
+                for statement in &block.statements {
+                    if let Statement::Binding(binding) = statement
+                        && binding.kind == BindingKind::Def
+                        && let Some(symbol) = self.module.symbol_for(binding.syntax.id)
+                    {
+                        local.insert(symbol, InitializationState::Declared);
+                    }
+                }
+                for statement in &block.statements {
+                    self.statement(statement, local, outer, false);
+                }
+                *local = original;
+            }
+            Expression::Product(product) => {
+                for element in &product.elements {
+                    self.expression(&element.value, local, outer);
+                }
+            }
+            Expression::Call(call) => {
+                self.expression(&call.callee, local, outer);
+                self.expression(&call.argument, local, outer);
+            }
+            Expression::Access(access) => {
+                if let Some(symbol) = self.module.symbol_for(access.syntax.id) {
+                    self.read(
+                        symbol,
+                        access.syntax.id,
+                        access.syntax.span.clone(),
+                        local,
+                        outer,
+                    );
+                } else {
+                    self.expression(&access.value, local, outer);
+                }
+            }
+            Expression::Infix(infix) => {
+                if let Some(lowered) = self.module.lowered_infix(infix.syntax.id).cloned() {
+                    self.expression(&lowered, local, outer);
+                } else {
+                    for operand in &infix.operands {
+                        self.expression(operand, local, outer);
+                    }
+                }
+            }
+            Expression::Name(name) => {
+                if let Some(symbol) = self.module.symbol_for(name.syntax.id) {
+                    self.read(
+                        symbol,
+                        name.syntax.id,
+                        name.syntax.span.clone(),
+                        local,
+                        outer,
+                    );
+                }
+            }
+            Expression::Quote(_)
+            | Expression::Splice(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_) => {}
+        }
+    }
+
+    fn read(
+        &mut self,
+        symbol: SymbolId,
+        syntax: SyntaxId,
+        span: Span,
+        local: &HashMap<SymbolId, InitializationState>,
+        outer: &HashMap<SymbolId, InitializationState>,
+    ) {
+        if let Some(state) = local.get(&symbol) {
+            if *state != InitializationState::Initialized && self.diagnosed_reads.insert(syntax) {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "binding is read before it is initialized",
+                ));
+            }
+        } else if outer
+            .get(&symbol)
+            .is_some_and(|state| *state != InitializationState::Initialized)
+        {
+            self.checked_symbols.insert(symbol);
+            self.checked_reads.insert(syntax);
+        }
+    }
+
+    fn set_pattern_state(
+        &self,
+        pattern: &Pattern,
+        state: InitializationState,
+        states: &mut HashMap<SymbolId, InitializationState>,
+    ) {
+        match pattern {
+            Pattern::Wildcard(_) => {}
+            Pattern::Binding(binding) => {
+                if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
+                    states.insert(symbol, state);
+                }
+            }
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    self.set_pattern_state(element, state, states);
+                }
+            }
+            Pattern::Nominal(pattern) => self.set_pattern_state(&pattern.argument, state, states),
+        }
     }
 }
 

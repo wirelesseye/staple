@@ -497,6 +497,79 @@ fn infers_return_types_through_forward_function_references() {
 }
 
 #[test]
+fn rejects_an_immediate_read_before_a_def_initializer() {
+    let syntax = parse("value\ndef value = 10\n").expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve(&syntax)
+        .expect_err("an immediate forward read must fail");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("read before it is initialized"))
+    );
+}
+
+#[test]
+fn permits_deferred_mutual_recursion_with_selective_state() {
+    let module = type_check(concat!(
+        "def f: () -> I32 = () => g ()\n",
+        "def g: () -> I32 = () => f ()\n",
+        "f ()\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("capturing a forward binding must remain legal");
+    assert!(llvm.contains("_g_state"));
+    assert!(llvm.contains("binding.uninitialized"));
+    assert!(!llvm.contains("_f_state"));
+}
+
+#[test]
+fn captures_potentially_unsafe_local_defs_by_binding_cell() {
+    let module = type_check(concat!(
+        "def outer: () -> I32 = () => {\n",
+        "  def f: () -> I32 = () => g ()\n",
+        "  def g: () -> I32 = () => f ()\n",
+        "  f ()\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("unsafe local captures should share a binding cell");
+    assert!(llvm.contains("binding.cell"));
+    assert!(llvm.contains("binding.uninitialized"));
+}
+
+#[test]
+fn applies_initialization_state_to_recursive_local_generics() {
+    let module = type_check(concat!(
+        "def outer: () -> I32 = () => {\n",
+        "  def loop: T => T -> T = value => loop value\n",
+        "  loop 1\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generic functions use the same initialization state model");
+    assert!(llvm.contains("binding.state.cell"));
+    assert!(llvm.contains("binding.uninitialized"));
+}
+
+#[test]
+fn does_not_add_state_metadata_to_safe_bindings() {
+    let module = type_check("def answer = 42\nanswer\n");
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("safe bindings should compile without state metadata");
+    assert!(!llvm.contains("_answer_state"));
+    assert!(!llvm.contains("binding.uninitialized"));
+}
+
+#[test]
 fn rejects_an_incorrect_function_result_type() {
     let module = resolve("use std.cinterop.*\nlet answer = () -> CString => 42\n");
     let diagnostics = TypeChecker::new()
@@ -770,8 +843,7 @@ fn c_pointer_preserves_its_pointee_type() {
 fn generic_opaque_arguments_are_part_of_type_identity() {
     let module = resolve(concat!(
         "type Handle = T => opaque\n",
-        "let first: Handle I32\n",
-        "let second: Handle String = first\n",
+        "def invalid: Handle I32 -> Handle String = value => value\n",
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
@@ -1047,7 +1119,7 @@ fn generates_a_named_function_after_predeclaring_it() {
         .expect("module should compile");
 
     assert!(llvm.contains("define i32 @first(ptr %0, i32 %a, i32 %b)"));
-    assert!(llvm.contains("call i32 @first(ptr null, i32 1, i32 2)"));
+    assert!(llvm.contains("closure.call"));
 }
 
 #[test]
@@ -1058,7 +1130,8 @@ fn predeclares_functions_for_recursion() {
         .compile_module(&module)
         .expect("recursive function should compile");
 
-    assert!(llvm.contains("call i32 @recurse(ptr %0, i32 %n)"));
+    assert!(llvm.contains("binding.uninitialized"));
+    assert!(llvm.contains("closure.call"));
 }
 
 #[test]
@@ -1076,7 +1149,8 @@ fn preserves_the_environment_for_recursive_closures() {
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("recursive closure should compile");
-    assert!(llvm.contains("call i32 @recurse(ptr %0, i32 %n)"));
+    assert!(llvm.contains("binding.cell"));
+    assert!(llvm.contains("closure.call"));
     assert!(llvm.contains("load { i32 }"));
 }
 

@@ -586,13 +586,14 @@ fn loads_an_imported_top_level_global_from_a_function() {
 }
 
 #[test]
-fn infers_imported_values_across_a_module_cycle() {
+fn rejects_an_early_read_across_a_module_cycle() {
     let fixture = Fixture::new();
     fixture.write("main.sta", "use ma.*\na\n");
     fixture.write("ma.sta", "use mb.*\npub let a = b\n");
     fixture.write("mb.sta", "use ma\npub let b = 41\n");
 
-    fixture
+    let error = fixture
         .compile()
-        .expect("cross-module value type should be inferred");
+        .expect_err("the earlier module must not observe a default value");
+    assert!(error.contains("binding is read before it is initialized"));
 }

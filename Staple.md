@@ -207,8 +207,10 @@ is not supported.
 Every reachable module's top-level statements execute exactly once. Dependencies
 are initialized before modules which use them. Mutually recursive groups are
 initialized in canonical file-path order, and statements within one module keep
-source order. Reading a top-level value from a module that has not yet run its
-initializer observes that value's default representation.
+source order. Module globals begin in the `Declared` state, enter `Initializing`
+while their initializer is evaluated, and become `Initialized(value)` only after
+that value has been stored. Reading a global before it is `Initialized` is an
+initialization error; globals never expose a default representation.
 
 ## Bindings
 
@@ -245,9 +247,8 @@ value is currently unspecified.
 
 ### `def`
 
-`def` defines a hoisted value. It is comparable to JavaScript's `var`: the
-binding is available throughout its containing scope, rather than becoming
-available only after the definition.
+`def` defines a hoisted value. The name is available throughout its containing
+scope, rather than becoming available only after the definition.
 
 ```staple
 def greet = () => {
@@ -258,8 +259,24 @@ def greet = () => {
 `def` is not a function-declaration keyword. It can bind any value. In the
 example above, the value assigned to `greet` happens to be a function value.
 
-The precise behavior of reading a hoisted binding before its initializer is
-evaluated is currently unspecified.
+A hoisted binding begins `Declared`, becomes `Initializing` while its initializer
+is evaluated, and then becomes `Initialized(value)`. Evaluating its value in
+either of the first two states is an initialization error. The compiler reports
+direct, source-order violations statically and emits a runtime check when the
+evaluation time cannot be established statically.
+
+Creating a function closure captures references for later use; it does not
+evaluate the captured values. Recursive and mutually recursive closures are
+therefore legal:
+
+```staple
+def first = () => second ()
+def second = () => first ()
+```
+
+Calling such a closure before all values it needs have been initialized still
+produces an initialization error. Function-valued bindings otherwise follow the
+same initialization rules as bindings of every other value type.
 
 ### Binding type annotations
 
