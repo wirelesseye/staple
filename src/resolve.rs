@@ -366,7 +366,7 @@ struct Interface {
     values: HashMap<String, SymbolId>,
     fixities: HashMap<String, Fixity>,
     types: HashMap<String, TypeId>,
-    macros: HashMap<String, MacroId>,
+    macros: HashMap<String, Vec<MacroId>>,
     traits: HashMap<String, TraitId>,
 }
 
@@ -403,10 +403,10 @@ fn export_interface_item(
     if let Some(ty) = imported.types.get(item) {
         changed |= exported.types.insert(alias.to_owned(), *ty).is_none();
     }
-    if let Some(macro_id) = imported.macros.get(item) {
+    if let Some(macro_ids) = imported.macros.get(item) {
         changed |= exported
             .macros
-            .insert(alias.to_owned(), *macro_id)
+            .insert(alias.to_owned(), macro_ids.clone())
             .is_none();
     }
     if let Some(trait_id) = imported.traits.get(item) {
@@ -424,14 +424,14 @@ pub struct NameResolver {
     namespaces: HashMap<String, ModuleId>,
     imported_types: HashMap<String, TypeId>,
     imported_fixities: HashMap<String, Fixity>,
-    imported_macros: HashMap<String, MacroId>,
+    imported_macros: HashMap<String, Vec<MacroId>>,
     imported_traits: HashMap<String, TraitId>,
     visible_trait_methods: HashMap<String, Vec<TraitMethodId>>,
     type_parameter_scopes: Vec<HashMap<String, TypeParameterId>>,
     prelude_values: HashMap<String, SymbolId>,
     prelude_types: HashMap<String, TypeId>,
     prelude_fixities: HashMap<String, Fixity>,
-    prelude_macros: HashMap<String, MacroId>,
+    prelude_macros: HashMap<String, Vec<MacroId>>,
     prelude_traits: HashMap<String, TraitId>,
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
@@ -476,7 +476,7 @@ pub struct NameResolver {
     binding_type_parameters: HashMap<SyntaxId, Vec<TypeParameterPattern>>,
     binding_trait_bounds: HashMap<SyntaxId, Vec<crate::TraitBound>>,
     declared_types: Vec<HashMap<String, TypeId>>,
-    declared_macros: Vec<HashMap<String, MacroId>>,
+    declared_macros: Vec<HashMap<String, Vec<MacroId>>>,
     declared_traits: Vec<HashMap<String, TraitId>>,
     diagnostics: Vec<Diagnostic>,
     next_symbol_id: usize,
@@ -791,10 +791,17 @@ impl NameResolver {
         name: &str,
         primitive: PrimitiveMacro,
     ) {
-        let Some(id) = self.declared_macros[module.0].get(name).copied() else {
+        let Some(ids) = self.declared_macros[module.0].get(name).cloned() else {
             self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
                 format!("standard library `std.cinterop` does not declare macro `{name}`"),
+            ));
+            return;
+        };
+        let [id] = ids.as_slice() else {
+            self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("compiler-provided macro `{name}` cannot be overloaded"),
             ));
             return;
         };
@@ -804,7 +811,7 @@ impl NameResolver {
                 format!("standard library macro `{name}` must be public"),
             ));
         }
-        self.primitive_macros.insert(id, primitive);
+        self.primitive_macros.insert(*id, primitive);
     }
 
     fn register_builtin_type(
@@ -962,19 +969,16 @@ impl NameResolver {
                     Item::MacroDeclaration(declaration) => {
                         let id = MacroId(self.next_macro_id);
                         self.next_macro_id += 1;
-                        if self.declared_macros[source_module.id.0]
-                            .insert(declaration.name.clone(), id)
-                            .is_some()
-                        {
-                            self.diagnostics.push(Diagnostic::new(
-                                declaration.syntax.span.clone(),
-                                format!("duplicate macro definition of `{}`", declaration.name),
-                            ));
-                        }
+                        self.declared_macros[source_module.id.0]
+                            .entry(declaration.name.clone())
+                            .or_default()
+                            .push(id);
                         if declaration.visibility == Visibility::Public {
                             self.interfaces[source_module.id.0]
                                 .macros
-                                .insert(declaration.name.clone(), id);
+                                .entry(declaration.name.clone())
+                                .or_default()
+                                .push(id);
                         }
                     }
                     Item::TraitDeclaration(declaration) => {
@@ -1277,7 +1281,7 @@ impl NameResolver {
             found = true;
             self.insert_imported_type(local.to_owned(), ty, span.clone());
         }
-        if let Some(macro_id) = self.interfaces[module.0].macros.get(item).copied() {
+        if let Some(macro_id) = self.interfaces[module.0].macros.get(item).cloned() {
             found = true;
             self.insert_imported_macro(local.to_owned(), macro_id, span.clone());
         }
@@ -1309,7 +1313,7 @@ impl NameResolver {
         }
     }
 
-    fn insert_imported_macro(&mut self, name: String, id: MacroId, span: Span) {
+    fn insert_imported_macro(&mut self, name: String, id: Vec<MacroId>, span: Span) {
         if self.current_scope().contains_key(&name)
             || self.namespaces.contains_key(&name)
             || self.imported_macros.insert(name.clone(), id).is_some()
@@ -2302,19 +2306,19 @@ impl NameResolver {
             .or_else(|| self.prelude_values.get(name).copied())
     }
 
-    fn lookup_macro(&self, name: &str) -> Option<MacroId> {
+    fn lookup_macro(&self, name: &str) -> Option<Vec<MacroId>> {
         if self.lookup(name).is_some() {
             return None;
         }
         self.declared_macros[self.current_module.0]
             .get(name)
-            .copied()
-            .or_else(|| self.imported_macros.get(name).copied())
-            .or_else(|| self.prelude_macros.get(name).copied())
+            .cloned()
+            .or_else(|| self.imported_macros.get(name).cloned())
+            .or_else(|| self.prelude_macros.get(name).cloned())
     }
 
     fn resolve_primitive_macro(&self, callee: &Expression) -> Option<PrimitiveMacro> {
-        let id = match callee {
+        let ids = match callee {
             Expression::Name(name) => self.lookup_macro(&name.name),
             Expression::Access(access) => {
                 let Expression::Name(namespace) = access.value.as_ref() else {
@@ -2326,11 +2330,15 @@ impl NameResolver {
                 self.namespaces
                     .get(&namespace.name)
                     .and_then(|module| self.interfaces[module.0].macros.get(item))
-                    .copied()
+                    .cloned()
             }
             _ => None,
         }?;
-        self.primitive_macros.get(&id).copied()
+        let mut primitives = ids
+            .into_iter()
+            .filter_map(|id| self.primitive_macros.get(&id).copied());
+        let primitive = primitives.next()?;
+        primitives.next().is_none().then_some(primitive)
     }
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());

@@ -106,6 +106,28 @@ spliced expressions retain their caller environment. A macro consumes the
 number of arguments described by its curried `Syntax` type; further call
 arguments apply to the expanded expression.
 
+Macros may be overloaded by declaring the same name more than once in one
+module. An invocation selects the complete matching overload that consumes the
+most syntax atoms. Same-length matches use pattern specificity: a literal
+identifier is narrower than `Ident String`, `Ident String` is narrower than
+`Expr`, and category types are narrower than `Syntax`. Specificity must hold at
+every parameter; incomparable matches are ambiguous. Exact duplicate patterns
+are rejected.
+
+An incomplete longer overload does not prevent a shorter complete overload
+from matching. Any syntax left after the shorter expansion is applied to its
+result as an ordinary call. Imports, renames, namespaces, and re-exports carry
+the whole overload set, but overload sets from unrelated imports do not merge.
+The standard prelude supplies two `if` forms:
+
+```staple
+if condition then_branch
+if condition then_branch else else_branch
+```
+
+The first form is intended for a unit-valued branch; the second joins the types
+of both branches normally.
+
 Compile-time evaluation supports pure functions, bindings, products, matches,
 literals, recursion, and pure integer operations. It rejects external or
 runtime-only effects. Expansion is limited to 128 nested macros and each

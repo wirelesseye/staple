@@ -15,6 +15,7 @@ def switch_number = switch: Switch => match switch {
     Disabled() => 0,
 }
 
+// A wildcard arm can make a product match exhaustive.
 def same_switch = (left: Switch, right: Switch) => match (left, right) {
     (Enabled(), Enabled()) => True,
     (Disabled(), Disabled()) => True,
@@ -28,8 +29,8 @@ let generic_value = unbox boxed
 let singleton_value = switch_number Enabled
 println "Nominal patterns, generic constructors, and singleton matches evaluated successfully."
 
-// A wildcard arm can make a product match exhaustive.
-match same_switch (Enabled, Disabled) {
-    True() => println "same",
-    False() => println "different",
+if (same_switch (Enabled, Disabled)) {
+    println "same"
+} else {
+    println "different"
 }

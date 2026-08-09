@@ -12,6 +12,7 @@ const MAX_EVALUATION_STEPS: usize = 1_000_000;
 struct MacroKey {
     module: ModuleId,
     name: String,
+    syntax: SyntaxId,
 }
 
 #[derive(Clone)]
@@ -31,7 +32,7 @@ struct MacroDefinition {
     kind: MacroKind,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum MetaType {
     Syntax,
     Expr,
@@ -43,7 +44,7 @@ enum MetaType {
 
 #[derive(Clone, Default)]
 struct ModuleScope {
-    macros: HashMap<String, MacroKey>,
+    macros: HashMap<String, Vec<MacroKey>>,
     namespaces: HashMap<String, ModuleId>,
     helpers: HashMap<String, HelperDefinition>,
 }
@@ -138,6 +139,7 @@ impl MacroExpander {
                         let key = MacroKey {
                             module: source_module.id,
                             name: declaration.name.clone(),
+                            syntax: declaration.syntax.id,
                         };
                         let kind = if Some(source_module.id) == core && declaration.name == "quote"
                         {
@@ -182,7 +184,9 @@ impl MacroExpander {
                         );
                         scopes[source_module.id.0]
                             .macros
-                            .insert(declaration.name.clone(), key);
+                            .entry(declaration.name.clone())
+                            .or_default()
+                            .push(key);
                     }
                     Item::Statement(statement) => {
                         if let Statement::Binding(binding) = statement.as_ref()
@@ -202,16 +206,16 @@ impl MacroExpander {
             }
         }
 
-        let mut public_macros = definitions
+        let mut public_macros = HashMap::<(ModuleId, String), Vec<MacroKey>>::new();
+        for definition in definitions
             .values()
             .filter(|definition| definition.declaration.visibility == Visibility::Public)
-            .map(|definition| {
-                (
-                    (definition.key.module, definition.key.name.clone()),
-                    definition.key.clone(),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        {
+            public_macros
+                .entry((definition.key.module, definition.key.name.clone()))
+                .or_default()
+                .push(definition.key.clone());
+        }
         let mut public_helpers = program
             .modules()
             .iter()
@@ -261,9 +265,9 @@ impl MacroExpander {
                         }
                     };
                     for (item, alias) in names {
-                        if let Some(key) = previous_macros.get(&(imported, item.clone())) {
+                        if let Some(keys) = previous_macros.get(&(imported, item.clone())) {
                             changed |= public_macros
-                                .insert((source_module.id, alias.clone()), key.clone())
+                                .insert((source_module.id, alias.clone()), keys.clone())
                                 .is_none();
                         }
                         if let Some(helper) = previous_helpers.get(&(imported, item)) {
@@ -283,14 +287,14 @@ impl MacroExpander {
             if let Some(core) = core
                 && source_module.id != core
             {
-                for definition in definitions.values().filter(|definition| {
-                    definition.key.module == core
-                        && definition.declaration.visibility == Visibility::Public
-                }) {
+                for ((module, name), keys) in &public_macros {
+                    if *module != core {
+                        continue;
+                    }
                     scopes[source_module.id.0]
                         .macros
-                        .entry(definition.key.name.clone())
-                        .or_insert_with(|| definition.key.clone());
+                        .entry(name.clone())
+                        .or_insert_with(|| keys.clone());
                 }
                 for ((module, name), binding) in &public_helpers {
                     if *module == core {
@@ -317,14 +321,14 @@ impl MacroExpander {
                         }
                     }
                     UseKind::Glob => {
-                        for ((_, name), key) in public_macros
+                        for ((_, name), keys) in public_macros
                             .iter()
                             .filter(|((module, _), _)| *module == imported)
                         {
                             scopes[source_module.id.0]
                                 .macros
                                 .entry(name.clone())
-                                .or_insert_with(|| key.clone());
+                                .or_insert_with(|| keys.clone());
                         }
                         for ((module, name), binding) in &public_helpers {
                             if *module == imported {
@@ -382,14 +386,14 @@ impl MacroExpander {
         imported: ModuleId,
         item: &str,
         local: &str,
-        public_macros: &HashMap<(ModuleId, String), MacroKey>,
+        public_macros: &HashMap<(ModuleId, String), Vec<MacroKey>>,
         public_helpers: &HashMap<(ModuleId, String), HelperDefinition>,
     ) {
-        if let Some(key) = public_macros.get(&(imported, item.to_owned())) {
+        if let Some(keys) = public_macros.get(&(imported, item.to_owned())) {
             scope
                 .macros
                 .entry(local.to_owned())
-                .or_insert_with(|| key.clone());
+                .or_insert_with(|| keys.clone());
         }
         if let Some(helper) = public_helpers.get(&(imported, item.to_owned())) {
             scope
@@ -400,6 +404,34 @@ impl MacroExpander {
     }
 
     fn validate_definitions(&mut self) {
+        let mut groups = HashMap::<(ModuleId, String), Vec<MacroDefinition>>::new();
+        for definition in self.definitions.values() {
+            groups
+                .entry((definition.key.module, definition.key.name.clone()))
+                .or_default()
+                .push(definition.clone());
+        }
+        for ((_, name), mut definitions) in groups {
+            definitions.sort_by_key(|definition| definition.key.syntax.0);
+            for (index, definition) in definitions.iter().enumerate() {
+                if let Some(previous) = definitions[..index]
+                    .iter()
+                    .find(|previous| previous.parameters == definition.parameters)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        definition.declaration.syntax.span.clone(),
+                        format!(
+                            "duplicate macro overload `{name}: {}`",
+                            format_meta_signature(&definition.parameters)
+                        ),
+                    ));
+                    self.diagnostics.push(Diagnostic::new(
+                        previous.declaration.syntax.span.clone(),
+                        "previous overload defined here",
+                    ));
+                }
+            }
+        }
         for definition in self.definitions.values() {
             if let Some(annotation) = &definition.declaration.annotation
                 && !valid_macro_annotation(annotation)
@@ -544,23 +576,13 @@ impl MacroExpander {
             return expression;
         }
         let (head, arguments) = flatten_call(&expression);
-        if let Some(key) = self.resolve_macro(module, head) {
-            let Some(definition) = self.definitions.get(&key).cloned() else {
+        if let Some(keys) = self.resolve_macro(module, head) {
+            let Some(definition) =
+                self.select_macro(&keys, &arguments, expression.syntax().span.clone())
+            else {
                 return expression;
             };
-            if arguments.len() < definition.arity {
-                self.diagnostics.push(Diagnostic::new(
-                    expression.syntax().span.clone(),
-                    format!(
-                        "macro `{}` requires {} argument{} but received {}",
-                        key.name,
-                        definition.arity,
-                        if definition.arity == 1 { "" } else { "s" },
-                        arguments.len()
-                    ),
-                ));
-                return expression;
-            }
+            let key = definition.key.clone();
             if !matches!(definition.result, MetaType::Syntax | MetaType::Expr) {
                 self.diagnostics.push(Diagnostic::new(
                     expression.syntax().span.clone(),
@@ -568,7 +590,7 @@ impl MacroExpander {
                 ));
                 return expression;
             }
-            if self.expansion_stack.contains(&key) {
+            if self.expansion_stack.contains(&key) && head.syntax().definition_module().is_some() {
                 self.diagnostics.push(Diagnostic::new(
                     expression.syntax().span.clone(),
                     format!("recursive macro expansion of `{}`", key.name),
@@ -675,7 +697,7 @@ impl MacroExpander {
         }
     }
 
-    fn resolve_macro(&self, module: ModuleId, head: &Expression) -> Option<MacroKey> {
+    fn resolve_macro(&self, module: ModuleId, head: &Expression) -> Option<Vec<MacroKey>> {
         match head {
             Expression::Name(name) => {
                 let context = name
@@ -702,17 +724,122 @@ impl MacroExpander {
                     .map(ModuleId)
                     .unwrap_or(module);
                 let target = self.scopes[context.0].namespaces.get(&namespace.name)?;
-                let key = MacroKey {
-                    module: *target,
-                    name: item.clone(),
-                };
-                self.definitions
-                    .get(&key)
-                    .filter(|definition| definition.declaration.visibility == Visibility::Public)
-                    .map(|_| key)
+                self.scopes[target.0].macros.get(item).map(|keys| {
+                    keys.iter()
+                        .filter(|key| {
+                            self.definitions[key].declaration.visibility == Visibility::Public
+                        })
+                        .cloned()
+                        .collect()
+                })
             }
             _ => None,
         }
+    }
+
+    fn select_macro(
+        &mut self,
+        keys: &[MacroKey],
+        arguments: &[&Expression],
+        span: Span,
+    ) -> Option<MacroDefinition> {
+        let definitions = keys
+            .iter()
+            .filter_map(|key| self.definitions.get(key).cloned())
+            .collect::<Vec<_>>();
+        let mut complete = definitions
+            .iter()
+            .filter(|definition| {
+                arguments.len() >= definition.arity
+                    && definition
+                        .parameters
+                        .iter()
+                        .zip(arguments)
+                        .all(|(expected, argument)| meta_type_matches(expected, argument))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if complete.is_empty() {
+            if let [definition] = definitions.as_slice()
+                && arguments.len() >= definition.arity
+            {
+                self.validate_macro_arguments(definition, &arguments[..definition.arity]);
+                return None;
+            }
+            let mut arities = definitions
+                .iter()
+                .filter(|definition| {
+                    arguments.len() < definition.arity
+                        && definition
+                            .parameters
+                            .iter()
+                            .zip(arguments)
+                            .all(|(expected, argument)| meta_type_matches(expected, argument))
+                })
+                .map(|definition| definition.arity)
+                .collect::<Vec<_>>();
+            arities.sort_unstable();
+            arities.dedup();
+            let name = keys
+                .first()
+                .map(|key| key.name.as_str())
+                .unwrap_or("<macro>");
+            let message = if arities.is_empty() {
+                format!("no overload of macro `{name}` matches this invocation")
+            } else if let [arity] = arities.as_slice() {
+                format!(
+                    "macro `{name}` requires {arity} argument{} but received {}",
+                    if *arity == 1 { "" } else { "s" },
+                    arguments.len()
+                )
+            } else {
+                let required = arities
+                    .iter()
+                    .map(usize::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" or ");
+                format!(
+                    "macro `{name}` received {} argument{}; matching overloads require {required}",
+                    arguments.len(),
+                    if arguments.len() == 1 { "" } else { "s" }
+                )
+            };
+            self.diagnostics.push(Diagnostic::new(span, message));
+            return None;
+        }
+        let longest = complete.iter().map(|definition| definition.arity).max()?;
+        complete.retain(|definition| definition.arity == longest);
+        let undominated = complete
+            .iter()
+            .filter(|candidate| {
+                !complete.iter().any(|other| {
+                    other.key != candidate.key
+                        && signature_more_specific(&other.parameters, &candidate.parameters)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if let [definition] = undominated.as_slice() {
+            return Some(definition.clone());
+        }
+        let name = keys
+            .first()
+            .map(|key| key.name.as_str())
+            .unwrap_or("<macro>");
+        self.diagnostics.push(Diagnostic::new(
+            span,
+            format!("ambiguous invocation of macro `{name}`"),
+        ));
+        for definition in undominated {
+            self.diagnostics.push(Diagnostic::new(
+                definition.declaration.syntax.span.clone(),
+                format!(
+                    "matching overload `{name}: {}` defined here",
+                    format_meta_signature(&definition.parameters)
+                ),
+            ));
+        }
+        None
     }
 
     fn invoke_macro(
@@ -782,16 +909,7 @@ impl MacroExpander {
         let mut valid = true;
         for (index, (expected, argument)) in definition.parameters.iter().zip(arguments).enumerate()
         {
-            let matches = match expected {
-                MetaType::Syntax | MetaType::Expr => true,
-                MetaType::Ident(spelling) => match argument {
-                    Expression::Name(name) if is_plain_identifier(name) => spelling
-                        .as_ref()
-                        .is_none_or(|expected| expected == &name.name),
-                    _ => false,
-                },
-                MetaType::Type | MetaType::Pattern | MetaType::Item => false,
-            };
+            let matches = meta_type_matches(expected, argument);
             if !matches {
                 let expectation = match expected {
                     MetaType::Ident(Some(spelling)) => {
@@ -909,18 +1027,10 @@ impl MacroExpander {
             }
             Expression::Call(call) => {
                 let (head, arguments) = flatten_call(expression);
-                if let Some(key) = self.resolve_macro(module, head) {
-                    let definition = self.definitions.get(&key)?.clone();
-                    if arguments.len() != definition.arity {
-                        self.diagnostics.push(Diagnostic::new(
-                            expression.syntax().span.clone(),
-                            format!(
-                                "compile-time macro `{}` requires {} arguments",
-                                key.name, definition.arity
-                            ),
-                        ));
-                        return None;
-                    }
+                if let Some(keys) = self.resolve_macro(module, head) {
+                    let definition =
+                        self.select_macro(&keys, &arguments, expression.syntax().span.clone())?;
+                    let key = definition.key.clone();
                     if self.expansion_stack.contains(&key) {
                         self.diagnostics.push(Diagnostic::new(
                             expression.syntax().span.clone(),
@@ -929,9 +1039,22 @@ impl MacroExpander {
                         return None;
                     }
                     self.expansion_stack.push(key.clone());
-                    let result = self
-                        .invoke_macro(&definition, arguments, expression.syntax().span.clone())
-                        .map(Value::Syntax);
+                    let consumed = arguments[..definition.arity].to_vec();
+                    let mut result =
+                        self.invoke_macro(&definition, consumed, expression.syntax().span.clone());
+                    if let Some(mut expanded) = result.take() {
+                        for argument in &arguments[definition.arity..] {
+                            let mut syntax = expanded.syntax().clone();
+                            syntax.id = self.fresh_id();
+                            expanded = Expression::Call(crate::CallExpression {
+                                syntax,
+                                callee: Box::new(expanded),
+                                argument: Box::new((*argument).clone()),
+                            });
+                        }
+                        result = Some(expanded);
+                    }
+                    let result = result.map(Value::Syntax);
                     self.expansion_stack.pop();
                     return result;
                 }
@@ -1265,6 +1388,54 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
         }
         _ => None,
     }
+}
+
+fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
+    match expected {
+        MetaType::Syntax | MetaType::Expr => true,
+        MetaType::Ident(spelling) => match argument {
+            Expression::Name(name) if is_plain_identifier(name) => spelling
+                .as_ref()
+                .is_none_or(|expected| expected == &name.name),
+            _ => false,
+        },
+        MetaType::Type | MetaType::Pattern | MetaType::Item => false,
+    }
+}
+
+fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
+    left == right
+        || matches!(right, MetaType::Syntax)
+        || matches!(
+            (left, right),
+            (MetaType::Ident(_), MetaType::Expr)
+                | (MetaType::Ident(Some(_)), MetaType::Ident(None))
+        )
+}
+
+fn signature_more_specific(left: &[MetaType], right: &[MetaType]) -> bool {
+    left.len() == right.len()
+        && left
+            .iter()
+            .zip(right)
+            .all(|(left, right)| meta_type_at_least_as_specific(left, right))
+        && left != right
+}
+
+fn format_meta_signature(parameters: &[MetaType]) -> String {
+    parameters
+        .iter()
+        .map(|parameter| match parameter {
+            MetaType::Syntax => "Syntax".to_owned(),
+            MetaType::Expr => "Expr".to_owned(),
+            MetaType::Ident(None) => "Ident String".to_owned(),
+            MetaType::Ident(Some(spelling)) => format!("Ident {spelling:?}"),
+            MetaType::Type => "Type".to_owned(),
+            MetaType::Pattern => "Pattern".to_owned(),
+            MetaType::Item => "Item".to_owned(),
+        })
+        .collect::<Vec<_>>()
+        .join(" -> ")
 }
 
 fn macro_signature(annotation: &Type) -> Option<(Vec<MetaType>, MetaType)> {

@@ -1358,6 +1358,103 @@ fn expands_typed_macros_with_literal_identifier_parameters() {
 }
 
 #[test]
+fn expands_standard_if_overloads_and_nested_forms() {
+    let module = type_check(concat!(
+        "let condition: Bool = True\n",
+        "let without_else = if condition ()\n",
+        "let with_else: I32 = if condition 2 else 3\n",
+        "let nested: I32 = if condition (if condition 4 else 5) else 6\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("standard if overloads should expand and generate code");
+}
+
+#[test]
+fn macro_overloads_choose_longest_then_most_specific() {
+    let module = type_check(concat!(
+        "macro select = value: Expr => quote { 10 }\n",
+        "macro select = value: Expr => Ident \"with\" => replacement: Expr => quote { $replacement }\n",
+        "macro classify = value: Syntax => quote { 1 }\n",
+        "macro classify = value: Expr => quote { 2 }\n",
+        "macro classify = value: Ident String => quote { 3 }\n",
+        "macro classify = Ident \"else\" => quote { 4 }\n",
+        "let longest: I32 = select 0 with 20\n",
+        "let specific: I32 = classify else\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("selected overloads should generate code");
+}
+
+#[test]
+fn incomplete_longer_macro_overloads_fall_back_to_shorter_forms() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("let condition: Bool = True\nif condition 1 else\n", root)
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("leftover else should be resolved as ordinary syntax");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown name `else`"))
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("matching overloads require 4") })
+    );
+}
+
+#[test]
+fn diagnoses_duplicate_and_ambiguous_macro_overloads() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let duplicate = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "macro same = value: Expr => quote { 1 }\n",
+                "macro same = other: Expr => quote { 2 }\n",
+            ),
+            root,
+        )
+        .expect("duplicate overload source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(duplicate)
+        .expect_err("identical overload patterns should fail");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate macro overload `same: Expr`")
+    }));
+
+    let ambiguous = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "macro crossed = left: Ident String => right: Expr => quote { 1 }\n",
+                "macro crossed = left: Expr => right: Ident String => quote { 2 }\n",
+                "crossed first second\n",
+            ),
+            root,
+        )
+        .expect("ambiguous overload source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(ambiguous)
+        .expect_err("incomparable overloads should be ambiguous");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message == "ambiguous invocation of macro `crossed`" })
+    );
+}
+
+#[test]
 fn rejects_a_mismatched_literal_identifier_macro_argument() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
