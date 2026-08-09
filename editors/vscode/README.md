@@ -8,15 +8,31 @@ Basic Visual Studio Code support for the Staple programming language.
 - Syntax highlighting for comments, strings, numbers, keywords, declarations,
   types, macro quotations and splices, punctuation, and operators
 - Line-comment toggling and bracket matching
+- Semantic highlighting for namespaces, types, traits, macros, functions,
+  parameters, variables, and properties
+- Live parse, import, name-resolution, type, and ownership diagnostics
 
-This first version is intentionally limited to declarative language support. It
-does not provide diagnostics, completion, formatting, navigation, or a language
-server.
+Completion, formatting, navigation, hover, and rename are not yet provided.
+
+## Language server
+
+Build the server from the repository:
+
+```sh
+cd stapler
+cargo build --bin staple-lsp
+```
+
+Install `staple-lsp` on `PATH`, or set `staple.languageServer.path` to the
+absolute path of the built executable. If the compiler cannot discover the
+standard library from its installation or `STAPLE_STDLIB`, set
+`staple.standardLibrary.path` to the repository's `stapler/stdlib` directory.
 
 ## Local development
 
-Open this directory in Visual Studio Code and press `F5` to launch an Extension
-Development Host. Open any `.sta` file in the new window to test the extension.
+Run `npm install`, open this directory in Visual Studio Code, and press `F5` to
+launch an Extension Development Host. Open any `.sta` file in the new window to
+test the extension.
 
 The extension can also be loaded directly from the command line:
 

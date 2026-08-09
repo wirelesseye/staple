@@ -14,6 +14,7 @@ mod typecheck;
 pub use ast::*;
 pub use codegen::*;
 pub use diagnostic::*;
+pub use lexer::lex;
 pub use parser::parse;
 pub use program::*;
 pub use resolve::*;

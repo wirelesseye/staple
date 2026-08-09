@@ -1,7 +1,11 @@
 use crate::ast::{SyntaxToken, TokenKind};
 use crate::combinator::{Parser, tag, take_while1};
 
-pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
+/// Losslessly tokenizes Staple source, including whitespace and comments.
+///
+/// Unknown and incomplete input is retained so editor tooling can continue to
+/// provide useful results while a document is being edited.
+pub fn lex(source: &str) -> Vec<SyntaxToken> {
     let mut tokens = Vec::new();
     let mut offset = 0;
     while offset < source.len() {

@@ -1,8 +1,10 @@
 use std::collections::{HashMap, HashSet};
+use std::fmt;
+use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::parser::parse_with_syntax_ids;
-use crate::{Item, Module, SyntaxId, UseDeclaration};
+use crate::{Item, Module, SourceLocation, SyntaxId, UseDeclaration};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(pub usize);
@@ -13,6 +15,61 @@ pub struct SourceModule {
     pub path: PathBuf,
     pub syntax: Module,
 }
+
+/// A structured failure produced while loading an editor-owned source file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoadDiagnostic {
+    pub source: Option<PathBuf>,
+    pub range: Option<Range<usize>>,
+    pub location: Option<SourceLocation>,
+    pub message: String,
+}
+
+impl LoadDiagnostic {
+    fn compiler(message: impl Into<String>) -> Self {
+        Self {
+            source: None,
+            range: None,
+            location: None,
+            message: message.into(),
+        }
+    }
+
+    fn source(
+        path: impl Into<PathBuf>,
+        range: Option<Range<usize>>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            source: Some(path.into()),
+            range,
+            location: None,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for LoadDiagnostic {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let Some(source) = &self.source {
+            write!(formatter, "{}: ", source.display())?;
+        }
+        formatter.write_str(&self.message)?;
+        if let Some(location) = self.location {
+            write!(
+                formatter,
+                " at line {}, column {}",
+                location.line, location.column
+            )
+        } else if let Some(range) = &self.range {
+            write!(formatter, " at byte {}", range.start)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl std::error::Error for LoadDiagnostic {}
 
 #[derive(Debug, Clone)]
 pub struct Program {
@@ -96,54 +153,103 @@ impl ProgramLoader {
     }
 
     pub fn load_path(mut self, entry: &Path) -> Result<Program, String> {
-        let entry = canonical_file(entry)?;
+        self.load_path_diagnostic(entry)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load_path_diagnostic(&mut self, entry: &Path) -> Result<Program, LoadDiagnostic> {
+        let entry = canonical_file(entry).map_err(LoadDiagnostic::compiler)?;
         self.module_root = Some(entry.parent().unwrap_or_else(|| Path::new(".")).to_owned());
         let entry_id = self.load_file(&entry)?;
         self.load_standard_library()?;
-        Ok(self.finish(entry_id))
+        Ok(self.finish_ref(entry_id))
     }
 
     pub fn load_source(mut self, source: &str, module_root: &Path) -> Result<Program, String> {
+        self.load_source_diagnostic(source, module_root)
+            .map_err(|error| error.to_string())
+    }
+
+    fn load_source_diagnostic(
+        &mut self,
+        source: &str,
+        module_root: &Path,
+    ) -> Result<Program, LoadDiagnostic> {
         let root = std::fs::canonicalize(module_root).map_err(|error| {
-            format!(
+            LoadDiagnostic::compiler(format!(
                 "could not resolve module root `{}`: {error}",
                 module_root.display()
-            )
+            ))
         })?;
         self.module_root = Some(root.clone());
         let path = root.join("<stdin>.sta");
         let entry = self.insert_source(path, source)?;
         self.load_imports(entry, &root)?;
         self.load_standard_library()?;
-        Ok(self.finish(entry))
+        Ok(self.finish_ref(entry))
     }
 
-    fn load_file(&mut self, path: &Path) -> Result<ModuleId, String> {
+    /// Loads an entry module from in-memory text while retaining its real path.
+    /// Imported modules are loaded from disk relative to the entry module.
+    pub fn load_source_at(mut self, path: &Path, source: &str) -> Result<Program, LoadDiagnostic> {
+        let parent = path.parent().unwrap_or_else(|| Path::new("."));
+        let root = std::fs::canonicalize(parent).map_err(|error| {
+            LoadDiagnostic::source(
+                path,
+                None,
+                format!(
+                    "could not resolve module root `{}`: {error}",
+                    parent.display()
+                ),
+            )
+        })?;
+        let file_name = path
+            .file_name()
+            .ok_or_else(|| LoadDiagnostic::source(path, None, "source path has no file name"))?;
+        let entry_path = root.join(file_name);
+        self.module_root = Some(root.clone());
+        let entry = self.insert_source(entry_path, source)?;
+        self.load_imports(entry, &root)?;
+        self.load_standard_library()?;
+        Ok(self.finish_ref(entry))
+    }
+
+    fn load_file(&mut self, path: &Path) -> Result<ModuleId, LoadDiagnostic> {
         if let Some(id) = self.paths.get(path) {
             return Ok(*id);
         }
-        let source = std::fs::read_to_string(path)
-            .map_err(|error| format!("could not read `{}`: {error}", path.display()))?;
+        let source = std::fs::read_to_string(path).map_err(|error| {
+            LoadDiagnostic::source(
+                path,
+                None,
+                format!("could not read `{}`: {error}", path.display()),
+            )
+        })?;
         let id = self.insert_source(path.to_owned(), &source)?;
         let root = self.module_root.clone().expect("module root is set");
         self.load_imports(id, &root)?;
         Ok(id)
     }
 
-    fn insert_source(&mut self, path: PathBuf, source: &str) -> Result<ModuleId, String> {
+    fn insert_source(&mut self, path: PathBuf, source: &str) -> Result<ModuleId, LoadDiagnostic> {
         let syntax = parse_with_syntax_ids(
             source,
             &mut self.next_syntax_id,
             &path.display().to_string(),
         )
-        .map_err(|error| format!("{}: {error}", path.display()))?;
+        .map_err(|error| LoadDiagnostic {
+            source: Some(path.clone()),
+            range: Some(error.offset..error.offset),
+            location: Some(error.location),
+            message: error.message,
+        })?;
         let id = ModuleId(self.modules.len());
         self.paths.insert(path.clone(), id);
         self.modules.push(SourceModule { id, path, syntax });
         Ok(id)
     }
 
-    fn load_imports(&mut self, module: ModuleId, root: &Path) -> Result<(), String> {
+    fn load_imports(&mut self, module: ModuleId, root: &Path) -> Result<(), LoadDiagnostic> {
         let uses = self.modules[module.0]
             .syntax
             .items
@@ -160,15 +266,25 @@ impl ProgramLoader {
                 root.to_owned()
             };
             let path = use_path(&import_root, &declaration);
-            let path = canonical_file(&path).map_err(|message| match &declaration.syntax.span {
-                crate::Span::User {
-                    location: Some(location),
-                    ..
-                } => format!(
-                    "{} at line {}, column {}",
-                    message, location.line, location.column
-                ),
-                span => format!("{} at byte {}", message, span.to_range().start),
+            let path = canonical_file(&path).map_err(|message| {
+                let (source, range, location) = match &declaration.syntax.span {
+                    crate::Span::User {
+                        source,
+                        range,
+                        location,
+                    } => (
+                        source.as_deref().map(PathBuf::from),
+                        Some(range.clone()),
+                        *location,
+                    ),
+                    crate::Span::Compiler => (None, None, None),
+                };
+                LoadDiagnostic {
+                    source,
+                    range,
+                    location,
+                    message,
+                }
             })?;
             let imported = self.load_file(&path)?;
             self.imported_modules
@@ -177,34 +293,46 @@ impl ProgramLoader {
         Ok(())
     }
 
-    fn load_standard_library(&mut self) -> Result<(), String> {
+    fn load_standard_library(&mut self) -> Result<(), LoadDiagnostic> {
         let root = self.resolve_standard_library_root()?;
-        let core = canonical_file(&root.join("std/core.sta"))?;
+        let core = canonical_file(&root.join("std/core.sta")).map_err(LoadDiagnostic::compiler)?;
         self.standard_library_core = Some(self.load_file(&core)?);
-        let cinterop = canonical_file(&root.join("std/cinterop.sta"))?;
+        let cinterop =
+            canonical_file(&root.join("std/cinterop.sta")).map_err(LoadDiagnostic::compiler)?;
         self.standard_library_cinterop = Some(self.load_file(&cinterop)?);
         Ok(())
     }
 
-    fn resolve_standard_library_root(&mut self) -> Result<PathBuf, String> {
+    fn resolve_standard_library_root(&mut self) -> Result<PathBuf, LoadDiagnostic> {
         if let Some(root) = &self.standard_library_root {
-            return canonical_directory(root, "standard library");
+            return canonical_directory(root, "standard library").map_err(LoadDiagnostic::compiler);
         }
         if let Some(root) = std::env::var_os("STAPLE_STDLIB") {
             let root = PathBuf::from(root);
-            let root = canonical_directory(&root, "standard library from `STAPLE_STDLIB`")?;
+            let root = canonical_directory(&root, "standard library from `STAPLE_STDLIB`")
+                .map_err(LoadDiagnostic::compiler)?;
             self.standard_library_root = Some(root.clone());
             return Ok(root);
         }
-        let executable = std::env::current_exe()
-            .map_err(|error| format!("could not locate the Staple standard library: {error}"))?;
-        let prefix = executable
-            .parent()
-            .and_then(Path::parent)
-            .ok_or_else(|| "could not determine the Stapler installation prefix".to_owned())?;
+        let executable = std::env::current_exe().map_err(|error| {
+            LoadDiagnostic::compiler(format!(
+                "could not locate the Staple standard library: {error}"
+            ))
+        })?;
+        let prefix = executable.parent().and_then(Path::parent).ok_or_else(|| {
+            LoadDiagnostic::compiler("could not determine the Stapler installation prefix")
+        })?;
         let root = prefix.join("lib/staple/stdlib");
-        canonical_directory(&root, "standard library")
-            .map_err(|error| format!("{error}; pass `--stdlib <path>` or set `STAPLE_STDLIB`"))
+        canonical_directory(&root, "standard library").map_err(|error| {
+            LoadDiagnostic::compiler(format!(
+                "{error}; pass `--stdlib <path>` or set `STAPLE_STDLIB`"
+            ))
+        })
+    }
+
+    fn finish_ref(&mut self, entry: ModuleId) -> Program {
+        let loader = std::mem::take(self);
+        loader.finish(entry)
     }
 
     fn finish(self, entry: ModuleId) -> Program {
@@ -349,4 +477,24 @@ fn initialization_order(
         .into_iter()
         .flat_map(|component| components[component].iter().copied())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn source_at_reports_a_structured_missing_import() {
+        let entry = std::env::temp_dir().join("staple-loader-structured-test.sta");
+        let error = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&entry, "use module_that_does_not_exist\n")
+            .unwrap_err();
+        assert_eq!(
+            error.source.as_deref().and_then(Path::file_name),
+            entry.file_name()
+        );
+        assert!(error.range.is_some());
+        assert!(error.message.contains("module_that_does_not_exist"));
+    }
 }

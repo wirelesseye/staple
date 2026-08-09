@@ -1,11 +1,15 @@
 {
   "name": "staple-language-support",
   "displayName": "Staple Language Support",
-  "description": "Syntax highlighting for the Staple programming language.",
+  "description": "Language support and semantic highlighting for the Staple programming language.",
   "version": "0.1.0",
   "engines": {
     "vscode": "^1.80.0"
   },
+  "main": "./extension.js",
+  "activationEvents": [
+    "onLanguage:staple"
+  ],
   "categories": [
     "Programming Languages"
   ],
@@ -29,6 +33,24 @@
         "scopeName": "source.staple",
         "path": "./syntaxes/staple.tmLanguage.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Staple",
+      "properties": {
+        "staple.languageServer.path": {
+          "type": "string",
+          "default": "staple-lsp",
+          "description": "Path to the staple-lsp executable."
+        },
+        "staple.standardLibrary.path": {
+          "type": "string",
+          "default": "",
+          "description": "Optional path to the Staple standard-library root."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   }
 }
