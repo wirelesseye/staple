@@ -52,6 +52,23 @@ fn supports_repeated_spread_and_erased_product_references() {
 }
 
 #[test]
+fn spreads_fixed_product_values_and_call_arguments() {
+    let source = concat!(
+        "def sum: I32[4] -> I32 = (a, b, c, d) => a + b + c + d\n",
+        "let pair = (left: 2, right: 3)\n",
+        "let expanded = (prefix: \"value\", ...pair, suffix: False)\n",
+        "let selected: I32 = expanded.left + expanded.right\n",
+        "let answer: I32 = sum (1, ...pair, 4)\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("product value spreads should generate LLVM");
+    assert!(llvm.contains("product.spread.element"));
+}
+
+#[test]
 fn type_checks_and_lowers_mutable_places_and_ref_replace() {
     let source = concat!(
         "let mut value = 1\n",
@@ -172,6 +189,15 @@ fn rejects_invalid_product_spreads_and_indices() {
         diagnostic
             .message
             .contains("cannot spread non-product type")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let invalid = (...1, 2)\n"))
+        .expect_err("a scalar value cannot be spread");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot spread non-product value")
     }));
 
     let diagnostics = TypeChecker::new()

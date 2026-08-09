@@ -1721,7 +1721,42 @@ impl TypeChecker {
             }
             Expression::Product(product) => {
                 let mut elements = Vec::new();
-                for (index, element) in product.elements.iter().enumerate() {
+                for element in &product.elements {
+                    if element.spread {
+                        let value_type = self.check_expression(module, &element.value);
+                        if self.did_return {
+                            return CheckedType::empty_product();
+                        }
+                        match value_type {
+                            CheckedType::Product(product) if !product.variadic => {
+                                if elements.len().saturating_add(product.elements.len())
+                                    > MAX_PRODUCT_ARITY
+                                {
+                                    self.diagnostics.push(Diagnostic::new(
+                                        element.syntax.span.clone(),
+                                        format!(
+                                            "product arity exceeds the limit of {MAX_PRODUCT_ARITY}"
+                                        ),
+                                    ));
+                                } else {
+                                    elements.extend(product.elements);
+                                }
+                            }
+                            CheckedType::ErasedProduct(_) => {
+                                self.diagnostics.push(Diagnostic::new(
+                                    element.syntax.span.clone(),
+                                    "cannot spread an erased product value",
+                                ));
+                            }
+                            CheckedType::Error => {}
+                            other => self.diagnostics.push(Diagnostic::new(
+                                element.syntax.span.clone(),
+                                format!("cannot spread non-product value of type `{other}`"),
+                            )),
+                        }
+                        continue;
+                    }
+                    let index = elements.len();
                     let value_type = self.check_expression_expected(
                         module,
                         &element.value,
@@ -1737,10 +1772,17 @@ impl TypeChecker {
                     if self.did_return {
                         return CheckedType::empty_product();
                     }
-                    elements.push(CheckedTypeElement {
-                        name: element.name.clone(),
-                        value_type,
-                    });
+                    if elements.len() == MAX_PRODUCT_ARITY {
+                        self.diagnostics.push(Diagnostic::new(
+                            element.syntax.span.clone(),
+                            format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
+                        ));
+                    } else {
+                        elements.push(CheckedTypeElement {
+                            name: element.name.clone(),
+                            value_type,
+                        });
+                    }
                 }
                 normalize_product_type(elements, false)
             }

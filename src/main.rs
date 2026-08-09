@@ -599,6 +599,46 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_product_value_spreads() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-product-spread-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-product-spread-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "def sum: I32[4] -> I32 = (a, b, c, d) => a + b + c + d\n",
+                "let mut calls = 0\n",
+                "def make_pair = () => { calls = calls + 1; (2, 3) }\n",
+                "let expanded = (1, ...make_pair (), 4)\n",
+                "exit ((sum expanded - 10) + (calls - 1))\n",
+            ),
+        )
+        .expect("temporary product-spread source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("product-spread executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("product-spread executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn drops_owned_locals_in_reverse_scope_order() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

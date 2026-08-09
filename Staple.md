@@ -452,6 +452,20 @@ A spread operand must be a fixed product. Explicit `...T[0]` and `...T[1]`
 contribute zero and one elements respectively. A bare trailing `...` retains
 its separate meaning in a C-variadic function parameter type.
 
+Fixed product values can be flattened in the same way:
+
+```staple
+let coordinates = (x: 10, y: 20)
+let entry = (name: "origin", ...coordinates, visible: True)
+// Equivalent to (name: "origin", x: 10, y: 20, visible: True)
+```
+
+Multiple value spreads may appear in any position. Each spread operand is
+evaluated exactly once and must have a fixed product type; erased products,
+references, and scalar values cannot be spread. Names belonging to the spread
+product's elements are preserved. Spreads are also allowed when constructing a
+product used as a function argument.
+
 Homogeneous products support variable indexing with a `USize` expression:
 
 ```staple

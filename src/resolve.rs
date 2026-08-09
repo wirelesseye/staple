@@ -1717,10 +1717,10 @@ impl NameResolver {
             Expression::Block(block) => self.resolve_block(block),
             Expression::Product(product) => {
                 for element in &product.elements {
-                    let singleton_expected = (product.elements.len() == 1)
+                    let singleton_expected = (product.elements.len() == 1 && !element.spread)
                         .then_some(expected_type)
                         .flatten();
-                    let singleton_suggestion = (product.elements.len() == 1)
+                    let singleton_suggestion = (product.elements.len() == 1 && !element.spread)
                         .then_some(suggested_function)
                         .flatten();
                     self.resolve_expression(

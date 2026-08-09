@@ -1315,11 +1315,16 @@ impl Grammar {
                 } else {
                     None
                 };
+                let spread = self.eat(TokenKind::Ellipsis);
+                if spread && name.is_some() {
+                    return Err(self.error("a product value spread cannot be named"));
+                }
                 let value = self.parse_expression()?;
                 elements.push(ProductElement {
                     syntax: self.syntax(element_start),
                     name,
                     value,
+                    spread,
                 });
                 if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                     break;

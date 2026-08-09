@@ -793,10 +793,19 @@ impl MacroExpander {
             Expression::Product(product) => {
                 let mut values = Vec::new();
                 for element in &product.elements {
-                    values.push((
-                        element.name.clone(),
-                        self.eval_expression(module, &element.value, environment)?,
-                    ));
+                    let value = self.eval_expression(module, &element.value, environment)?;
+                    if element.spread {
+                        let Value::Product(elements) = value else {
+                            self.diagnostics.push(Diagnostic::new(
+                                element.syntax.span.clone(),
+                                "compile-time product spread requires a product value",
+                            ));
+                            return None;
+                        };
+                        values.extend(elements);
+                    } else {
+                        values.push((element.name.clone(), value));
+                    }
                 }
                 Some(Value::Product(values))
             }

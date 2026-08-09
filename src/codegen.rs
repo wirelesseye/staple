@@ -4754,18 +4754,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         product: &ProductExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let mut values = Vec::new();
-        for element in &product.elements {
-            let value = self.compile_expression(environment, &element.value)?;
-            if environment.did_return {
-                return Ok(self.unit_value());
-            }
-            values.push(value_as_basic(value).ok_or_else(|| {
-                Diagnostic::new(
-                    element.syntax.span.clone(),
-                    "product element is not a first-class value",
-                )
-            })?);
+        let values = self.compile_product_elements(environment, product)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
         }
         if let [value] = values.as_slice() {
             return Ok(value.as_any_value_enum());
@@ -4785,6 +4776,60 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(product_value.as_any_value_enum())
     }
 
+    fn compile_product_elements(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        product: &ProductExpression,
+    ) -> CodeGenerationResult<Vec<BasicValueEnum<'context>>> {
+        let mut values = Vec::new();
+        for element in &product.elements {
+            let value = self.compile_expression(environment, &element.value)?;
+            if environment.did_return {
+                return Ok(Vec::new());
+            }
+            if element.spread {
+                let Some(CheckedType::Product(value_type)) =
+                    self.concrete_expression_type(&element.value)
+                else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "product spread operand does not have a fixed product type",
+                    ));
+                };
+                if value_type.elements.is_empty() {
+                    continue;
+                }
+                let Some(BasicValueEnum::StructValue(product_value)) = value_as_basic(value) else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "product spread operand has an invalid representation",
+                    ));
+                };
+                for index in 0..value_type.elements.len() {
+                    values.push(
+                        self.builder
+                            .build_extract_value(
+                                product_value,
+                                index as u32,
+                                "product.spread.element",
+                            )
+                            .map_err(|error| {
+                                Diagnostic::new(element.syntax.span.clone(), error.to_string())
+                            })?,
+                    );
+                }
+                continue;
+            }
+            values.push(value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "product element is not a first-class value",
+                )
+            })?);
+        }
+        Ok(values)
+    }
+
     fn compile_arguments(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
@@ -4792,26 +4837,23 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         expected_count: usize,
         variadic: bool,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
-        let expressions: Vec<&Expression> = match argument {
-            Expression::Product(product) => product
-                .elements
-                .iter()
-                .map(|element| &element.value)
-                .collect(),
-            expression => vec![expression],
-        };
-        let mut arguments = Vec::new();
-        for expression in expressions {
-            let value = self.compile_expression(environment, expression)?;
+        let arguments = if let Expression::Product(product) = argument {
+            self.compile_product_elements(environment, product)?
+        } else {
+            let value = self.compile_expression(environment, argument)?;
             if environment.did_return {
-                return Ok(Vec::new());
+                Vec::new()
+            } else {
+                vec![value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        argument.syntax().span.clone(),
+                        "argument is not a first-class value",
+                    )
+                })?]
             }
-            arguments.push(value_as_basic(value).ok_or_else(|| {
-                Diagnostic::new(
-                    expression.syntax().span.clone(),
-                    "argument is not a first-class value",
-                )
-            })?);
+        };
+        if environment.did_return {
+            return Ok(Vec::new());
         }
         if arguments.len() == expected_count || (variadic && arguments.len() >= expected_count) {
             return Ok(arguments.into_iter().map(Into::into).collect());

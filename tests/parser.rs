@@ -710,6 +710,7 @@ fn parses_repeated_spread_erased_and_variable_index_syntax() {
         "let fixed: Ref I32[3]\n",
         "let erased: Ref I32[]\n",
         "let mixed: (String, ...I32[3], ...(I32, I32))\n",
+        "let expanded = (prefix: \"value\", ...mixed, suffix: 1)\n",
         "let value = erased[index].0\n",
     );
     let module = parse(source).expect("product extensions should parse");
@@ -720,7 +721,15 @@ fn parses_repeated_spread_erased_and_variable_index_syntax() {
     };
     assert!(matches!(fixed.annotation, Some(Type::Application(_))));
 
-    let Statement::Binding(value) = statement(&module.items[3]) else {
+    let Statement::Binding(expanded) = statement(&module.items[3]) else {
+        panic!("expected expanded binding");
+    };
+    let Some(Expression::Product(expanded)) = &expanded.value else {
+        panic!("expected expanded product value");
+    };
+    assert!(expanded.elements[1].spread);
+
+    let Statement::Binding(value) = statement(&module.items[4]) else {
         panic!("expected indexed binding");
     };
     assert!(matches!(value.value, Some(Expression::Access(_))));

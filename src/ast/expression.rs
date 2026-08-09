@@ -108,6 +108,7 @@ pub struct ProductElement {
     pub syntax: Syntax,
     pub name: Option<String>,
     pub value: Expression,
+    pub spread: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
