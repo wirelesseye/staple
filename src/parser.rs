@@ -374,39 +374,38 @@ impl Grammar {
             self.expect(TokenKind::Identifier, "expected module path after `use`")?
                 .text,
         ];
-        let kind = loop {
-            if self.eat(TokenKind::As) {
-                if path.len() < 2 {
-                    return Err(self.error("renamed imports require a module path and item"));
-                }
-                let item = path.pop().expect("checked path length");
-                let alias = self.parse_value_name("expected import alias after `as`")?;
-                break UseKind::Renamed { item, alias };
-            }
-            if !self.eat(TokenKind::Dot) {
-                break UseKind::Namespace;
-            }
-            if self.at(TokenKind::Star) && self.peek_n(1) != Some(TokenKind::As) {
-                self.bump_token();
-                break UseKind::Glob;
-            }
-            if self.eat(TokenKind::LParen) {
-                let mut names = Vec::new();
-                if !self.at(TokenKind::RParen) {
-                    loop {
-                        names.push(self.parse_import_name()?);
-                        if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
-                            break;
-                        }
+        while self.eat(TokenKind::Dot) {
+            path.push(self.parse_value_name("expected module path component after `.`")?);
+        }
+        let kind = if self.has_newline_before_next_token() {
+            UseKind::Namespace
+        } else if self.eat(TokenKind::Star) {
+            UseKind::Glob
+        } else if self.eat(TokenKind::LParen) {
+            let mut names = Vec::new();
+            if !self.at(TokenKind::RParen) {
+                loop {
+                    names.push(self.parse_import_name()?);
+                    if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
+                        break;
                     }
                 }
-                if names.is_empty() {
-                    return Err(self.error("selected imports require at least one item"));
-                }
-                self.expect(TokenKind::RParen, "expected `)` after imported items")?;
-                break UseKind::Selected(names);
             }
-            path.push(self.parse_value_name("expected module path component after `.`")?);
+            if names.is_empty() {
+                return Err(self.error("selected imports require at least one item"));
+            }
+            self.expect(TokenKind::RParen, "expected `)` after imported items")?;
+            UseKind::Selected(names)
+        } else if self.at(TokenKind::Identifier) || self.peek().is_some_and(is_symbol_kind) {
+            let item = self.parse_value_name("expected imported item")?;
+            if self.eat(TokenKind::As) {
+                let alias = self.parse_value_name("expected import alias after `as`")?;
+                UseKind::Renamed { item, alias }
+            } else {
+                UseKind::Selected(vec![item])
+            }
+        } else {
+            UseKind::Namespace
         };
         Ok(UseDeclaration {
             syntax: self.syntax(start),

@@ -72,7 +72,7 @@ fn imports_standard_io_print_functions() {
     fixture.write(
         "main.sta",
         concat!(
-            "use std.io.(print, println)\n",
+            "use std.io (print, println)\n",
             "print \"hello\"\n",
             "println \" world\"\n",
         ),
@@ -102,8 +102,8 @@ fn imports_public_values_and_types_through_all_use_forms() {
         "main.sta",
         concat!(
             "use math\n",
-            "use math.(Number)\n",
-            "use math.add as plus\n",
+            "use math (Number)\n",
+            "use math add as plus\n",
             "let first: math.Number = math.add (1, 2)\n",
             "let second: Number = plus (first, math.forty)\n",
             "second\n",
@@ -132,7 +132,7 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
     fixture.write(
         "main.sta",
         concat!(
-            "use traits.(Increment)\n",
+            "use traits (Increment)\n",
             "use implementations\n",
             "def twice: T => Increment T => T -> T = value => increment (increment value)\n",
             "let answer: I32 = twice 40\n",
@@ -152,13 +152,13 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
             "let answer: I32 = apply 41\n",
         ),
         concat!(
-            "use traits.Increment as Inc\n",
+            "use traits Increment as Inc\n",
             "use implementations\n",
             "def apply: T => Inc T => T -> T = value => Inc.increment value\n",
             "let answer: I32 = apply 41\n",
         ),
         concat!(
-            "use traits.*\n",
+            "use traits *\n",
             "use implementations\n",
             "def apply: T => Increment T => T -> T = value => increment value\n",
             "let answer: I32 = apply 41\n",
@@ -173,7 +173,7 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
     fixture.write(
         "main.sta",
         concat!(
-            "use traits.(Increment)\n",
+            "use traits (Increment)\n",
             "let answer: I32 = increment 41\n",
         ),
     );
@@ -196,7 +196,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
     fixture.write(
         "main.sta",
         concat!(
-            "use values.*\n",
+            "use values *\n",
             "let answer: I32 = identity 42\n",
             "let text: String = identity \"hello\"\n",
         ),
@@ -208,7 +208,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
 
     fixture.write(
         "main.sta",
-        concat!("use values.*\n", "let user: UserId = UserId 42\n"),
+        concat!("use values *\n", "let user: UserId = UserId 42\n"),
     );
     let error = fixture
         .compile()
@@ -236,7 +236,7 @@ fn exports_constructors_and_destructors_for_public_representations() {
     fixture.write(
         "main.sta",
         concat!(
-            "use boxes.(Box)\n",
+            "use boxes (Box)\n",
             "let boxed: Box I32 = Box (value: 42)\n",
             "let Box (value) = boxed\n",
             "value\n",
@@ -249,7 +249,7 @@ fn exports_constructors_and_destructors_for_public_representations() {
     fixture.write(
         "main.sta",
         concat!(
-            "use boxes.Box as Wrapped\n",
+            "use boxes Box as Wrapped\n",
             "let boxed: Wrapped I32 = Wrapped (value: 42)\n",
             "let Wrapped (value) = boxed\n",
             "value\n",
@@ -262,7 +262,7 @@ fn exports_constructors_and_destructors_for_public_representations() {
     fixture.write(
         "main.sta",
         concat!(
-            "use boxes.*\n",
+            "use boxes *\n",
             "let boxed: Box I32 = Box (value: 42)\n",
             "let Box (value) = boxed\n",
             "value\n",
@@ -291,13 +291,13 @@ fn exports_public_singleton_types_as_values_without_public_repr() {
 
     fixture.write(
         "main.sta",
-        "use markers.(Ready)\nlet ready: Ready = Ready\nlet Ready() = ready\n",
+        "use markers (Ready)\nlet ready: Ready = Ready\nlet Ready() = ready\n",
     );
     fixture
         .compile()
         .expect("selected singleton import should include its type and value");
 
-    fixture.write("main.sta", "use markers.*\nlet hidden = Hidden\n");
+    fixture.write("main.sta", "use markers *\nlet hidden = Hidden\n");
     let error = fixture
         .compile()
         .expect_err("private singleton value should not be exported");
@@ -318,7 +318,7 @@ fn composes_sum_variants_across_modules() {
     fixture.write(
         "main.sta",
         concat!(
-            "use errors.*\n",
+            "use errors *\n",
             "def parse = (path: String) => { let Ok(file)? = read(path); Ok(file) }\n",
             "let result: Ok String | IOError | ParseError = parse(\"input\")\n",
         ),
@@ -353,7 +353,7 @@ fn rejects_destructuring_an_imported_private_representation() {
     );
     fixture.write(
         "main.sta",
-        concat!("use ids.*\n", "let UserId value = make 42\n",),
+        concat!("use ids *\n", "let UserId value = make 42\n",),
     );
     let error = fixture
         .compile()
@@ -390,7 +390,7 @@ fn resolves_mutually_recursive_module_namespaces() {
 #[test]
 fn rejects_imports_of_private_items() {
     let fixture = Fixture::new();
-    fixture.write("main.sta", "use values.(hidden)\nhidden\n");
+    fixture.write("main.sta", "use values (hidden)\nhidden\n");
     fixture.write("values.sta", "let hidden = 1\n");
 
     let error = fixture
@@ -402,7 +402,7 @@ fn rejects_imports_of_private_items() {
 #[test]
 fn emits_dependency_initializers_before_the_entry_initializer() {
     let fixture = Fixture::new();
-    fixture.write("main.sta", "use dependency.*\nvalue\n");
+    fixture.write("main.sta", "use dependency *\nvalue\n");
     fixture.write("dependency.sta", "pub let value = 1\n");
 
     let llvm = fixture.compile().expect("program should compile");
@@ -420,10 +420,10 @@ fn emits_dependency_initializers_before_the_entry_initializer() {
 #[test]
 fn resolves_every_module_path_from_the_entry_directory() {
     let fixture = Fixture::new();
-    fixture.write("main.sta", "use package.first.*\nanswer\n");
+    fixture.write("main.sta", "use package.first *\nanswer\n");
     fixture.write(
         "package/first.sta",
-        "use shared.*\npub let answer = shared_answer\n",
+        "use shared *\npub let answer = shared_answer\n",
     );
     fixture.write("shared.sta", "pub let shared_answer = 42\n");
 
@@ -447,11 +447,11 @@ fn imports_public_extern_bindings() {
     let fixture = Fixture::new();
     fixture.write(
         "main.sta",
-        "use ffi.(puts)\nuse std.cinterop.(c_string)\nputs (c_string \"hello\")\n",
+        "use ffi (puts)\nuse std.cinterop (c_string)\nputs (c_string \"hello\")\n",
     );
     fixture.write(
         "ffi.sta",
-        "use std.cinterop.*\npub extern \"c\" { let puts: (CPointer CChar) -> I32 }\n",
+        "use std.cinterop *\npub extern \"c\" { let puts: (CPointer CChar) -> I32 }\n",
     );
 
     let llvm = fixture.compile().expect("public extern should import");
@@ -465,7 +465,7 @@ fn imports_primitive_macros_through_namespace_and_renaming() {
         "main.sta",
         concat!(
             "use std.cinterop\n",
-            "use std.cinterop.c_string as cs\n",
+            "use std.cinterop c_string as cs\n",
             "def values = () => {\n",
             "  let first: cinterop.CString = cinterop.c_string \"first\"\n",
             "  let second: cinterop.CString = cs \"second\"\n",
@@ -508,8 +508,8 @@ fn imports_user_macros_through_selected_and_renamed_forms() {
     fixture.write(
         "main.sta",
         concat!(
-            "use helpers.reveal as renamed\n",
-            "use helpers.(reveal)\n",
+            "use helpers reveal as renamed\n",
+            "use helpers (reveal)\n",
             "let first: I32 = renamed 1\n",
             "let second: I32 = reveal 2\n",
         ),
@@ -552,8 +552,8 @@ fn imports_operator_values_and_their_fixities() {
         "main.sta",
         concat!(
             "use math\n",
-            "use math.+ as combine\n",
-            "use math.((**))\n",
+            "use math + as combine\n",
+            "use math ((**))\n",
             "1 `combine` 2\n",
             "1 ** 2 ** 3\n",
             "1 math.+ 2\n",
@@ -574,7 +574,7 @@ fn loads_an_imported_top_level_global_from_a_function() {
     fixture.write(
         "main.sta",
         concat!(
-            "use values.*\n",
+            "use values *\n",
             "def get: () -> I32 = () => value\n",
             "get ()\n",
         ),
@@ -590,8 +590,8 @@ fn loads_an_imported_top_level_global_from_a_function() {
 #[test]
 fn rejects_an_early_read_across_a_module_cycle() {
     let fixture = Fixture::new();
-    fixture.write("main.sta", "use ma.*\na\n");
-    fixture.write("ma.sta", "use mb.*\npub let a = b\n");
+    fixture.write("main.sta", "use ma *\na\n");
+    fixture.write("ma.sta", "use mb *\npub let a = b\n");
     fixture.write("mb.sta", "use ma\npub let b = 41\n");
 
     let error = fixture

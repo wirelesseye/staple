@@ -143,7 +143,7 @@ A source file may contain expression statements alongside bindings, type
 declarations, and foreign declarations:
 
 ```staple
-use std.cinterop.*
+use std.cinterop *
 
 extern "c" {
     let printf: (CPointer CChar, ...) -> I32
@@ -183,9 +183,9 @@ let value: another_module.MyType
 Public items can instead be imported directly:
 
 ```staple
-use path.to.another_module.*
-use path.to.another_module.(func, MyType)
-use path.to.another_module.func as my_func
+use path.to.another_module *
+use path.to.another_module (func, MyType)
+use path.to.another_module func as my_func
 ```
 
 The wildcard form imports every public named item. The parenthesized form
@@ -234,7 +234,7 @@ An external declaration may omit its value because its implementation is
 provided outside staple:
 
 ```staple
-use std.cinterop.*
+use std.cinterop *
 
 extern "c" {
     let printf: (CPointer CChar, ...) -> I32
@@ -314,7 +314,7 @@ The primitive `c_string` macro from `std.cinterop` accepts only a string literal
 and produces an owned `CString` backed by allocated NUL-terminated storage:
 
 ```staple
-use std.cinterop.(c_string, CString)
+use std.cinterop (c_string, CString)
 
 def message = () => c_string "hello"
 ```
@@ -694,7 +694,7 @@ operator is an error.
 
 Public functions carry their fixity through namespace, glob, selected, and
 renamed imports. Symbolic selected imports use an extra pair of parentheses,
-for example `use math.((<>))`; qualified values and calls may be written
+for example `use math ((<>))`; qualified values and calls may be written
 `(math.<>)` and `1 math.<> 2`.
 
 ## Block expressions
@@ -903,7 +903,7 @@ allowed while nested collection is suppressed.
 
 `CChar`, `CString`, and the generic `CPointer` constructor are public opaque
 types in `std.cinterop`. Source code must import them explicitly, for example
-with `use std.cinterop.*`. `CPointer T` is the language's C pointer type; the
+with `use std.cinterop *`. `CPointer T` is the language's C pointer type; the
 pointee is a compile-time argument with no runtime field. There are no `*T` or
 `*const T` type forms and Staple does not distinguish mutable and const C
 pointers.
@@ -1161,7 +1161,7 @@ An `extern` block declares values supplied by a foreign ABI. The ABI name is a
 string following `extern`:
 
 ```staple
-use std.cinterop.*
+use std.cinterop *
 
 extern "c" {
     let printf: (CPointer CChar, ...) -> I32

@@ -90,9 +90,10 @@ fn parses_traits_implementations_and_bounds_losslessly() {
 fn parses_use_declarations_and_public_items_losslessly() {
     let source = concat!(
         "use path.to.another_module\n",
-        "use path.to.another_module.*\n",
-        "use path.to.another_module.(func, MyType)\n",
-        "use path.to.another_module.func as my_func\n",
+        "use path.to.another_module *\n",
+        "use path.to.another_module (func, MyType)\n",
+        "use path.to.another_module func\n",
+        "use path.to.another_module func as my_func\n",
         "pub type alias PublicType = I32\n",
         "pub def public_value = 1\n",
     );
@@ -107,12 +108,15 @@ fn parses_use_declarations_and_public_items_losslessly() {
         matches!(root.items[2], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Selected(names) if names == &["func", "MyType"]))
     );
     assert!(
-        matches!(root.items[3], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Renamed { item, alias } if item == "func" && alias == "my_func"))
+        matches!(root.items[3], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Selected(names) if names == &["func"]))
     );
     assert!(
-        matches!(root.items[4], Item::TypeDeclaration(ref declaration) if declaration.visibility == Visibility::Public)
+        matches!(root.items[4], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Renamed { item, alias } if item == "func" && alias == "my_func"))
     );
-    let Item::TypeDeclaration(declaration) = &root.items[4] else {
+    assert!(
+        matches!(root.items[5], Item::TypeDeclaration(ref declaration) if declaration.visibility == Visibility::Public)
+    );
+    let Item::TypeDeclaration(declaration) = &root.items[5] else {
         panic!("expected type declaration")
     };
     assert!(
@@ -121,7 +125,7 @@ fn parses_use_declarations_and_public_items_losslessly() {
             .text()
             .ends_with("pub type alias PublicType = I32")
     );
-    let Statement::Binding(binding) = statement(&root.items[5]) else {
+    let Statement::Binding(binding) = statement(&root.items[6]) else {
         panic!("expected binding")
     };
     assert_eq!(binding.visibility, Visibility::Public);
@@ -586,7 +590,7 @@ fn parses_multiple_top_level_statements() {
 #[test]
 fn parses_returns_and_semicolon_separated_items_losslessly() {
     let source = concat!(
-        "use std.core.*;",
+        "use std.core *;",
         "type alias Number = I32;",
         "extern \"c\" { let exit: I32 -> (); };",
         "def answer = () => { let value = 42; return value; };",
