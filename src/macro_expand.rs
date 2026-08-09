@@ -26,7 +26,19 @@ struct MacroDefinition {
     key: MacroKey,
     declaration: MacroDeclaration,
     arity: usize,
+    parameters: Vec<MetaType>,
+    result: MetaType,
     kind: MacroKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum MetaType {
+    Syntax,
+    Expr,
+    Ident(Option<String>),
+    Type,
+    Pattern,
+    Item,
 }
 
 #[derive(Clone, Default)]
@@ -150,12 +162,21 @@ impl MacroExpander {
                                     .map(expression_arity)
                                     .unwrap_or(0)
                             });
+                        let (parameters, result) = declaration
+                            .annotation
+                            .as_ref()
+                            .and_then(macro_signature)
+                            .unwrap_or_else(|| {
+                                inferred_macro_signature(declaration.value.as_ref())
+                            });
                         definitions.insert(
                             key.clone(),
                             MacroDefinition {
                                 key: key.clone(),
                                 declaration: declaration.clone(),
                                 arity,
+                                parameters,
+                                result,
                                 kind,
                             },
                         );
@@ -385,24 +406,48 @@ impl MacroExpander {
             {
                 self.diagnostics.push(Diagnostic::new(
                     annotation.syntax().span.clone(),
-                    "a macro annotation must be one or more `Syntax` parameters returning `Syntax`",
+                    "a macro annotation must accept one or more syntax-category parameters and return a syntax category",
                 ));
             }
+            if let (Some(annotation), Some(body)) = (
+                definition.declaration.annotation.as_ref(),
+                definition.declaration.value.as_ref(),
+            ) && let Some((parameters, _)) = macro_signature(annotation)
+            {
+                for (index, (declared, body_parameter)) in parameters
+                    .iter()
+                    .zip(macro_body_parameter_types(body))
+                    .enumerate()
+                {
+                    if body_parameter.is_some_and(|body_parameter| body_parameter != *declared) {
+                        self.diagnostics.push(Diagnostic::new(
+                            body.syntax().span.clone(),
+                            format!(
+                                "macro `{}` parameter {} conflicts with its annotation",
+                                definition.key.name,
+                                index + 1
+                            ),
+                        ));
+                    }
+                }
+            }
             match &definition.kind {
-                MacroKind::CString | MacroKind::Quote
-                    if definition.arity != 1
-                        || definition
-                            .declaration
-                            .annotation
-                            .as_ref()
-                            .is_none_or(|annotation| !valid_macro_annotation(annotation)) =>
+                MacroKind::CString
+                    if definition.parameters != [MetaType::Expr]
+                        || definition.result != MetaType::Expr =>
                 {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
-                        format!(
-                            "compiler-provided macro `{}` must have signature `Syntax -> Syntax`",
-                            definition.key.name
-                        ),
+                        "compiler-provided macro `c_string` must have signature `Expr -> Expr`",
+                    ));
+                }
+                MacroKind::Quote
+                    if definition.parameters != [MetaType::Syntax]
+                        || definition.result != MetaType::Syntax =>
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        definition.declaration.syntax.span.clone(),
+                        "compiler-provided macro `quote` must have signature `Syntax -> Syntax`",
                     ));
                 }
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
@@ -435,7 +480,7 @@ impl MacroExpander {
                     self.diagnostics.push(Diagnostic::new(
                         body.syntax().span.clone(),
                         format!(
-                            "macro `{}` parameters must bind `Syntax` values",
+                            "macro `{}` parameters must match atomic syntax values",
                             definition.key.name
                         ),
                     ));
@@ -513,6 +558,13 @@ impl MacroExpander {
                         if definition.arity == 1 { "" } else { "s" },
                         arguments.len()
                     ),
+                ));
+                return expression;
+            }
+            if !matches!(definition.result, MetaType::Syntax | MetaType::Expr) {
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    format!("macro `{}` does not produce expression syntax", key.name),
                 ));
                 return expression;
             }
@@ -669,6 +721,9 @@ impl MacroExpander {
         arguments: Vec<&Expression>,
         call_span: Span,
     ) -> Option<Expression> {
+        if !self.validate_macro_arguments(definition, &arguments) {
+            return None;
+        }
         match &definition.kind {
             MacroKind::CString => {
                 let [argument] = arguments.as_slice() else {
@@ -717,6 +772,49 @@ impl MacroExpander {
                 }
             }
         }
+    }
+
+    fn validate_macro_arguments(
+        &mut self,
+        definition: &MacroDefinition,
+        arguments: &[&Expression],
+    ) -> bool {
+        let mut valid = true;
+        for (index, (expected, argument)) in definition.parameters.iter().zip(arguments).enumerate()
+        {
+            let matches = match expected {
+                MetaType::Syntax | MetaType::Expr => true,
+                MetaType::Ident(spelling) => match argument {
+                    Expression::Name(name) if is_plain_identifier(name) => spelling
+                        .as_ref()
+                        .is_none_or(|expected| expected == &name.name),
+                    _ => false,
+                },
+                MetaType::Type | MetaType::Pattern | MetaType::Item => false,
+            };
+            if !matches {
+                let expectation = match expected {
+                    MetaType::Ident(Some(spelling)) => {
+                        format!("identifier `{spelling}`")
+                    }
+                    MetaType::Ident(None) => "an identifier".to_owned(),
+                    MetaType::Type => "a type".to_owned(),
+                    MetaType::Pattern => "a pattern".to_owned(),
+                    MetaType::Item => "an item".to_owned(),
+                    MetaType::Syntax | MetaType::Expr => "an expression".to_owned(),
+                };
+                self.diagnostics.push(Diagnostic::new(
+                    argument.syntax().span.clone(),
+                    format!(
+                        "argument {} of macro `{}` must be {expectation}",
+                        index + 1,
+                        definition.key.name
+                    ),
+                ));
+                valid = false;
+            }
+        }
+        valid
     }
 
     fn tick(&mut self, span: Span) -> bool {
@@ -1135,13 +1233,99 @@ fn macro_annotation_arity(annotation: &Type) -> usize {
     }
 }
 
-fn is_syntax_type(ty: &Type) -> bool {
-    matches!(ty, Type::Named(named) if named.namespace.is_none() && named.name == "Syntax")
+fn meta_type(ty: &Type) -> Option<MetaType> {
+    match ty {
+        Type::Named(named) if named.namespace.is_none() => match named.name.as_str() {
+            "Syntax" => Some(MetaType::Syntax),
+            "Expr" => Some(MetaType::Expr),
+            "Ident" => Some(MetaType::Ident(None)),
+            "Type" => Some(MetaType::Type),
+            "Pattern" => Some(MetaType::Pattern),
+            "Item" => Some(MetaType::Item),
+            _ => None,
+        },
+        Type::Application(application) => {
+            let Type::Named(callee) = application.callee.as_ref() else {
+                return None;
+            };
+            if callee.namespace.is_some() || callee.name != "Ident" {
+                return None;
+            }
+            match application.argument.as_ref() {
+                Type::Named(argument)
+                    if argument.namespace.is_none() && argument.name == "String" =>
+                {
+                    Some(MetaType::Ident(None))
+                }
+                Type::StringLiteral(literal) => crate::string_literal::decode(&literal.literal)
+                    .ok()
+                    .map(|spelling| MetaType::Ident(Some(spelling))),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn macro_signature(annotation: &Type) -> Option<(Vec<MetaType>, MetaType)> {
+    let mut parameters = Vec::new();
+    let mut current = annotation;
+    while let Type::Function(function) = current {
+        parameters.push(meta_type(&function.parameter)?);
+        current = &function.result;
+    }
+    let result = meta_type(current)?;
+    (!parameters.is_empty()).then_some((parameters, result))
+}
+
+fn inferred_macro_signature(value: Option<&Expression>) -> (Vec<MetaType>, MetaType) {
+    let mut parameters = Vec::new();
+    let mut current = value;
+    while let Some(Expression::Function(function)) = current {
+        parameters.push(pattern_meta_type(&function.pattern).unwrap_or(MetaType::Syntax));
+        current = Some(&function.body);
+    }
+    (parameters, MetaType::Syntax)
+}
+
+fn macro_body_parameter_types(expression: &Expression) -> Vec<Option<MetaType>> {
+    let mut parameters = Vec::new();
+    let mut current = expression;
+    while let Expression::Function(function) = current {
+        parameters.push(match &function.pattern {
+            Pattern::Binding(binding) if matches!(binding.ty, Type::Inferred(_)) => None,
+            pattern => pattern_meta_type(pattern),
+        });
+        current = &function.body;
+    }
+    parameters
+}
+
+fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
+    match pattern {
+        Pattern::Binding(binding) => match &binding.ty {
+            Type::Inferred(_) => Some(MetaType::Syntax),
+            ty => meta_type(ty),
+        },
+        Pattern::Wildcard(_) => Some(MetaType::Syntax),
+        Pattern::Nominal(pattern) if pattern.namespace.is_none() && pattern.name == "Ident" => {
+            let Pattern::StringLiteral(literal) = pattern.argument.as_ref() else {
+                return None;
+            };
+            crate::string_literal::decode(&literal.literal)
+                .ok()
+                .map(|spelling| MetaType::Ident(Some(spelling)))
+        }
+        Pattern::Product(_) | Pattern::Nominal(_) | Pattern::StringLiteral(_) => None,
+    }
 }
 
 fn type_contains_syntax(ty: &Type) -> bool {
     match ty {
-        Type::Named(named) => named.name == "Syntax",
+        Type::Named(named) => matches!(
+            named.name.as_str(),
+            "Syntax" | "Expr" | "Ident" | "Type" | "Pattern" | "Item"
+        ),
         Type::Function(function) => {
             type_contains_syntax(&function.parameter) || type_contains_syntax(&function.result)
         }
@@ -1235,16 +1419,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
 }
 
 fn valid_macro_annotation(annotation: &Type) -> bool {
-    match annotation {
-        Type::Function(function) => {
-            is_syntax_type(&function.parameter)
-                && match function.result.as_ref() {
-                    Type::Function(_) => valid_macro_annotation(&function.result),
-                    result => is_syntax_type(result),
-                }
-        }
-        _ => false,
-    }
+    macro_signature(annotation).is_some()
 }
 
 fn valid_macro_parameter_patterns(expression: &Expression, arity: usize) -> bool {
@@ -1254,13 +1429,7 @@ fn valid_macro_parameter_patterns(expression: &Expression, arity: usize) -> bool
     let Expression::Function(function) = expression else {
         return false;
     };
-    let valid_pattern = match &function.pattern {
-        Pattern::Binding(binding) => {
-            matches!(binding.ty, Type::Inferred(_)) || is_syntax_type(&binding.ty)
-        }
-        Pattern::Wildcard(_) => true,
-        Pattern::Product(_) | Pattern::Nominal(_) | Pattern::StringLiteral(_) => false,
-    };
+    let valid_pattern = pattern_meta_type(&function.pattern).is_some();
     valid_pattern && valid_macro_parameter_patterns(&function.body, arity - 1)
 }
 
@@ -1273,6 +1442,16 @@ fn flatten_call(expression: &Expression) -> (&Expression, Vec<&Expression>) {
     }
     arguments.reverse();
     (head, arguments)
+}
+
+fn is_plain_identifier(name: &crate::NameExpression) -> bool {
+    let mut tokens = name
+        .syntax
+        .tokens()
+        .iter()
+        .filter(|token| !token.kind.is_trivia());
+    matches!(tokens.next(), Some(token) if token.kind == crate::TokenKind::Identifier)
+        && tokens.next().is_none()
 }
 
 fn bool_value(value: bool) -> Value {
@@ -1307,6 +1486,16 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     .all(|(pattern, (_, value))| bind_pattern(pattern, value, environment))
         }
         Pattern::Nominal(pattern) => {
+            if pattern.namespace.is_none()
+                && pattern.name == "Ident"
+                && let Value::Syntax(Expression::Name(name)) = &value
+            {
+                return bind_pattern(
+                    &pattern.argument,
+                    Value::String(name.name.clone()),
+                    environment,
+                );
+            }
             let Value::Nominal(name, value) = value else {
                 return false;
             };

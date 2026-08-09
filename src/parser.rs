@@ -492,6 +492,11 @@ impl Grammar {
             Vec::new()
         };
         self.parse_sized_relaxations(&mut type_parameters)?;
+        let trait_bounds = if type_parameters.is_empty() {
+            Vec::new()
+        } else {
+            self.parse_trait_bounds()?
+        };
         let (kind, underlying) = if !has_body {
             (TypeDeclarationKind::Singleton, None)
         } else if self.eat(TokenKind::Opaque) {
@@ -514,6 +519,7 @@ impl Grammar {
             kind,
             name,
             type_parameters,
+            trait_bounds,
             underlying,
         })
     }
@@ -843,6 +849,7 @@ impl Grammar {
                         | TokenKind::Mut
                         | TokenKind::Underscore
                         | TokenKind::LParen
+                        | TokenKind::String
                 )
             );
         if namespace.is_some() && !adjacent_argument {

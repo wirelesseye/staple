@@ -95,6 +95,7 @@ pub struct TypeDeclaration {
     pub kind: TypeDeclarationKind,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
+    pub trait_bounds: Vec<TraitBound>,
     pub underlying: Option<Type>,
 }
 

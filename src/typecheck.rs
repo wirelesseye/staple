@@ -581,6 +581,7 @@ pub struct TypeChecker {
     pattern_types: HashMap<SyntaxId, CheckedType>,
     copy_trait: Option<TraitId>,
     sized_trait: Option<TraitId>,
+    string_type_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
@@ -609,6 +610,7 @@ impl TypeChecker {
     pub fn check(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
         self.copy_trait = module.standard_trait("Copy");
         self.sized_trait = module.standard_trait("Sized");
+        self.string_type_trait = module.standard_trait("StringType");
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
         self.collect_type_declarations(&module);
@@ -690,6 +692,18 @@ impl TypeChecker {
                 "standard library must declare public empty trait `Copy`",
             )),
         }
+        match self
+            .string_type_trait
+            .and_then(|id| module.traits().get(&id))
+        {
+            Some(string_type)
+                if string_type.declaration.visibility == crate::Visibility::Public
+                    && string_type.declaration.members.is_empty() => {}
+            _ => self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "standard library must declare public empty trait `StringType`",
+            )),
+        }
         match self.drop_trait.and_then(|id| module.traits().get(&id)) {
             Some(drop)
                 if drop.declaration.visibility == crate::Visibility::Public
@@ -753,6 +767,13 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     implementation.target.syntax().span.clone(),
                     "`Copy` is implemented structurally and cannot be implemented explicitly",
+                ));
+                continue;
+            }
+            if Some(implementation.trait_id) == self.string_type_trait {
+                self.diagnostics.push(Diagnostic::new(
+                    implementation.target.syntax().span.clone(),
+                    "`StringType` is compiler-defined and cannot be implemented explicitly",
                 ));
                 continue;
             }
@@ -2960,6 +2981,16 @@ impl TypeChecker {
                 &bounds,
             );
         }
+        if Some(trait_id) == self.string_type_trait {
+            return matches!(
+                target,
+                CheckedType::String | CheckedType::StringLiteralSet(_)
+            ) || self
+                .active_function_bounds
+                .iter()
+                .flatten()
+                .any(|bound| bound.trait_id == trait_id && &bound.argument == target);
+        }
         if Some(trait_id) == self.default_trait {
             let bounds = self
                 .active_function_bounds
@@ -3409,6 +3440,20 @@ impl TypeChecker {
                 return CheckedType::Error;
             }
         }
+        for bound in &declaration.trait_bounds {
+            let Some(trait_id) = module.trait_for(bound.syntax.id) else {
+                continue;
+            };
+            let argument = self.resolve_source_type(module, &bound.argument);
+            let argument = substitute_type(argument, &substitutions);
+            if !self.trait_obligation_available(trait_id, &argument) {
+                self.diagnostics.push(Diagnostic::new(
+                    bound.syntax.span.clone(),
+                    format!("trait bound is not satisfied for `{argument}`"),
+                ));
+                return CheckedType::Error;
+            }
+        }
         if module.builtin_type(id) == Some(BuiltinType::CPointer) {
             return CheckedType::CPointer {
                 pointee: Box::new(arguments[0].clone()),
@@ -3439,10 +3484,22 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         }
+        let declaration_bounds = declaration
+            .trait_bounds
+            .iter()
+            .filter_map(|bound| {
+                Some(CheckedTraitBound {
+                    trait_id: module.trait_for(bound.syntax.id)?,
+                    argument: self.resolve_source_type(module, &bound.argument),
+                })
+            })
+            .collect();
+        self.active_function_bounds.push(declaration_bounds);
         let template = self.resolve_source_type(
             module,
             declaration.underlying.as_ref().expect("represented type"),
         );
+        self.active_function_bounds.pop();
         self.resolving_named_types.remove(&id);
         let representation = substitute_type(template, &substitutions);
         if declaration.kind == TypeDeclarationKind::Distinct && !representation.is_sized() {

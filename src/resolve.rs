@@ -1418,6 +1418,12 @@ impl NameResolver {
                 for parameter in &declaration.type_parameters {
                     self.declare_type_parameter_pattern(parameter);
                 }
+                for bound in &declaration.trait_bounds {
+                    if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
+                        self.trait_references.insert(bound.syntax.id, trait_id);
+                    }
+                    self.resolve_type(&bound.argument);
+                }
                 if let Some(underlying) = &declaration.underlying {
                     self.resolve_type(underlying);
                     if declaration.representation_visibility == Visibility::Public {

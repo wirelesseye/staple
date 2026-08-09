@@ -1336,6 +1336,89 @@ fn evaluates_pure_syntax_helpers_and_conditional_macros() {
 }
 
 #[test]
+fn expands_typed_macros_with_literal_identifier_parameters() {
+    let module = type_check(concat!(
+        "macro conditional =\n",
+        "    condition: Expr =>\n",
+        "    then_branch: Expr =>\n",
+        "    Ident \"else\" =>\n",
+        "    else_branch: Expr => quote {\n",
+        "        match $condition {\n",
+        "            True() => $then_branch,\n",
+        "            False() => $else_branch,\n",
+        "        }\n",
+        "    }\n",
+        "let condition: Bool = True\n",
+        "let result: I32 = conditional condition 1 else 2\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("typed macro should expand to an ordinary expression");
+}
+
+#[test]
+fn rejects_a_mismatched_literal_identifier_macro_argument() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "macro conditional = value: Expr => Ident \"else\" => quote { $value }\n",
+                "conditional 1 otherwise\n",
+            ),
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("literal identifier mismatch should fail expansion");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("argument 2 of macro `conditional` must be identifier `else`")
+    }));
+}
+
+#[test]
+fn string_type_is_satisfied_by_strings_and_literal_types() {
+    type_check(concat!(
+        "def preserve: T => StringType T => T -> T = value => value\n",
+        "let literal = preserve \"hello\"\n",
+        "let text: String = \"hello\"\n",
+        "let copied: String = preserve text\n",
+    ));
+}
+
+#[test]
+fn ident_rejects_non_string_spelling_types() {
+    let module = resolve(concat!(
+        "type alias InvalidIdent = Ident I32\n",
+        "let invalid: InvalidIdent\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("Ident's spelling argument must satisfy StringType");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message == "trait bound is not satisfied for `I32`" })
+    );
+}
+
+#[test]
+fn rejects_explicit_string_type_implementations() {
+    let module = resolve("impl StringType I32 {}\n");
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("StringType must remain sealed");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message
+            == "`StringType` is compiler-defined and cannot be implemented explicitly"
+    }));
+}
+
+#[test]
 fn evaluates_pure_compile_time_control_flow_and_arithmetic() {
     let module = type_check(concat!(
         "macro computed = unused => match 1 + 1 == 2 {\n",

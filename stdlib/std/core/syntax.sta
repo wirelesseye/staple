@@ -1,1 +1,15 @@
-pub type Syntax = opaque
+// Compiler-owned, compile-time-only syntax categories.
+pub type Expr = opaque
+pub type Type = opaque
+pub type Pattern = opaque
+pub type Item = opaque
+
+// The parameter describes the accepted identifier spelling. `String` accepts
+// any identifier; a string literal type accepts exactly that spelling.
+pub type Ident = Spelling => StringType Spelling => opaque
+
+// A sealed compiler-defined marker: String and every string literal type
+// satisfy it. It has no runtime methods or user implementations.
+pub trait StringType = T => {}
+
+pub type alias Syntax = Expr | Ident String | Type | Pattern | Item

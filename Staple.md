@@ -59,10 +59,11 @@ code, including comments and formatting, can be represented as data rather than
 being reduced immediately to semantic values. Metaprograms should be able to
 work with structured syntax instead of assembling source-code strings.
 
-Expression macros transform compiler-owned `Syntax` values before ordinary name
-resolution and type checking. A macro body is a curried compile-time Staple
-function. Its parameters and result are `Syntax`; an explicit annotation is
-optional for user macros:
+Expression macros transform compiler-owned syntax values before ordinary name
+resolution and type checking. `Syntax` is the permissive sum of `Expr`,
+`Ident String`, `Type`, `Pattern`, and `Item`. A macro body is a curried
+compile-time Staple function. Every parameter consumes one atomic syntax unit;
+an omitted parameter type means `Syntax`:
 
 ```staple
 macro choose = condition => then => else => quote {
@@ -71,6 +72,28 @@ macro choose = condition => then => else => quote {
         False() => $else,
     }
 }
+```
+
+Typed parameters constrain the grammar accepted at an invocation. `Ident` is a
+generic syntax type whose argument constrains its spelling. `Ident String`
+accepts any identifier and `Ident "else"` accepts exactly the identifier
+`else`. The compiler-owned, methodless `StringType` trait is satisfied by
+`String` and every string literal type, and constrains the argument of `Ident`.
+It cannot be implemented explicitly. A literal identifier parameter may be
+left unbound or given a binding when its syntax is needed:
+
+```staple
+macro conditional =
+    condition: Expr =>
+    then_branch: Expr =>
+    Ident "else" =>
+    else_branch: Expr =>
+    quote {
+        match $condition {
+            True() => $then_branch,
+            False() => $else_branch,
+        }
+    }
 ```
 
 The braces in `quote { expression }` delimit one expression and are not part of
@@ -93,7 +116,7 @@ generation remain future work.
 
 Compiler-provided macros use typed bodyless contracts. `std.core` declares
 `pub macro quote: Syntax -> Syntax`, and `std.cinterop` declares
-`pub macro c_string: Syntax -> Syntax`.
+`pub macro c_string: Expr -> Expr`.
 
 ## Source files
 

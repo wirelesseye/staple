@@ -224,8 +224,7 @@ fn rejects_removed_pointer_type_syntax() {
 
 #[test]
 fn parses_opaque_macro_declarations() {
-    let root =
-        parse("pub macro c_string: Syntax -> Syntax\n").expect("macro declaration should parse");
+    let root = parse("pub macro c_string: Expr -> Expr\n").expect("macro declaration should parse");
     assert!(matches!(
         root.items[0],
         Item::MacroDeclaration(ref declaration)
@@ -249,6 +248,34 @@ fn parses_macro_bodies_quotes_and_splices_losslessly() {
         root.items[0],
         Item::MacroDeclaration(ref declaration)
             if declaration.annotation.is_none() && declaration.value.is_some()
+    ));
+}
+
+#[test]
+fn parses_typed_macro_parameters_and_literal_identifiers() {
+    let source = concat!(
+        "macro conditional = condition: Expr => then_branch: Expr => ",
+        "Ident \"else\" => else_branch: Expr => quote { $else_branch }\n",
+    );
+    let root = parse(source).expect("typed macro parameters should parse");
+    assert_eq!(root.text(), source);
+    let Item::MacroDeclaration(declaration) = &root.items[0] else {
+        panic!("expected macro declaration");
+    };
+    let Some(Expression::Function(first)) = &declaration.value else {
+        panic!("expected first parameter");
+    };
+    let Expression::Function(second) = first.body.as_ref() else {
+        panic!("expected second parameter");
+    };
+    let Expression::Function(keyword) = second.body.as_ref() else {
+        panic!("expected identifier parameter");
+    };
+    assert!(matches!(
+        keyword.pattern,
+        Pattern::Nominal(ref pattern)
+            if pattern.name == "Ident"
+                && matches!(pattern.argument.as_ref(), Pattern::StringLiteral(_))
     ));
 }
 
