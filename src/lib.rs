@@ -4,6 +4,7 @@ mod combinator;
 mod diagnostic;
 mod lexer;
 mod macro_expand;
+mod ownership;
 mod parser;
 mod program;
 mod resolve;

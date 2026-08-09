@@ -165,6 +165,7 @@ pub enum IntrinsicFunction {
     },
     StringFromCString,
     StringToCString,
+    Drop,
 }
 
 #[derive(Debug, Clone)]
@@ -196,6 +197,7 @@ pub struct ResolvedModule {
     lowered_infix: HashMap<SyntaxId, Expression>,
     builtin_types: HashMap<TypeId, BuiltinType>,
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
+    external_symbols: HashSet<SymbolId>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     constructors: HashMap<SymbolId, TypeId>,
     singleton_values: HashMap<SymbolId, TypeId>,
@@ -275,6 +277,10 @@ impl ResolvedModule {
 
     pub fn intrinsic_functions(&self) -> &HashMap<SymbolId, IntrinsicFunction> {
         &self.intrinsic_functions
+    }
+
+    pub fn is_external_symbol(&self, symbol: SymbolId) -> bool {
+        self.external_symbols.contains(&symbol)
     }
 
     pub fn primitive_macro_for(&self, syntax: SyntaxId) -> Option<PrimitiveMacro> {
@@ -474,6 +480,17 @@ impl NameResolver {
             return Err(self.diagnostics);
         }
         self.functions.sort_by_key(|function| function.id.0);
+        let external_symbols = program
+            .modules()
+            .iter()
+            .flat_map(|module| module.syntax.items.iter())
+            .filter_map(|item| match item {
+                Item::ExternBlock(block) if block.abi != "\"staple-intrinsic\"" => Some(block),
+                _ => None,
+            })
+            .flat_map(|block| block.bindings.iter())
+            .filter_map(|binding| self.declared_symbols.get(&binding.syntax.id).copied())
+            .collect();
         let mut resolved = ResolvedModule {
             program,
             functions: self.functions,
@@ -488,6 +505,7 @@ impl NameResolver {
             lowered_infix: self.lowered_infix,
             builtin_types: self.builtin_types,
             intrinsic_functions: self.intrinsic_functions,
+            external_symbols,
             macro_calls: self.macro_calls,
             constructors: self.constructors,
             singleton_values: self.singleton_values,
@@ -599,6 +617,20 @@ impl NameResolver {
                         ));
                     }
                 }
+            }
+        }
+        for item in &program.module(core).syntax.items {
+            let Item::Statement(statement) = item else {
+                continue;
+            };
+            let Statement::Binding(binding) = statement.as_ref() else {
+                continue;
+            };
+            if binding.name == "drop"
+                && let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied()
+            {
+                self.intrinsic_functions
+                    .insert(symbol, IntrinsicFunction::Drop);
             }
         }
         for (name, _) in expected {
@@ -1616,7 +1648,11 @@ impl NameResolver {
                     .cloned()
                     .unwrap_or_default(),
             ) {
-                (Some(_), methods) if !methods.is_empty() => {
+                (Some(symbol), methods)
+                    if !methods.is_empty()
+                        && self.intrinsic_functions.get(&symbol)
+                            != Some(&IntrinsicFunction::Drop) =>
+                {
                     self.diagnostics.push(Diagnostic::new(
                         name.syntax.span.clone(),
                         format!("ambiguous name `{}`; qualify the trait method", name.name),

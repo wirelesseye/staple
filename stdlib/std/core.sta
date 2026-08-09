@@ -18,6 +18,14 @@ pub macro quote: Syntax -> Syntax
 
 pub(repr) type Ok = T => T
 
+pub trait Copy = T => {}
+
+pub trait Drop = T => {
+    drop: T -> ()
+}
+
+pub def drop: T => T -> () = value => ()
+
 pub trait Add = T => {
     add: T -> T -> T
 }
@@ -442,13 +450,13 @@ impl Compare USize {
     def greater_than_or_equal = left => right => __usize_greater_than_or_equal (left, right)
 }
 
-pub def infixl 6 + : T => Add T => T -> T -> T = left => right => Add.add left right
-pub def infixl 6 - : T => Subtract T => T -> T -> T = left => right => Subtract.subtract left right
-pub def infixl 7 * : T => Multiply T => T -> T -> T = left => right => Multiply.multiply left right
-pub def infixl 7 / : T => Divide T => T -> T -> T = left => right => Divide.divide left right
-pub def infix 4 == : T => Eq T => T -> T -> Bool = left => right => Eq.equal left right
-pub def infix 4 != : T => Eq T => T -> T -> Bool = left => right => Eq.not_equal left right
-pub def infix 4 < : T => Compare T => T -> T -> Bool = left => right => Compare.less_than left right
-pub def infix 4 <= : T => Compare T => T -> T -> Bool = left => right => Compare.less_than_or_equal left right
-pub def infix 4 > : T => Compare T => T -> T -> Bool = left => right => Compare.greater_than left right
-pub def infix 4 >= : T => Compare T => T -> T -> Bool = left => right => Compare.greater_than_or_equal left right
+pub def infixl 6 + : T => Copy T => Add T => T -> T -> T = left => right => Add.add left right
+pub def infixl 6 - : T => Copy T => Subtract T => T -> T -> T = left => right => Subtract.subtract left right
+pub def infixl 7 * : T => Copy T => Multiply T => T -> T -> T = left => right => Multiply.multiply left right
+pub def infixl 7 / : T => Copy T => Divide T => T -> T -> T = left => right => Divide.divide left right
+pub def infix 4 == : T => Copy T => Eq T => T -> T -> Bool = left => right => Eq.equal left right
+pub def infix 4 != : T => Copy T => Eq T => T -> T -> Bool = left => right => Eq.not_equal left right
+pub def infix 4 < : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.less_than left right
+pub def infix 4 <= : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.less_than_or_equal left right
+pub def infix 4 > : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.greater_than left right
+pub def infix 4 >= : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.greater_than_or_equal left right

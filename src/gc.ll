@@ -1,4 +1,4 @@
-%GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, {{SIZE}} }
+%GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, {{SIZE}} }
 %GcRoot = type { ptr, {{SIZE}}, ptr }
 
 @__staple_gc_head = internal global ptr null
@@ -9,6 +9,7 @@
 @__staple_gc_table = internal global ptr null
 @__staple_gc_table_capacity = internal global {{SIZE}} 0
 @__staple_gc_table_count = internal global {{SIZE}} 0
+@__staple_gc_collecting = internal global i1 false
 
 declare ptr @malloc({{SIZE}})
 declare ptr @calloc({{SIZE}}, {{SIZE}})
@@ -249,6 +250,7 @@ entry:
   br i1 %initialized, label %clear.start, label %return
 
 clear.start:
+  store i1 true, ptr @__staple_gc_collecting
   %head = load ptr, ptr @__staple_gc_head
   br label %clear.loop
 
@@ -283,7 +285,7 @@ roots.start:
 roots.loop:
   %root = phi ptr [ %roots, %roots.start ], [ %root.next, %roots.body ]
   %roots.done = icmp eq ptr %root, null
-  br i1 %roots.done, label %sweep.start, label %roots.body
+  br i1 %roots.done, label %finalize.start, label %roots.body
 
 roots.body:
   %root.start.slot = getelementptr %GcRoot, ptr %root, i32 0, i32 0
@@ -294,6 +296,40 @@ roots.body:
   %root.next.slot = getelementptr %GcRoot, ptr %root, i32 0, i32 2
   %root.next = load ptr, ptr %root.next.slot
   br label %roots.loop
+
+finalize.start:
+  %finalize.head = load ptr, ptr @__staple_gc_head
+  br label %finalize.loop
+
+finalize.loop:
+  %finalize.header = phi ptr [ %finalize.head, %finalize.start ], [ %finalize.next, %finalize.continue ]
+  %finalize.done = icmp eq ptr %finalize.header, null
+  br i1 %finalize.done, label %sweep.start, label %finalize.check
+
+finalize.check:
+  %finalize.mark.slot = getelementptr %GcHeader, ptr %finalize.header, i32 0, i32 2
+  %finalize.mark = load {{SIZE}}, ptr %finalize.mark.slot
+  %finalize.dead = icmp eq {{SIZE}} %finalize.mark, 0
+  %finalizer.slot = getelementptr %GcHeader, ptr %finalize.header, i32 0, i32 3
+  %finalizer = load ptr, ptr %finalizer.slot
+  %has.finalizer = icmp ne ptr %finalizer, null
+  %finalized.slot = getelementptr %GcHeader, ptr %finalize.header, i32 0, i32 4
+  %finalized = load {{SIZE}}, ptr %finalized.slot
+  %not.finalized = icmp eq {{SIZE}} %finalized, 0
+  %needs.finalize.1 = and i1 %finalize.dead, %has.finalizer
+  %needs.finalize = and i1 %needs.finalize.1, %not.finalized
+  br i1 %needs.finalize, label %finalize.call, label %finalize.continue
+
+finalize.call:
+  store {{SIZE}} 1, ptr %finalized.slot
+  %finalize.payload = getelementptr i8, ptr %finalize.header, {{SIZE}} {{HEADER_BYTES}}
+  call void %finalizer(ptr %finalize.payload)
+  br label %finalize.continue
+
+finalize.continue:
+  %finalize.next.slot = getelementptr %GcHeader, ptr %finalize.header, i32 0, i32 0
+  %finalize.next = load ptr, ptr %finalize.next.slot
+  br label %finalize.loop
 
 sweep.start:
   br label %sweep.loop
@@ -339,6 +375,7 @@ threshold:
   %small = icmp ult {{SIZE}} %grown, 1048576
   %next.threshold = select i1 %small, {{SIZE}} 1048576, {{SIZE}} %grown
   store {{SIZE}} %next.threshold, ptr @__staple_gc_threshold
+  store i1 false, ptr @__staple_gc_collecting
   br label %return
 
 return:
@@ -376,7 +413,10 @@ threshold.check:
   %at.limit = icmp uge {{SIZE}} %bytes, %threshold
   %remaining = sub {{SIZE}} %threshold, %bytes
   %exceeds.remaining = icmp ugt {{SIZE}} %charge, %remaining
-  %crosses = or i1 %at.limit, %exceeds.remaining
+  %would.cross = or i1 %at.limit, %exceeds.remaining
+  %collecting = load i1, ptr @__staple_gc_collecting
+  %can.collect = xor i1 %collecting, true
+  %crosses = and i1 %would.cross, %can.collect
   br i1 %crosses, label %collect.first, label %allocate.first
 
 collect.first:
@@ -389,22 +429,30 @@ allocate.first:
   br i1 %first.failed, label %retry, label %initialize
 
 retry:
+  %retry.collecting = load i1, ptr @__staple_gc_collecting
+  br i1 %retry.collecting, label %trap, label %retry.collect
+
+retry.collect:
   call void @__staple_gc_collect()
   %second = call ptr @__staple_gc_try_allocate({{SIZE}} %size)
   %second.failed = icmp eq ptr %second, null
   br i1 %second.failed, label %trap, label %initialize
 
 initialize:
-  %header = phi ptr [ %first, %allocate.first ], [ %second, %retry ]
+  %header = phi ptr [ %first, %allocate.first ], [ %second, %retry.collect ]
   %head = load ptr, ptr @__staple_gc_head
   %next.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 0
   store ptr %head, ptr %next.slot
   %size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
   store {{SIZE}} %size, ptr %size.slot
   %mark.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
-  store {{SIZE}} 0, ptr %mark.slot
-  %reserved.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 3
-  store {{SIZE}} 0, ptr %reserved.slot
+  %initial.mark.bit = load i1, ptr @__staple_gc_collecting
+  %initial.mark = zext i1 %initial.mark.bit to {{SIZE}}
+  store {{SIZE}} %initial.mark, ptr %mark.slot
+  %finalizer.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 3
+  store ptr null, ptr %finalizer.slot
+  %finalized.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 4
+  store {{SIZE}} 0, ptr %finalized.slot
   store ptr %header, ptr @__staple_gc_head
   %old.bytes = load {{SIZE}}, ptr @__staple_gc_bytes
   %new.bytes = add {{SIZE}} %old.bytes, %charge
@@ -416,6 +464,14 @@ initialize:
 trap:
   call void @llvm.trap()
   unreachable
+}
+
+define void @__staple_gc_set_finalizer(ptr %payload, ptr %finalizer) {
+entry:
+  %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
+  %slot = getelementptr %GcHeader, ptr %header, i32 0, i32 3
+  store ptr %finalizer, ptr %slot
+  ret void
 }
 
 define void @__staple_gc_set_stack_bottom(ptr %bottom) {

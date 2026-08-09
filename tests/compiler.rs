@@ -709,8 +709,8 @@ fn compares_all_standard_library_integer_types() {
         "let less_equal: Bool = 1 <= 2\n",
         "let greater: Bool = 2 > 1\n",
         "let greater_equal: Bool = 2 >= 1\n",
-        "def same: T => Eq T => T -> T -> Bool = left => right => left == right\n",
-        "def before: T => Compare T => T -> T -> Bool = left => right => left < right\n",
+        "def same: T => Copy T => Eq T => T -> T -> Bool = left => right => left == right\n",
+        "def before: T => Copy T => Compare T => T -> T -> Bool = left => right => left < right\n",
         "let generic_equal: Bool = same 1 1\n",
         "let generic_order: Bool = before 1 2\n",
         "def i8 = (x: I8, y: I8) => x < y\n",
@@ -894,10 +894,12 @@ fn string_literals_have_the_canonical_string_type() {
 fn c_string_is_an_imported_primitive_macro() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
-        "let text: String = \"hello\"\n",
-        "let c_text: CString = c_string \"hello\"\n",
-        "let copied: String = string_from_c_string c_text\n",
-        "let converted: CString = string_to_c_string text\n",
+        "def exercise = () => {\n",
+        "  let text: String = \"hello\"\n",
+        "  let c_text: CString = c_string \"hello\"\n",
+        "  let copied: String = string_from_c_string c_text\n",
+        "  let converted: CString = string_to_c_string text\n",
+        "}\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -1816,7 +1818,7 @@ fn infers_product_and_result_only_compile_time_parameters() {
 #[test]
 fn monomorphizes_curried_generic_function_layers() {
     let module = type_check(concat!(
-        "def keep_first: (A, B) => A -> B -> A = a => b => a\n",
+        "def keep_first: (A, B) => Copy A => A -> B -> A = a => b => a\n",
         "let answer: I32 = keep_first 42 \"ignored\"\n",
     ));
     let context = Context::create();
@@ -2051,4 +2053,146 @@ fn emits_a_native_object_file() {
     std::fs::remove_file(&output).expect("temporary object should be removable");
 
     assert!(length > 0);
+}
+
+#[test]
+fn infers_copy_and_enforces_affine_moves() {
+    type_check(concat!(
+        "type Point = (I32, I32)\n",
+        "def copied = () => { let point = Point (1, 2); let other = point; point; other }\n",
+    ));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.*\n",
+            "def invalid = (value: CString) => { let moved = value; value }\n",
+        )))
+        .expect_err("CString must be move-only");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("use of moved value"))
+    );
+}
+
+#[test]
+fn exposes_copy_but_rejects_explicit_implementations() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Value = I32\n",
+            "impl Copy Value {}\n",
+        )))
+        .expect_err("Copy implementations must be inferred");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`Copy` is implemented structurally")
+    }));
+}
+
+#[test]
+fn lowers_custom_drop_and_gc_finalizer_glue() {
+    let module = type_check(concat!(
+        "type Resource = I32\n",
+        "impl Drop Resource { def drop = Resource value => () }\n",
+        "def release = () => { let resource = Resource 7; drop resource }\n",
+        "def managed = () => Ref (Resource 9)\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("Drop glue should compile");
+
+    assert!(llvm.contains("drop.call"));
+    assert!(llvm.contains("__staple_gc_set_finalizer"));
+    assert!(llvm.contains("__staple_gc_finalize_"));
+}
+
+#[test]
+fn rejects_move_only_globals_partial_moves_and_cstring_returns_from_c() {
+    let ffi_diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.*\n",
+            "extern \"c\" { let invalid_return: () -> CString }\n",
+        )))
+        .expect_err("C must not manufacture owned CStrings");
+    assert!(
+        ffi_diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("cannot return owned `CString`") })
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.*\n",
+            "let global: CString = c_string \"owned\"\n",
+            "def partial = (pair: (CString, I32)) => pair.0\n",
+        )))
+        .expect_err("unsupported ownership operations should be rejected");
+    let messages = diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("move-only values cannot be stored"))
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("cannot move a field"))
+    );
+}
+
+#[test]
+fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
+    let module = type_check(concat!(
+        "use std.cinterop.*\n",
+        "extern \"c\" { let inspect: CString -> I32 }\n",
+        "def make = (value: CString) => { let callback = () => inspect value; callback }\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a move-only capture should get managed finalizer glue");
+    assert!(llvm.contains("__staple_gc_finalize_closure_"));
+
+    for source in [
+        concat!(
+            "use std.cinterop.*\n",
+            "extern \"c\" { let inspect: CString -> I32 }\n",
+            "def invalid = (value: CString) => { let callback = () => inspect value; value }\n",
+        ),
+        concat!(
+            "use std.cinterop.*\n",
+            "def invalid = (value: Ref CString) => { let Ref inner = value; drop inner }\n",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err("captured and Ref-owned resources cannot be moved again");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains("moved value")
+                || diagnostic.message.contains("cannot move this value")
+        }));
+    }
+}
+
+#[test]
+fn lowers_path_sensitive_drop_flags() {
+    let module = type_check(concat!(
+        "type Resource = I32\n",
+        "impl Drop Resource { def drop = Resource value => () }\n",
+        "def conditional = (flag: Bool, resource: Resource) => match flag {\n",
+        "  True() => { drop resource; () },\n",
+        "  False() => (),\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("conditional ownership should lower through a runtime drop flag");
+    assert!(llvm.contains("drop.is_live"));
+    assert!(llvm.contains("drop.call"));
 }

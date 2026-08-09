@@ -466,8 +466,10 @@ fn imports_primitive_macros_through_namespace_and_renaming() {
         concat!(
             "use std.cinterop\n",
             "use std.cinterop.c_string as cs\n",
-            "let first: cinterop.CString = cinterop.c_string \"first\"\n",
-            "let second: cinterop.CString = cs \"second\"\n",
+            "def values = () => {\n",
+            "  let first: cinterop.CString = cinterop.c_string \"first\"\n",
+            "  let second: cinterop.CString = cs \"second\"\n",
+            "}\n",
         ),
     );
 

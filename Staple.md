@@ -311,12 +311,12 @@ backslash protects the following quote from ending the string. Supported
 escapes are `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, and `\\"`.
 
 The primitive `c_string` macro from `std.cinterop` accepts only a string literal
-and produces a `CString` backed by static NUL-terminated storage:
+and produces an owned `CString` backed by allocated NUL-terminated storage:
 
 ```staple
 use std.cinterop.(c_string, CString)
 
-let message: CString = c_string "hello"
+def message = () => c_string "hello"
 ```
 
 Macros are module items and support the same namespace, glob, selected, and
@@ -766,9 +766,9 @@ import can shadow a prelude name. Integer literals use an expected integer type
 when one is available and otherwise default to `I32`. Mixed-type arithmetic is
 not implicit.
 
-`String` is an owned UTF-8 buffer represented by a pointer, byte length, and
-capacity. String literals have this canonical type. Until Staple gains
-move/drop semantics, allocated string buffers live until process exit.
+`String` is an immutable garbage-collected handle. Its managed descriptor
+contains a UTF-8 byte pointer, byte length, and capacity; the byte storage is
+managed as well. Copying a `String` copies the handle.
 
 `Ref T` is an immutable garbage-collected reference to a value of type `T`.
 Constructing `Ref value` copies or moves `value` into a managed allocation;
@@ -796,15 +796,46 @@ crosses a growing allocation threshold. Stack/register values, module globals,
 managed payloads, closure environments, and recursive binding cells are
 scanned conservatively, so an integer or raw bit pattern that resembles a
 managed address can keep an otherwise unreachable object alive temporarily.
-There are currently no null, weak, mutable, finalizable, manual-collection, or
-collector-statistics operations.
+There are currently no null, weak, mutable, manual-collection, or
+collector-statistics operations. Closure environments are managed objects.
+Recursive binding cells remain permanent conservative root regions and are a
+future migration.
 
-Closure environments and recursive binding cells are registered as permanent
-root regions for correctness but retain their existing allocation behavior, so
-they still live until process exit. `String` buffers likewise remain unmanaged.
-Migrating those allocations is future work. Deterministic drop semantics are
-also deferred until Staple has resource-owning values such as files or foreign
-allocations; garbage collection does not provide deterministic destruction.
+Values are affine unless they are structurally `Copy`. Assignment, argument
+passing, return, whole-value destructuring, and closure capture move a
+non-`Copy` value; using it afterward is an error. Integers, `Bool`, `String`,
+`Ref T`, C pointers, functions, and products/sums/distinct values made entirely
+from `Copy` fields are copied implicitly. The public prelude trait `Copy` can be
+used as a generic bound, but implementations are compiler-inferred and an
+explicit `impl Copy` is rejected. A custom `Drop` implementation makes its
+distinct target move-only regardless of its representation.
+
+```staple
+trait Copy = T => {}
+
+trait Drop = T => {
+    drop: T -> ()
+}
+
+type File = I32
+impl Drop File {
+    def drop = File descriptor => close descriptor
+}
+```
+
+Owned locals and parameters are dropped in reverse lexical order on normal
+scope exit, explicit `return`, and propagation. `drop value` consumes and
+destroys a value early. A destructor may inspect copied fields and make scoped
+C calls, but may not move out of its value; after the custom destructor returns,
+the representation's owned fields are dropped automatically. Partial field
+moves through `.name` or `.index` are rejected; destructure the whole owned
+value instead. Move-only globals are not supported.
+
+When an unreachable managed payload or closure environment owns a `Drop`
+value, collection finalizes it exactly once before reclaiming its storage.
+Finalization is two-phase: all unreachable finalizers run while their objects
+still exist, resurrection does not retain those objects, and allocation is
+allowed while nested collection is suppressed.
 
 `CChar`, `CString`, and the generic `CPointer` constructor are public opaque
 types in `std.cinterop`. Source code must import them explicitly, for example
@@ -813,11 +844,14 @@ pointee is a compile-time argument with no runtime field. There are no `*T` or
 `*const T` type forms and Staple does not distinguish mutable and const C
 pointers.
 
-`CString` remains a distinct raw pointer to NUL-terminated bytes. It is
-compatible with `CPointer CChar`, but an arbitrary `CPointer CChar` is not
-assumed to be NUL terminated. `string_from_c_string` validates and copies UTF-8
-into a `String`; `string_to_c_string` copies a `String`, appends a terminator,
-and traps on an interior NUL byte. Invalid UTF-8 also traps.
+`CString` is an owned, move-only pointer to NUL-terminated bytes and drops with
+`free`. It is compatible with `CPointer CChar`, but an arbitrary
+`CPointer CChar` is not assumed to be NUL terminated. Passing a `CString` to a
+C function creates a call-scoped view rather than transferring ownership, and
+C declarations may not return `CString`. `string_from_c_string` consumes its
+argument, validates and copies UTF-8 into a `String`, then frees it;
+`string_to_c_string` allocates an owned copy, appends a terminator, and traps on
+an interior NUL byte. Invalid UTF-8 also traps.
 
 An underscore asks stapler to infer a type:
 

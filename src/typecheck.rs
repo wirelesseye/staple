@@ -319,6 +319,9 @@ pub struct TypedModule {
     matches: HashMap<SyntaxId, CheckedMatch>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    ownership: crate::ownership::OwnershipInfo,
+    copy_trait: Option<TraitId>,
+    drop_trait: Option<TraitId>,
 }
 
 impl TypedModule {
@@ -364,6 +367,74 @@ impl TypedModule {
 
     pub fn type_of_pattern(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.pattern_types.get(&syntax_id)
+    }
+
+    pub fn is_copy_type(&self, value_type: &CheckedType) -> bool {
+        is_copy_type(
+            value_type,
+            self.copy_trait,
+            self.drop_trait,
+            &self.trait_implementations,
+            &[],
+        )
+    }
+
+    pub(crate) fn is_copy_in_function(
+        &self,
+        value_type: &CheckedType,
+        function: Option<FunctionId>,
+    ) -> bool {
+        // Nested closure functions share their enclosing function's type
+        // parameters, but store only their own syntactic bounds. Parameter IDs
+        // are globally unique, so including all active function bounds also
+        // makes the enclosing `Copy T` obligation visible in the closure.
+        let bounds = self
+            .function_bounds
+            .values()
+            .flat_map(|bounds| bounds.iter().cloned())
+            .collect::<Vec<_>>();
+        let _ = function;
+        is_copy_type(
+            value_type,
+            self.copy_trait,
+            self.drop_trait,
+            &self.trait_implementations,
+            &bounds,
+        )
+    }
+
+    pub(crate) fn is_drop_method(&self, function: FunctionId) -> bool {
+        self.drop_trait.is_some_and(|drop_trait| {
+            self.trait_implementations.iter().any(|implementation| {
+                implementation.trait_id == drop_trait
+                    && implementation
+                        .methods
+                        .values()
+                        .any(|value| *value == function)
+            })
+        })
+    }
+
+    pub fn type_needs_drop(&self, value_type: &CheckedType) -> bool {
+        type_needs_drop(value_type, self.drop_trait, &self.trait_implementations)
+    }
+
+    pub(crate) fn drop_method_for(&self, value_type: &CheckedType) -> Option<FunctionId> {
+        let drop_trait = self.drop_trait?;
+        self.trait_implementations
+            .iter()
+            .find(|implementation| {
+                implementation.trait_id == drop_trait && &implementation.target == value_type
+            })
+            .and_then(|implementation| implementation.methods.values().next().copied())
+    }
+
+    pub(crate) fn moved_symbols(&self, syntax: SyntaxId) -> impl Iterator<Item = SymbolId> + '_ {
+        self.ownership.moved_symbols(syntax)
+    }
+
+    pub(crate) fn is_non_owning_symbol(&self, symbol: SymbolId) -> bool {
+        self.ownership.is_non_owning_symbol(symbol)
     }
 
     pub fn type_of_symbol(&self, symbol: SymbolId) -> Option<&CheckedType> {
@@ -415,6 +486,8 @@ pub struct TypeChecker {
     matches: HashMap<SyntaxId, CheckedMatch>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    copy_trait: Option<TraitId>,
+    drop_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     top_level_bindings: HashMap<SymbolId, Binding>,
@@ -439,6 +512,31 @@ impl TypeChecker {
     }
 
     pub fn check(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
+        let standard_core = module.program().standard_library_core();
+        let standard_trait_syntax = |name: &str| {
+            standard_core.and_then(|core| {
+                module
+                    .program()
+                    .module(core)
+                    .syntax
+                    .items
+                    .iter()
+                    .find_map(|item| {
+                        let Item::TraitDeclaration(declaration) = item else {
+                            return None;
+                        };
+                        (declaration.name == name).then_some(declaration.syntax.id)
+                    })
+            })
+        };
+        let copy_syntax = standard_trait_syntax("Copy");
+        let drop_syntax = standard_trait_syntax("Drop");
+        self.copy_trait = module.traits().iter().find_map(|(id, value)| {
+            (Some(value.declaration.syntax.id) == copy_syntax).then_some(*id)
+        });
+        self.drop_trait = module.traits().iter().find_map(|(id, value)| {
+            (Some(value.declaration.syntax.id) == drop_syntax).then_some(*id)
+        });
         self.collect_type_declarations(&module);
         self.collect_traits(&module);
         self.collect_trait_implementations(&module);
@@ -468,7 +566,7 @@ impl TypeChecker {
             return Err(self.diagnostics);
         }
 
-        Ok(TypedModule {
+        let typed = TypedModule {
             resolved: module,
             expression_types: self.expression_types,
             symbol_types: self.symbol_types,
@@ -481,7 +579,16 @@ impl TypeChecker {
             matches: self.matches,
             accesses: self.accesses,
             pattern_types: self.pattern_types,
-        })
+            ownership: crate::ownership::OwnershipInfo::default(),
+            copy_trait: self.copy_trait,
+            drop_trait: self.drop_trait,
+        };
+        let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
+        if ownership_diagnostics.is_empty() {
+            Ok(TypedModule { ownership, ..typed })
+        } else {
+            Err(ownership_diagnostics)
+        }
     }
 
     fn collect_type_declarations(&mut self, module: &ResolvedModule) {
@@ -489,6 +596,25 @@ impl TypeChecker {
     }
 
     fn collect_traits(&mut self, module: &ResolvedModule) {
+        match self.copy_trait.and_then(|id| module.traits().get(&id)) {
+            Some(copy)
+                if copy.declaration.visibility == crate::Visibility::Public
+                    && copy.declaration.members.is_empty() => {}
+            _ => self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "standard library must declare public empty trait `Copy`",
+            )),
+        }
+        match self.drop_trait.and_then(|id| module.traits().get(&id)) {
+            Some(drop)
+                if drop.declaration.visibility == crate::Visibility::Public
+                    && drop.declaration.members.len() == 1
+                    && drop.declaration.members[0].name == "drop" => {}
+            _ => self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "standard library must declare public trait `Drop` with one `drop` member",
+            )),
+        }
         for resolved_trait in module.traits().values() {
             for method in &resolved_trait.methods {
                 let member = module.trait_method(*method).expect("resolved trait member");
@@ -521,6 +647,13 @@ impl TypeChecker {
 
     fn collect_trait_implementations(&mut self, module: &ResolvedModule) {
         for implementation in module.trait_implementations() {
+            if Some(implementation.trait_id) == self.copy_trait {
+                self.diagnostics.push(Diagnostic::new(
+                    implementation.target.syntax().span.clone(),
+                    "`Copy` is implemented structurally and cannot be implemented explicitly",
+                ));
+                continue;
+            }
             let target = self.resolve_source_type(module, &implementation.target);
             if contains_type_parameter(&target)
                 || contains_inferred_type(&target)
@@ -529,6 +662,15 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     implementation.target.syntax().span.clone(),
                     "trait implementation target must be fully concrete",
+                ));
+                continue;
+            }
+            if Some(implementation.trait_id) == self.drop_trait
+                && !matches!(target, CheckedType::Distinct { .. })
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    implementation.target.syntax().span.clone(),
+                    "`Drop` may only be implemented for a represented nominal type",
                 ));
                 continue;
             }
@@ -734,6 +876,17 @@ impl TypeChecker {
                         result: Box::new(CheckedType::CString),
                     })
                 }
+                crate::IntrinsicFunction::Drop => self
+                    .symbol_types
+                    .get(symbol)
+                    .cloned()
+                    .filter(|value_type| {
+                        matches!(value_type,
+                            CheckedType::Function(function)
+                                if contains_type_parameter(&function.parameter)
+                                    && *function.result == CheckedType::empty_product())
+                    })
+                    .unwrap_or(CheckedType::Error),
             };
             if self.symbol_types.get(symbol) != Some(&expected) {
                 self.diagnostics.push(Diagnostic::new(
@@ -1018,18 +1171,30 @@ impl TypeChecker {
                             "external bindings cannot have compile-time parameters",
                         ));
                     }
-                    if block.abi != "\"staple-intrinsic\""
-                        && binding
+                    if block.abi != "\"staple-intrinsic\"" {
+                        let external_type = binding
                             .annotation
                             .as_ref()
-                            .map(|annotation| self.resolve_source_type(module, annotation))
+                            .map(|annotation| self.resolve_source_type(module, annotation));
+                        if external_type
                             .as_ref()
                             .is_some_and(checked_type_contains_sum)
-                    {
-                        self.diagnostics.push(Diagnostic::new(
-                            binding.syntax.span.clone(),
-                            "external binding types cannot contain sums",
-                        ));
+                        {
+                            self.diagnostics.push(Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                "external binding types cannot contain sums",
+                            ));
+                        }
+                        if matches!(
+                            external_type,
+                            Some(CheckedType::Function(CheckedFunctionType { result, .. }))
+                                if checked_type_contains_cstring(&result)
+                        ) {
+                            self.diagnostics.push(Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                "external functions cannot return owned `CString` values",
+                            ));
+                        }
                     }
                     self.check_binding(module, binding);
                 }
@@ -2200,6 +2365,21 @@ impl TypeChecker {
     }
 
     fn trait_obligation_available(&self, trait_id: TraitId, target: &CheckedType) -> bool {
+        if Some(trait_id) == self.copy_trait {
+            let bounds = self
+                .active_function_bounds
+                .iter()
+                .flatten()
+                .cloned()
+                .collect::<Vec<_>>();
+            return is_copy_type(
+                target,
+                self.copy_trait,
+                self.drop_trait,
+                &self.trait_implementations,
+                &bounds,
+            );
+        }
         if !contains_type_parameter(target) {
             return self.trait_implementations.iter().any(|implementation| {
                 implementation.trait_id == trait_id && &implementation.target == target
@@ -3222,6 +3402,114 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
         }
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(checked_type_contains_sum)
+        }
+        _ => false,
+    }
+}
+
+fn checked_type_contains_cstring(value_type: &CheckedType) -> bool {
+    match value_type {
+        CheckedType::CString => true,
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| checked_type_contains_cstring(&element.value_type)),
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(checked_type_contains_cstring),
+        CheckedType::Distinct { representation, .. } => {
+            checked_type_contains_cstring(representation)
+        }
+        _ => false,
+    }
+}
+
+fn has_drop_implementation(
+    value_type: &CheckedType,
+    drop_trait: Option<TraitId>,
+    implementations: &[CheckedTraitImplementation],
+) -> bool {
+    drop_trait.is_some_and(|drop_trait| {
+        implementations.iter().any(|implementation| {
+            implementation.trait_id == drop_trait && &implementation.target == value_type
+        })
+    })
+}
+
+fn is_copy_type(
+    value_type: &CheckedType,
+    copy_trait: Option<TraitId>,
+    drop_trait: Option<TraitId>,
+    implementations: &[CheckedTraitImplementation],
+    bounds: &[CheckedTraitBound],
+) -> bool {
+    if has_drop_implementation(value_type, drop_trait, implementations) {
+        return false;
+    }
+    match value_type {
+        CheckedType::Inferred | CheckedType::Error => true,
+        CheckedType::I32
+        | CheckedType::I8
+        | CheckedType::I16
+        | CheckedType::I64
+        | CheckedType::U8
+        | CheckedType::U16
+        | CheckedType::U32
+        | CheckedType::U64
+        | CheckedType::ISize
+        | CheckedType::USize
+        | CheckedType::String
+        | CheckedType::CChar
+        | CheckedType::CPointer { .. }
+        | CheckedType::Ref(_)
+        | CheckedType::Function(_) => true,
+        CheckedType::CString => false,
+        CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
+            bounds
+                .iter()
+                .any(|bound| bound.trait_id == copy_trait && &bound.argument == value_type)
+        }),
+        CheckedType::Product(product) => product.elements.iter().all(|element| {
+            is_copy_type(
+                &element.value_type,
+                copy_trait,
+                drop_trait,
+                implementations,
+                bounds,
+            )
+        }),
+        CheckedType::Sum(sum) => sum.alternatives.iter().all(|alternative| {
+            is_copy_type(alternative, copy_trait, drop_trait, implementations, bounds)
+        }),
+        CheckedType::Distinct { representation, .. } => is_copy_type(
+            representation,
+            copy_trait,
+            drop_trait,
+            implementations,
+            bounds,
+        ),
+        CheckedType::Opaque { .. } | CheckedType::TypeConstructor { .. } => false,
+    }
+}
+
+fn type_needs_drop(
+    value_type: &CheckedType,
+    drop_trait: Option<TraitId>,
+    implementations: &[CheckedTraitImplementation],
+) -> bool {
+    if has_drop_implementation(value_type, drop_trait, implementations) {
+        return true;
+    }
+    match value_type {
+        CheckedType::CString => true,
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| type_needs_drop(&element.value_type, drop_trait, implementations)),
+        CheckedType::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .any(|alternative| type_needs_drop(alternative, drop_trait, implementations)),
+        CheckedType::Distinct { representation, .. } => {
+            type_needs_drop(representation, drop_trait, implementations)
         }
         _ => false,
     }
