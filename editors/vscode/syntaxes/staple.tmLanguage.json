@@ -1,0 +1,194 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Staple",
+  "scopeName": "source.staple",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#declarations" },
+    { "include": "#quotation" },
+    { "include": "#keywords" },
+    { "include": "#numbers" },
+    { "include": "#types" },
+    { "include": "#operators" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.staple",
+          "match": "//.*$"
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.staple",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            {
+              "name": "constant.character.escape.staple",
+              "match": "\\\\[nrt0\\\\\"]"
+            },
+            {
+              "name": "invalid.illegal.escape.staple",
+              "match": "\\\\."
+            }
+          ]
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "name": "meta.function.definition.staple",
+          "match": "\\b(def)\\s+(?:(infix|infixl|infixr)\\s+([0-9]+)\\s+)?((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*|[!#$%&*+./<=>?@\\\\^|~:-]+)",
+          "captures": {
+            "1": { "name": "storage.type.function.staple" },
+            "2": { "name": "storage.modifier.fixity.staple" },
+            "3": { "name": "constant.numeric.integer.precedence.staple" },
+            "4": { "name": "entity.name.function.staple" }
+          }
+        },
+        {
+          "name": "meta.macro.definition.staple",
+          "match": "\\b(macro)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
+          "captures": {
+            "1": { "name": "storage.type.macro.staple" },
+            "2": { "name": "entity.name.function.preprocessor.staple" }
+          }
+        },
+        {
+          "name": "meta.type.definition.staple",
+          "match": "\\b(type)\\s+(?:(alias)\\s+)?((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
+          "captures": {
+            "1": { "name": "storage.type.staple" },
+            "2": { "name": "storage.modifier.alias.staple" },
+            "3": { "name": "entity.name.type.staple" }
+          }
+        },
+        {
+          "name": "meta.trait.definition.staple",
+          "match": "\\b(trait)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
+          "captures": {
+            "1": { "name": "storage.type.trait.staple" },
+            "2": { "name": "entity.name.type.interface.staple" }
+          }
+        },
+        {
+          "name": "meta.implementation.staple",
+          "match": "\\b(impl)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
+          "captures": {
+            "1": { "name": "storage.type.impl.staple" },
+            "2": { "name": "entity.name.type.interface.staple" }
+          }
+        },
+        {
+          "name": "meta.binding.staple",
+          "match": "\\b(let)\\s+(mut\\s+)?((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
+          "captures": {
+            "1": { "name": "storage.type.binding.staple" },
+            "2": { "name": "storage.modifier.mutable.staple" },
+            "3": { "name": "entity.name.variable.staple" }
+          }
+        }
+      ]
+    },
+    "quotation": {
+      "patterns": [
+        {
+          "name": "keyword.other.quote.staple",
+          "match": "\\bquote(?=\\s*\\{)"
+        },
+        {
+          "name": "meta.macro.splice.staple",
+          "match": "(\\$)((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)(\\.\\.\\.)?",
+          "captures": {
+            "1": { "name": "punctuation.definition.variable.staple" },
+            "2": { "name": "variable.other.readwrite.staple" },
+            "3": { "name": "keyword.operator.spread.staple" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.staple",
+          "match": "\\b(?:match|return)\\b"
+        },
+        {
+          "name": "keyword.control.import.staple",
+          "match": "\\b(?:use|as)\\b"
+        },
+        {
+          "name": "keyword.declaration.staple",
+          "match": "\\b(?:def|extern|impl|let|macro|trait|type)\\b"
+        },
+        {
+          "name": "storage.modifier.staple",
+          "match": "\\b(?:alias|infix|infixl|infixr|mut|opaque|pub)\\b"
+        },
+        {
+          "name": "keyword.operator.expression.staple",
+          "match": "\\bsatisfies\\b"
+        },
+        {
+          "name": "variable.language.wildcard.staple",
+          "match": "(?<![_\\p{Alphabetic}\\p{Number}])_(?![_\\p{Alphabetic}\\p{Number}])"
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.integer.staple",
+          "match": "(?<![_\\p{Alphabetic}\\p{Number}])[0-9]+(?![_\\p{Alphabetic}\\p{Number}])"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.staple",
+          "match": "(?<![_\\p{Alphabetic}\\p{Number}])\\p{Uppercase}(?:_|\\p{Alphabetic}|\\p{Number})*(?![_\\p{Alphabetic}\\p{Number}])"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.staple",
+          "match": "=>|->"
+        },
+        {
+          "name": "keyword.operator.spread.staple",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.symbolic.staple",
+          "match": "[!#$%&*+/<=>?@\\\\^|~:-]+|\\.{2,}"
+        },
+        {
+          "name": "punctuation.definition.operator.staple",
+          "match": "`"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.section.group.staple",
+          "match": "[(){}\\[\\]]"
+        },
+        {
+          "name": "punctuation.separator.staple",
+          "match": "[,;.]"
+        }
+      ]
+    }
+  }
+}
