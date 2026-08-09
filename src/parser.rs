@@ -113,10 +113,9 @@ impl Grammar {
             return Err(self.error("`pub(repr)` may only modify a type declaration"));
         }
         let item = match self.peek() {
-            Some(TokenKind::Use) if visibility == Visibility::Private => {
-                self.parse_use_declaration().map(Item::UseDeclaration)
-            }
-            Some(TokenKind::Use) => Err(self.error("`use` declarations cannot be public")),
+            Some(TokenKind::Use) => self
+                .parse_use_declaration(visibility, item_start)
+                .map(Item::UseDeclaration),
             Some(TokenKind::Extern) => self
                 .parse_extern_block(visibility, item_start)
                 .map(Item::ExternBlock),
@@ -367,8 +366,11 @@ impl Grammar {
     }
 
     /// Parses a namespace, glob, selected, or renamed `use` declaration.
-    fn parse_use_declaration(&mut self) -> Result<UseDeclaration, ParseError> {
-        let start = self.position;
+    fn parse_use_declaration(
+        &mut self,
+        visibility: Visibility,
+        start: usize,
+    ) -> Result<UseDeclaration, ParseError> {
         self.expect(TokenKind::Use, "expected `use`")?;
         let mut path = vec![
             self.expect(TokenKind::Identifier, "expected module path after `use`")?
@@ -409,6 +411,7 @@ impl Grammar {
         };
         Ok(UseDeclaration {
             syntax: self.syntax(start),
+            visibility,
             path,
             kind,
         })

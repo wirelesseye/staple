@@ -190,9 +190,17 @@ use path.to.another_module func as my_func
 
 The wildcard form imports every public named item. The parenthesized form
 imports only the listed items. The `as` form imports one item under a different
-local name. Imports are hoisted, apply throughout their module, and are not
-re-exported. Importing two items under the same name, or colliding with a local
-declaration, is an error.
+local name. Imports are hoisted and apply throughout their module. Prefixing an
+item import with `pub` re-exports it from the importing module:
+
+```staple
+pub use path.to.another_module (func, MyType)
+pub use path.to.another_module func as public_func
+pub use path.to.another_module *
+```
+
+Re-exports may be chained through multiple modules. Importing two items under
+the same name, or colliding with a local declaration, is an error.
 
 Top-level declarations are private by default. `pub` exports a binding or type:
 
@@ -201,8 +209,7 @@ pub def format = (value: I32) => value
 pub type alias Number = I32
 ```
 
-`pub extern` exports every binding declared by that external block. `pub use`
-is not supported.
+`pub extern` exports every binding declared by that external block.
 
 Every reachable module's top-level statements execute exactly once. Dependencies
 are initialized before modules which use them. Mutually recursive groups are

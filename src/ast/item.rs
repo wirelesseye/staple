@@ -34,6 +34,7 @@ pub enum Visibility {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UseDeclaration {
     pub syntax: Syntax,
+    pub visibility: Visibility,
     pub path: Vec<String>,
     pub kind: UseKind,
 }

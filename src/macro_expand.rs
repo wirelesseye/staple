@@ -181,12 +181,17 @@ impl MacroExpander {
             }
         }
 
-        let public_macros = definitions
+        let mut public_macros = definitions
             .values()
             .filter(|definition| definition.declaration.visibility == Visibility::Public)
-            .map(|definition| (definition.key.clone(), definition.key.clone()))
+            .map(|definition| {
+                (
+                    (definition.key.module, definition.key.name.clone()),
+                    definition.key.clone(),
+                )
+            })
             .collect::<HashMap<_, _>>();
-        let public_helpers = program
+        let mut public_helpers = program
             .modules()
             .iter()
             .flat_map(|module| {
@@ -197,6 +202,61 @@ impl MacroExpander {
                     .map(move |(name, helper)| ((module.id, name.clone()), helper.clone()))
             })
             .collect::<HashMap<_, _>>();
+
+        loop {
+            let previous_macros = public_macros.clone();
+            let previous_helpers = public_helpers.clone();
+            let mut changed = false;
+            for source_module in program.modules() {
+                for item in &source_module.syntax.items {
+                    let Item::UseDeclaration(use_) = item else {
+                        continue;
+                    };
+                    if use_.visibility != Visibility::Public {
+                        continue;
+                    }
+                    let Some(imported) = program.imported_module(use_.syntax.id) else {
+                        continue;
+                    };
+                    let names = match &use_.kind {
+                        UseKind::Namespace => Vec::new(),
+                        UseKind::Glob => previous_macros
+                            .keys()
+                            .filter(|(module, _)| *module == imported)
+                            .map(|(_, name)| (name.clone(), name.clone()))
+                            .chain(
+                                previous_helpers
+                                    .keys()
+                                    .filter(|(module, _)| *module == imported)
+                                    .map(|(_, name)| (name.clone(), name.clone())),
+                            )
+                            .collect(),
+                        UseKind::Selected(names) => names
+                            .iter()
+                            .map(|name| (name.clone(), name.clone()))
+                            .collect(),
+                        UseKind::Renamed { item, alias } => {
+                            vec![(item.clone(), alias.clone())]
+                        }
+                    };
+                    for (item, alias) in names {
+                        if let Some(key) = previous_macros.get(&(imported, item.clone())) {
+                            changed |= public_macros
+                                .insert((source_module.id, alias.clone()), key.clone())
+                                .is_none();
+                        }
+                        if let Some(helper) = previous_helpers.get(&(imported, item)) {
+                            changed |= public_helpers
+                                .insert((source_module.id, alias), helper.clone())
+                                .is_none();
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
 
         for source_module in program.modules() {
             if let Some(core) = core
@@ -236,13 +296,13 @@ impl MacroExpander {
                         }
                     }
                     UseKind::Glob => {
-                        for (key, _) in public_macros
+                        for ((_, name), key) in public_macros
                             .iter()
-                            .filter(|(key, _)| key.module == imported)
+                            .filter(|((module, _), _)| *module == imported)
                         {
                             scopes[source_module.id.0]
                                 .macros
-                                .entry(key.name.clone())
+                                .entry(name.clone())
                                 .or_insert_with(|| key.clone());
                         }
                         for ((module, name), binding) in &public_helpers {
@@ -301,15 +361,14 @@ impl MacroExpander {
         imported: ModuleId,
         item: &str,
         local: &str,
-        public_macros: &HashMap<MacroKey, MacroKey>,
+        public_macros: &HashMap<(ModuleId, String), MacroKey>,
         public_helpers: &HashMap<(ModuleId, String), HelperDefinition>,
     ) {
-        let key = MacroKey {
-            module: imported,
-            name: item.to_owned(),
-        };
-        if public_macros.contains_key(&key) {
-            scope.macros.entry(local.to_owned()).or_insert(key);
+        if let Some(key) = public_macros.get(&(imported, item.to_owned())) {
+            scope
+                .macros
+                .entry(local.to_owned())
+                .or_insert_with(|| key.clone());
         }
         if let Some(helper) = public_helpers.get(&(imported, item.to_owned())) {
             scope

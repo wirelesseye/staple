@@ -116,6 +116,43 @@ fn imports_public_values_and_types_through_all_use_forms() {
 }
 
 #[test]
+fn reexports_public_items_through_selected_renamed_glob_and_chained_uses() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "origin.sta",
+        concat!(
+            "pub type alias Number = I32\n",
+            "pub let value: Number = 42\n",
+            "pub macro reveal = item => quote { $item }\n",
+        ),
+    );
+    fixture.write(
+        "facade.sta",
+        concat!(
+            "pub use origin (Number, reveal)\n",
+            "pub use origin value as answer\n",
+        ),
+    );
+    fixture.write("all.sta", "pub use origin *\n");
+    fixture.write("chain.sta", "pub use facade answer as result\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use facade (Number, reveal)\n",
+            "use all value\n",
+            "use chain result\n",
+            "let first: Number = reveal value\n",
+            "let second: Number = result\n",
+            "first + second\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("public uses should re-export every imported item kind");
+}
+
+#[test]
 fn imports_public_traits_and_discovers_loaded_global_implementations() {
     let fixture = Fixture::new();
     fixture.write(

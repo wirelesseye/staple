@@ -94,6 +94,7 @@ fn parses_use_declarations_and_public_items_losslessly() {
         "use path.to.another_module (func, MyType)\n",
         "use path.to.another_module func\n",
         "use path.to.another_module func as my_func\n",
+        "pub use path.to.another_module PublicType\n",
         "pub type alias PublicType = I32\n",
         "pub def public_value = 1\n",
     );
@@ -114,9 +115,12 @@ fn parses_use_declarations_and_public_items_losslessly() {
         matches!(root.items[4], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Renamed { item, alias } if item == "func" && alias == "my_func"))
     );
     assert!(
-        matches!(root.items[5], Item::TypeDeclaration(ref declaration) if declaration.visibility == Visibility::Public)
+        matches!(root.items[5], Item::UseDeclaration(ref use_) if use_.visibility == Visibility::Public)
     );
-    let Item::TypeDeclaration(declaration) = &root.items[5] else {
+    assert!(
+        matches!(root.items[6], Item::TypeDeclaration(ref declaration) if declaration.visibility == Visibility::Public)
+    );
+    let Item::TypeDeclaration(declaration) = &root.items[6] else {
         panic!("expected type declaration")
     };
     assert!(
@@ -125,7 +129,7 @@ fn parses_use_declarations_and_public_items_losslessly() {
             .text()
             .ends_with("pub type alias PublicType = I32")
     );
-    let Statement::Binding(binding) = statement(&root.items[6]) else {
+    let Statement::Binding(binding) = statement(&root.items[7]) else {
         panic!("expected binding")
     };
     assert_eq!(binding.visibility, Visibility::Public);

@@ -340,13 +340,61 @@ impl ResolvedModule {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct Interface {
     values: HashMap<String, SymbolId>,
     fixities: HashMap<String, Fixity>,
     types: HashMap<String, TypeId>,
     macros: HashMap<String, MacroId>,
     traits: HashMap<String, TraitId>,
+}
+
+fn extend_interface(exported: &mut Interface, imported: &Interface) -> bool {
+    let mut changed = false;
+    for name in imported.values.keys() {
+        changed |= export_interface_item(exported, imported, name, name);
+    }
+    for name in imported.types.keys() {
+        changed |= export_interface_item(exported, imported, name, name);
+    }
+    for name in imported.macros.keys() {
+        changed |= export_interface_item(exported, imported, name, name);
+    }
+    for name in imported.traits.keys() {
+        changed |= export_interface_item(exported, imported, name, name);
+    }
+    changed
+}
+
+fn export_interface_item(
+    exported: &mut Interface,
+    imported: &Interface,
+    item: &str,
+    alias: &str,
+) -> bool {
+    let mut changed = false;
+    if let Some(symbol) = imported.values.get(item) {
+        changed |= exported.values.insert(alias.to_owned(), *symbol).is_none();
+        if let Some(fixity) = imported.fixities.get(item) {
+            exported.fixities.insert(alias.to_owned(), *fixity);
+        }
+    }
+    if let Some(ty) = imported.types.get(item) {
+        changed |= exported.types.insert(alias.to_owned(), *ty).is_none();
+    }
+    if let Some(macro_id) = imported.macros.get(item) {
+        changed |= exported
+            .macros
+            .insert(alias.to_owned(), *macro_id)
+            .is_none();
+    }
+    if let Some(trait_id) = imported.traits.get(item) {
+        changed |= exported
+            .traits
+            .insert(alias.to_owned(), *trait_id)
+            .is_none();
+    }
+    changed
 }
 
 #[derive(Default)]
@@ -663,6 +711,46 @@ impl NameResolver {
                         "the `staple-intrinsic` ABI is reserved for the standard library",
                     ));
                 }
+            }
+        }
+        self.collect_reexports(program);
+    }
+
+    fn collect_reexports(&mut self, program: &Program) {
+        loop {
+            let previous = self.interfaces.clone();
+            let mut changed = false;
+            for source_module in program.modules() {
+                for item in &source_module.syntax.items {
+                    let Item::UseDeclaration(declaration) = item else {
+                        continue;
+                    };
+                    if declaration.visibility != Visibility::Public {
+                        continue;
+                    }
+                    let Some(imported) = program.imported_module(declaration.syntax.id) else {
+                        continue;
+                    };
+                    let imported = &previous[imported.0];
+                    let exported = &mut self.interfaces[source_module.id.0];
+                    match &declaration.kind {
+                        UseKind::Namespace => {}
+                        UseKind::Glob => {
+                            changed |= extend_interface(exported, imported);
+                        }
+                        UseKind::Selected(names) => {
+                            for name in names {
+                                changed |= export_interface_item(exported, imported, name, name);
+                            }
+                        }
+                        UseKind::Renamed { item, alias } => {
+                            changed |= export_interface_item(exported, imported, item, alias);
+                        }
+                    }
+                }
+            }
+            if !changed {
+                break;
             }
         }
     }
