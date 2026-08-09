@@ -59,6 +59,7 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
                 "satisfies" => TokenKind::Satisfies,
                 "pub" => TokenKind::Pub,
                 "let" => TokenKind::Let,
+                "mut" => TokenKind::Mut,
                 "return" => TokenKind::Return,
                 "def" => TokenKind::Def,
                 "extern" => TokenKind::Extern,

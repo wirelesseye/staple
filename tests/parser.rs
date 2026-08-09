@@ -686,3 +686,31 @@ fn parses_repeated_spread_erased_and_variable_index_syntax() {
     };
     assert!(matches!(value.value, Some(Expression::Access(_))));
 }
+
+#[test]
+fn parses_mutable_patterns_and_assignment_statements_losslessly() {
+    let source = concat!(
+        "let mut value = 1\n",
+        "let (mut left, right) = (2, 3)\n",
+        "def update = (mut parameter: I32) => { parameter = 4; parameter }\n",
+        "value = left\n",
+    );
+    let module = parse(source).expect("mutable bindings and assignments should parse");
+    assert_eq!(module.text(), source);
+    let Statement::Binding(value) = statement(&module.items[0]) else {
+        panic!("expected mutable binding");
+    };
+    assert!(value.mutable);
+    let Statement::PatternBinding(pair) = statement(&module.items[1]) else {
+        panic!("expected pattern binding");
+    };
+    let Pattern::Product(pattern) = &pair.pattern else {
+        panic!("expected product pattern");
+    };
+    assert!(matches!(&pattern.elements[0], Pattern::Binding(binding) if binding.mutable));
+    assert!(matches!(
+        statement(&module.items[3]),
+        Statement::Assignment(_)
+    ));
+    assert!(parse("extern \"c\" { let mut value: I32 }\n").is_err());
+}

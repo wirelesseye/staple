@@ -166,6 +166,7 @@ pub enum IntrinsicFunction {
     StringFromCString,
     StringToCString,
     ErasedProductLength,
+    RefReplace,
     Drop,
 }
 
@@ -212,6 +213,8 @@ pub struct ResolvedModule {
     standard_traits: HashMap<String, TraitId>,
     checked_initialization_symbols: HashSet<SymbolId>,
     checked_initialization_reads: HashSet<SyntaxId>,
+    mutable_symbols: HashSet<SymbolId>,
+    symbol_modules: HashMap<SymbolId, ModuleId>,
 }
 
 impl ResolvedModule {
@@ -343,6 +346,14 @@ impl ResolvedModule {
     pub fn requires_initialization_check(&self, syntax: SyntaxId) -> bool {
         self.checked_initialization_reads.contains(&syntax)
     }
+
+    pub fn is_mutable_symbol(&self, symbol: SymbolId) -> bool {
+        self.mutable_symbols.contains(&symbol)
+    }
+
+    pub fn symbol_module(&self, symbol: SymbolId) -> Option<ModuleId> {
+        self.symbol_modules.get(&symbol).copied()
+    }
 }
 
 #[derive(Clone, Default)]
@@ -447,6 +458,8 @@ pub struct NameResolver {
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
+    mutable_symbols: HashSet<SymbolId>,
+    symbol_modules: HashMap<SymbolId, ModuleId>,
     interfaces: Vec<Interface>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
     module_values: Vec<HashMap<String, SymbolId>>,
@@ -580,6 +593,8 @@ impl NameResolver {
             standard_traits,
             checked_initialization_symbols: HashSet::new(),
             checked_initialization_reads: HashSet::new(),
+            mutable_symbols: self.mutable_symbols,
+            symbol_modules: self.symbol_modules,
         };
         let analysis = InitializationAnalyzer::new(&resolved).analyze();
         if !analysis.diagnostics.is_empty() {
@@ -694,6 +709,10 @@ impl NameResolver {
         if let Some(symbol) = self.interfaces[core.0].values.get("length").copied() {
             self.intrinsic_functions
                 .insert(symbol, IntrinsicFunction::ErasedProductLength);
+        }
+        if let Some(symbol) = self.interfaces[core.0].values.get("replace").copied() {
+            self.intrinsic_functions
+                .insert(symbol, IntrinsicFunction::RefReplace);
         }
         for (name, _) in expected {
             if !found.contains_key(&name) {
@@ -846,6 +865,7 @@ impl NameResolver {
             .map(|_| HashMap::new())
             .collect();
         for source_module in program.modules() {
+            self.current_module = source_module.id;
             for item in &source_module.syntax.items {
                 match item {
                     Item::ExternBlock(block) => {
@@ -1012,7 +1032,9 @@ impl NameResolver {
                         Statement::PatternBinding(binding) => {
                             self.allocate_pattern_symbols(&binding.pattern);
                         }
-                        Statement::Return(_) | Statement::Expression(_) => {}
+                        Statement::Assignment(_)
+                        | Statement::Return(_)
+                        | Statement::Expression(_) => {}
                     },
                     Item::UseDeclaration(_) => {}
                 }
@@ -1107,6 +1129,10 @@ impl NameResolver {
             .insert(binding.syntax.id, binding.trait_bounds.clone());
         self.symbols.insert(binding.syntax.id, symbol);
         self.symbol_owners.insert(symbol, None);
+        self.symbol_modules.insert(symbol, self.current_module);
+        if binding.mutable {
+            self.mutable_symbols.insert(symbol);
+        }
         symbol
     }
 
@@ -1119,6 +1145,10 @@ impl NameResolver {
                 self.declared_symbols.insert(binding.syntax.id, symbol);
                 self.symbols.insert(binding.syntax.id, symbol);
                 self.symbol_owners.insert(symbol, None);
+                self.symbol_modules.insert(symbol, self.current_module);
+                if binding.mutable {
+                    self.mutable_symbols.insert(symbol);
+                }
             }
             Pattern::Product(product) => {
                 for element in &product.elements {
@@ -1489,6 +1519,12 @@ impl NameResolver {
                 self.resolve_expression(&binding.value, None, None);
                 self.declare_pattern(&binding.pattern);
             }
+            Statement::Assignment(assignment) => {
+                self.syntax_modules
+                    .insert(assignment.syntax.id, self.current_module);
+                self.resolve_expression(&assignment.target, None, None);
+                self.resolve_expression(&assignment.value, None, None);
+            }
             Statement::Return(statement) => {
                 if self.function_stack.is_empty() {
                     self.diagnostics.push(Diagnostic::new(
@@ -1531,6 +1567,12 @@ impl NameResolver {
         }
         if binding.kind == BindingKind::Let {
             self.declare_allocated(binding);
+            if binding.mutable && binding.value.is_none() {
+                self.diagnostics.push(Diagnostic::new(
+                    binding.syntax.span.clone(),
+                    "mutable `let` bindings require an initializer",
+                ));
+            }
         }
         self.pop_type_parameter_scope();
     }
@@ -2121,6 +2163,11 @@ impl NameResolver {
                         binding.syntax.span.clone(),
                     );
                 }
+                if binding.mutable
+                    && let Some(symbol) = self.symbols.get(&binding.syntax.id).copied()
+                {
+                    self.mutable_symbols.insert(symbol);
+                }
             }
             Pattern::Product(product) => {
                 for element in &product.elements {
@@ -2166,6 +2213,11 @@ impl NameResolver {
         } else {
             self.declare_fresh(binding);
         }
+        if binding.mutable
+            && let Some(symbol) = self.symbols.get(&binding.syntax.id).copied()
+        {
+            self.mutable_symbols.insert(symbol);
+        }
     }
 
     fn declare_fresh(&mut self, binding: &Binding) {
@@ -2181,6 +2233,7 @@ impl NameResolver {
         self.next_symbol_id += 1;
         self.symbol_owners
             .insert(symbol, self.function_stack.last().copied());
+        self.symbol_modules.insert(symbol, self.current_module);
         self.declare_symbol(name, syntax, span, symbol);
     }
 
@@ -2320,7 +2373,7 @@ impl<'a> InitializationAnalyzer<'a> {
                             &mut globals,
                         );
                     }
-                    Statement::Return(_) | Statement::Expression(_) => {}
+                    Statement::Assignment(_) | Statement::Return(_) | Statement::Expression(_) => {}
                 }
             }
         }
@@ -2395,6 +2448,10 @@ impl<'a> InitializationAnalyzer<'a> {
                 }
                 self.expression(&binding.value, local, outer);
                 self.set_pattern_state(&binding.pattern, InitializationState::Initialized, local);
+            }
+            Statement::Assignment(assignment) => {
+                self.expression(&assignment.target, local, outer);
+                self.expression(&assignment.value, local, outer);
             }
             Statement::Return(statement) => self.expression(&statement.value, local, outer),
             Statement::Expression(expression) => self.expression(expression, local, outer),

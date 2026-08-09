@@ -2,3 +2,5 @@ pub(repr) type Ref = T => T
 
 // TODO: move this to the `product` module
 pub def length: T => Ref T[] -> USize = value => 0
+
+pub def replace: T => (Ref T, T) -> T = (reference, value) => value

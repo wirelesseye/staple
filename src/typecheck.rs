@@ -3,9 +3,9 @@ use std::fmt;
 
 use crate::{
     Accessor, Binding, BuiltinType, Diagnostic, Expression, FunctionId, IntegerType, Item, Module,
-    Pattern, PatternBindingKind, ProductType, ResolvedFunction, ResolvedModule, Span, Statement,
-    SymbolId, SyntaxId, TraitId, TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId,
-    TypeParameterId, TypeParameterPattern,
+    ModuleId, Pattern, PatternBindingKind, ProductType, ResolvedFunction, ResolvedModule, Span,
+    Statement, SymbolId, SyntaxId, TraitId, TraitMethodId, Type, TypeDeclaration,
+    TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
 };
 
 const MAX_PRODUCT_ARITY: usize = 65_535;
@@ -951,6 +951,25 @@ impl TypeChecker {
                                 && *function.result == CheckedType::USize
                     ))
                     .unwrap_or(CheckedType::Error),
+                crate::IntrinsicFunction::RefReplace => self
+                    .symbol_types
+                    .get(symbol)
+                    .cloned()
+                    .filter(|value_type| match value_type {
+                        CheckedType::Function(function) => {
+                            let CheckedType::Product(product) = function.parameter.as_ref() else {
+                                return false;
+                            };
+                            let [reference, replacement] = product.elements.as_slice() else {
+                                return false;
+                            };
+                            matches!(&reference.value_type, CheckedType::Ref(payload)
+                                if payload.as_ref() == &replacement.value_type
+                                    && payload.as_ref() == function.result.as_ref())
+                        }
+                        _ => false,
+                    })
+                    .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::Drop => self
                     .symbol_types
                     .get(symbol)
@@ -1318,6 +1337,14 @@ impl TypeChecker {
                 }
                 CheckedType::empty_product()
             }
+            Statement::Assignment(assignment) => {
+                let target_type = self.check_expression(module, &assignment.target);
+                if !self.did_return {
+                    self.check_assignment_place(module, assignment);
+                    self.check_expression_expected(module, &assignment.value, Some(&target_type));
+                }
+                CheckedType::empty_product()
+            }
             Statement::Return(statement) => {
                 let expected = self.return_contexts.last().cloned();
                 let concrete_expected = expected
@@ -1339,6 +1366,60 @@ impl TypeChecker {
                 CheckedType::empty_product()
             }
             Statement::Expression(expression) => self.check_expression(module, expression),
+        }
+    }
+
+    fn check_assignment_place(&mut self, module: &ResolvedModule, assignment: &crate::Assignment) {
+        let current_module = module.module_for_syntax(assignment.syntax.id);
+        if !self.is_writable_place(module, &assignment.target, current_module) {
+            self.diagnostics.push(Diagnostic::new(
+                assignment.target.syntax().span.clone(),
+                "assignment target is not a writable place",
+            ));
+        }
+    }
+
+    fn is_writable_place(
+        &self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        current_module: Option<ModuleId>,
+    ) -> bool {
+        if let Some(symbol) = module.symbol_for(expression.syntax().id) {
+            return module.is_mutable_symbol(symbol)
+                && module.symbol_module(symbol) == current_module;
+        }
+        match expression {
+            Expression::Access(access) => {
+                if self.expression_crosses_ref(&access.value) {
+                    true
+                } else {
+                    self.is_writable_place(module, &access.value, current_module)
+                }
+            }
+            Expression::Index(index) => {
+                if self.expression_crosses_ref(&index.value) {
+                    true
+                } else {
+                    self.is_writable_place(module, &index.value, current_module)
+                }
+            }
+            Expression::Name(_) => false,
+            _ => false,
+        }
+    }
+
+    fn expression_crosses_ref(&self, expression: &Expression) -> bool {
+        let Some(mut value_type) = self.expression_types.get(&expression.syntax().id).cloned()
+        else {
+            return false;
+        };
+        loop {
+            match value_type {
+                CheckedType::Distinct { representation, .. } => value_type = *representation,
+                CheckedType::Ref(_) => return true,
+                _ => return false,
+            }
         }
     }
 

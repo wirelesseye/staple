@@ -310,7 +310,20 @@ impl Grammar {
             _ if visibility == Visibility::Public => {
                 Err(self.error("`pub` must modify a declaration"))
             }
-            _ => self.parse_expression().map(Statement::Expression),
+            _ => {
+                let start = self.position;
+                let target = self.parse_expression()?;
+                if self.eat(TokenKind::Equals) {
+                    let value = self.parse_expression()?;
+                    Ok(Statement::Assignment(Assignment {
+                        syntax: self.syntax(start),
+                        target,
+                        value,
+                    }))
+                } else {
+                    Ok(Statement::Expression(target))
+                }
+            }
         }
     }
 
@@ -434,6 +447,9 @@ impl Grammar {
                 return Err(self.error("unterminated extern block"));
             }
             let binding = self.parse_binding(Visibility::Private, None, true)?;
+            if binding.mutable {
+                return Err(self.error("external bindings cannot be mutable"));
+            }
             if !binding.type_parameters.is_empty() {
                 return Err(self.error("external bindings cannot have compile-time parameters"));
             }
@@ -519,6 +535,10 @@ impl Grammar {
             }
             _ => return Err(self.error("expected `let`, `def`, `type`, or `extern`")),
         };
+        let mutable = self.eat(TokenKind::Mut);
+        if mutable && kind != BindingKind::Let {
+            return Err(self.error("`mut` is only allowed on `let` bindings"));
+        }
         let fixity = match self.peek() {
             Some(TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr) => {
                 if !allow_fixity {
@@ -574,6 +594,7 @@ impl Grammar {
             syntax: self.syntax(start),
             visibility,
             kind,
+            mutable,
             name,
             fixity,
             type_parameters,
@@ -723,6 +744,10 @@ impl Grammar {
     /// Parses either a binding pattern or a nested product pattern.
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         let start = self.position;
+        let mutable = self.eat(TokenKind::Mut);
+        if mutable {
+            return self.parse_named_pattern_from(start, true);
+        }
         if self.eat(TokenKind::Underscore) {
             Ok(Pattern::Wildcard(WildcardPattern {
                 syntax: self.syntax(start),
@@ -749,6 +774,14 @@ impl Grammar {
 
     fn parse_named_pattern(&mut self) -> Result<Pattern, ParseError> {
         let start = self.position;
+        self.parse_named_pattern_from(start, false)
+    }
+
+    fn parse_named_pattern_from(
+        &mut self,
+        start: usize,
+        mutable: bool,
+    ) -> Result<Pattern, ParseError> {
         let first = self.expect(TokenKind::Identifier, "expected pattern")?.text;
         let (namespace, name) = if self.eat(TokenKind::Dot) {
             let name = self
@@ -762,12 +795,20 @@ impl Grammar {
             && self.has_newline_before_next_token())
             && matches!(
                 self.peek(),
-                Some(TokenKind::Identifier | TokenKind::Underscore | TokenKind::LParen)
+                Some(
+                    TokenKind::Identifier
+                        | TokenKind::Mut
+                        | TokenKind::Underscore
+                        | TokenKind::LParen
+                )
             );
         if namespace.is_some() && !adjacent_argument {
             return Err(self.error("expected an argument after nominal pattern"));
         }
         if adjacent_argument {
+            if mutable {
+                return Err(self.error("`mut` can only modify a binding pattern"));
+            }
             let argument = Box::new(self.parse_pattern()?);
             return Ok(Pattern::Nominal(NominalPattern {
                 syntax: self.syntax(start),
@@ -785,6 +826,7 @@ impl Grammar {
         };
         Ok(Pattern::Binding(BindingPattern {
             syntax: self.syntax(start),
+            mutable,
             name,
             ty,
         }))
@@ -980,6 +1022,9 @@ impl Grammar {
             return Ok(None);
         }
         let start = self.position;
+        if self.peek() == Some(TokenKind::Equals) {
+            return Ok(None);
+        }
         if self.eat(TokenKind::Backtick) {
             let first = self
                 .expect(

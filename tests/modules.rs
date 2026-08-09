@@ -87,6 +87,28 @@ fn imports_standard_io_print_functions() {
 }
 
 #[test]
+fn only_the_declaring_module_can_assign_a_public_mutable_global() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "state.sta",
+        "pub let mut counter = 1\ncounter = 2\npub let point = Ref (x: 1, y: 2)\n",
+    );
+    fixture.write(
+        "main.sta",
+        "use state (counter, point)\nlet observed = counter\npoint.x = 4\n",
+    );
+    fixture
+        .compile()
+        .expect("the owner module may assign its mutable global");
+
+    fixture.write("main.sta", "use state counter\ncounter = 3\n");
+    let error = fixture
+        .compile()
+        .expect_err("importers cannot assign mutable globals");
+    assert!(error.contains("writable place"));
+}
+
+#[test]
 fn imports_public_values_and_types_through_all_use_forms() {
     let fixture = Fixture::new();
     fixture.write(

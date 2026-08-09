@@ -467,11 +467,13 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { let exit: I32 -> () }\n",
-                "let product: I32[3] = (10, 20, 30)\n",
+                "let mut product: I32[3] = (10, 20, 30)\n",
                 "let fixed: Ref I32[3] = Ref product\n",
                 "let erased: Ref I32[] = fixed\n",
                 "let index: USize = 1\n",
-                "let result = (erased[index] - 20) + (fixed[index] - 20) + (product[index] - 20)\n",
+                "product[index] = 21\n",
+                "erased[index] = 22\n",
+                "let result = (erased[index] - 22) + (fixed[index] - 22) + (product[index] - 21)\n",
                 "match length erased == 3 { True() => exit result, False() => exit 1 }\n",
             ),
         )
@@ -490,6 +492,64 @@ mod tests {
         let status = Command::new(&output)
             .status()
             .expect("erased-product executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runs_mutable_bindings_captures_and_refs() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-mutable-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-mutable-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let mut drops = 0\n",
+                "type Resource = I32\n",
+                "impl Drop Resource { def drop = Resource value => { drops = drops + value } }\n",
+                "def release = () => { let mut resource = Resource 1; resource = Resource 2 }\n",
+                "def abandon = () => { let mut resource = Resource 4; let update = () => { resource = Resource 5 }; update () }\n",
+                "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Ref n; churn (n - 1) } }\n",
+                "def make_counter = () => {\n",
+                "  let mut value = 1\n",
+                "  () => { value = value + 1; value }\n",
+                "}\n",
+                "let counter = make_counter ()\n",
+                "let first = counter ()\n",
+                "let second = counter ()\n",
+                "let point = Ref (x: 4, y: 5)\n",
+                "point.x = 6\n",
+                "let scalar = Ref 7\n",
+                "let old = replace (scalar, 8)\n",
+                "let Ref current = scalar\n",
+                "release ()\n",
+                "abandon ()\n",
+                "churn 40000\n",
+                "churn 40000\n",
+                "exit ((first - 2) + (second - 3) + (point.x - 6) + (old - 7) + (current - 8) + (drops - 12))\n",
+            ),
+        )
+        .expect("temporary mutable source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("mutable executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("mutable executable should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
         assert!(status.success());

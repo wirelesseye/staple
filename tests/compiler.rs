@@ -52,6 +52,118 @@ fn supports_repeated_spread_and_erased_product_references() {
 }
 
 #[test]
+fn type_checks_and_lowers_mutable_places_and_ref_replace() {
+    let source = concat!(
+        "let mut value = 1\n",
+        "value = 2\n",
+        "let mut pair = (x: 3, y: 4)\n",
+        "pair.x = value\n",
+        "let fixed: Ref I32[2] = Ref (5, 6)\n",
+        "fixed.0 = pair.x\n",
+        "let index: USize = 1\n",
+        "fixed[index] = 7\n",
+        "let scalar = Ref 8\n",
+        "let old = replace (scalar, 9)\n",
+        "def local = () => { let mut inside = 10; inside = old; inside }\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("mutable places should generate LLVM");
+    assert!(llvm.contains("mutable.binding.cell"));
+    assert!(llvm.contains("place.field"));
+    assert!(llvm.contains("ref.replace.old"));
+}
+
+#[test]
+fn rejects_invalid_assignment_targets_and_uninitialized_mutable_lets() {
+    let diagnostics = NameResolver::new()
+        .resolve(&parse("let mut value: I32\n").expect("syntax should parse"))
+        .expect_err("mutable lets require an initializer");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("require an initializer"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let value = 1\nvalue = 2\n"))
+        .expect_err("immutable names cannot be assigned");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("writable place"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "def product = () => (x: 1, y: 2)\nproduct ().x = 3\n",
+        ))
+        .expect_err("by-value temporaries are not writable");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("writable place"))
+    );
+}
+
+#[test]
+fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
+    let module = type_check(concat!(
+        "use std.cinterop *\n",
+        "def local = (first: CString, second: CString) => {\n",
+        "  let mut value = first\n",
+        "  value = second\n",
+        "  let moved = value\n",
+        "  value = c_string \"replacement\"\n",
+        "  drop moved\n",
+        "  drop value\n",
+        "}\n",
+        "def captured = (initial: CString) => {\n",
+        "  let mut value = initial\n",
+        "  () => { let old = value; value = c_string \"next\"; drop old }\n",
+        "}\n",
+        "def managed = (initial: CString, next: CString) => {\n",
+        "  let reference = Ref initial\n",
+        "  let old = replace (reference, next)\n",
+        "  drop old\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("move-only mutable cells should generate LLVM");
+    assert!(llvm.contains("mutable.drop.is_live"));
+    assert!(llvm.contains("__staple_gc_finalize_mutable_cell_"));
+    assert!(llvm.contains("ref.replace.old"));
+}
+
+#[test]
+fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
+    type_check(concat!(
+        "type Box = I32\n",
+        "type Empty\n",
+        "def parameter = (mut value: I32) => { value = value + 1; value }\n",
+        "def matched = (value: Box | Empty) => match value { Box (mut inner) => { inner = 3; inner }, Empty() => 0 }\n",
+        "def borrowed = (value: Ref I32) => { let Ref (mut inner) = value; inner = 4; inner }\n",
+    ));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Resource = I32\n",
+            "impl Drop Resource { def drop = Resource value => () }\n",
+            "def invalid = (value: Ref Resource) => { let Ref (mut inner) = value; inner }\n",
+        )))
+        .expect_err("move-only Ref borrows cannot become mutable locals");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("borrowed through `Ref` cannot be bound as mutable")
+    }));
+}
+
+#[test]
 fn rejects_invalid_product_spreads_and_indices() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let invalid: (...I32)\n"))

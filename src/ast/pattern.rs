@@ -63,6 +63,7 @@ pub struct WildcardPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingPattern {
     pub syntax: Syntax,
+    pub mutable: bool,
     pub name: String,
     pub ty: Type,
 }

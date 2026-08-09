@@ -21,6 +21,7 @@ pub enum TokenKind {
     Satisfies,
     Pub,
     Let,
+    Mut,
     Return,
     Def,
     Extern,

@@ -11,7 +11,7 @@ use inkwell::{
     targets::{
         CodeModel, FileType, InitializationConfig, RelocMode, Target, TargetMachine, TargetTriple,
     },
-    types::BasicType,
+    types::{BasicType, BasicTypeEnum},
     values::{AnyValue, AnyValueEnum, BasicValue, BasicValueEnum},
 };
 
@@ -47,6 +47,7 @@ struct ModuleEmitter<'module, 'context> {
     globals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
     closure_codes: HashMap<SymbolId, inkwell::values::FunctionValue<'context>>,
     gc_finalizers: HashMap<String, inkwell::values::FunctionValue<'context>>,
+    captured_mutable_symbols: HashSet<SymbolId>,
     external_symbols: HashSet<SymbolId>,
     storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initialization_states: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
@@ -67,6 +68,7 @@ struct FunctionEnvironment<'context> {
         ),
     >,
     owned_order: Vec<SymbolId>,
+    owned_mutable: HashSet<SymbolId>,
     binding_cells: HashMap<SymbolId, inkwell::values::PointerValue<'context>>,
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
@@ -81,6 +83,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         typed_module: &'module TypedModule,
         target_machine: &TargetMachine,
     ) -> Self {
+        let captured_mutable_symbols = typed_module
+            .functions()
+            .iter()
+            .flat_map(|function| function.captures.iter().copied())
+            .filter(|symbol| typed_module.resolved().is_mutable_symbol(*symbol))
+            .collect();
         Self {
             context,
             typed_module,
@@ -95,6 +103,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             globals: HashMap::new(),
             closure_codes: HashMap::new(),
             gc_finalizers: HashMap::new(),
+            captured_mutable_symbols,
             external_symbols: HashSet::new(),
             storage: HashMap::new(),
             initialization_states: HashMap::new(),
@@ -651,6 +660,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(symbol)
+                    || self.typed_module.resolved().is_mutable_symbol(symbol)
                 {
                     environment
                         .binding_cells
@@ -718,6 +728,28 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved pattern binding")
                     })?;
+                if binding.mutable && !self.storage.contains_key(&symbol) {
+                    let cell = self.allocate_mutable_cell(
+                        environment,
+                        symbol,
+                        binding.syntax.span.clone(),
+                    )?;
+                    let cell_type = self.compile_binding_cell_type(symbol)?;
+                    let slot = self
+                        .builder
+                        .build_struct_gep(cell_type, cell, 0, "binding.value")
+                        .map_err(compiler_diagnostic)?;
+                    self.builder
+                        .build_store(slot, value)
+                        .map_err(compiler_diagnostic)?;
+                    self.store_local_initialization_state(
+                        environment,
+                        symbol,
+                        2,
+                        binding.syntax.span.clone(),
+                    )?;
+                    return Ok(());
+                }
                 environment.locals.insert(symbol, value.as_any_value_enum());
                 self.track_symbol_ownership(environment, symbol)?;
                 Ok(())
@@ -804,6 +836,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .build_store(*live, self.context.bool_type().const_zero())
                     .map_err(compiler_diagnostic)?;
             }
+            if self.typed_module.resolved().is_mutable_symbol(symbol) {
+                self.store_local_initialization_state(environment, symbol, 0, Span::Compiler)?;
+            }
         }
         Ok(())
     }
@@ -820,6 +855,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 && let Some(value) = value_as_basic(value)
             {
                 self.compile_conditional_drop(value, &value_type, live, span.clone())?;
+            } else if environment.owned_mutable.remove(&symbol)
+                && let Some(cell) = environment.binding_cells.get(&symbol).copied()
+                && let Some(value_type) = self.typed_module.type_of_symbol(symbol).cloned()
+            {
+                let value_type = substitute_type(value_type, &self.active_type_substitutions);
+                self.compile_conditional_mutable_cell_drop(cell, &value_type, span.clone())?;
             }
         }
         environment.owned_order.truncate(start);
@@ -837,6 +878,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 && let Some(value) = value_as_basic(value)
             {
                 self.compile_conditional_drop(value, &value_type, live, span.clone())?;
+            } else if environment.owned_mutable.contains(&symbol)
+                && let Some(cell) = environment.binding_cells.get(&symbol).copied()
+                && let Some(value_type) = self.typed_module.type_of_symbol(symbol).cloned()
+            {
+                let value_type = substitute_type(value_type, &self.active_type_substitutions);
+                self.compile_conditional_mutable_cell_drop(cell, &value_type, span.clone())?;
             }
         }
         Ok(())
@@ -1136,6 +1183,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.store_pattern_globals(environment, &binding.pattern)?;
                 self.store_pattern_initialization_state(&binding.pattern, 2)
             }
+            Statement::Assignment(assignment) => self.compile_assignment(environment, assignment),
             Statement::Return(statement) => Err(Diagnostic::new(
                 statement.syntax.span.clone(),
                 "`return` is only allowed inside a function",
@@ -1319,6 +1367,57 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .struct_type(&[llvm_type, self.context.i8_type().into()], false))
     }
 
+    fn allocate_mutable_cell(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+            return Ok(cell);
+        }
+        let cell_type = self.compile_binding_cell_type(symbol)?;
+        let captured = self.captured_mutable_symbols.contains(&symbol);
+        let cell = if captured {
+            self.build_gc_allocation(
+                self.size_type
+                    .const_int(self.target_data.get_store_size(&cell_type), false),
+                "mutable.binding.cell",
+                span.clone(),
+            )?
+        } else {
+            self.builder
+                .build_alloca(cell_type, "mutable.binding.cell")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+        };
+        let state = self
+            .builder
+            .build_struct_gep(cell_type, cell, 1, "binding.state")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_store(state, self.context.i8_type().const_zero())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        let value_type = self
+            .typed_module
+            .type_of_symbol(symbol)
+            .cloned()
+            .map(|ty| substitute_type(ty, &self.active_type_substitutions))
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked mutable binding"))?;
+        if self.typed_module.type_needs_drop(&value_type) {
+            if captured {
+                let finalizer = self.ensure_mutable_cell_finalizer(&value_type)?;
+                self.set_gc_finalizer(cell, finalizer)?;
+            } else {
+                environment.owned_mutable.insert(symbol);
+                if !environment.owned_order.contains(&symbol) {
+                    environment.owned_order.push(symbol);
+                }
+            }
+        }
+        environment.binding_cells.insert(symbol, cell);
+        Ok(cell)
+    }
+
     fn store_local_initialization_state(
         &mut self,
         environment: &FunctionEnvironment<'context>,
@@ -1377,6 +1476,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
                     })?;
+                if binding.mutable {
+                    self.allocate_mutable_cell(environment, symbol, binding.syntax.span.clone())?;
+                }
                 if environment.binding_cells.contains_key(&symbol) {
                     self.store_local_initialization_state(
                         environment,
@@ -1438,6 +1540,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(None)
             }
+            Statement::Assignment(assignment) => {
+                self.compile_assignment(environment, assignment)?;
+                Ok(None)
+            }
             Statement::Return(statement) => {
                 let value = self.compile_expression(environment, &statement.value)?;
                 if environment.did_return {
@@ -1474,6 +1580,273 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(Some(value))
             }
+        }
+    }
+
+    fn compile_assignment(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        assignment: &crate::Assignment,
+    ) -> CodeGenerationResult<()> {
+        let (pointer, value_type, symbol) =
+            self.compile_place_pointer(environment, &assignment.target)?;
+        let value = self.compile_expression(environment, &assignment.value)?;
+        if environment.did_return {
+            return Ok(());
+        }
+        let value = value_as_basic(value).ok_or_else(|| {
+            Diagnostic::new(
+                assignment.value.syntax().span.clone(),
+                "assigned value is not storable",
+            )
+        })?;
+
+        if self.typed_module.type_needs_drop(&value_type) {
+            if let Some(symbol) = symbol
+                && let Some(cell) = environment.binding_cells.get(&symbol).copied()
+            {
+                self.compile_conditional_mutable_cell_drop(
+                    cell,
+                    &value_type,
+                    assignment.syntax.span.clone(),
+                )?;
+            } else {
+                let llvm_type = self.compile_type(&value_type)?;
+                let old = self
+                    .builder
+                    .build_load(llvm_type, pointer, "assignment.old")
+                    .map_err(compiler_diagnostic)?;
+                self.compile_drop_value(old, &value_type, assignment.syntax.span.clone())?;
+            }
+        }
+        self.builder
+            .build_store(pointer, value)
+            .map_err(|error| Diagnostic::new(assignment.syntax.span.clone(), error.to_string()))?;
+        if let Some(symbol) = symbol {
+            self.store_local_initialization_state(
+                environment,
+                symbol,
+                2,
+                assignment.syntax.span.clone(),
+            )?;
+            self.store_global_initialization_state(symbol, 2, assignment.syntax.span.clone())?;
+        }
+        Ok(())
+    }
+
+    fn compile_place_pointer(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        expression: &Expression,
+    ) -> CodeGenerationResult<(
+        inkwell::values::PointerValue<'context>,
+        CheckedType,
+        Option<SymbolId>,
+    )> {
+        if let Some(symbol) = self.typed_module.symbol_for(expression.syntax().id) {
+            let value_type = self
+                .typed_module
+                .type_of_symbol(symbol)
+                .cloned()
+                .map(|ty| substitute_type(ty, &self.active_type_substitutions))
+                .ok_or_else(|| {
+                    Diagnostic::new(expression.syntax().span.clone(), "unchecked place")
+                })?;
+            if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+                let cell_type = self.compile_binding_cell_type(symbol)?;
+                let slot = self
+                    .builder
+                    .build_struct_gep(cell_type, cell, 0, "binding.value")
+                    .map_err(compiler_diagnostic)?;
+                return Ok((slot, value_type, Some(symbol)));
+            }
+            if let Some(global) = self.storage.get(&symbol).copied() {
+                return Ok((global.as_pointer_value(), value_type, Some(symbol)));
+            }
+            return Err(Diagnostic::new(
+                expression.syntax().span.clone(),
+                "mutable binding storage is not available",
+            ));
+        }
+
+        match expression {
+            Expression::Access(access) => {
+                let checked = self
+                    .typed_module
+                    .access_for(access.syntax.id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(access.syntax.span.clone(), "missing checked access")
+                    })?;
+                let result_type = self.concrete_expression_type(expression).ok_or_else(|| {
+                    Diagnostic::new(access.syntax.span.clone(), "unchecked access place")
+                })?;
+                if checked.erased {
+                    let reference = self.compile_expression(environment, &access.value)?;
+                    let Some(BasicValueEnum::StructValue(reference)) = value_as_basic(reference)
+                    else {
+                        return Err(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            "invalid erased Ref place",
+                        ));
+                    };
+                    let pointer = self
+                        .builder
+                        .build_extract_value(reference, 0, "place.pointer")
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                    let length = self
+                        .builder
+                        .build_extract_value(reference, 1, "place.length")
+                        .map_err(compiler_diagnostic)?
+                        .into_int_value();
+                    let position = self.size_type.const_int(checked.index as u64, false);
+                    let out = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::UGE,
+                            position,
+                            length,
+                            "place.out_of_bounds",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    self.build_trap_if(out, access.syntax.span.clone())?;
+                    let element_type = self.compile_type(&result_type)?;
+                    let pointer = unsafe {
+                        self.builder
+                            .build_gep(element_type, pointer, &[position], "place.element")
+                    }
+                    .map_err(compiler_diagnostic)?;
+                    return Ok((pointer, result_type, None));
+                }
+
+                let (pointer, container_type) = if let Some(payload) = checked.dereference.clone() {
+                    let reference = self.compile_expression(environment, &access.value)?;
+                    let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(reference)
+                    else {
+                        return Err(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            "invalid Ref place",
+                        ));
+                    };
+                    (pointer, payload)
+                } else {
+                    if let Some(symbol) = self.typed_module.symbol_for(access.value.syntax().id)
+                        && self.typed_module.resolved().is_mutable_symbol(symbol)
+                    {
+                        self.check_symbol_initialization(
+                            environment,
+                            symbol,
+                            access.value.syntax().span.clone(),
+                        )?;
+                    }
+                    let (pointer, value_type, _) =
+                        self.compile_place_pointer(environment, &access.value)?;
+                    (pointer, value_type)
+                };
+                let container_type = strip_place_wrappers(container_type);
+                let BasicTypeEnum::StructType(container_llvm) =
+                    self.compile_type(&container_type)?
+                else {
+                    return Err(Diagnostic::new(
+                        access.syntax.span.clone(),
+                        "access place is not a product",
+                    ));
+                };
+                let pointer = self
+                    .builder
+                    .build_struct_gep(container_llvm, pointer, checked.index as u32, "place.field")
+                    .map_err(compiler_diagnostic)?;
+                Ok((pointer, result_type, None))
+            }
+            Expression::Index(index) => {
+                let checked = self
+                    .typed_module
+                    .index_for(index.syntax.id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(index.syntax.span.clone(), "missing checked index")
+                    })?;
+                let position = self.compile_expression(environment, &index.index)?;
+                let Some(BasicValueEnum::IntValue(position)) = value_as_basic(position) else {
+                    return Err(Diagnostic::new(
+                        index.index.syntax().span.clone(),
+                        "place index is not an integer",
+                    ));
+                };
+                let (base, length) = match checked.kind {
+                    crate::CheckedIndexKind::Value { length } => {
+                        if let Some(symbol) = self.typed_module.symbol_for(index.value.syntax().id)
+                            && self.typed_module.resolved().is_mutable_symbol(symbol)
+                        {
+                            self.check_symbol_initialization(
+                                environment,
+                                symbol,
+                                index.value.syntax().span.clone(),
+                            )?;
+                        }
+                        let (pointer, _, _) =
+                            self.compile_place_pointer(environment, &index.value)?;
+                        (pointer, self.size_type.const_int(length as u64, false))
+                    }
+                    crate::CheckedIndexKind::Ref { length } => {
+                        let reference = self.compile_expression(environment, &index.value)?;
+                        let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(reference)
+                        else {
+                            return Err(Diagnostic::new(
+                                index.syntax.span.clone(),
+                                "invalid Ref place",
+                            ));
+                        };
+                        (pointer, self.size_type.const_int(length as u64, false))
+                    }
+                    crate::CheckedIndexKind::ErasedRef => {
+                        let reference = self.compile_expression(environment, &index.value)?;
+                        let Some(BasicValueEnum::StructValue(reference)) =
+                            value_as_basic(reference)
+                        else {
+                            return Err(Diagnostic::new(
+                                index.syntax.span.clone(),
+                                "invalid erased Ref place",
+                            ));
+                        };
+                        let pointer = self
+                            .builder
+                            .build_extract_value(reference, 0, "place.pointer")
+                            .map_err(compiler_diagnostic)?
+                            .into_pointer_value();
+                        let length = self
+                            .builder
+                            .build_extract_value(reference, 1, "place.length")
+                            .map_err(compiler_diagnostic)?
+                            .into_int_value();
+                        (pointer, length)
+                    }
+                };
+                let out = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::UGE,
+                        position,
+                        length,
+                        "place.out_of_bounds",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.build_trap_if(out, index.syntax.span.clone())?;
+                let element_type =
+                    substitute_type(checked.element.clone(), &self.active_type_substitutions);
+                let llvm_type = self.compile_type(&element_type)?;
+                let pointer = unsafe {
+                    self.builder
+                        .build_gep(llvm_type, base, &[position], "place.element")
+                }
+                .map_err(compiler_diagnostic)?;
+                Ok((pointer, element_type, None))
+            }
+            _ => Err(Diagnostic::new(
+                expression.syntax().span.clone(),
+                "assignment target is not a place",
+            )),
         }
     }
 
@@ -1775,7 +2148,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         symbol,
                         self.typed_module
                             .resolved()
-                            .requires_initialization_check(access.syntax.id),
+                            .requires_initialization_check(access.syntax.id)
+                            || self.typed_module.resolved().is_mutable_symbol(symbol),
                         access.syntax.span.clone(),
                         "value is not available here".to_owned(),
                     );
@@ -1925,7 +2299,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     symbol,
                     self.typed_module
                         .resolved()
-                        .requires_initialization_check(name.syntax.id),
+                        .requires_initialization_check(name.syntax.id)
+                        || self.typed_module.resolved().is_mutable_symbol(symbol),
                     name.syntax.span.clone(),
                     format!("value `{}` is not available here", name.name),
                 )
@@ -2717,6 +3092,100 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(function)
     }
 
+    fn ensure_mutable_cell_finalizer(
+        &mut self,
+        value_type: &CheckedType,
+    ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
+        let key = format!("mutable-cell:{value_type:?}");
+        if let Some(function) = self.gc_finalizers.get(&key).copied() {
+            return Ok(function);
+        }
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let name = format!("__staple_gc_finalize_mutable_cell_{:016x}", hasher.finish());
+        let function_type = self.context.void_type().fn_type(
+            &[self.context.ptr_type(AddressSpace::default()).into()],
+            false,
+        );
+        let function = self.llvm_module.add_function(&name, function_type, None);
+        self.gc_finalizers.insert(key, function);
+        let previous_block = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        let cell = function
+            .get_first_param()
+            .expect("mutable cell payload")
+            .into_pointer_value();
+        self.compile_conditional_mutable_cell_drop(cell, value_type, Span::Compiler)?;
+        self.builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
+        if let Some(block) = previous_block {
+            self.builder.position_at_end(block);
+        }
+        Ok(function)
+    }
+
+    fn compile_conditional_mutable_cell_drop(
+        &mut self,
+        cell: inkwell::values::PointerValue<'context>,
+        value_type: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let llvm_value_type = self.compile_type(value_type)?;
+        let cell_type = self
+            .context
+            .struct_type(&[llvm_value_type, self.context.i8_type().into()], false);
+        let state = self
+            .builder
+            .build_struct_gep(cell_type, cell, 1, "mutable.drop.state")
+            .map_err(compiler_diagnostic)?;
+        let live = self
+            .builder
+            .build_load(self.context.i8_type(), state, "mutable.drop.live")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let live = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                live,
+                self.context.i8_type().const_int(2, false),
+                "mutable.drop.is_live",
+            )
+            .map_err(compiler_diagnostic)?;
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "mutable drop outside a function"))?;
+        let drop_block = self.context.append_basic_block(function, "mutable.drop");
+        let continue_block = self
+            .context
+            .append_basic_block(function, "mutable.drop.continue");
+        self.builder
+            .build_conditional_branch(live, drop_block, continue_block)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(drop_block);
+        let slot = self
+            .builder
+            .build_struct_gep(cell_type, cell, 0, "mutable.drop.value")
+            .map_err(compiler_diagnostic)?;
+        let value = self
+            .builder
+            .build_load(llvm_value_type, slot, "mutable.drop.loaded")
+            .map_err(compiler_diagnostic)?;
+        self.compile_drop_value(value, value_type, span)?;
+        self.builder
+            .build_store(state, self.context.i8_type().const_zero())
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_unconditional_branch(continue_block)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(continue_block);
+        Ok(())
+    }
+
     fn set_gc_finalizer(
         &mut self,
         pointer: inkwell::values::PointerValue<'context>,
@@ -3355,6 +3824,39 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map(|value| value.as_any_value_enum())
                     .map_err(compiler_diagnostic);
             }
+            IntrinsicFunction::RefReplace => {
+                let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
+                let [
+                    inkwell::values::BasicMetadataValueEnum::PointerValue(reference),
+                    replacement,
+                ] = arguments.as_slice()
+                else {
+                    return Err(Diagnostic::new(
+                        call.argument.syntax().span.clone(),
+                        "replace requires a fixed Ref and a replacement value",
+                    ));
+                };
+                let payload = self
+                    .concrete_expression_type(&Expression::Call(call.clone()))
+                    .ok_or_else(|| {
+                        Diagnostic::new(call.syntax.span.clone(), "unchecked replace payload")
+                    })?;
+                let payload_type = self.compile_type(&payload)?;
+                let old = self
+                    .builder
+                    .build_load(payload_type, *reference, "ref.replace.old")
+                    .map_err(compiler_diagnostic)?;
+                let replacement = BasicValueEnum::try_from(*replacement).map_err(|_| {
+                    Diagnostic::new(
+                        call.argument.syntax().span.clone(),
+                        "replacement is not storable",
+                    )
+                })?;
+                self.builder
+                    .build_store(*reference, replacement)
+                    .map_err(compiler_diagnostic)?;
+                return Ok(old.as_any_value_enum());
+            }
             _ => {}
         }
         let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
@@ -3445,6 +3947,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             IntrinsicFunction::StringFromCString
             | IntrinsicFunction::StringToCString
             | IntrinsicFunction::ErasedProductLength
+            | IntrinsicFunction::RefReplace
             | IntrinsicFunction::Drop => {
                 unreachable!()
             }
@@ -4072,6 +4575,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(symbol)
+                    || self.typed_module.resolved().is_mutable_symbol(symbol)
                 {
                     environment
                         .binding_cells
@@ -4171,6 +4675,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .typed_module
                 .resolved()
                 .requires_initialization_state(symbol)
+                || self.typed_module.resolved().is_mutable_symbol(symbol)
             {
                 continue;
             }
@@ -4230,6 +4735,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(*symbol)
+                    || self.typed_module.resolved().is_mutable_symbol(*symbol)
                 {
                     return Ok(self.context.ptr_type(AddressSpace::default()).into());
                 }
@@ -4616,6 +5122,15 @@ fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
         }
         CheckedType::CPointer { pointee } => checked_type_contains_ref(pointee),
         _ => false,
+    }
+}
+
+fn strip_place_wrappers(mut value_type: CheckedType) -> CheckedType {
+    loop {
+        match value_type {
+            CheckedType::Distinct { representation, .. } => value_type = *representation,
+            other => return other,
+        }
     }
 }
 

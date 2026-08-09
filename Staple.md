@@ -229,10 +229,13 @@ staple has two binding keywords: `let` and `def`.
 
 ### `let`
 
-`let` declares or defines an immutable value.
+`let` declares or defines a value. Bindings are immutable unless their binding
+pattern is marked `mut`:
 
 ```staple
 let answer = 42
+let mut counter = 0
+counter = counter + 1
 ```
 
 A type may be written after the binding name:
@@ -240,6 +243,25 @@ A type may be written after the binding name:
 ```staple
 let answer: I32 = 42
 ```
+
+`mut` may mark individual names in any binding pattern, including function
+parameters and match arms. A mutable `let` must have an initializer. Assignment
+is a statement and its right-hand side must have the type of the destination:
+
+```staple
+let (mut left, right) = (1, 2)
+left = right
+
+def increment = (mut value: I32) => {
+    value = value + 1
+    value
+}
+```
+
+Fields and indices of a by-value product are writable when the product is rooted
+in a mutable binding. Mutable locals captured by functions are shared cells, so
+the defining scope and all closures observe subsequent assignments. Public
+mutable module bindings remain assignable only from their declaring module.
 
 An external declaration may omit its value because its implementation is
 provided outside staple:
@@ -827,16 +849,30 @@ not implicit.
 contains a UTF-8 byte pointer, byte length, and capacity; the byte storage is
 managed as well. Copying a `String` copies the handle.
 
-`Ref T` is an immutable garbage-collected reference to a value of type `T`.
+`Ref T` is a garbage-collected reference to a value of type `T`.
 Constructing `Ref value` copies or moves `value` into a managed allocation;
 copying a `Ref` copies only its non-null handle. Product fields and indices can
-be accessed directly through the handle:
+be accessed and assigned directly through the handle. Every alias observes the
+same payload mutation, even when the binding containing the `Ref` is immutable:
 
 ```staple
 let point: Ref (x: I32, y: I32) = Ref (x: 10, y: 20)
 let x = point.x
+point.x = 30
 let Ref (captured_x, captured_y) = point
 ```
+
+The prelude function `replace: T => (Ref T, T) -> T` replaces a whole fixed
+payload and returns the previous value:
+
+```staple
+let value = Ref 10
+let previous = replace (value, 20)
+```
+
+`replace` is not available for erased product payloads because an erased product
+cannot be passed by value. Individual elements of `Ref T[]` remain writable by
+index.
 
 `Ref` follows the ordinary literal representation rules when nested inside a
 nominal type. For example, this declaration retains both constructor layers:
@@ -871,7 +907,7 @@ crosses a growing allocation threshold. Stack/register values, module globals,
 managed payloads, closure environments, and recursive binding cells are
 scanned conservatively, so an integer or raw bit pattern that resembles a
 managed address can keep an otherwise unreachable object alive temporarily.
-There are currently no null, weak, mutable, manual-collection, or
+There are currently no null, weak, manual-collection, or
 collector-statistics operations. Closure environments are managed objects.
 Recursive binding cells remain permanent conservative root regions and are a
 future migration.

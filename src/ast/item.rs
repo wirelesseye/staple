@@ -52,8 +52,16 @@ pub enum UseKind {
 pub enum Statement {
     Binding(Binding),
     PatternBinding(PatternBinding),
+    Assignment(Assignment),
     Return(ReturnStatement),
     Expression(Expression),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assignment {
+    pub syntax: Syntax,
+    pub target: Expression,
+    pub value: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,6 +185,7 @@ pub struct Binding {
     pub syntax: Syntax,
     pub visibility: Visibility,
     pub kind: BindingKind,
+    pub mutable: bool,
     pub name: String,
     pub fixity: Option<Fixity>,
     pub type_parameters: Vec<TypeParameterPattern>,

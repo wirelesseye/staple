@@ -130,6 +130,7 @@ impl<'a> OwnershipChecker<'a> {
             let state = if self
                 .module
                 .is_copy_in_function(value_type, Some(function.id))
+                || self.module.resolved().is_mutable_symbol(*capture)
             {
                 ValueState::Available
             } else {
@@ -148,7 +149,9 @@ impl<'a> OwnershipChecker<'a> {
                 if let Some(function_id) = self.module.function_for(value.syntax.id) {
                     let captures = self.module.functions()[function_id.0].captures.clone();
                     for capture in captures {
-                        self.use_symbol(capture, &value.syntax, true);
+                        if !self.module.resolved().is_mutable_symbol(capture) {
+                            self.use_symbol(capture, &value.syntax, true);
+                        }
                     }
                 }
                 true
@@ -276,6 +279,14 @@ impl<'a> OwnershipChecker<'a> {
                 self.bind_pattern(&binding.pattern, false);
                 true
             }
+            Statement::Assignment(assignment) => {
+                self.check_assignment_target(&assignment.target);
+                self.check_expression(&assignment.value, true);
+                if let Some(symbol) = self.module.symbol_for(assignment.target.syntax().id) {
+                    self.states.insert(symbol, ValueState::Available);
+                }
+                true
+            }
             Statement::Return(statement) => {
                 self.check_expression(&statement.value, true);
                 false
@@ -295,6 +306,12 @@ impl<'a> OwnershipChecker<'a> {
                         .module
                         .type_of_symbol(symbol)
                         .is_some_and(|ty| !self.module.is_copy_in_function(ty, self.function));
+                if frozen && value.mutable {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.syntax.span.clone(),
+                        "a move-only value borrowed through `Ref` cannot be bound as mutable",
+                    ));
+                }
                 self.states.insert(
                     symbol,
                     if frozen {
@@ -320,6 +337,25 @@ impl<'a> OwnershipChecker<'a> {
                 self.bind_pattern(&value.argument, freeze || dereferences_ref);
             }
             Pattern::Wildcard(_) => {}
+        }
+    }
+
+    fn check_assignment_target(&mut self, expression: &Expression) {
+        if self.module.symbol_for(expression.syntax().id).is_some() {
+            return;
+        }
+        match expression {
+            Expression::Name(_) => {}
+            Expression::Access(access) => {
+                self.check_expression(&access.value, false);
+            }
+            Expression::Index(index) => {
+                self.check_expression(&index.value, false);
+                self.check_expression(&index.index, true);
+            }
+            _ => {
+                self.check_expression(expression, false);
+            }
         }
     }
 

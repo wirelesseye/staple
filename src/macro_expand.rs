@@ -471,6 +471,11 @@ impl MacroExpander {
             Statement::PatternBinding(binding) => {
                 binding.value = self.expand_expression(module, binding.value.clone(), depth);
             }
+            Statement::Assignment(assignment) => {
+                assignment.target =
+                    self.expand_expression(module, assignment.target.clone(), depth);
+                assignment.value = self.expand_expression(module, assignment.value.clone(), depth);
+            }
             Statement::Return(return_) => {
                 return_.value = self.expand_expression(module, return_.value.clone(), depth);
             }
@@ -924,6 +929,13 @@ impl MacroExpander {
                                 return None;
                             }
                         }
+                        Statement::Assignment(assignment) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                assignment.syntax.span.clone(),
+                                "mutation is not allowed during compile-time evaluation",
+                            ));
+                            return None;
+                        }
                         Statement::Expression(value) => {
                             result = self.eval_expression(module, value, &mut local)?
                         }
@@ -1199,7 +1211,9 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
                 .is_none_or(|statement| match statement {
                     Statement::Expression(expression) => obviously_not_syntax(expression, 0),
                     Statement::Return(return_) => obviously_not_syntax(&return_.value, 0),
-                    Statement::Binding(_) | Statement::PatternBinding(_) => true,
+                    Statement::Binding(_)
+                    | Statement::PatternBinding(_)
+                    | Statement::Assignment(_) => true,
                 })
         }
         Expression::Infix(_)
@@ -1385,6 +1399,10 @@ fn substitute_statement(
         Statement::PatternBinding(binding) => {
             binding.value = substitute_splices(&binding.value, environment, diagnostics)?
         }
+        Statement::Assignment(assignment) => {
+            assignment.target = substitute_splices(&assignment.target, environment, diagnostics)?;
+            assignment.value = substitute_splices(&assignment.value, environment, diagnostics)?;
+        }
         Statement::Return(return_) => {
             return_.value = substitute_splices(&return_.value, environment, diagnostics)?
         }
@@ -1469,6 +1487,10 @@ fn alpha_rename_expression(
                             mark,
                             scopes.last_mut().unwrap(),
                         );
+                    }
+                    Statement::Assignment(assignment) => {
+                        alpha_rename_expression(&mut assignment.target, mark, scopes);
+                        alpha_rename_expression(&mut assignment.value, mark, scopes);
                     }
                     Statement::Return(return_) => {
                         alpha_rename_expression(&mut return_.value, mark, scopes)
@@ -1572,6 +1594,11 @@ fn freshen_statement(
             expander.freshen_syntax(&mut binding.syntax, module, mark);
             freshen_pattern(expander, &mut binding.pattern, module, mark);
             expander.freshen_expression(&mut binding.value, module, mark);
+        }
+        Statement::Assignment(assignment) => {
+            expander.freshen_syntax(&mut assignment.syntax, module, mark);
+            expander.freshen_expression(&mut assignment.target, module, mark);
+            expander.freshen_expression(&mut assignment.value, module, mark);
         }
         Statement::Return(return_) => {
             expander.freshen_syntax(&mut return_.syntax, module, mark);
