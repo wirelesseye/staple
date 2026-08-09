@@ -118,7 +118,7 @@
       "patterns": [
         {
           "name": "keyword.control.staple",
-          "match": "\\b(?:match|return)\\b"
+          "match": "\\b(?:break|continue|loop|match|return)\\b"
         },
         {
           "name": "keyword.control.import.staple",
