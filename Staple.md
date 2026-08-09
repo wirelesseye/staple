@@ -135,7 +135,11 @@ Stapler loads the standard library at compile time. `--stdlib <path>` selects
 its root explicitly, `STAPLE_STDLIB` provides the same path through the
 environment, and an installed compiler otherwise looks in
 `../lib/staple/stdlib` relative to its executable. The standard-library root
-contains `std/core.sta` and `std/cinterop.sta`.
+contains `std/core.sta`, feature modules under `std/core/`, and
+`std/cinterop.sta`. Core features include numbers, booleans, strings,
+references, results, syntax, equality, copying, dropping, and defaults.
+`std.core` re-exports their public items and remains the stable prelude
+interface.
 
 ### Top-level statements
 

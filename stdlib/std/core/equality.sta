@@ -1,0 +1,4 @@
+pub trait Eq = T => {
+    equal: T -> T -> Bool
+    not_equal: T -> T -> Bool
+}

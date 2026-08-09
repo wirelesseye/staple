@@ -1,0 +1,33 @@
+pub type I8 = opaque
+pub type I16 = opaque
+pub type I32 = opaque
+pub type I64 = opaque
+pub type U8 = opaque
+pub type U16 = opaque
+pub type U32 = opaque
+pub type U64 = opaque
+pub type ISize = opaque
+pub type USize = opaque
+
+pub trait Add = T => {
+    add: T -> T -> T
+}
+
+pub trait Subtract = T => {
+    subtract: T -> T -> T
+}
+
+pub trait Multiply = T => {
+    multiply: T -> T -> T
+}
+
+pub trait Divide = T => {
+    divide: T -> T -> T
+}
+
+pub trait Compare = T => {
+    less_than: T -> T -> Bool
+    less_than_or_equal: T -> T -> Bool
+    greater_than: T -> T -> Bool
+    greater_than_or_equal: T -> T -> Bool
+}

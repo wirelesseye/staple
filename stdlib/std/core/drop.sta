@@ -1,0 +1,5 @@
+pub trait Drop = T => {
+    drop: T -> ()
+}
+
+pub def drop: T => T -> () = value => ()

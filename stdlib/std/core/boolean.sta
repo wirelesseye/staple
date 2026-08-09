@@ -1,0 +1,16 @@
+pub type True
+pub type False
+pub type alias Bool = True | False
+
+impl Eq Bool {
+    def equal = left => right => match (left, right) {
+        (True(), True()) => True,
+        (False(), False()) => True,
+        _ => False,
+    }
+    def not_equal = left => right => match (left, right) {
+        (True(), False()) => True,
+        (False(), True()) => True,
+        _ => False,
+    }
+}

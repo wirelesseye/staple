@@ -1,0 +1,395 @@
+pub use std.core.number.types *
+
+extern "staple-intrinsic" {
+    let __i8_add: (I8, I8) -> I8
+    let __i8_subtract: (I8, I8) -> I8
+    let __i8_multiply: (I8, I8) -> I8
+    let __i8_divide: (I8, I8) -> I8
+    let __i16_add: (I16, I16) -> I16
+    let __i16_subtract: (I16, I16) -> I16
+    let __i16_multiply: (I16, I16) -> I16
+    let __i16_divide: (I16, I16) -> I16
+    let __i32_add: (I32, I32) -> I32
+    let __i32_subtract: (I32, I32) -> I32
+    let __i32_multiply: (I32, I32) -> I32
+    let __i32_divide: (I32, I32) -> I32
+    let __i64_add: (I64, I64) -> I64
+    let __i64_subtract: (I64, I64) -> I64
+    let __i64_multiply: (I64, I64) -> I64
+    let __i64_divide: (I64, I64) -> I64
+    let __u8_add: (U8, U8) -> U8
+    let __u8_subtract: (U8, U8) -> U8
+    let __u8_multiply: (U8, U8) -> U8
+    let __u8_divide: (U8, U8) -> U8
+    let __u16_add: (U16, U16) -> U16
+    let __u16_subtract: (U16, U16) -> U16
+    let __u16_multiply: (U16, U16) -> U16
+    let __u16_divide: (U16, U16) -> U16
+    let __u32_add: (U32, U32) -> U32
+    let __u32_subtract: (U32, U32) -> U32
+    let __u32_multiply: (U32, U32) -> U32
+    let __u32_divide: (U32, U32) -> U32
+    let __u64_add: (U64, U64) -> U64
+    let __u64_subtract: (U64, U64) -> U64
+    let __u64_multiply: (U64, U64) -> U64
+    let __u64_divide: (U64, U64) -> U64
+    let __isize_add: (ISize, ISize) -> ISize
+    let __isize_subtract: (ISize, ISize) -> ISize
+    let __isize_multiply: (ISize, ISize) -> ISize
+    let __isize_divide: (ISize, ISize) -> ISize
+    let __usize_add: (USize, USize) -> USize
+    let __usize_subtract: (USize, USize) -> USize
+    let __usize_multiply: (USize, USize) -> USize
+    let __usize_divide: (USize, USize) -> USize
+    let __i8_equal: (I8, I8) -> Bool
+    let __i8_not_equal: (I8, I8) -> Bool
+    let __i8_less_than: (I8, I8) -> Bool
+    let __i8_less_than_or_equal: (I8, I8) -> Bool
+    let __i8_greater_than: (I8, I8) -> Bool
+    let __i8_greater_than_or_equal: (I8, I8) -> Bool
+    let __i16_equal: (I16, I16) -> Bool
+    let __i16_not_equal: (I16, I16) -> Bool
+    let __i16_less_than: (I16, I16) -> Bool
+    let __i16_less_than_or_equal: (I16, I16) -> Bool
+    let __i16_greater_than: (I16, I16) -> Bool
+    let __i16_greater_than_or_equal: (I16, I16) -> Bool
+    let __i32_equal: (I32, I32) -> Bool
+    let __i32_not_equal: (I32, I32) -> Bool
+    let __i32_less_than: (I32, I32) -> Bool
+    let __i32_less_than_or_equal: (I32, I32) -> Bool
+    let __i32_greater_than: (I32, I32) -> Bool
+    let __i32_greater_than_or_equal: (I32, I32) -> Bool
+    let __i64_equal: (I64, I64) -> Bool
+    let __i64_not_equal: (I64, I64) -> Bool
+    let __i64_less_than: (I64, I64) -> Bool
+    let __i64_less_than_or_equal: (I64, I64) -> Bool
+    let __i64_greater_than: (I64, I64) -> Bool
+    let __i64_greater_than_or_equal: (I64, I64) -> Bool
+    let __u8_equal: (U8, U8) -> Bool
+    let __u8_not_equal: (U8, U8) -> Bool
+    let __u8_less_than: (U8, U8) -> Bool
+    let __u8_less_than_or_equal: (U8, U8) -> Bool
+    let __u8_greater_than: (U8, U8) -> Bool
+    let __u8_greater_than_or_equal: (U8, U8) -> Bool
+    let __u16_equal: (U16, U16) -> Bool
+    let __u16_not_equal: (U16, U16) -> Bool
+    let __u16_less_than: (U16, U16) -> Bool
+    let __u16_less_than_or_equal: (U16, U16) -> Bool
+    let __u16_greater_than: (U16, U16) -> Bool
+    let __u16_greater_than_or_equal: (U16, U16) -> Bool
+    let __u32_equal: (U32, U32) -> Bool
+    let __u32_not_equal: (U32, U32) -> Bool
+    let __u32_less_than: (U32, U32) -> Bool
+    let __u32_less_than_or_equal: (U32, U32) -> Bool
+    let __u32_greater_than: (U32, U32) -> Bool
+    let __u32_greater_than_or_equal: (U32, U32) -> Bool
+    let __u64_equal: (U64, U64) -> Bool
+    let __u64_not_equal: (U64, U64) -> Bool
+    let __u64_less_than: (U64, U64) -> Bool
+    let __u64_less_than_or_equal: (U64, U64) -> Bool
+    let __u64_greater_than: (U64, U64) -> Bool
+    let __u64_greater_than_or_equal: (U64, U64) -> Bool
+    let __isize_equal: (ISize, ISize) -> Bool
+    let __isize_not_equal: (ISize, ISize) -> Bool
+    let __isize_less_than: (ISize, ISize) -> Bool
+    let __isize_less_than_or_equal: (ISize, ISize) -> Bool
+    let __isize_greater_than: (ISize, ISize) -> Bool
+    let __isize_greater_than_or_equal: (ISize, ISize) -> Bool
+    let __usize_equal: (USize, USize) -> Bool
+    let __usize_not_equal: (USize, USize) -> Bool
+    let __usize_less_than: (USize, USize) -> Bool
+    let __usize_less_than_or_equal: (USize, USize) -> Bool
+    let __usize_greater_than: (USize, USize) -> Bool
+    let __usize_greater_than_or_equal: (USize, USize) -> Bool
+}
+
+impl Add I8 {
+    def add = left => right => __i8_add (left, right)
+}
+
+impl Subtract I8 {
+    def subtract = left => right => __i8_subtract (left, right)
+}
+
+impl Multiply I8 {
+    def multiply = left => right => __i8_multiply (left, right)
+}
+
+impl Divide I8 {
+    def divide = left => right => __i8_divide (left, right)
+}
+
+impl Add I16 {
+    def add = left => right => __i16_add (left, right)
+}
+
+impl Subtract I16 {
+    def subtract = left => right => __i16_subtract (left, right)
+}
+
+impl Multiply I16 {
+    def multiply = left => right => __i16_multiply (left, right)
+}
+
+impl Divide I16 {
+    def divide = left => right => __i16_divide (left, right)
+}
+
+impl Add I32 {
+    def add = left => right => __i32_add (left, right)
+}
+
+impl Subtract I32 {
+    def subtract = left => right => __i32_subtract (left, right)
+}
+
+impl Multiply I32 {
+    def multiply = left => right => __i32_multiply (left, right)
+}
+
+impl Divide I32 {
+    def divide = left => right => __i32_divide (left, right)
+}
+
+impl Add I64 {
+    def add = left => right => __i64_add (left, right)
+}
+
+impl Subtract I64 {
+    def subtract = left => right => __i64_subtract (left, right)
+}
+
+impl Multiply I64 {
+    def multiply = left => right => __i64_multiply (left, right)
+}
+
+impl Divide I64 {
+    def divide = left => right => __i64_divide (left, right)
+}
+
+impl Add U8 {
+    def add = left => right => __u8_add (left, right)
+}
+
+impl Subtract U8 {
+    def subtract = left => right => __u8_subtract (left, right)
+}
+
+impl Multiply U8 {
+    def multiply = left => right => __u8_multiply (left, right)
+}
+
+impl Divide U8 {
+    def divide = left => right => __u8_divide (left, right)
+}
+
+impl Add U16 {
+    def add = left => right => __u16_add (left, right)
+}
+
+impl Subtract U16 {
+    def subtract = left => right => __u16_subtract (left, right)
+}
+
+impl Multiply U16 {
+    def multiply = left => right => __u16_multiply (left, right)
+}
+
+impl Divide U16 {
+    def divide = left => right => __u16_divide (left, right)
+}
+
+impl Add U32 {
+    def add = left => right => __u32_add (left, right)
+}
+
+impl Subtract U32 {
+    def subtract = left => right => __u32_subtract (left, right)
+}
+
+impl Multiply U32 {
+    def multiply = left => right => __u32_multiply (left, right)
+}
+
+impl Divide U32 {
+    def divide = left => right => __u32_divide (left, right)
+}
+
+impl Add U64 {
+    def add = left => right => __u64_add (left, right)
+}
+
+impl Subtract U64 {
+    def subtract = left => right => __u64_subtract (left, right)
+}
+
+impl Multiply U64 {
+    def multiply = left => right => __u64_multiply (left, right)
+}
+
+impl Divide U64 {
+    def divide = left => right => __u64_divide (left, right)
+}
+
+impl Add ISize {
+    def add = left => right => __isize_add (left, right)
+}
+
+impl Subtract ISize {
+    def subtract = left => right => __isize_subtract (left, right)
+}
+
+impl Multiply ISize {
+    def multiply = left => right => __isize_multiply (left, right)
+}
+
+impl Divide ISize {
+    def divide = left => right => __isize_divide (left, right)
+}
+
+impl Add USize {
+    def add = left => right => __usize_add (left, right)
+}
+
+impl Subtract USize {
+    def subtract = left => right => __usize_subtract (left, right)
+}
+
+impl Multiply USize {
+    def multiply = left => right => __usize_multiply (left, right)
+}
+
+impl Divide USize {
+    def divide = left => right => __usize_divide (left, right)
+}
+
+impl Eq I8 {
+    def equal = left => right => __i8_equal (left, right)
+    def not_equal = left => right => __i8_not_equal (left, right)
+}
+
+impl Compare I8 {
+    def less_than = left => right => __i8_less_than (left, right)
+    def less_than_or_equal = left => right => __i8_less_than_or_equal (left, right)
+    def greater_than = left => right => __i8_greater_than (left, right)
+    def greater_than_or_equal = left => right => __i8_greater_than_or_equal (left, right)
+}
+
+impl Eq I16 {
+    def equal = left => right => __i16_equal (left, right)
+    def not_equal = left => right => __i16_not_equal (left, right)
+}
+
+impl Compare I16 {
+    def less_than = left => right => __i16_less_than (left, right)
+    def less_than_or_equal = left => right => __i16_less_than_or_equal (left, right)
+    def greater_than = left => right => __i16_greater_than (left, right)
+    def greater_than_or_equal = left => right => __i16_greater_than_or_equal (left, right)
+}
+
+impl Eq I32 {
+    def equal = left => right => __i32_equal (left, right)
+    def not_equal = left => right => __i32_not_equal (left, right)
+}
+
+impl Compare I32 {
+    def less_than = left => right => __i32_less_than (left, right)
+    def less_than_or_equal = left => right => __i32_less_than_or_equal (left, right)
+    def greater_than = left => right => __i32_greater_than (left, right)
+    def greater_than_or_equal = left => right => __i32_greater_than_or_equal (left, right)
+}
+
+impl Eq I64 {
+    def equal = left => right => __i64_equal (left, right)
+    def not_equal = left => right => __i64_not_equal (left, right)
+}
+
+impl Compare I64 {
+    def less_than = left => right => __i64_less_than (left, right)
+    def less_than_or_equal = left => right => __i64_less_than_or_equal (left, right)
+    def greater_than = left => right => __i64_greater_than (left, right)
+    def greater_than_or_equal = left => right => __i64_greater_than_or_equal (left, right)
+}
+
+impl Eq U8 {
+    def equal = left => right => __u8_equal (left, right)
+    def not_equal = left => right => __u8_not_equal (left, right)
+}
+
+impl Compare U8 {
+    def less_than = left => right => __u8_less_than (left, right)
+    def less_than_or_equal = left => right => __u8_less_than_or_equal (left, right)
+    def greater_than = left => right => __u8_greater_than (left, right)
+    def greater_than_or_equal = left => right => __u8_greater_than_or_equal (left, right)
+}
+
+impl Eq U16 {
+    def equal = left => right => __u16_equal (left, right)
+    def not_equal = left => right => __u16_not_equal (left, right)
+}
+
+impl Compare U16 {
+    def less_than = left => right => __u16_less_than (left, right)
+    def less_than_or_equal = left => right => __u16_less_than_or_equal (left, right)
+    def greater_than = left => right => __u16_greater_than (left, right)
+    def greater_than_or_equal = left => right => __u16_greater_than_or_equal (left, right)
+}
+
+impl Eq U32 {
+    def equal = left => right => __u32_equal (left, right)
+    def not_equal = left => right => __u32_not_equal (left, right)
+}
+
+impl Compare U32 {
+    def less_than = left => right => __u32_less_than (left, right)
+    def less_than_or_equal = left => right => __u32_less_than_or_equal (left, right)
+    def greater_than = left => right => __u32_greater_than (left, right)
+    def greater_than_or_equal = left => right => __u32_greater_than_or_equal (left, right)
+}
+
+impl Eq U64 {
+    def equal = left => right => __u64_equal (left, right)
+    def not_equal = left => right => __u64_not_equal (left, right)
+}
+
+impl Compare U64 {
+    def less_than = left => right => __u64_less_than (left, right)
+    def less_than_or_equal = left => right => __u64_less_than_or_equal (left, right)
+    def greater_than = left => right => __u64_greater_than (left, right)
+    def greater_than_or_equal = left => right => __u64_greater_than_or_equal (left, right)
+}
+
+impl Eq ISize {
+    def equal = left => right => __isize_equal (left, right)
+    def not_equal = left => right => __isize_not_equal (left, right)
+}
+
+impl Compare ISize {
+    def less_than = left => right => __isize_less_than (left, right)
+    def less_than_or_equal = left => right => __isize_less_than_or_equal (left, right)
+    def greater_than = left => right => __isize_greater_than (left, right)
+    def greater_than_or_equal = left => right => __isize_greater_than_or_equal (left, right)
+}
+
+impl Eq USize {
+    def equal = left => right => __usize_equal (left, right)
+    def not_equal = left => right => __usize_not_equal (left, right)
+}
+
+impl Compare USize {
+    def less_than = left => right => __usize_less_than (left, right)
+    def less_than_or_equal = left => right => __usize_less_than_or_equal (left, right)
+    def greater_than = left => right => __usize_greater_than (left, right)
+    def greater_than_or_equal = left => right => __usize_greater_than_or_equal (left, right)
+}
+
+pub def infixl 6 + : T => Copy T => Add T => T -> T -> T = left => right => Add.add left right
+pub def infixl 6 - : T => Copy T => Subtract T => T -> T -> T = left => right => Subtract.subtract left right
+pub def infixl 7 * : T => Copy T => Multiply T => T -> T -> T = left => right => Multiply.multiply left right
+pub def infixl 7 / : T => Copy T => Divide T => T -> T -> T = left => right => Divide.divide left right
+pub def infix 4 == : T => Copy T => Eq T => T -> T -> Bool = left => right => Eq.equal left right
+pub def infix 4 != : T => Copy T => Eq T => T -> T -> Bool = left => right => Eq.not_equal left right
+pub def infix 4 < : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.less_than left right
+pub def infix 4 <= : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.less_than_or_equal left right
+pub def infix 4 > : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.greater_than left right
+pub def infix 4 >= : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.greater_than_or_equal left right

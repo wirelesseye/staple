@@ -1,0 +1,1 @@
+pub(repr) type Ok = T => T

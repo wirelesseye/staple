@@ -1,0 +1,16 @@
+pub trait Default = T => {
+    default: () -> T
+}
+
+impl Default I8 { def default = () => 0 }
+impl Default I16 { def default = () => 0 }
+impl Default I32 { def default = () => 0 }
+impl Default I64 { def default = () => 0 }
+impl Default U8 { def default = () => 0 }
+impl Default U16 { def default = () => 0 }
+impl Default U32 { def default = () => 0 }
+impl Default U64 { def default = () => 0 }
+impl Default ISize { def default = () => 0 }
+impl Default USize { def default = () => 0 }
+impl Default Bool { def default = () => False }
+impl Default String { def default = () => "" }

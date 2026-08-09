@@ -209,6 +209,7 @@ pub struct ResolvedModule {
     trait_references: HashMap<SyntaxId, TraitId>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
+    standard_traits: HashMap<String, TraitId>,
     checked_initialization_symbols: HashSet<SymbolId>,
     checked_initialization_reads: HashSet<SyntaxId>,
 }
@@ -329,6 +330,10 @@ impl ResolvedModule {
 
     pub fn trait_implementations(&self) -> &[ResolvedTraitImplementation] {
         &self.trait_implementations
+    }
+
+    pub fn standard_trait(&self, name: &str) -> Option<TraitId> {
+        self.standard_traits.get(name).copied()
     }
 
     pub fn requires_initialization_state(&self, symbol: SymbolId) -> bool {
@@ -481,12 +486,15 @@ impl NameResolver {
         let program = crate::macro_expand::expand_program(program)?;
         self.standard_library_core = program.standard_library_core();
         self.standard_library_cinterop = program.standard_library_cinterop();
+        let standard_library_directory = self
+            .standard_library_core
+            .and_then(|core| program.module(core).path.parent());
         self.multiple_modules = program
             .modules()
             .iter()
             .filter(|module| {
-                Some(module.id) != self.standard_library_core
-                    && Some(module.id) != self.standard_library_cinterop
+                standard_library_directory
+                    .is_none_or(|directory| !module.path.starts_with(directory))
             })
             .count()
             > 1;
@@ -540,6 +548,10 @@ impl NameResolver {
             .flat_map(|block| block.bindings.iter())
             .filter_map(|binding| self.declared_symbols.get(&binding.syntax.id).copied())
             .collect();
+        let standard_traits = self
+            .standard_library_core
+            .map(|core| self.interfaces[core.0].traits.clone())
+            .unwrap_or_default();
         let mut resolved = ResolvedModule {
             program,
             functions: self.functions,
@@ -565,6 +577,7 @@ impl NameResolver {
             trait_references: self.trait_references,
             trait_method_references: self.trait_method_references,
             trait_implementations: self.trait_implementations,
+            standard_traits,
             checked_initialization_symbols: HashSet::new(),
             checked_initialization_reads: HashSet::new(),
         };
@@ -641,11 +654,17 @@ impl NameResolver {
             IntrinsicFunction::StringToCString,
         ));
         let mut found = HashMap::new();
-        for source_module in [Some(core), program.standard_library_cinterop()]
-            .into_iter()
-            .flatten()
+        let standard_library_directory = program
+            .module(core)
+            .path
+            .parent()
+            .expect("std.core has a parent directory");
+        for source_module in program
+            .modules()
+            .iter()
+            .filter(|module| module.path.starts_with(standard_library_directory))
         {
-            for item in &program.module(source_module).syntax.items {
+            for item in &source_module.syntax.items {
                 let Item::ExternBlock(block) = item else {
                     continue;
                 };
@@ -668,25 +687,13 @@ impl NameResolver {
                 }
             }
         }
-        for item in &program.module(core).syntax.items {
-            let Item::Statement(statement) = item else {
-                continue;
-            };
-            let Statement::Binding(binding) = statement.as_ref() else {
-                continue;
-            };
-            if binding.name == "drop"
-                && let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied()
-            {
-                self.intrinsic_functions
-                    .insert(symbol, IntrinsicFunction::Drop);
-            }
-            if binding.name == "length"
-                && let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied()
-            {
-                self.intrinsic_functions
-                    .insert(symbol, IntrinsicFunction::ErasedProductLength);
-            }
+        if let Some(symbol) = self.interfaces[core.0].values.get("drop").copied() {
+            self.intrinsic_functions
+                .insert(symbol, IntrinsicFunction::Drop);
+        }
+        if let Some(symbol) = self.interfaces[core.0].values.get("length").copied() {
+            self.intrinsic_functions
+                .insert(symbol, IntrinsicFunction::ErasedProductLength);
         }
         for (name, _) in expected {
             if !found.contains_key(&name) {
@@ -697,9 +704,7 @@ impl NameResolver {
             }
         }
         for source_module in program.modules() {
-            if source_module.id == core
-                || Some(source_module.id) == program.standard_library_cinterop()
-            {
+            if source_module.path.starts_with(standard_library_directory) {
                 continue;
             }
             for item in &source_module.syntax.items {
@@ -713,7 +718,6 @@ impl NameResolver {
                 }
             }
         }
-        self.collect_reexports(program);
     }
 
     fn collect_reexports(&mut self, program: &Program) {
@@ -784,10 +788,10 @@ impl NameResolver {
         name: &str,
         builtin: BuiltinType,
     ) {
-        let Some(id) = self.declared_types[module.0].get(name).copied() else {
+        let Some(id) = self.interfaces[module.0].types.get(name).copied() else {
             self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
-                format!("standard library `{module_name}` does not declare `{name}`"),
+                format!("standard library `{module_name}` does not export `{name}`"),
             ));
             return;
         };
@@ -1014,6 +1018,7 @@ impl NameResolver {
                 }
             }
         }
+        self.collect_reexports(program);
     }
 
     fn build_definition_context_values(&mut self, program: &Program) {

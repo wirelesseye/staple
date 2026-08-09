@@ -556,35 +556,9 @@ impl TypeChecker {
     }
 
     pub fn check(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
-        let standard_core = module.program().standard_library_core();
-        let standard_trait_syntax = |name: &str| {
-            standard_core.and_then(|core| {
-                module
-                    .program()
-                    .module(core)
-                    .syntax
-                    .items
-                    .iter()
-                    .find_map(|item| {
-                        let Item::TraitDeclaration(declaration) = item else {
-                            return None;
-                        };
-                        (declaration.name == name).then_some(declaration.syntax.id)
-                    })
-            })
-        };
-        let copy_syntax = standard_trait_syntax("Copy");
-        let drop_syntax = standard_trait_syntax("Drop");
-        let default_syntax = standard_trait_syntax("Default");
-        self.copy_trait = module.traits().iter().find_map(|(id, value)| {
-            (Some(value.declaration.syntax.id) == copy_syntax).then_some(*id)
-        });
-        self.drop_trait = module.traits().iter().find_map(|(id, value)| {
-            (Some(value.declaration.syntax.id) == drop_syntax).then_some(*id)
-        });
-        self.default_trait = module.traits().iter().find_map(|(id, value)| {
-            (Some(value.declaration.syntax.id) == default_syntax).then_some(*id)
-        });
+        self.copy_trait = module.standard_trait("Copy");
+        self.drop_trait = module.standard_trait("Drop");
+        self.default_trait = module.standard_trait("Default");
         self.collect_type_declarations(&module);
         self.collect_traits(&module);
         self.collect_trait_implementations(&module);
