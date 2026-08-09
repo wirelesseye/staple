@@ -172,7 +172,7 @@ pub struct ResolvedFunction {
     pub name: String,
     pub binding_syntax: Option<SyntaxId>,
     pub pattern: Pattern,
-    pub return_annotation: Option<Type>,
+    pub result_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<crate::TraitBound>,
@@ -1448,18 +1448,15 @@ impl NameResolver {
                 self.function_parents
                     .insert(function_id, self.function_stack.last().copied());
                 self.resolve_pattern_types(&function.pattern);
-                if let Some(ty) = &function.return_type {
-                    self.resolve_type(ty);
-                }
                 self.function_stack.push(function_id);
                 self.push_scope();
                 self.declare_pattern(&function.pattern);
-                let expected_result = function.return_type.as_ref().or_else(|| {
+                let expected_result = (|| {
                     let Type::Function(function_type) = expected_type? else {
                         return None;
                     };
                     Some(function_type.result.as_ref())
-                });
+                })();
                 self.resolve_expression(&function.body, expected_result, None);
                 self.pop_scope();
                 self.function_stack.pop();
@@ -1485,7 +1482,10 @@ impl NameResolver {
                     name,
                     binding_syntax: suggested_function.map(|(_, syntax)| syntax),
                     pattern: function.pattern.clone(),
-                    return_annotation: function.return_type.clone(),
+                    result_annotation: match function.body.as_ref() {
+                        Expression::Satisfies(satisfies) => Some(satisfies.ty.clone()),
+                        _ => None,
+                    },
                     binding_annotation: expected_type.cloned(),
                     type_parameters: suggested_function
                         .and_then(|(_, syntax)| self.binding_type_parameters.get(&syntax).cloned())
@@ -1496,6 +1496,10 @@ impl NameResolver {
                     captures,
                     body: (*function.body).clone(),
                 });
+            }
+            Expression::Satisfies(satisfies) => {
+                self.resolve_type(&satisfies.ty);
+                self.resolve_expression(&satisfies.value, Some(&satisfies.ty), suggested_function);
             }
             Expression::Match(match_) => {
                 self.resolve_expression(&match_.subject, None, None);
@@ -1510,7 +1514,17 @@ impl NameResolver {
             Expression::Block(block) => self.resolve_block(block),
             Expression::Product(product) => {
                 for element in &product.elements {
-                    self.resolve_expression(&element.value, None, None);
+                    let singleton_expected = (product.elements.len() == 1)
+                        .then_some(expected_type)
+                        .flatten();
+                    let singleton_suggestion = (product.elements.len() == 1)
+                        .then_some(suggested_function)
+                        .flatten();
+                    self.resolve_expression(
+                        &element.value,
+                        singleton_expected,
+                        singleton_suggestion,
+                    );
                 }
             }
             Expression::Call(call) => {
@@ -2253,6 +2267,7 @@ impl<'a> InitializationAnalyzer<'a> {
                 );
                 self.expression(&function.body, &mut function_local, &snapshot);
             }
+            Expression::Satisfies(satisfies) => self.expression(&satisfies.value, local, outer),
             Expression::Match(match_) => {
                 self.expression(&match_.subject, local, outer);
                 for arm in &match_.arms {

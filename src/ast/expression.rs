@@ -3,6 +3,7 @@ use super::{Pattern, Statement, Syntax, Type};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
     Function(Box<FunctionExpression>),
+    Satisfies(Box<SatisfiesExpression>),
     Match(MatchExpression),
     Block(BlockExpression),
     Product(ProductExpression),
@@ -21,6 +22,7 @@ impl Expression {
     pub fn syntax(&self) -> &Syntax {
         match self {
             Self::Function(expression) => &expression.syntax,
+            Self::Satisfies(expression) => &expression.syntax,
             Self::Match(expression) => &expression.syntax,
             Self::Block(expression) => &expression.syntax,
             Self::Product(expression) => &expression.syntax,
@@ -68,8 +70,14 @@ pub struct MatchArm {
 pub struct FunctionExpression {
     pub syntax: Syntax,
     pub pattern: Pattern,
-    pub return_type: Option<Type>,
     pub body: Box<Expression>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SatisfiesExpression {
+    pub syntax: Syntax,
+    pub value: Box<Expression>,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

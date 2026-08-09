@@ -68,7 +68,7 @@ fn compiler_diagnostics_report_line_and_column() {
 fn infers_and_checks_function_return_types() {
     let module = type_check(concat!(
         "let first = (a: I32, b: I32) => a\n",
-        "let second = (a: I32, b: I32) -> I32 => b\n",
+        "let second = (a: I32, b: I32) => b satisfies I32\n",
         "first (1, second (3, 2))\n",
     ));
 
@@ -82,6 +82,25 @@ fn infers_and_checks_function_return_types() {
             .expect("function should have a checked type");
         assert_eq!(*function_type.result, CheckedType::I32);
     }
+}
+
+#[test]
+fn checks_general_satisfies_expressions_and_contextually_types_functions() {
+    type_check(concat!(
+        "let small = 42 satisfies I8\n",
+        "let identity = (value => value) satisfies I32 -> I32\n",
+        "let result: I32 = identity 42\n",
+    ));
+
+    let module = resolve("let invalid = \"text\" satisfies I32\n");
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("an expression must satisfy its asserted type");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `I32`, found `String`")
+    }));
 }
 
 #[test]
@@ -571,7 +590,7 @@ fn does_not_add_state_metadata_to_safe_bindings() {
 
 #[test]
 fn rejects_an_incorrect_function_result_type() {
-    let module = resolve("use std.cinterop.*\nlet answer = () -> CString => 42\n");
+    let module = resolve("use std.cinterop.*\nlet answer = () => 42 satisfies CString\n");
     let diagnostics = TypeChecker::new()
         .check(module)
         .expect_err("incorrect return type should fail");
@@ -1879,7 +1898,7 @@ fn rejects_returns_outside_functions_and_incompatible_return_values() {
             .contains("only allowed inside a function")
     }));
 
-    let module = resolve("def invalid = () -> String => { return 42; }\n");
+    let module = resolve("def invalid = () => { return 42; } satisfies String\n");
     let diagnostics = TypeChecker::new()
         .check(module)
         .expect_err("return value should match the function result");
@@ -1893,16 +1912,16 @@ fn rejects_returns_outside_functions_and_incompatible_return_values() {
 #[test]
 fn supports_contextual_literals_and_arithmetic_for_all_integer_types() {
     let source = concat!(
-        "def i8_value = () -> I8 => { let a: I8 = 8; let b: I8 = 4; (a + b) * b - a / b; }\n",
-        "def i16_value = () -> I16 => { let a: I16 = 8; let b: I16 = 4; (a + b) * b - a / b; }\n",
-        "def i32_value = () -> I32 => { let a: I32 = 8; let b: I32 = 4; (a + b) * b - a / b; }\n",
-        "def i64_value = () -> I64 => { let a: I64 = 8; let b: I64 = 4; (a + b) * b - a / b; }\n",
-        "def u8_value = () -> U8 => { let a: U8 = 8; let b: U8 = 4; (a + b) * b - a / b; }\n",
-        "def u16_value = () -> U16 => { let a: U16 = 8; let b: U16 = 4; (a + b) * b - a / b; }\n",
-        "def u32_value = () -> U32 => { let a: U32 = 8; let b: U32 = 4; (a + b) * b - a / b; }\n",
-        "def u64_value = () -> U64 => { let a: U64 = 8; let b: U64 = 4; (a + b) * b - a / b; }\n",
-        "def isize_value = () -> ISize => { let a: ISize = 8; let b: ISize = 4; (a + b) * b - a / b; }\n",
-        "def usize_value = () -> USize => { let a: USize = 8; let b: USize = 4; (a + b) * b - a / b; }\n",
+        "def i8_value = () => { let a: I8 = 8; let b: I8 = 4; (a + b) * b - a / b; } satisfies I8\n",
+        "def i16_value = () => { let a: I16 = 8; let b: I16 = 4; (a + b) * b - a / b; } satisfies I16\n",
+        "def i32_value = () => { let a: I32 = 8; let b: I32 = 4; (a + b) * b - a / b; } satisfies I32\n",
+        "def i64_value = () => { let a: I64 = 8; let b: I64 = 4; (a + b) * b - a / b; } satisfies I64\n",
+        "def u8_value = () => { let a: U8 = 8; let b: U8 = 4; (a + b) * b - a / b; } satisfies U8\n",
+        "def u16_value = () => { let a: U16 = 8; let b: U16 = 4; (a + b) * b - a / b; } satisfies U16\n",
+        "def u32_value = () => { let a: U32 = 8; let b: U32 = 4; (a + b) * b - a / b; } satisfies U32\n",
+        "def u64_value = () => { let a: U64 = 8; let b: U64 = 4; (a + b) * b - a / b; } satisfies U64\n",
+        "def isize_value = () => { let a: ISize = 8; let b: ISize = 4; (a + b) * b - a / b; } satisfies ISize\n",
+        "def usize_value = () => { let a: USize = 8; let b: USize = 4; (a + b) * b - a / b; } satisfies USize\n",
         "i8_value ()\n",
     );
     let module = type_check(source);

@@ -7,10 +7,10 @@ let details: (name: String, year: I32) = (name: greeting, year: 2026)
 def add_curried: I32 -> I32 -> I32 = left => right => left + right
 def add_ten = add_curried 10
 
-def nested_sum = (first: I32, (second: I32, third: I32)) -> I32 => {
+def nested_sum = (first: I32, (second: I32, third: I32)) => {
     let subtotal = first + second
     subtotal + third
-}
+} satisfies I32
 
 // Symbolic and backtick infix operators are ordinary curried functions.
 def infixl 1 |>: I32 -> I32 -> I32 = value => function_result => function_result

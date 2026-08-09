@@ -56,6 +56,7 @@ pub(crate) fn lex(source: &str) -> Vec<SyntaxToken> {
             kind = match text {
                 "use" => TokenKind::Use,
                 "as" => TokenKind::As,
+                "satisfies" => TokenKind::Satisfies,
                 "pub" => TokenKind::Pub,
                 "let" => TokenKind::Let,
                 "return" => TokenKind::Return,

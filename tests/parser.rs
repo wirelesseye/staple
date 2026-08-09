@@ -265,8 +265,8 @@ fn parses_product_parameter_and_expression_body() {
 }
 
 #[test]
-fn parses_function_result_annotation_before_body_arrow() {
-    let source = "let add = (a: I32, b: I32) -> I32 => a + b\n";
+fn parses_low_precedence_satisfies_expression() {
+    let source = "let add = (a: I32, b: I32) => a + b satisfies I32\n";
     let root = parse(source).expect("function should parse");
     let Statement::Binding(binding) = statement(&root.items[0]) else {
         panic!("expected binding");
@@ -275,11 +275,17 @@ fn parses_function_result_annotation_before_body_arrow() {
         panic!("expected function");
     };
 
-    assert!(matches!(
-        function.return_type,
-        Some(Type::Named(ref named)) if named.name == "I32"
-    ));
+    let Expression::Satisfies(satisfies) = function.body.as_ref() else {
+        panic!("expected satisfies expression");
+    };
+    assert!(matches!(satisfies.ty, Type::Named(ref named) if named.name == "I32"));
+    assert!(matches!(satisfies.value.as_ref(), Expression::Infix(_)));
     assert_eq!(root.text(), source);
+}
+
+#[test]
+fn rejects_removed_inline_function_result_annotation() {
+    assert!(parse("let add = (a: I32, b: I32) -> I32 => a + b\n").is_err());
 }
 
 #[test]
@@ -359,7 +365,7 @@ fn rejects_block_local_fixity_modifiers() {
 fn rejects_the_old_function_body_arrow() {
     let error = parse("let answer = () -> 42\n").expect_err("old syntax should not parse");
 
-    assert!(error.message.contains("expected type"));
+    assert!(error.message.contains("expected `=>`"));
 }
 
 #[test]

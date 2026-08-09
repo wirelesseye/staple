@@ -1272,6 +1272,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.build_closure(environment, id, function.syntax.span.clone())
                     .map(|closure| closure.as_any_value_enum())
             }
+            Expression::Satisfies(satisfies) => {
+                self.compile_expression(environment, &satisfies.value)
+            }
             Expression::Match(match_) => self.compile_match_expression(environment, match_),
             Expression::Block(block) => {
                 self.predeclare_checked_bindings(environment, &block.statements)?;

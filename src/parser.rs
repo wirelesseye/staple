@@ -38,6 +38,7 @@ struct Grammar {
     next_syntax_id: usize,
     newline_terminates_expression: bool,
     newline_terminates_type: bool,
+    any_newline_terminates_type: bool,
     brace_terminates_expression: bool,
     quote_depth: usize,
     source_name: Option<Arc<str>>,
@@ -62,6 +63,7 @@ impl Grammar {
             next_syntax_id,
             newline_terminates_expression: false,
             newline_terminates_type: false,
+            any_newline_terminates_type: false,
             brace_terminates_expression: false,
             quote_depth: 0,
             source_name,
@@ -681,28 +683,37 @@ impl Grammar {
             Err(error) => error,
         };
         self.position = checkpoint;
-        let expression = self.parse_infix_expression()?;
+        let mut expression = self.parse_infix_expression()?;
+        while self.eat(TokenKind::Satisfies) {
+            let previous = self.newline_terminates_type;
+            let previous_any = self.any_newline_terminates_type;
+            self.newline_terminates_type = true;
+            self.any_newline_terminates_type = true;
+            let ty = self.parse_type();
+            self.newline_terminates_type = previous;
+            self.any_newline_terminates_type = previous_any;
+            let ty = ty?;
+            expression = Expression::Satisfies(Box::new(crate::SatisfiesExpression {
+                syntax: self.syntax(checkpoint),
+                value: Box::new(expression),
+                ty,
+            }));
+        }
         if matches!(self.peek(), Some(TokenKind::Arrow | TokenKind::FatArrow)) {
             return Err(function_error);
         }
         Ok(expression)
     }
 
-    /// Parses a function parameter pattern, optional result type, and body.
+    /// Parses a function parameter pattern and body.
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
         let pattern = self.parse_pattern()?;
-        let return_type = if self.eat(TokenKind::Arrow) {
-            Some(self.parse_type()?)
-        } else {
-            None
-        };
         self.expect(TokenKind::FatArrow, "expected `=>` before function body")?;
         let body = Box::new(self.parse_expression()?);
         Ok(FunctionExpression {
             syntax: self.syntax(start),
             pattern,
-            return_type,
             body,
         })
     }
@@ -816,8 +827,9 @@ impl Grammar {
         while self.starts_type_atom()
             && !(self.newline_terminates_type
                 && self.has_newline_before_next_token()
-                && self.peek() == Some(TokenKind::Identifier)
-                && self.peek_n(1) == Some(TokenKind::Colon))
+                && (self.any_newline_terminates_type
+                    || (self.peek() == Some(TokenKind::Identifier)
+                        && self.peek_n(1) == Some(TokenKind::Colon))))
         {
             let argument = self.parse_type_atom()?;
             ty = Type::Application(TypeApplication {

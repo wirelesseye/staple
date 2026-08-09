@@ -727,9 +727,9 @@ impl TypeChecker {
                 parameter = *annotation.parameter;
             }
             let result = function
-                .return_annotation
+                .result_annotation
                 .as_ref()
-                .map(|value_type| self.resolve_source_type(module, value_type))
+                .map(|annotation| self.resolve_source_type(module, annotation))
                 .or_else(|| {
                     function.binding_annotation.as_ref().and_then(|annotation| {
                         let CheckedType::Function(function_type) =
@@ -1250,6 +1250,10 @@ impl TypeChecker {
                     .cloned()
                     .map(CheckedType::Function)
                     .unwrap_or(CheckedType::Error)
+            }
+            Expression::Satisfies(satisfies) => {
+                let annotation = self.resolve_source_type(module, &satisfies.ty);
+                self.check_expression_expected(module, &satisfies.value, Some(&annotation))
             }
             Expression::Match(match_) => self.check_match_expression(module, match_, expected),
             Expression::Block(block) => {

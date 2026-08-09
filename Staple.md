@@ -405,11 +405,10 @@ compile time remains unspecified.
 
 ## Functions
 
-A function value has one of the following forms:
+A function value has the following form:
 
 ```text
 <parameter> => <body expression>
-<parameter> -> <result type> => <body expression>
 ```
 
 There is no distinction between a top-level function and an inline function or
@@ -421,9 +420,9 @@ pattern matches the elements of a product, and a nominal pattern exposes the
 single representation value of a distinct type when that representation is
 visible.
 
-`=>` introduces the body of the abstraction. `->`, when present, introduces an
-explicit result type. Without an explicit result type, stapler infers it from
-the body.
+`=>` introduces the body of the abstraction. Stapler infers the result type
+from the body unless a surrounding function type or a `satisfies` expression
+constrains it.
 
 A binding pattern normally has a name and a type:
 
@@ -484,12 +483,27 @@ or a surrounding function annotation.
 A singleton product pattern is equivalent to its contained pattern, so
 `(value: T)` matches the same values as `value: T`.
 
-A function value may declare its result type directly:
+A function body may explicitly constrain its result with `satisfies`:
 
 ```staple
-let get_number = () -> I32 => {
+let get_number = () => {
     42
-}
+} satisfies I32
+```
+
+`<expression> satisfies <type>` is a general type-ascription expression, not a
+runtime conversion. It checks the expression with the given expected type and
+evaluates to the expression's value. `satisfies` has lower precedence than
+function application and infix operators, so `a + b satisfies I32` means
+`(a + b) satisfies I32`. Parentheses may constrain a smaller expression.
+
+When a `satisfies` expression is a function body, its type constrains the
+function result, including values produced by explicit `return` statements.
+For named bindings, a complete binding annotation is the canonical way to
+write both the parameter and result types:
+
+```staple
+def identity: I32 -> I32 = value => value
 ```
 
 A binding annotation may also constrain the complete function type. A function
@@ -999,8 +1013,9 @@ rules.
 
 When the function result is omitted, Stapler joins its trailing value, reachable
 explicit returns, and every propagated alternative. The example therefore
-infers `Ok Tree | IOError | ParseError`. With an explicit result annotation,
-every normal and propagated result must be contained in that annotation.
+infers `Ok Tree | IOError | ParseError`. With an explicit binding annotation or
+`satisfies` constraint on the body, every normal and propagated result must be
+contained in that type.
 
 Sum types use Staple's internal tagged inline representation and may not appear
 anywhere inside an `extern` binding type.

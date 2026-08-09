@@ -18,6 +18,7 @@ impl SyntaxId {
 pub enum TokenKind {
     Use,
     As,
+    Satisfies,
     Pub,
     Let,
     Return,

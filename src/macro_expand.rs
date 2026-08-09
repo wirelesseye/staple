@@ -496,6 +496,10 @@ impl MacroExpander {
                 function.body = Box::new(self.expand_expression(module, *function.body, depth));
                 Expression::Function(function)
             }
+            Expression::Satisfies(mut satisfies) => {
+                satisfies.value = Box::new(self.expand_expression(module, *satisfies.value, depth));
+                Expression::Satisfies(satisfies)
+            }
             Expression::Match(mut match_) => {
                 match_.subject = Box::new(self.expand_expression(module, *match_.subject, depth));
                 for arm in &mut match_.arms {
@@ -674,6 +678,9 @@ impl MacroExpander {
                 function: function.as_ref().clone(),
                 environment: environment.clone(),
             }),
+            Expression::Satisfies(satisfies) => {
+                self.eval_expression(module, &satisfies.value, environment)
+            }
             Expression::Quote(quote) => {
                 let mark = self.next_mark;
                 self.next_mark += 1;
@@ -955,10 +962,11 @@ impl MacroExpander {
         match expression {
             Expression::Function(function) => {
                 freshen_pattern(self, &mut function.pattern, module, mark);
-                if let Some(return_type) = &mut function.return_type {
-                    freshen_type(self, return_type, module, mark);
-                }
                 self.freshen_expression(&mut function.body, module, mark);
+            }
+            Expression::Satisfies(satisfies) => {
+                self.freshen_expression(&mut satisfies.value, module, mark);
+                freshen_type(self, &mut satisfies.ty, module, mark);
             }
             Expression::Match(match_) => {
                 self.freshen_expression(&mut match_.subject, module, mark);
@@ -1054,6 +1062,9 @@ fn binding_contains_syntax(binding: &Binding) -> bool {
 }
 
 fn expression_parameter_contains_syntax(expression: &Expression) -> bool {
+    if let Expression::Satisfies(satisfies) = expression {
+        return expression_parameter_contains_syntax(&satisfies.value);
+    }
     let Expression::Function(function) = expression else {
         return false;
     };
@@ -1074,6 +1085,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
     if arity > 0 {
         return match expression {
             Expression::Function(function) => obviously_not_syntax(&function.body, arity - 1),
+            Expression::Satisfies(satisfies) => obviously_not_syntax(&satisfies.value, arity),
             _ => true,
         };
     }
@@ -1083,6 +1095,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         | Expression::Name(_)
         | Expression::Call(_)
         | Expression::Access(_) => false,
+        Expression::Satisfies(satisfies) => obviously_not_syntax(&satisfies.value, 0),
         Expression::Match(match_) => match_
             .arms
             .iter()
@@ -1221,6 +1234,9 @@ fn substitute_splices(
         Expression::Function(function) => {
             *function.body = substitute_splices(&function.body, environment, diagnostics)?
         }
+        Expression::Satisfies(satisfies) => {
+            *satisfies.value = substitute_splices(&satisfies.value, environment, diagnostics)?
+        }
         Expression::Match(match_) => {
             *match_.subject = substitute_splices(&match_.subject, environment, diagnostics)?;
             for arm in &mut match_.arms {
@@ -1322,6 +1338,9 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut function.body, mark, scopes);
             scopes.pop();
         }
+        Expression::Satisfies(satisfies) => {
+            alpha_rename_expression(&mut satisfies.value, mark, scopes)
+        }
         Expression::Match(match_) => {
             alpha_rename_expression(&mut match_.subject, mark, scopes);
             for arm in &mut match_.arms {
@@ -1391,6 +1410,7 @@ fn alpha_rename_expression(
 fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
     match expression {
         Expression::Function(value) => &mut value.syntax,
+        Expression::Satisfies(value) => &mut value.syntax,
         Expression::Match(value) => &mut value.syntax,
         Expression::Block(value) => &mut value.syntax,
         Expression::Product(value) => &mut value.syntax,
