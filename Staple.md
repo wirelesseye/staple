@@ -920,9 +920,11 @@ import can shadow a prelude name. Integer literals use an expected integer type
 when one is available and otherwise default to `I32`. Mixed-type arithmetic is
 not implicit.
 
-`String` is an immutable garbage-collected handle. Its managed descriptor
-contains a UTF-8 byte pointer, byte length, and capacity; the byte storage is
-managed as well. Copying a `String` copies the handle.
+`String` is an immutable garbage-collected UTF-8 byte sequence. The standard
+library declares it as a nominal type with the private representation
+`Ref U8[]`. At runtime it contains a managed byte pointer and a byte length; it
+has no capacity field or separate descriptor allocation. Copying a `String`
+copies those two words and keeps the managed byte storage shared.
 
 `Ref T` is a garbage-collected reference to a value of type `T`. Its standard
 declaration is `pub(repr) type Ref = T => ?Sized T => T`, so its payload may be

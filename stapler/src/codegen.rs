@@ -1970,23 +1970,29 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.release_moved_ownership(environment, expression.syntax().id)?;
             return Ok(value);
         }
-        let Some(coercion) = self
+        let value = if let Some(coercion) = self
             .typed_module
             .coercion_for(expression.syntax().id)
             .cloned()
-        else {
-            return Ok(value);
-        };
-        let source = substitute_type(coercion.source, &self.active_type_substitutions);
-        let target = substitute_type(coercion.target, &self.active_type_substitutions);
-        let value = if matches!(
-            (&source, &target),
-            (CheckedType::Ref(_), CheckedType::Ref(target))
-                if matches!(target.as_ref(), CheckedType::ErasedProduct(_))
-        ) {
-            self.coerce_erased_ref_value(value, &source, &target, expression.syntax().span.clone())?
+        {
+            let source = substitute_type(coercion.source, &self.active_type_substitutions);
+            let target = substitute_type(coercion.target, &self.active_type_substitutions);
+            if matches!(
+                (&source, &target),
+                (CheckedType::Ref(_), CheckedType::Ref(target))
+                    if matches!(target.as_ref(), CheckedType::ErasedProduct(_))
+            ) {
+                self.coerce_erased_ref_value(
+                    value,
+                    &source,
+                    &target,
+                    expression.syntax().span.clone(),
+                )?
+            } else {
+                self.coerce_sum_value(value, &source, &target, expression.syntax().span.clone())?
+            }
         } else {
-            self.coerce_sum_value(value, &source, &target, expression.syntax().span.clone())?
+            value
         };
         self.release_moved_ownership(environment, expression.syntax().id)?;
         Ok(value)
@@ -2693,6 +2699,35 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
             }
             Pattern::Nominal(pattern) => match value_type {
+                CheckedType::String
+                    if self
+                        .typed_module
+                        .resolved()
+                        .type_for_pattern(pattern.syntax.id)
+                        .is_some_and(|id| {
+                            self.typed_module.resolved().builtin_type(id)
+                                == Some(crate::BuiltinType::String)
+                        }) =>
+                {
+                    let representation = self
+                        .typed_module
+                        .string_representation()
+                        .cloned()
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                pattern.syntax.span.clone(),
+                                "standard library String representation was not checked",
+                            )
+                        })?;
+                    self.compile_match_pattern_branch(
+                        environment,
+                        &pattern.argument,
+                        value,
+                        &representation,
+                        success,
+                        failure,
+                    )?;
+                }
                 CheckedType::Ref(payload)
                     if self
                         .typed_module
@@ -2817,17 +2852,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         failure: inkwell::basic_block::BasicBlock<'context>,
         span: Span,
     ) -> CodeGenerationResult<()> {
-        let BasicValueEnum::PointerValue(string_pointer) = value else {
+        let BasicValueEnum::StructValue(string) = value else {
             return Err(Diagnostic::new(
                 span,
                 "string match value has an invalid representation",
             ));
         };
-        let string = self
-            .builder
-            .build_load(self.string_type(), string_pointer, "match.string")
-            .map_err(compiler_diagnostic)?
-            .into_struct_value();
         let pointer = self
             .builder
             .build_extract_value(string, 0, "match.string.pointer")
@@ -3167,8 +3197,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pointer: inkwell::values::PointerValue<'context>,
         length: inkwell::values::IntValue<'context>,
         span: Span,
-    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
-        let mut value = self.string_type().const_zero();
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let mut value = self.erased_ref_type().const_zero();
         value = self
             .builder
             .build_insert_value(value, pointer, 0, "string.pointer")
@@ -3179,21 +3209,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_insert_value(value, length, 1, "string.length")
             .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
             .into_struct_value();
-        value = self
-            .builder
-            .build_insert_value(value, length, 2, "string.capacity")
-            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-            .into_struct_value();
-        let descriptor_size = self.target_data.get_store_size(&self.string_type());
-        let descriptor = self.build_gc_allocation(
-            self.size_type.const_int(descriptor_size, false),
-            "string.allocate",
-            span.clone(),
-        )?;
-        self.builder
-            .build_store(descriptor, value)
-            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
-        Ok(descriptor)
+        Ok(value)
     }
 
     fn build_ref_value(
@@ -4231,17 +4247,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if environment.did_return {
             return Ok(self.unit_value());
         }
-        let Some(BasicValueEnum::PointerValue(string_pointer)) = value_as_basic(argument) else {
+        let Some(BasicValueEnum::StructValue(string)) = value_as_basic(argument) else {
             return Err(Diagnostic::new(
                 call.argument.syntax().span.clone(),
                 "String conversion requires a String value",
             ));
         };
-        let string = self
-            .builder
-            .build_load(self.string_type(), string_pointer, "string.value")
-            .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
-            .into_struct_value();
         let pointer = self
             .builder
             .build_extract_value(string, 0, "string.pointer")
@@ -5176,9 +5187,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 format!("opaque type `{name}` has no by-value representation"),
             )),
             CheckedType::CString => Ok(self.context.ptr_type(AddressSpace::default()).into()),
-            CheckedType::String | CheckedType::StringLiteralSet(_) => {
-                Ok(self.context.ptr_type(AddressSpace::default()).into())
-            }
+            CheckedType::String | CheckedType::StringLiteralSet(_) => self
+                .typed_module
+                .string_representation()
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        Span::Compiler,
+                        "standard library String representation was not checked",
+                    )
+                })
+                .and_then(|representation| self.compile_type(representation)),
             CheckedType::Ref(payload)
                 if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)) =>
             {
@@ -5223,17 +5241,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let pointer = self.context.ptr_type(AddressSpace::default());
         self.context
             .struct_type(&[pointer.into(), pointer.into()], false)
-    }
-
-    fn string_type(&self) -> inkwell::types::StructType<'context> {
-        self.context.struct_type(
-            &[
-                self.context.ptr_type(AddressSpace::default()).into(),
-                self.size_type.into(),
-                self.size_type.into(),
-            ],
-            false,
-        )
     }
 
     fn compile_product_type(

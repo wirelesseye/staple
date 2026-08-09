@@ -1,1 +1,1 @@
-pub type String = opaque
+pub type String = Ref U8[]

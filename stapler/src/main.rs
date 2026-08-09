@@ -696,7 +696,13 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { let exit: I32 -> () }\n",
+                "use std.cinterop (string_from_c_string, string_to_c_string)\n",
                 "type Some = String\n",
+                "def roundtrip: String -> String = value => string_from_c_string (string_to_c_string value)\n",
+                "def return_unicode = () => roundtrip \"hé\"\n",
+                "def capture = (value: String) => () => value\n",
+                "def empty_score: String -> I32 = value => match value { \"\" => 1, _ => 100, }\n",
+                "def unicode_score: String -> I32 = value => match value { \"hé\" => 2, _ => 100, }\n",
                 "def pure: (\"yes\" | \"no\") -> I32 = value => match value {\n",
                 "  \"yes\" => 1,\n",
                 "  \"no\" => 2,\n",
@@ -708,7 +714,11 @@ mod tests {
                 "}\n",
                 "let literal: \"yes\" | \"no\" = \"no\"\n",
                 "let injected: Some | \"yes\" | \"no\" = literal\n",
-                "exit (pure \"yes\" + pure literal + mixed injected + mixed (Some \"value\") - 10)\n",
+                "let empty = roundtrip \"\"\n",
+                "let pair = (text: return_unicode (), count: 1)\n",
+                "let copied = pair.text\n",
+                "let read = capture copied\n",
+                "exit (pure \"yes\" + pure literal + mixed injected + mixed (Some \"value\") + empty_score empty + unicode_score pair.text + unicode_score copied + unicode_score (read ()) - 17)\n",
             ),
         )
         .expect("temporary string-literal source should be writable");
@@ -728,6 +738,6 @@ mod tests {
             .expect("string-literal executable should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
-        assert!(status.success());
+        assert!(status.success(), "String executable returned {status}");
     }
 }

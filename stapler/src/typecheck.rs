@@ -129,6 +129,12 @@ pub enum CheckedType {
     },
 }
 
+fn expected_string_representation() -> CheckedType {
+    CheckedType::Ref(Box::new(CheckedType::ErasedProduct(Box::new(
+        CheckedType::U8,
+    ))))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedProductType {
     pub elements: Vec<CheckedTypeElement>,
@@ -402,6 +408,7 @@ pub struct TypedModule {
     accesses: HashMap<SyntaxId, CheckedAccess>,
     indices: HashMap<SyntaxId, CheckedIndex>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    string_representation: Option<CheckedType>,
     ownership: crate::ownership::OwnershipInfo,
     copy_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
@@ -455,6 +462,10 @@ impl TypedModule {
 
     pub fn type_of_pattern(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.pattern_types.get(&syntax_id)
+    }
+
+    pub(crate) fn string_representation(&self) -> Option<&CheckedType> {
+        self.string_representation.as_ref()
     }
 
     pub fn is_copy_type(&self, value_type: &CheckedType) -> bool {
@@ -579,6 +590,7 @@ pub struct TypeChecker {
     accesses: HashMap<SyntaxId, CheckedAccess>,
     indices: HashMap<SyntaxId, CheckedIndex>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    string_representation: Option<CheckedType>,
     copy_trait: Option<TraitId>,
     sized_trait: Option<TraitId>,
     string_type_trait: Option<TraitId>,
@@ -614,6 +626,7 @@ impl TypeChecker {
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
         self.collect_type_declarations(&module);
+        self.collect_string_representation(&module);
         self.collect_traits(&module);
         self.collect_trait_implementations(&module);
         self.seed_constructors(&module);
@@ -656,6 +669,7 @@ impl TypeChecker {
             accesses: self.accesses,
             indices: self.indices,
             pattern_types: self.pattern_types,
+            string_representation: self.string_representation,
             ownership: crate::ownership::OwnershipInfo::default(),
             copy_trait: self.copy_trait,
             drop_trait: self.drop_trait,
@@ -671,6 +685,32 @@ impl TypeChecker {
 
     fn collect_type_declarations(&mut self, module: &ResolvedModule) {
         self.type_declarations = module.type_declarations().clone();
+    }
+
+    fn collect_string_representation(&mut self, module: &ResolvedModule) {
+        let Some((_, declaration)) = self
+            .type_declarations
+            .iter()
+            .find(|(id, _)| module.builtin_type(**id) == Some(BuiltinType::String))
+        else {
+            return;
+        };
+        let Some(underlying) = declaration.underlying.clone() else {
+            return;
+        };
+        let span = declaration.syntax.span.clone();
+        let representation = self.resolve_source_type(module, &underlying);
+        let expected = expected_string_representation();
+        if representation == expected {
+            self.string_representation = Some(representation);
+        } else if representation != CheckedType::Error {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!(
+                    "standard library type `String` must be represented by `Ref U8[]`, found `{representation}`"
+                ),
+            ));
+        }
     }
 
     fn collect_traits(&mut self, module: &ResolvedModule) {
@@ -1337,6 +1377,15 @@ impl TypeChecker {
                     return;
                 };
                 match value_type {
+                    CheckedType::String
+                        if module.builtin_type(expected_id) == Some(BuiltinType::String) =>
+                    {
+                        let representation = self
+                            .string_representation
+                            .clone()
+                            .unwrap_or_else(expected_string_representation);
+                        self.bind_pattern_types(module, &pattern.argument, &representation);
+                    }
                     CheckedType::Ref(payload)
                         if module.builtin_type(expected_id) == Some(BuiltinType::Ref) =>
                     {
@@ -2431,6 +2480,11 @@ impl TypeChecker {
                     return;
                 };
                 let representation = match value_type {
+                    CheckedType::String
+                        if module.builtin_type(expected_id) == Some(BuiltinType::String) =>
+                    {
+                        self.string_representation.clone()
+                    }
                     CheckedType::Ref(payload)
                         if module.builtin_type(expected_id) == Some(BuiltinType::Ref) =>
                     {
@@ -2441,7 +2495,7 @@ impl TypeChecker {
                             ));
                             return;
                         }
-                        Some(payload.as_ref())
+                        Some(payload.as_ref().clone())
                     }
                     CheckedType::Sum(sum) => {
                         sum.alternatives
@@ -2449,17 +2503,17 @@ impl TypeChecker {
                             .find_map(|alternative| match alternative {
                                 CheckedType::Distinct {
                                     id, representation, ..
-                                } if *id == expected_id => Some(representation.as_ref()),
+                                } if *id == expected_id => Some(representation.as_ref().clone()),
                                 _ => None,
                             })
                     }
                     CheckedType::Distinct {
                         id, representation, ..
-                    } if *id == expected_id => Some(representation.as_ref()),
+                    } if *id == expected_id => Some(representation.as_ref().clone()),
                     _ => None,
                 };
                 if let Some(representation) = representation {
-                    self.check_match_pattern(module, &pattern.argument, representation);
+                    self.check_match_pattern(module, &pattern.argument, &representation);
                 } else if *value_type != CheckedType::Error {
                     self.diagnostics.push(Diagnostic::new(
                         pattern.syntax.span.clone(),
@@ -2659,7 +2713,10 @@ impl TypeChecker {
                     };
                     let specialized_matrix = matrix
                         .iter()
-                        .filter(|row| coverage_pattern_matches_literal(row[0], &literal))
+                        .filter(|row| {
+                            coverage_pattern_matches_literal(row[0], &literal)
+                                || coverage_pattern_is_string_catch_all(module, row[0])
+                        })
                         .map(|row| row[1..].to_vec())
                         .collect::<Vec<_>>();
                     Self::coverage_is_useful(
@@ -2669,14 +2726,17 @@ impl TypeChecker {
                         &candidate[1..],
                     )
                 }
-                CoveragePattern::Any => {
+                CoveragePattern::Any | CoveragePattern::Pattern(Pattern::Nominal(_))
+                    if matches!(first, CoveragePattern::Any)
+                        || coverage_pattern_is_string_catch_all(module, first) =>
+                {
                     let specialized_matrix = matrix
                         .iter()
                         .filter(|row| {
                             matches!(
                                 Self::canonical_coverage_pattern(row[0]),
                                 CoveragePattern::Any
-                            )
+                            ) || coverage_pattern_is_string_catch_all(module, row[0])
                         })
                         .map(|row| row[1..].to_vec())
                         .collect::<Vec<_>>();
@@ -3454,6 +3514,9 @@ impl TypeChecker {
                 return CheckedType::Error;
             }
         }
+        if module.builtin_type(id) == Some(BuiltinType::String) {
+            return CheckedType::String;
+        }
         if module.builtin_type(id) == Some(BuiltinType::CPointer) {
             return CheckedType::CPointer {
                 pointee: Box::new(arguments[0].clone()),
@@ -3964,6 +4027,18 @@ fn coverage_pattern_matches_literal(pattern: CoveragePattern<'_>, literal: &str)
         }
         _ => false,
     }
+}
+
+fn coverage_pattern_is_string_catch_all(
+    module: &ResolvedModule,
+    pattern: CoveragePattern<'_>,
+) -> bool {
+    let CoveragePattern::Pattern(Pattern::Nominal(pattern)) = pattern else {
+        return false;
+    };
+    module
+        .type_for_pattern(pattern.syntax.id)
+        .is_some_and(|id| module.builtin_type(id) == Some(BuiltinType::String))
 }
 
 fn literal_set_is_subset_of(actual: &[String], expected: &CheckedType) -> bool {

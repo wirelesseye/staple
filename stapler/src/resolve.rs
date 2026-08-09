@@ -835,17 +835,38 @@ impl NameResolver {
                 format!("standard library type `{name}` must be public"),
             ));
         }
-        let valid_kind = if builtin == BuiltinType::Ref {
-            declaration.kind == crate::TypeDeclarationKind::Distinct
-                && declaration.representation_visibility == Visibility::Public
+        if builtin == BuiltinType::String {
+            if declaration.kind != crate::TypeDeclarationKind::Distinct {
+                self.diagnostics.push(Diagnostic::new(
+                    declaration.syntax.span.clone(),
+                    "standard library type `String` must be a represented distinct type",
+                ));
+            }
+            if declaration.representation_visibility != Visibility::Private {
+                self.diagnostics.push(Diagnostic::new(
+                    declaration.syntax.span.clone(),
+                    "standard library type `String` must keep its representation private",
+                ));
+            }
+            if !declaration.type_parameters.is_empty() {
+                self.diagnostics.push(Diagnostic::new(
+                    declaration.syntax.span.clone(),
+                    "standard library type `String` must not accept compile-time arguments",
+                ));
+            }
         } else {
-            declaration.kind == crate::TypeDeclarationKind::Opaque
-        };
-        if !valid_kind {
-            self.diagnostics.push(Diagnostic::new(
-                declaration.syntax.span.clone(),
-                format!("standard library type `{name}` has an invalid representation"),
-            ));
+            let valid_kind = if builtin == BuiltinType::Ref {
+                declaration.kind == crate::TypeDeclarationKind::Distinct
+                    && declaration.representation_visibility == Visibility::Public
+            } else {
+                declaration.kind == crate::TypeDeclarationKind::Opaque
+            };
+            if !valid_kind {
+                self.diagnostics.push(Diagnostic::new(
+                    declaration.syntax.span.clone(),
+                    format!("standard library type `{name}` has an invalid representation"),
+                ));
+            }
         }
         if matches!(builtin, BuiltinType::CPointer | BuiltinType::Ref)
             && declaration.type_parameters.len() != 1

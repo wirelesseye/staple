@@ -22,6 +22,57 @@ fn type_check(source: &str) -> stapler::TypedModule {
         .expect("source should type-check")
 }
 
+fn copy_directory(source: &Path, target: &Path) {
+    std::fs::create_dir_all(target).expect("test standard library directory should be created");
+    for entry in std::fs::read_dir(source).expect("standard library directory should be readable") {
+        let entry = entry.expect("standard library entry should be readable");
+        let source = entry.path();
+        let target = target.join(entry.file_name());
+        if source.is_dir() {
+            copy_directory(&source, &target);
+        } else {
+            std::fs::copy(source, target).expect("standard library file should be copied");
+        }
+    }
+}
+
+fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock should be after the Unix epoch")
+        .as_nanos();
+    let temporary = std::env::temp_dir().join(format!(
+        "stapler-string-contract-{}-{nonce}",
+        std::process::id()
+    ));
+    copy_directory(&root.join("stdlib"), &temporary);
+    std::fs::write(temporary.join("std/core/string.sta"), declaration)
+        .expect("test String declaration should be written");
+
+    let messages = match ProgramLoader::new()
+        .with_standard_library_root(&temporary)
+        .load_source("", root)
+    {
+        Err(error) => vec![error],
+        Ok(program) => match NameResolver::new().resolve_program(program) {
+            Err(diagnostics) => diagnostics
+                .into_iter()
+                .map(|diagnostic| diagnostic.message)
+                .collect(),
+            Ok(module) => TypeChecker::new()
+                .check(module)
+                .err()
+                .unwrap_or_default()
+                .into_iter()
+                .map(|diagnostic| diagnostic.message)
+                .collect(),
+        },
+    };
+    std::fs::remove_dir_all(temporary).expect("test standard library should be removed");
+    messages
+}
+
 #[test]
 fn supports_repeated_spread_and_erased_product_references() {
     let source = concat!(
@@ -1243,6 +1294,43 @@ fn string_literals_have_the_canonical_string_type() {
 }
 
 #[test]
+fn validates_the_standard_library_string_representation() {
+    assert!(
+        string_contract_diagnostics(concat!(
+            "pub type String = Ref U8[]\n",
+            "def bytes: String -> Ref U8[] = String value => value\n",
+            "def matched_bytes: String -> Ref U8[] = value => match value { String bytes => bytes, }\n",
+        ))
+        .is_empty()
+    );
+
+    for (declaration, expected) in [
+        (
+            "pub type String = opaque\n",
+            "standard library type `String` must be a represented distinct type",
+        ),
+        (
+            "pub(repr) type String = Ref U8[]\n",
+            "standard library type `String` must keep its representation private",
+        ),
+        (
+            "pub type String = T => Ref U8[]\n",
+            "standard library type `String` must not accept compile-time arguments",
+        ),
+        (
+            "pub type String = Ref I8[]\n",
+            "standard library type `String` must be represented by `Ref U8[]`, found `Ref I8[]`",
+        ),
+    ] {
+        let diagnostics = string_contract_diagnostics(declaration);
+        assert!(
+            diagnostics.iter().any(|message| message == expected),
+            "missing `{expected}` in {diagnostics:?}",
+        );
+    }
+}
+
+#[test]
 fn c_string_is_an_imported_primitive_macro() {
     let module = type_check(concat!(
         "use std.cinterop *\n",
@@ -1258,7 +1346,10 @@ fn c_string_is_an_imported_primitive_macro() {
         .compile_module(&module)
         .expect("String operations should compile");
 
-    assert!(llvm.contains("string.capacity"));
+    assert!(llvm.contains("string.pointer"));
+    assert!(llvm.contains("string.length"));
+    assert!(!llvm.contains("string.capacity"));
+    assert!(!llvm.contains("string.allocate"));
     assert!(llvm.contains("@strlen"));
     assert!(llvm.contains("@memchr"));
     assert!(llvm.contains("@llvm.trap"));
