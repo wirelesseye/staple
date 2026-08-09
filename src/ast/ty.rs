@@ -61,6 +61,8 @@ impl TypeParameterPattern {
 pub struct TypeParameterBinding {
     pub syntax: Syntax,
     pub name: String,
+    /// Whether this parameter has the language's implicit `Sized` bound.
+    pub sized: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

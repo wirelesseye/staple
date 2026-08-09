@@ -194,7 +194,7 @@ fn rejects_erased_products_outside_refs_and_ref_destructuring() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| { diagnostic.message.contains("direct payload of `Ref`") })
+            .any(|diagnostic| { diagnostic.message.contains("unsized type") })
     );
 
     let diagnostics = TypeChecker::new()
@@ -235,7 +235,7 @@ fn handles_product_repetition_edges_and_limits() {
 }
 
 #[test]
-fn aliases_complete_erased_references_but_rejects_bare_erased_aliases_and_ffi() {
+fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
     type_check(concat!(
         "type alias Ints = Ref I32[]\n",
         "let fixed: Ref I32[2] = Ref (1, 2)\n",
@@ -243,13 +243,20 @@ fn aliases_complete_erased_references_but_rejects_bare_erased_aliases_and_ffi() 
         "let count: USize = length values\n",
     ));
 
+    type_check("type alias Slice = I32[]\n");
+    type_check(concat!(
+        "type alias Slice = I32[]\n",
+        "let fixed: Ref I32[2] = Ref (1, 2)\n",
+        "let values: Ref Slice = fixed\n",
+    ));
+
     let diagnostics = TypeChecker::new()
-        .check(resolve("type alias Invalid = I32[]\n"))
-        .expect_err("bare erased aliases must be rejected");
+        .check(resolve("type alias Slice = I32[]\nlet invalid: Slice\n"))
+        .expect_err("unsized aliases cannot be used by value");
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| { diagnostic.message.contains("direct payload of `Ref`") })
+            .any(|diagnostic| { diagnostic.message.contains("unsized type") })
     );
 
     let diagnostics = TypeChecker::new()
@@ -259,6 +266,53 @@ fn aliases_complete_erased_references_but_rejects_bare_erased_aliases_and_ffi() 
         diagnostic
             .message
             .contains("external binding types cannot contain erased products")
+    }));
+}
+
+#[test]
+fn enforces_implicit_sized_and_supports_question_sized_parameters() {
+    type_check(concat!(
+        "type alias Slice = E => E[]\n",
+        "def preserve: T => ?Sized T => Ref T -> Ref T = value => value\n",
+        "def explicitly_sized: T => ?Sized T => Sized T => Ref T -> Ref T = value => value\n",
+        "let fixed: Ref I32[2] = Ref (1, 2)\n",
+        "let erased: Ref (Slice I32) = fixed\n",
+        "let same: Ref (Slice I32) = preserve erased\n",
+        "let same_fixed: Ref I32[2] = explicitly_sized fixed\n",
+    ));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def sized_only: T => Ref T -> Ref T = value => value\n",
+            "let fixed: Ref I32[2] = Ref (1, 2)\n",
+            "let erased: Ref I32[] = fixed\n",
+            "let invalid = sized_only erased\n",
+        )))
+        .expect_err("ordinary generic parameters have an implicit Sized bound");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("implicit `Sized` bound") })
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "def invalid: T => ?Sized T => T -> () = value => ()\n",
+        ))
+        .expect_err("a relaxed parameter cannot be passed by value");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("must be sized") })
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("impl Sized I32 {}\n"))
+        .expect_err("Sized is structural");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`Sized` is implemented structurally")
     }));
 }
 

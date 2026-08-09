@@ -193,6 +193,7 @@ pub struct ResolvedModule {
     named_types: HashMap<SyntaxId, TypeId>,
     nominal_patterns: HashMap<SyntaxId, TypeId>,
     type_parameters: HashMap<SyntaxId, TypeParameterId>,
+    type_parameter_sized: HashMap<TypeParameterId, bool>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
@@ -254,6 +255,10 @@ impl ResolvedModule {
 
     pub fn type_parameter_for(&self, syntax_id: SyntaxId) -> Option<TypeParameterId> {
         self.type_parameters.get(&syntax_id).copied()
+    }
+
+    pub fn type_parameter_is_sized(&self, id: TypeParameterId) -> bool {
+        self.type_parameter_sized.get(&id).copied().unwrap_or(true)
     }
 
     pub fn type_declarations(&self) -> &HashMap<TypeId, TypeDeclaration> {
@@ -448,6 +453,7 @@ pub struct NameResolver {
     functions: Vec<ResolvedFunction>,
     named_types: HashMap<SyntaxId, TypeId>,
     type_parameters: HashMap<SyntaxId, TypeParameterId>,
+    type_parameter_sized: HashMap<TypeParameterId, bool>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
     traits: HashMap<TraitId, ResolvedTrait>,
@@ -573,6 +579,7 @@ impl NameResolver {
             named_types: self.named_types,
             nominal_patterns: self.nominal_patterns,
             type_parameters: self.type_parameters,
+            type_parameter_sized: self.type_parameter_sized,
             type_declarations: self.type_declarations,
             type_names: self.type_names,
             syntax_modules: self.syntax_modules,
@@ -839,6 +846,17 @@ impl NameResolver {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 format!("standard library type `{name}` must accept one compile-time argument"),
+            ));
+        }
+        if builtin == BuiltinType::Ref
+            && !matches!(
+                declaration.type_parameters.as_slice(),
+                [TypeParameterPattern::Binding(binding)] if !binding.sized
+            )
+        {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                "standard library type `Ref` must relax its parameter with `?Sized`",
             ));
         }
         self.type_names.insert(id, name.to_owned());
@@ -1608,6 +1626,7 @@ impl NameResolver {
                     ));
                 }
                 self.type_parameters.insert(binding.syntax.id, id);
+                self.type_parameter_sized.insert(id, binding.sized);
             }
             TypeParameterPattern::Product(product) => {
                 for element in &product.elements {

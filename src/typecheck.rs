@@ -102,6 +102,7 @@ pub enum CheckedType {
     Parameter {
         id: TypeParameterId,
         name: String,
+        sized: bool,
     },
     TypeConstructor {
         id: TypeId,
@@ -199,24 +200,24 @@ impl CheckedType {
         })
     }
 
-    pub fn is_concrete(&self) -> bool {
+    pub fn is_fully_known(&self) -> bool {
         match self {
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => false,
-            Self::CPointer { pointee } => pointee.is_concrete(),
+            Self::CPointer { pointee } => pointee.is_fully_known(),
             Self::Ref(value) => {
-                matches!(value.as_ref(), Self::ErasedProduct(element) if element.is_concrete())
-                    || value.is_concrete()
+                matches!(value.as_ref(), Self::ErasedProduct(element) if element.is_fully_known())
+                    || value.is_fully_known()
             }
             Self::ErasedProduct(_) => false,
             Self::Product(product) => product
                 .elements
                 .iter()
-                .all(|element| element.value_type.is_concrete()),
-            Self::Sum(sum) => sum.alternatives.iter().all(CheckedType::is_concrete),
+                .all(|element| element.value_type.is_fully_known()),
+            Self::Sum(sum) => sum.alternatives.iter().all(CheckedType::is_fully_known),
             Self::Function(function) => {
-                function.parameter.is_concrete() && function.result.is_concrete()
+                function.parameter.is_fully_known() && function.result.is_fully_known()
             }
-            Self::Distinct { representation, .. } => representation.is_concrete(),
+            Self::Distinct { representation, .. } => representation.is_fully_known(),
             Self::I32
             | Self::I8
             | Self::I16
@@ -232,6 +233,41 @@ impl CheckedType {
             | Self::CChar
             | Self::Opaque { .. }
             | Self::Parameter { .. } => true,
+        }
+    }
+
+    pub fn is_sized(&self) -> bool {
+        match self {
+            // Unresolved/error types are accepted here to avoid cascading placement
+            // diagnostics; full inference and constructor application are checked
+            // independently.
+            Self::Inferred | Self::Error | Self::TypeConstructor { .. } => true,
+            Self::ErasedProduct(_) => false,
+            Self::Parameter { sized, .. } => *sized,
+            Self::Product(product) => product
+                .elements
+                .iter()
+                .all(|element| element.value_type.is_sized()),
+            Self::Sum(sum) => sum.alternatives.iter().all(CheckedType::is_sized),
+            Self::Distinct { representation, .. } => representation.is_sized(),
+            // These values all have a statically known handle or scalar representation.
+            Self::Ref(_)
+            | Self::CPointer { .. }
+            | Self::Function(_)
+            | Self::I32
+            | Self::I8
+            | Self::I16
+            | Self::I64
+            | Self::U8
+            | Self::U16
+            | Self::U32
+            | Self::U64
+            | Self::ISize
+            | Self::USize
+            | Self::String
+            | Self::CString
+            | Self::CChar
+            | Self::Opaque { .. } => true,
         }
     }
 }
@@ -530,6 +566,7 @@ pub struct TypeChecker {
     indices: HashMap<SyntaxId, CheckedIndex>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
     copy_trait: Option<TraitId>,
+    sized_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
@@ -557,6 +594,7 @@ impl TypeChecker {
 
     pub fn check(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
         self.copy_trait = module.standard_trait("Copy");
+        self.sized_trait = module.standard_trait("Sized");
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
         self.collect_type_declarations(&module);
@@ -617,28 +655,18 @@ impl TypeChecker {
 
     fn collect_type_declarations(&mut self, module: &ResolvedModule) {
         self.type_declarations = module.type_declarations().clone();
-        for declaration in self.type_declarations.values() {
-            let Some(underlying) = &declaration.underlying else {
-                continue;
-            };
-            if !valid_erased_source_placement(module, underlying) {
-                self.diagnostics.push(Diagnostic::new(
-                    underlying.syntax().span.clone(),
-                    "an erased product is only allowed as the direct payload of `Ref`",
-                ));
-            }
-            if declaration.kind == TypeDeclarationKind::Distinct
-                && source_type_contains_erased_product(underlying)
-            {
-                self.diagnostics.push(Diagnostic::new(
-                    declaration.syntax.span.clone(),
-                    "distinct type representations cannot contain erased products",
-                ));
-            }
-        }
     }
 
     fn collect_traits(&mut self, module: &ResolvedModule) {
+        match self.sized_trait.and_then(|id| module.traits().get(&id)) {
+            Some(sized)
+                if sized.declaration.visibility == crate::Visibility::Public
+                    && sized.declaration.members.is_empty() => {}
+            _ => self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "standard library must declare public empty trait `Sized`",
+            )),
+        }
         match self.copy_trait.and_then(|id| module.traits().get(&id)) {
             Some(copy)
                 if copy.declaration.visibility == crate::Visibility::Public
@@ -700,6 +728,13 @@ impl TypeChecker {
 
     fn collect_trait_implementations(&mut self, module: &ResolvedModule) {
         for implementation in module.trait_implementations() {
+            if Some(implementation.trait_id) == self.sized_trait {
+                self.diagnostics.push(Diagnostic::new(
+                    implementation.target.syntax().span.clone(),
+                    "`Sized` is implemented structurally and cannot be implemented explicitly",
+                ));
+                continue;
+            }
             if Some(implementation.trait_id) == self.copy_trait {
                 self.diagnostics.push(Diagnostic::new(
                     implementation.target.syntax().span.clone(),
@@ -719,7 +754,7 @@ impl TypeChecker {
             }
             if contains_type_parameter(&target)
                 || contains_inferred_type(&target)
-                || !target.is_concrete()
+                || !target.is_fully_known()
             {
                 self.diagnostics.push(Diagnostic::new(
                     implementation.target.syntax().span.clone(),
@@ -812,6 +847,7 @@ impl TypeChecker {
                     .type_parameter_for(binding.syntax.id)
                     .expect("resolved compile-time parameter"),
                 name: binding.name.clone(),
+                sized: binding.sized,
             },
             TypeParameterPattern::Product(product) if product.elements.len() == 1 => {
                 self.checked_type_parameter_pattern(module, &product.elements[0])
@@ -998,14 +1034,14 @@ impl TypeChecker {
                 continue;
             }
             let mut parameter = self.resolve_source_type(module, &function.pattern.ty());
-            if !parameter.is_concrete()
+            if !parameter.is_fully_known()
                 && let Some(annotation) = &function.binding_annotation
                 && let CheckedType::Function(annotation) =
                     self.resolve_source_type(module, annotation)
             {
                 parameter = *annotation.parameter;
             }
-            let result = function
+            let mut result = function
                 .result_annotation
                 .as_ref()
                 .map(|annotation| self.resolve_source_type(module, annotation))
@@ -1020,6 +1056,25 @@ impl TypeChecker {
                     })
                 })
                 .unwrap_or(CheckedType::Inferred);
+            if !parameter.is_sized() && parameter != CheckedType::Error {
+                self.diagnostics.push(Diagnostic::new(
+                    function.pattern.syntax().span.clone(),
+                    "function parameters must be sized",
+                ));
+                parameter = CheckedType::Error;
+            }
+            if !matches!(result, CheckedType::Inferred | CheckedType::Error) && !result.is_sized() {
+                self.diagnostics.push(Diagnostic::new(
+                    function
+                        .result_annotation
+                        .as_ref()
+                        .map_or(Span::Compiler, |annotation| {
+                            annotation.syntax().span.clone()
+                        }),
+                    "function results must be sized",
+                ));
+                result = CheckedType::Error;
+            }
             let mut function_type = CheckedFunctionType {
                 parameter: Box::new(parameter),
                 result: Box::new(result),
@@ -1529,7 +1584,13 @@ impl TypeChecker {
                 }
             }
         };
-        if !checked_type.is_concrete() && checked_type != CheckedType::Error {
+        if !checked_type.is_sized() && checked_type != CheckedType::Error {
+            self.diagnostics.push(Diagnostic::new(
+                binding.syntax.span.clone(),
+                format!("binding `{}` has an unsized type", binding.name),
+            ));
+        }
+        if !checked_type.is_fully_known() && checked_type != CheckedType::Error {
             self.diagnostics.push(Diagnostic::new(
                 binding.syntax.span.clone(),
                 format!("could not fully infer the type of `{}`", binding.name),
@@ -2671,6 +2732,14 @@ impl TypeChecker {
     }
 
     fn trait_obligation_available(&self, trait_id: TraitId, target: &CheckedType) -> bool {
+        if Some(trait_id) == self.sized_trait {
+            return target.is_sized()
+                || self
+                    .active_function_bounds
+                    .iter()
+                    .flatten()
+                    .any(|bound| bound.trait_id == trait_id && &bound.argument == target);
+        }
         if Some(trait_id) == self.copy_trait {
             let bounds = self
                 .active_function_bounds
@@ -2767,6 +2836,7 @@ impl TypeChecker {
         if !contains_type_parameter(&value_type) {
             return value_type;
         }
+        let sized_parameters = sized_type_parameter_ids(&value_type);
         let declared_parameters = type_parameter_ids(&value_type);
         let CheckedType::Function(function) = &value_type else {
             return value_type;
@@ -2804,6 +2874,20 @@ impl TypeChecker {
                     } else {
                         "generic function conflicts with the expected type"
                     },
+                ));
+                return CheckedType::Error;
+            }
+        }
+        for id in &sized_parameters {
+            if let Some(replacement) = substitutions.get(id)
+                && !replacement.is_sized()
+                && *replacement != CheckedType::Error
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    format!(
+                        "compile-time argument `{replacement}` does not satisfy the implicit `Sized` bound"
+                    ),
                 ));
                 return CheckedType::Error;
             }
@@ -2893,16 +2977,7 @@ impl TypeChecker {
     }
 
     fn resolve_source_type(&mut self, module: &ResolvedModule, source_type: &Type) -> CheckedType {
-        let value_type = self.resolve_source_type_inner(module, source_type);
-        if !valid_erased_placement(&value_type) {
-            self.diagnostics.push(Diagnostic::new(
-                source_type.syntax().span.clone(),
-                "an erased product is only allowed as the direct payload of `Ref`",
-            ));
-            CheckedType::Error
-        } else {
-            value_type
-        }
+        self.resolve_source_type_inner(module, source_type)
     }
 
     fn resolve_source_type_inner(
@@ -2917,13 +2992,25 @@ impl TypeChecker {
                     CheckedType::Parameter {
                         id,
                         name: named.name.clone(),
+                        sized: module.type_parameter_is_sized(id),
                     }
                 } else {
                     self.resolve_named_type(module, named)
                 }
             }
             Type::Product(product) => {
+                let span = product.syntax.span.clone();
                 let product = self.resolve_product_type(module, product);
+                if (product.variadic || product.elements.len() != 1)
+                    && product
+                        .elements
+                        .iter()
+                        .any(|element| !element.value_type.is_sized())
+                {
+                    self.diagnostics
+                        .push(Diagnostic::new(span, "product elements must be sized"));
+                    return CheckedType::Error;
+                }
                 normalize_product_type(product.elements, product.variadic)
             }
             Type::Sum(sum) => {
@@ -2934,10 +3021,23 @@ impl TypeChecker {
                     .collect();
                 self.normalize_sum_type(alternatives, sum.syntax.span.clone())
             }
-            Type::Function(function) => CheckedType::Function(CheckedFunctionType {
-                parameter: Box::new(self.resolve_source_type_inner(module, &function.parameter)),
-                result: Box::new(self.resolve_source_type_inner(module, &function.result)),
-            }),
+            Type::Function(function) => {
+                let parameter = self.resolve_source_type_inner(module, &function.parameter);
+                let result = self.resolve_source_type_inner(module, &function.result);
+                if (!parameter.is_sized() && parameter != CheckedType::Error)
+                    || (!result.is_sized() && result != CheckedType::Error)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        function.syntax.span.clone(),
+                        "function parameters and results must be sized",
+                    ));
+                    return CheckedType::Error;
+                }
+                CheckedType::Function(CheckedFunctionType {
+                    parameter: Box::new(parameter),
+                    result: Box::new(result),
+                })
+            }
             Type::Application(application) => {
                 let callee = self.resolve_source_type_inner(module, &application.callee);
                 let argument = self.resolve_source_type_inner(module, &application.argument);
@@ -2945,6 +3045,13 @@ impl TypeChecker {
             }
             Type::Repeated(repeated) => {
                 let element = self.resolve_source_type_inner(module, &repeated.element);
+                if !element.is_sized() && element != CheckedType::Error {
+                    self.diagnostics.push(Diagnostic::new(
+                        repeated.element.syntax().span.clone(),
+                        "product elements must be sized",
+                    ));
+                    return CheckedType::Error;
+                }
                 let Some(count) = &repeated.count else {
                     return CheckedType::ErasedProduct(Box::new(element));
                 };
@@ -3102,12 +3209,10 @@ impl TypeChecker {
         );
         self.resolving_named_types.remove(&id);
         let representation = substitute_type(template, &substitutions);
-        if declaration.kind == TypeDeclarationKind::Distinct
-            && checked_type_contains_erased_product(&representation)
-        {
+        if declaration.kind == TypeDeclarationKind::Distinct && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
-                "distinct type representations cannot contain erased products",
+                "distinct type representations must be sized",
             ));
             return CheckedType::Error;
         }
@@ -3136,6 +3241,16 @@ impl TypeChecker {
                 let Some(id) = module.type_parameter_for(binding.syntax.id) else {
                     return false;
                 };
+                if binding.sized && !argument.is_sized() && *argument != CheckedType::Error {
+                    self.diagnostics.push(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        format!(
+                            "compile-time argument `{argument}` does not satisfy the implicit `Sized` bound for `{}`",
+                            binding.name
+                        ),
+                    ));
+                    return false;
+                }
                 substitutions.insert(id, argument.clone());
                 true
             }
@@ -3325,12 +3440,10 @@ impl TypeChecker {
                 .expect("non-opaque type declaration has an underlying type"),
         );
         self.resolving_named_types.remove(&id);
-        if declaration.kind == TypeDeclarationKind::Distinct
-            && checked_type_contains_erased_product(&representation)
-        {
+        if declaration.kind == TypeDeclarationKind::Distinct && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
-                "distinct type representations cannot contain erased products",
+                "distinct type representations must be sized",
             ));
             return CheckedType::Error;
         }
@@ -3373,131 +3486,6 @@ pub(crate) fn erased_ref_length(actual: &CheckedType, expected: &CheckedType) ->
         .then_some(product.elements.len())
 }
 
-fn valid_erased_placement(value_type: &CheckedType) -> bool {
-    match value_type {
-        CheckedType::ErasedProduct(_) => false,
-        CheckedType::Ref(payload) => match payload.as_ref() {
-            CheckedType::ErasedProduct(element) => valid_erased_element(element),
-            other => valid_erased_placement(other),
-        },
-        CheckedType::CPointer { pointee } => valid_erased_placement(pointee),
-        CheckedType::Product(product) => product
-            .elements
-            .iter()
-            .all(|element| valid_erased_placement(&element.value_type)),
-        CheckedType::Sum(sum) => sum.alternatives.iter().all(valid_erased_placement),
-        CheckedType::Function(function) => {
-            valid_erased_placement(&function.parameter) && valid_erased_placement(&function.result)
-        }
-        CheckedType::Distinct {
-            arguments,
-            representation,
-            ..
-        } => arguments.iter().all(valid_erased_placement) && valid_erased_placement(representation),
-        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
-            arguments.iter().all(valid_erased_placement)
-        }
-        _ => true,
-    }
-}
-
-fn valid_erased_source_placement(module: &ResolvedModule, value_type: &Type) -> bool {
-    match value_type {
-        Type::Repeated(repeated) => {
-            repeated.count.is_some() && valid_erased_source_placement(module, &repeated.element)
-        }
-        Type::Application(application) => {
-            let direct_ref = module
-                .type_for(application.callee.syntax().id)
-                .is_some_and(|id| module.builtin_type(id) == Some(BuiltinType::Ref));
-            let argument_valid = if direct_ref {
-                match application.argument.as_ref() {
-                    Type::Repeated(repeated) if repeated.count.is_none() => {
-                        valid_erased_source_element(module, &repeated.element)
-                    }
-                    other => valid_erased_source_placement(module, other),
-                }
-            } else {
-                valid_erased_source_placement(module, &application.argument)
-            };
-            valid_erased_source_placement(module, &application.callee) && argument_valid
-        }
-        Type::Product(product) => product
-            .elements
-            .iter()
-            .all(|element| valid_erased_source_placement(module, &element.ty)),
-        Type::Sum(sum) => sum
-            .alternatives
-            .iter()
-            .all(|alternative| valid_erased_source_placement(module, alternative)),
-        Type::Function(function) => {
-            valid_erased_source_placement(module, &function.parameter)
-                && valid_erased_source_placement(module, &function.result)
-        }
-        Type::Inferred(_) | Type::Named(_) => true,
-    }
-}
-
-fn valid_erased_source_element(module: &ResolvedModule, value_type: &Type) -> bool {
-    match value_type {
-        Type::Repeated(repeated) => repeated.count.is_some(),
-        other => valid_erased_source_placement(module, other),
-    }
-}
-
-fn source_type_contains_erased_product(value_type: &Type) -> bool {
-    match value_type {
-        Type::Repeated(repeated) => {
-            repeated.count.is_none() || source_type_contains_erased_product(&repeated.element)
-        }
-        Type::Application(application) => {
-            source_type_contains_erased_product(&application.callee)
-                || source_type_contains_erased_product(&application.argument)
-        }
-        Type::Product(product) => product
-            .elements
-            .iter()
-            .any(|element| source_type_contains_erased_product(&element.ty)),
-        Type::Sum(sum) => sum
-            .alternatives
-            .iter()
-            .any(source_type_contains_erased_product),
-        Type::Function(function) => {
-            source_type_contains_erased_product(&function.parameter)
-                || source_type_contains_erased_product(&function.result)
-        }
-        Type::Inferred(_) | Type::Named(_) => false,
-    }
-}
-
-fn valid_erased_element(value_type: &CheckedType) -> bool {
-    match value_type {
-        CheckedType::ErasedProduct(_) => false,
-        CheckedType::Ref(payload) => match payload.as_ref() {
-            CheckedType::ErasedProduct(element) => valid_erased_element(element),
-            other => valid_erased_element(other),
-        },
-        CheckedType::CPointer { pointee } => valid_erased_element(pointee),
-        CheckedType::Product(product) => product
-            .elements
-            .iter()
-            .all(|element| valid_erased_element(&element.value_type)),
-        CheckedType::Function(function) => {
-            valid_erased_element(&function.parameter) && valid_erased_element(&function.result)
-        }
-        CheckedType::Sum(sum) => sum.alternatives.iter().all(valid_erased_element),
-        CheckedType::Distinct {
-            arguments,
-            representation,
-            ..
-        } => arguments.iter().all(valid_erased_element) && valid_erased_element(representation),
-        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
-            arguments.iter().all(valid_erased_element)
-        }
-        _ => true,
-    }
-}
-
 fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType> {
     match (actual, expected) {
         (CheckedType::Error, _) | (_, CheckedType::Error) => Some(CheckedType::Error),
@@ -3514,9 +3502,17 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
         (
-            CheckedType::Parameter { id: actual, name },
+            CheckedType::Parameter {
+                id: actual,
+                name,
+                sized,
+            },
             CheckedType::Parameter { id: expected, .. },
-        ) if actual == expected => Some(CheckedType::Parameter { id: actual, name }),
+        ) if actual == expected => Some(CheckedType::Parameter {
+            id: actual,
+            name,
+            sized,
+        }),
         (
             CheckedType::Opaque {
                 id: actual_id,
@@ -3639,10 +3635,10 @@ pub(crate) fn substitute_type(
     substitutions: &HashMap<TypeParameterId, CheckedType>,
 ) -> CheckedType {
     match value_type {
-        CheckedType::Parameter { id, name } => substitutions
+        CheckedType::Parameter { id, name, sized } => substitutions
             .get(&id)
             .cloned()
-            .unwrap_or(CheckedType::Parameter { id, name }),
+            .unwrap_or(CheckedType::Parameter { id, name, sized }),
         CheckedType::CPointer { pointee } => CheckedType::CPointer {
             pointee: Box::new(substitute_type(*pointee, substitutions)),
         },
@@ -3820,6 +3816,56 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
             _ => {}
         }
     }
+    let mut ids = HashSet::new();
+    collect(value_type, &mut ids);
+    ids
+}
+
+fn sized_type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
+    fn collect(value_type: &CheckedType, ids: &mut HashSet<TypeParameterId>) {
+        match value_type {
+            CheckedType::Parameter {
+                id, sized: true, ..
+            } => {
+                ids.insert(*id);
+            }
+            CheckedType::Parameter { .. } => {}
+            CheckedType::CPointer { pointee } => collect(pointee, ids),
+            CheckedType::Ref(value) | CheckedType::ErasedProduct(value) => collect(value, ids),
+            CheckedType::Opaque { arguments, .. }
+            | CheckedType::TypeConstructor { arguments, .. } => {
+                for argument in arguments {
+                    collect(argument, ids);
+                }
+            }
+            CheckedType::Product(product) => {
+                for element in &product.elements {
+                    collect(&element.value_type, ids);
+                }
+            }
+            CheckedType::Function(function) => {
+                collect(&function.parameter, ids);
+                collect(&function.result, ids);
+            }
+            CheckedType::Sum(sum) => {
+                for alternative in &sum.alternatives {
+                    collect(alternative, ids);
+                }
+            }
+            CheckedType::Distinct {
+                arguments,
+                representation,
+                ..
+            } => {
+                for argument in arguments {
+                    collect(argument, ids);
+                }
+                collect(representation, ids);
+            }
+            _ => {}
+        }
+    }
+
     let mut ids = HashSet::new();
     collect(value_type, &mut ids);
     ids

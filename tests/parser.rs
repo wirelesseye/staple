@@ -526,6 +526,45 @@ fn parses_compile_time_parameters_and_type_application() {
 }
 
 #[test]
+fn parses_sized_relaxations_losslessly() {
+    let source = concat!(
+        "pub(repr) type RefLike = T => ?Sized T => T\n",
+        "def preserve: T => ?Sized T => Ref T -> Ref T = value => value\n",
+        "def ordinary: T => T -> T = value => value\n",
+    );
+    let root = parse(source).expect("`?Sized` clauses should parse");
+    assert_eq!(root.text(), source);
+
+    let Item::TypeDeclaration(reference) = &root.items[0] else {
+        panic!("expected type declaration");
+    };
+    assert!(matches!(
+        reference.type_parameters.as_slice(),
+        [stapler::TypeParameterPattern::Binding(binding)] if !binding.sized
+    ));
+
+    let Statement::Binding(preserve) = statement(&root.items[1]) else {
+        panic!("expected generic binding");
+    };
+    assert!(matches!(
+        preserve.type_parameters.as_slice(),
+        [stapler::TypeParameterPattern::Binding(binding)] if !binding.sized
+    ));
+
+    let Statement::Binding(ordinary) = statement(&root.items[2]) else {
+        panic!("expected generic binding");
+    };
+    assert!(matches!(
+        ordinary.type_parameters.as_slice(),
+        [stapler::TypeParameterPattern::Binding(binding)] if binding.sized
+    ));
+
+    assert!(parse("type alias Bad = T => ?Other T => T\n").is_err());
+    assert!(parse("type alias Bad = T => ?Sized U => T\n").is_err());
+    assert!(parse("type alias Bad = T => ?Sized T => ?Sized T => T\n").is_err());
+}
+
+#[test]
 fn parses_public_representations_and_nominal_patterns() {
     let source = concat!(
         "pub(repr) type Box = T => (value: T)\n",

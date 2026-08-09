@@ -620,6 +620,22 @@ reachable concrete use is monomorphized, unused instantiations produce no code,
 and recursive calls must retain the current specialization. Generic `let` and
 `extern` declarations are not supported.
 
+Every compile-time type parameter has an implicit `Sized` bound. It may
+therefore appear in by-value parameters, results, products, and represented
+types. A declaration that only stores or forwards a type behind a constructor
+which accepts unsized arguments can relax that default after introducing the
+parameter:
+
+```staple
+def preserve_ref: T => ?Sized T => Ref T -> Ref T = value => value
+```
+
+The `?Sized T =>` clause must name an already introduced parameter and may
+appear only once for that parameter. It is a relaxation, not a trait bound:
+`Sized T =>` remains the ordinary bounded-generic spelling. A relaxed parameter
+cannot itself be passed or returned by value. `Sized` is compiler-derived, so
+explicit `impl Sized` declarations are rejected.
+
 ### Traits and bounded generic functions
 
 A trait declares a set of functions for one type parameter:
@@ -849,7 +865,10 @@ not implicit.
 contains a UTF-8 byte pointer, byte length, and capacity; the byte storage is
 managed as well. Copying a `String` copies the handle.
 
-`Ref T` is a garbage-collected reference to a value of type `T`.
+`Ref T` is a garbage-collected reference to a value of type `T`. Its standard
+declaration is `pub(repr) type Ref = T => ?Sized T => T`, so its payload may be
+sized or unsized while the reference value itself always has a known
+representation.
 Constructing `Ref value` copies or moves `value` into a managed allocation;
 copying a `Ref` copies only its non-null handle. Product fields and indices can
 be accessed and assigned directly through the handle. Every alias observes the
@@ -898,8 +917,10 @@ let third = values[index]
 is still fixed. It is not a dynamic array and is not equal to any `Ref T[N]`;
 fixed references are implicitly converted when an erased reference is
 expected. Literal and variable indexing perform runtime bounds checks. Erased
-products cannot be used by value, spread, destructured, or passed through a
-foreign ABI.
+products are unsized: they cannot be used by value, spread, destructured, or
+passed through a foreign ABI. Transparent aliases may name unsized types, and
+those aliases may be used behind a constructor such as `Ref` whose parameter
+is declared `?Sized`.
 
 Managed references use a non-moving, single-threaded, stop-the-world
 mark-and-sweep collector. Collection occurs automatically as the live heap

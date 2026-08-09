@@ -189,6 +189,7 @@ impl Grammar {
         let parameter = TypeParameterBinding {
             syntax: self.syntax(parameter_start),
             name: parameter_name,
+            sized: true,
         };
         self.expect(
             TokenKind::FatArrow,
@@ -485,11 +486,12 @@ impl Grammar {
         if !has_body && kind == TypeDeclarationKind::Alias {
             return Err(self.error("expected `=` after type alias name"));
         }
-        let type_parameters = if has_body {
+        let mut type_parameters = if has_body {
             self.parse_type_parameters()?
         } else {
             Vec::new()
         };
+        self.parse_sized_relaxations(&mut type_parameters)?;
         let (kind, underlying) = if !has_body {
             (TypeDeclarationKind::Singleton, None)
         } else if self.eat(TokenKind::Opaque) {
@@ -576,6 +578,7 @@ impl Grammar {
         let annotation = if annotation.is_some() {
             type_parameters = self.parse_type_parameters()?;
             if !type_parameters.is_empty() {
+                self.parse_sized_relaxations(&mut type_parameters)?;
                 trait_bounds = self.parse_trait_bounds()?;
             }
             Some(self.parse_type()?)
@@ -665,6 +668,39 @@ impl Grammar {
         Ok(bounds)
     }
 
+    fn parse_sized_relaxations(
+        &mut self,
+        parameters: &mut [TypeParameterPattern],
+    ) -> Result<(), ParseError> {
+        while self.eat_operator("?") {
+            let bound = self
+                .expect(TokenKind::Identifier, "expected `Sized` after `?`")?
+                .text;
+            if bound != "Sized" {
+                return Err(self.error("only the implicit `Sized` bound may be relaxed"));
+            }
+            let name = self
+                .expect(
+                    TokenKind::Identifier,
+                    "expected compile-time parameter after `?Sized`",
+                )?
+                .text;
+            self.expect(TokenKind::FatArrow, "expected `=>` after `?Sized` clause")?;
+            let Some(parameter) = find_type_parameter_binding_mut(parameters, &name) else {
+                return Err(self.error(format!(
+                    "`?Sized` must name an already introduced compile-time parameter; `{name}` was not found"
+                )));
+            };
+            if !parameter.sized {
+                return Err(self.error(format!(
+                    "duplicate `?Sized` clause for compile-time parameter `{name}`"
+                )));
+            }
+            parameter.sized = false;
+        }
+        Ok(())
+    }
+
     fn parse_type_parameter_pattern(&mut self) -> Result<TypeParameterPattern, ParseError> {
         let start = self.position;
         if self.eat(TokenKind::LParen) {
@@ -692,6 +728,7 @@ impl Grammar {
         Ok(TypeParameterPattern::Binding(TypeParameterBinding {
             syntax: self.syntax(start),
             name,
+            sized: true,
         }))
     }
 
@@ -1552,6 +1589,27 @@ fn line_starts(source: &str) -> Vec<usize> {
         }
     }
     starts
+}
+
+fn find_type_parameter_binding_mut<'a>(
+    parameters: &'a mut [TypeParameterPattern],
+    name: &str,
+) -> Option<&'a mut TypeParameterBinding> {
+    for parameter in parameters {
+        match parameter {
+            TypeParameterPattern::Binding(binding) if binding.name == name => {
+                return Some(binding);
+            }
+            TypeParameterPattern::Product(product) => {
+                if let Some(binding) = find_type_parameter_binding_mut(&mut product.elements, name)
+                {
+                    return Some(binding);
+                }
+            }
+            TypeParameterPattern::Binding(_) => {}
+        }
+    }
+    None
 }
 
 fn is_symbol_kind(kind: TokenKind) -> bool {
