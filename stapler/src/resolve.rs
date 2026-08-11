@@ -28,6 +28,16 @@ pub struct TypeParameterId(pub usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct MacroId(pub usize);
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DefinitionId {
+    Symbol(SymbolId),
+    Type(TypeId),
+    TypeParameter(TypeParameterId),
+    Trait(TraitId),
+    TraitMethod(TraitMethodId),
+    Module(ModuleId),
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedTrait {
     pub id: TraitId,
@@ -228,6 +238,8 @@ pub struct ResolvedModule {
     nominal_patterns: HashMap<SyntaxId, TypeId>,
     type_parameters: HashMap<SyntaxId, TypeParameterId>,
     type_parameter_sized: HashMap<TypeParameterId, bool>,
+    type_parameter_declarations: HashMap<TypeParameterId, SyntaxId>,
+    type_parameter_modules: HashMap<TypeParameterId, ModuleId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
@@ -250,6 +262,9 @@ pub struct ResolvedModule {
     checked_initialization_reads: HashSet<SyntaxId>,
     mutable_symbols: HashSet<SymbolId>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
+    symbol_declarations: HashMap<SymbolId, SyntaxId>,
+    trait_modules: HashMap<TraitId, ModuleId>,
+    import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
 }
 
 impl ResolvedModule {
@@ -267,6 +282,100 @@ impl ResolvedModule {
 
     pub fn symbol_for(&self, syntax_id: SyntaxId) -> Option<SymbolId> {
         self.symbols.get(&syntax_id).copied()
+    }
+
+    pub fn definitions_for(&self, syntax_id: SyntaxId) -> Vec<DefinitionId> {
+        let mut definitions = Vec::new();
+        if let Some(symbol) = self.symbol_for(syntax_id) {
+            if let Some(ty) = self
+                .constructor_type(symbol)
+                .or_else(|| self.singleton_type(symbol))
+            {
+                definitions.push(DefinitionId::Type(ty));
+            } else {
+                definitions.push(DefinitionId::Symbol(symbol));
+            }
+        }
+        if let Some(ty) = self
+            .type_for(syntax_id)
+            .or_else(|| self.type_for_pattern(syntax_id))
+        {
+            definitions.push(DefinitionId::Type(ty));
+        }
+        if let Some(parameter) = self.type_parameter_for(syntax_id) {
+            definitions.push(DefinitionId::TypeParameter(parameter));
+        }
+        if let Some(trait_id) = self.trait_for(syntax_id) {
+            definitions.push(DefinitionId::Trait(trait_id));
+        }
+        definitions.extend(
+            self.trait_methods_for_expression(syntax_id)
+                .iter()
+                .copied()
+                .map(DefinitionId::TraitMethod),
+        );
+        for (id, declaration) in &self.type_declarations {
+            if declaration.syntax.id == syntax_id {
+                definitions.push(DefinitionId::Type(*id));
+            }
+        }
+        for (id, resolved_trait) in &self.traits {
+            if resolved_trait.declaration.syntax.id == syntax_id {
+                definitions.push(DefinitionId::Trait(*id));
+            }
+        }
+        for (id, member) in &self.trait_methods {
+            if member.syntax.id == syntax_id {
+                definitions.push(DefinitionId::TraitMethod(*id));
+            }
+        }
+        let mut seen = HashSet::new();
+        definitions.retain(|definition| seen.insert(*definition));
+        definitions
+    }
+
+    pub fn import_definitions(&self, syntax: SyntaxId, name: &str) -> &[DefinitionId] {
+        self.import_definitions
+            .get(&(syntax, name.to_owned()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    pub fn declaration_syntax(&self, definition: DefinitionId) -> Option<SyntaxId> {
+        match definition {
+            DefinitionId::Symbol(symbol) => self.symbol_declarations.get(&symbol).copied(),
+            DefinitionId::Type(id) => self.type_declarations.get(&id).map(|value| value.syntax.id),
+            DefinitionId::TypeParameter(id) => self.type_parameter_declarations.get(&id).copied(),
+            DefinitionId::Trait(id) => self
+                .traits
+                .get(&id)
+                .map(|value| value.declaration.syntax.id),
+            DefinitionId::TraitMethod(id) => {
+                self.trait_methods.get(&id).map(|value| value.syntax.id)
+            }
+            DefinitionId::Module(id) => self.program.modules().iter().find_map(|module| {
+                module.syntax.items.iter().find_map(|item| {
+                    let Item::Submodule(submodule) = item else {
+                        return None;
+                    };
+                    (self.program.child_module(submodule.syntax.id) == Some(id))
+                        .then_some(submodule.syntax.id)
+                })
+            }),
+        }
+    }
+
+    pub fn definition_module(&self, definition: DefinitionId) -> Option<ModuleId> {
+        match definition {
+            DefinitionId::Symbol(symbol) => self.symbol_module(symbol),
+            DefinitionId::Type(id) => self.type_modules.get(&id).copied(),
+            DefinitionId::TypeParameter(id) => self.type_parameter_modules.get(&id).copied(),
+            DefinitionId::Trait(id) => self.trait_modules.get(&id).copied(),
+            DefinitionId::TraitMethod(id) => self
+                .trait_for_method(id)
+                .and_then(|trait_id| self.trait_modules.get(&trait_id).copied()),
+            DefinitionId::Module(id) => Some(id),
+        }
     }
 
     pub fn function_for(&self, syntax_id: SyntaxId) -> Option<FunctionId> {
@@ -530,20 +639,25 @@ pub struct NameResolver {
     named_types: HashMap<SyntaxId, TypeId>,
     type_parameters: HashMap<SyntaxId, TypeParameterId>,
     type_parameter_sized: HashMap<TypeParameterId, bool>,
+    type_parameter_declarations: HashMap<TypeParameterId, SyntaxId>,
+    type_parameter_modules: HashMap<TypeParameterId, ModuleId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
     traits: HashMap<TraitId, ResolvedTrait>,
     trait_methods: HashMap<TraitMethodId, crate::TraitMember>,
     trait_method_traits: HashMap<TraitMethodId, TraitId>,
     trait_member_ids: HashMap<(TraitId, String), TraitMethodId>,
+    trait_modules: HashMap<TraitId, ModuleId>,
     trait_references: HashMap<SyntaxId, TraitId>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     mutable_symbols: HashSet<SymbolId>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
+    import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     interfaces: Vec<Interface>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
+    symbol_declarations: HashMap<SymbolId, SyntaxId>,
     module_values: Vec<HashMap<String, SymbolId>>,
     definition_context_values: Vec<HashMap<String, SymbolId>>,
     definition_context_types: Vec<HashMap<String, TypeId>>,
@@ -662,6 +776,8 @@ impl NameResolver {
             nominal_patterns: self.nominal_patterns,
             type_parameters: self.type_parameters,
             type_parameter_sized: self.type_parameter_sized,
+            type_parameter_declarations: self.type_parameter_declarations,
+            type_parameter_modules: self.type_parameter_modules,
             type_declarations: self.type_declarations,
             type_names: self.type_names,
             syntax_modules: self.syntax_modules,
@@ -676,6 +792,7 @@ impl NameResolver {
             traits: self.traits,
             trait_methods: self.trait_methods,
             trait_method_traits: self.trait_method_traits,
+            trait_modules: self.trait_modules,
             trait_references: self.trait_references,
             trait_method_references: self.trait_method_references,
             trait_implementations: self.trait_implementations,
@@ -684,6 +801,8 @@ impl NameResolver {
             checked_initialization_reads: HashSet::new(),
             mutable_symbols: self.mutable_symbols,
             symbol_modules: self.symbol_modules,
+            symbol_declarations: self.symbol_declarations,
+            import_definitions: self.import_definitions,
         };
         let analysis = InitializationAnalyzer::new(&resolved).analyze();
         if !analysis.diagnostics.is_empty() {
@@ -1106,6 +1225,7 @@ impl NameResolver {
                     Item::TraitDeclaration(declaration) => {
                         let id = TraitId(self.next_trait_id);
                         self.next_trait_id += 1;
+                        self.trait_modules.insert(id, source_module.id);
                         if self.declared_traits[source_module.id.0]
                             .insert(declaration.name.clone(), id)
                             .is_some()
@@ -1286,6 +1406,7 @@ impl NameResolver {
         let symbol = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
         self.declared_symbols.insert(binding.syntax.id, symbol);
+        self.symbol_declarations.insert(symbol, binding.syntax.id);
         self.binding_type_parameters
             .insert(binding.syntax.id, binding.type_parameters.clone());
         self.binding_trait_bounds
@@ -1306,6 +1427,7 @@ impl NameResolver {
                 let symbol = SymbolId(self.next_symbol_id);
                 self.next_symbol_id += 1;
                 self.declared_symbols.insert(binding.syntax.id, symbol);
+                self.symbol_declarations.insert(symbol, binding.syntax.id);
                 self.symbols.insert(binding.syntax.id, symbol);
                 self.symbol_owners.insert(symbol, None);
                 self.symbol_modules.insert(symbol, self.current_module);
@@ -1353,6 +1475,12 @@ impl NameResolver {
             if declaration.kind == UseKind::Glob {
                 self.record_private_glob_items(imported, declaration, &interface);
             }
+            if let Some(name) = declaration.path.last() {
+                self.import_definitions
+                    .entry((declaration.syntax.id, name.clone()))
+                    .or_default()
+                    .push(DefinitionId::Module(imported));
+            }
             match &declaration.kind {
                 UseKind::Namespace => {
                     let name = declaration
@@ -1385,6 +1513,12 @@ impl NameResolver {
                 }
                 UseKind::Selected(names) => {
                     for name in names {
+                        self.record_import_definitions(
+                            declaration.syntax.id,
+                            name,
+                            name,
+                            &interface,
+                        );
                         self.install_selected(
                             &interface,
                             name,
@@ -1394,9 +1528,46 @@ impl NameResolver {
                     }
                 }
                 UseKind::Renamed { item, alias } => {
+                    self.record_import_definitions(declaration.syntax.id, item, alias, &interface);
                     self.install_selected(&interface, item, alias, declaration.syntax.span.clone());
                 }
             }
+        }
+    }
+
+    fn record_import_definitions(
+        &mut self,
+        syntax: SyntaxId,
+        item: &str,
+        alias: &str,
+        interface: &Interface,
+    ) {
+        let mut definitions = Vec::new();
+        if let Some(symbol) = interface.values.get(item).copied() {
+            if let Some(ty) = self
+                .constructors
+                .get(&symbol)
+                .or_else(|| self.singleton_values.get(&symbol))
+                .copied()
+            {
+                definitions.push(DefinitionId::Type(ty));
+            } else {
+                definitions.push(DefinitionId::Symbol(symbol));
+            }
+        }
+        if let Some(ty) = interface.types.get(item).copied() {
+            definitions.push(DefinitionId::Type(ty));
+        }
+        if let Some(trait_id) = interface.traits.get(item).copied() {
+            definitions.push(DefinitionId::Trait(trait_id));
+        }
+        let mut seen = HashSet::new();
+        definitions.retain(|definition| seen.insert(*definition));
+        for name in [item, alias] {
+            self.import_definitions
+                .entry((syntax, name.to_owned()))
+                .or_default()
+                .extend(definitions.iter().copied());
         }
     }
 
@@ -1722,6 +1893,10 @@ impl NameResolver {
                             format!("trait has no member named `{}`", member.name),
                         ));
                     }
+                    if let Some(method) = method {
+                        self.trait_method_references
+                            .insert(member.syntax.id, vec![method]);
+                    }
                     let function_name = trait_id
                         .map(|id| {
                             format!(
@@ -1953,6 +2128,9 @@ impl NameResolver {
                 }
                 self.type_parameters.insert(binding.syntax.id, id);
                 self.type_parameter_sized.insert(id, binding.sized);
+                self.type_parameter_declarations
+                    .insert(id, binding.syntax.id);
+                self.type_parameter_modules.insert(id, self.current_module);
             }
             TypeParameterPattern::Product(product) => {
                 for element in &product.elements {
@@ -1973,6 +2151,9 @@ impl NameResolver {
                 self.next_type_parameter_id += 1;
                 self.type_parameters.insert(binding.syntax.id, id);
                 self.type_parameter_sized.insert(id, binding.sized);
+                self.type_parameter_declarations
+                    .insert(id, binding.syntax.id);
+                self.type_parameter_modules.insert(id, self.current_module);
                 parameters.push(id);
             }
             TypeParameterPattern::Product(product) => {
@@ -2383,6 +2564,7 @@ impl NameResolver {
                     if let Some(pattern_symbol) = self.declared_symbols.remove(&binding.syntax.id) {
                         self.symbols.remove(&binding.syntax.id);
                         self.symbol_modules.remove(&pattern_symbol);
+                        self.symbol_declarations.remove(&pattern_symbol);
                         self.mutable_symbols.remove(&pattern_symbol);
                     }
                 } else {
@@ -2663,6 +2845,7 @@ impl NameResolver {
         self.symbol_owners
             .insert(symbol, self.function_stack.last().copied());
         self.symbol_modules.insert(symbol, self.current_module);
+        self.symbol_declarations.insert(symbol, syntax);
         self.declare_symbol(name, syntax, span, symbol);
     }
 

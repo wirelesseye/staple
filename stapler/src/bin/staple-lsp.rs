@@ -1,4 +1,5 @@
 mod staple_lsp {
+    pub mod definition;
     pub mod hover;
     pub mod semantic;
 }
@@ -11,8 +12,9 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{HoverRequest, Request as _, SemanticTokensFullRequest};
+use lsp_types::request::{GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest};
 use lsp_types::*;
+use staple_lsp::definition::{self, DefinitionEntry};
 use staple_lsp::hover::{self, HoverEntry};
 use staple_lsp::semantic::{self, SemanticEntry};
 use stapler::{Diagnostic as StapleDiagnostic, NameResolver, ProgramLoader, Span, TypeChecker};
@@ -23,7 +25,9 @@ struct Document {
     version: i32,
     semantic_tokens: Vec<SemanticToken>,
     hover_entries: Vec<HoverEntry>,
+    definition_entries: Vec<DefinitionEntry>,
     last_successful: Option<SuccessfulAnalysis>,
+    last_resolved: Option<ResolvedDefinitions>,
 }
 
 #[derive(Clone)]
@@ -31,6 +35,13 @@ struct SuccessfulAnalysis {
     source: String,
     semantic_entries: Vec<SemanticEntry>,
     hover_entries: Vec<HoverEntry>,
+}
+
+#[derive(Clone)]
+struct ResolvedDefinitions {
+    source: String,
+    path: PathBuf,
+    entries: Vec<DefinitionEntry>,
 }
 
 struct Server {
@@ -80,6 +91,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
             },
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
+        definition_provider: Some(OneOf::Left(true)),
         ..ServerCapabilities::default()
     };
     let result = InitializeResult {
@@ -161,6 +173,57 @@ impl Server {
                     serde_json::to_value(result).unwrap(),
                 )))
                 .map_err(|error| error.to_string())?;
+        } else if request.method == GotoDefinition::METHOD {
+            let params: GotoDefinitionParams =
+                serde_json::from_value(request.params).map_err(|error| error.to_string())?;
+            let uri = &params.text_document_position_params.text_document.uri;
+            let requested_position = params.text_document_position_params.position;
+            let result = self.documents.get(uri).and_then(|document| {
+                let offset = semantic::offset(&document.text, requested_position)?;
+                let entry = document
+                    .definition_entries
+                    .iter()
+                    .filter(|entry| entry.range.start <= offset && offset < entry.range.end)
+                    .min_by_key(|entry| entry.range.end - entry.range.start)?;
+                let origin_selection_range = lsp_range(&document.text, entry.range.clone());
+                let links = entry
+                    .targets
+                    .iter()
+                    .filter_map(|target| {
+                        let is_entry = document
+                            .last_resolved
+                            .as_ref()
+                            .is_some_and(|resolved| resolved.path == target.path);
+                        let target_uri = if is_entry {
+                            uri.clone()
+                        } else {
+                            path_to_uri(&target.path)?
+                        };
+                        let target_text = if is_entry || &target_uri == uri {
+                            document.text.clone()
+                        } else {
+                            std::fs::read_to_string(&target.path).ok()?
+                        };
+                        Some(LocationLink {
+                            origin_selection_range: Some(origin_selection_range),
+                            target_uri,
+                            target_range: lsp_range(&target_text, target.range.clone()),
+                            target_selection_range: lsp_range(
+                                &target_text,
+                                target.selection_range.clone(),
+                            ),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                (!links.is_empty()).then_some(GotoDefinitionResponse::Link(links))
+            });
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(
+                    request.id,
+                    serde_json::to_value(result).unwrap(),
+                )))
+                .map_err(|error| error.to_string())?;
         } else if request.method == HoverRequest::METHOD {
             let params: HoverParams =
                 serde_json::from_value(request.params).map_err(|error| error.to_string())?;
@@ -220,7 +283,9 @@ impl Server {
                         version: params.text_document.version,
                         semantic_tokens: Vec::new(),
                         hover_entries: Vec::new(),
+                        definition_entries: Vec::new(),
                         last_successful: None,
+                        last_resolved: None,
                     },
                 );
                 self.analyze(&uri)?;
@@ -260,6 +325,11 @@ impl Server {
             let tokens = semantic::tokens(&text, stapler::parse(&text).ok().as_ref(), None, None);
             self.documents.get_mut(uri).unwrap().semantic_tokens = tokens;
             self.documents.get_mut(uri).unwrap().hover_entries.clear();
+            self.documents
+                .get_mut(uri)
+                .unwrap()
+                .definition_entries
+                .clear();
             return self.publish(
                 uri.clone(),
                 vec![lsp_diagnostic(
@@ -276,6 +346,8 @@ impl Server {
         let mut resolved_for_tokens = None;
         let mut typed_for_tokens = None;
         let mut hover_entries = Vec::new();
+        let mut definition_entries = None;
+        let mut definition_path = path.clone();
         let mut analysis_succeeded = false;
         if let Some(module) = &parsed {
             let mut loader = ProgramLoader::new();
@@ -304,9 +376,20 @@ impl Server {
                         add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text)
                     }
                     Ok(resolved) => {
+                        definition_path = resolved
+                            .program()
+                            .module(resolved.program().entry())
+                            .path
+                            .clone();
+                        definition_entries = Some(definition::entries(module, &resolved, None));
                         resolved_for_tokens = Some(resolved.clone());
                         match TypeChecker::new().check(resolved) {
                             Ok(typed) => {
+                                definition_entries = Some(definition::entries(
+                                    module,
+                                    typed.resolved(),
+                                    Some(&typed),
+                                ));
                                 hover_entries = hover::entries(module, &typed);
                                 typed_for_tokens = Some(typed);
                                 analysis_succeeded = true;
@@ -333,6 +416,18 @@ impl Server {
             typed_for_tokens.as_ref(),
         );
         let document = self.documents.get_mut(uri).unwrap();
+        if let Some(entries) = definition_entries {
+            document.definition_entries = entries.clone();
+            document.last_resolved = Some(ResolvedDefinitions {
+                source: text.clone(),
+                path: definition_path,
+                entries,
+            });
+        } else if let Some(resolved) = &document.last_resolved {
+            document.definition_entries = remap_definition_entries(&text, resolved);
+        } else {
+            document.definition_entries.clear();
+        }
         if analysis_succeeded {
             document.semantic_tokens = semantic::encode(&text, &current_semantic);
             document.hover_entries = hover_entries.clone();
@@ -440,6 +535,49 @@ fn remap_hover_entries(source: &str, successful: &SuccessfulAnalysis) -> Vec<Hov
             })
         })
         .collect()
+}
+
+fn remap_definition_entries(source: &str, resolved: &ResolvedDefinitions) -> Vec<DefinitionEntry> {
+    let change = TextChange::between(&resolved.source, source);
+    resolved
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            let (start, end) = change.remap(entry.range.start, entry.range.end)?;
+            let range = start..end;
+            if resolved.source.get(entry.range.clone())? != source.get(range.clone())? {
+                return None;
+            }
+            let targets = entry
+                .targets
+                .iter()
+                .filter_map(|target| {
+                    if target.path != resolved.path {
+                        return Some(target.clone());
+                    }
+                    let (range_start, range_end) =
+                        change.remap(target.range.start, target.range.end)?;
+                    let (selection_start, selection_end) =
+                        change.remap(target.selection_range.start, target.selection_range.end)?;
+                    Some(definition::DefinitionTarget {
+                        path: target.path.clone(),
+                        range: range_start..range_end,
+                        selection_range: selection_start..selection_end,
+                    })
+                })
+                .collect::<Vec<_>>();
+            (!targets.is_empty()).then_some(DefinitionEntry { range, targets })
+        })
+        .collect()
+}
+
+fn lsp_range(source: &str, range: std::ops::Range<usize>) -> Range {
+    let (start_line, start_character) = semantic::position(source, range.start.min(source.len()));
+    let (end_line, end_character) = semantic::position(source, range.end.min(source.len()));
+    Range::new(
+        Position::new(start_line, start_character),
+        Position::new(end_line, end_character),
+    )
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -679,6 +817,21 @@ mod tests {
     }
 
     #[test]
+    fn definition_ranges_use_utf16_and_crlf_positions() {
+        let source = "😀\r\nlet café = 1\r\ncafé\r\n";
+        let declaration = source.find("café").unwrap();
+        let reference = source.rfind("café").unwrap();
+        assert_eq!(
+            lsp_range(source, declaration..declaration + "café".len()),
+            Range::new(Position::new(1, 4), Position::new(1, 8))
+        );
+        assert_eq!(
+            lsp_range(source, reference..reference + "café".len()),
+            Range::new(Position::new(2, 0), Position::new(2, 4))
+        );
+    }
+
+    #[test]
     fn serves_the_core_protocol_in_memory() {
         let (server_connection, client) = Connection::memory();
         let server = std::thread::spawn(|| {
@@ -714,6 +867,10 @@ mod tests {
         assert_eq!(
             result.capabilities.hover_provider,
             Some(HoverProviderCapability::Simple(true))
+        );
+        assert_eq!(
+            result.capabilities.definition_provider,
+            Some(OneOf::Left(true))
         );
         client
             .sender
@@ -812,6 +969,37 @@ mod tests {
 
         client
             .sender
+            .send(Message::Request(Request {
+                id: 6.into(),
+                method: GotoDefinition::METHOD.to_owned(),
+                params: serde_json::to_value(GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(uri.clone()),
+                        Position::new(1, 1),
+                    ),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .unwrap(),
+            }))
+            .unwrap();
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected definition response")
+        };
+        let definition: Option<GotoDefinitionResponse> =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(
+            matches!(
+                &definition,
+                Some(GotoDefinitionResponse::Link(links))
+                    if links.len() == 1
+                        && links[0].target_selection_range.start == Position::new(0, 4)
+            ),
+            "definition: {definition:?}"
+        );
+
+        client
+            .sender
             .send(Message::Notification(Notification::new(
                 DidChangeTextDocument::METHOD.to_owned(),
                 DidChangeTextDocumentParams {
@@ -852,6 +1040,37 @@ mod tests {
         let hover: Option<Hover> = serde_json::from_value(response.result.unwrap()).unwrap();
         assert!(
             matches!(hover, Some(Hover { contents: HoverContents::Markup(content), .. }) if content.value.contains("let okay: I32"))
+        );
+
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: 7.into(),
+                method: GotoDefinition::METHOD.to_owned(),
+                params: serde_json::to_value(GotoDefinitionParams {
+                    text_document_position_params: TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(uri.clone()),
+                        Position::new(2, 1),
+                    ),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .unwrap(),
+            }))
+            .unwrap();
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected preserved definition response")
+        };
+        let definition: Option<GotoDefinitionResponse> =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(
+            matches!(
+                &definition,
+                Some(GotoDefinitionResponse::Link(links))
+                    if links.len() == 1
+                        && links[0].target_selection_range.start == Position::new(0, 4)
+            ),
+            "definition: {definition:?}"
         );
 
         client
