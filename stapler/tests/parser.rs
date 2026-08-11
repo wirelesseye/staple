@@ -501,6 +501,28 @@ fn parses_expression_and_single_item_quotations_losslessly() {
 }
 
 #[test]
+fn parses_grouped_type_and_pattern_macro_arguments_losslessly() {
+    let source = concat!(
+        "inspect_type (I32 -> I32)\n",
+        "inspect_type (Result I32 Error)\n",
+        "inspect_pattern (Some value)\n",
+        "inspect_pattern ((left, right)) (40, 2)\n",
+    );
+    let root = parse(source).expect("grouped category arguments should parse");
+    assert_eq!(root.text(), source);
+    let Item::Statement(statement) = &root.items[0] else {
+        panic!("expected expression statement");
+    };
+    let Statement::Expression(Expression::Call(call)) = statement.as_ref() else {
+        panic!("expected macro call");
+    };
+    assert!(matches!(
+        call.argument.as_ref(),
+        Expression::SyntaxArgument(_)
+    ));
+}
+
+#[test]
 fn parses_hello_world_losslessly() {
     let source = include_str!("../examples/hello_world.sta");
     let root = parse(source).expect("hello_world should parse");

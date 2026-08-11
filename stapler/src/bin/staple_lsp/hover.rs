@@ -160,6 +160,7 @@ impl Collector<'_> {
                     self.collect_expression_declarations(operand);
                 }
             }
+            Expression::SyntaxArgument(_) => {}
             Expression::Quote(quote) => match &quote.template {
                 QuoteTemplate::Expression(expression) => {
                     self.collect_expression_declarations(expression)
@@ -196,7 +197,7 @@ impl Collector<'_> {
             Pattern::Nominal(nominal) => {
                 self.collect_pattern_declarations(&nominal.argument, prefix)
             }
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
         }
     }
 
@@ -506,6 +507,7 @@ impl Collector<'_> {
                     self.expression(operand);
                 }
             }
+            Expression::SyntaxArgument(_) => {}
             Expression::Quote(quote) => match &quote.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression),
                 QuoteTemplate::Item(item) => self.item(item),
@@ -549,7 +551,7 @@ impl Collector<'_> {
             }
             Pattern::Binding(binding) => self.ty(&binding.ty),
             Pattern::Wildcard(wildcard) => self.ty(&wildcard.ty),
-            Pattern::StringLiteral(_) => {}
+            Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
         }
     }
 
@@ -595,7 +597,7 @@ impl Collector<'_> {
                 self.ty(&application.argument);
             }
             Type::Repeated(repeated) => self.ty(&repeated.element),
-            Type::Inferred(_) | Type::StringLiteral(_) => {}
+            Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
         }
     }
 

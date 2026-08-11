@@ -1,4 +1,4 @@
-use super::{ProductType, Syntax, Type, TypeElement};
+use super::{ProductType, SpliceExpression, Syntax, Type, TypeElement};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
@@ -7,6 +7,7 @@ pub enum Pattern {
     StringLiteral(StringLiteralPattern),
     Product(ProductPattern),
     Nominal(NominalPattern),
+    Splice(SpliceExpression),
 }
 
 impl Pattern {
@@ -17,6 +18,7 @@ impl Pattern {
             Self::StringLiteral(pattern) => &pattern.syntax,
             Self::Product(pattern) => &pattern.syntax,
             Self::Nominal(pattern) => &pattern.syntax,
+            Self::Splice(pattern) => &pattern.syntax,
         }
     }
 
@@ -41,6 +43,9 @@ impl Pattern {
                 namespace: pattern.namespace.clone(),
                 name: pattern.name.clone(),
             }),
+            Self::Splice(pattern) => Type::Inferred(super::InferredType {
+                syntax: pattern.syntax.clone(),
+            }),
         }
     }
 
@@ -53,6 +58,7 @@ impl Pattern {
                 Self::StringLiteral(_) => None,
                 Self::Product(_) => None,
                 Self::Nominal(_) => None,
+                Self::Splice(_) => None,
             },
             ty: self.ty(),
             spread: false,

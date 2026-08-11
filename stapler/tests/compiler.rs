@@ -1772,6 +1772,147 @@ fn expands_explicit_and_inferred_item_macros() {
 }
 
 #[test]
+fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
+    let module = type_check(concat!(
+        "def type_identity: Type -> Type = value => value\n",
+        "def pattern_identity: Pattern -> Pattern = value => value\n",
+        "macro define_value = ty: Type => value: Expr => {\n",
+        "    let actual = type_identity ty\n",
+        "    quote { let generated: $actual = $value }\n",
+        "}\n",
+        "macro destructure = pattern: Pattern => value: Expr => {\n",
+        "    let actual = pattern_identity pattern\n",
+        "    quote { let $actual = $value }\n",
+        "}\n",
+        "define_value (I32 -> I32) (value => value)\n",
+        "destructure ((left, right)) (40, 2)\n",
+        "let answer: I32 = generated (left + right)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("type and pattern splices should generate valid code");
+}
+
+#[test]
+fn splices_types_and_patterns_through_expression_quotation_contexts() {
+    let module = type_check(concat!(
+        "macro typed_identity = ty: Type => quote { (value => value) satisfies ($ty -> $ty) }\n",
+        "macro parameter_function = pattern: Pattern => quote { $pattern => 42 }\n",
+        "macro matching = pattern: Pattern => quote { match (True satisfies Bool) { $pattern => 1, _ => 0 } }\n",
+        "let identity: I32 -> I32 = typed_identity I32\n",
+        "let constant: I32 -> I32 = parameter_function (_)\n",
+        "let matched: I32 = matching True\n",
+        "let result: I32 = identity (constant matched)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("contextual type and pattern splices should compile in expressions");
+}
+
+#[test]
+fn type_and_pattern_macro_inputs_support_atomic_and_compound_forms() {
+    let module = type_check(concat!(
+        "macro atomic_type = _: Type => quote { let atomic: I32 = 1 }\n",
+        "macro applied_type = _: Type => quote { let applied: I32 = 2 }\n",
+        "macro nominal_pattern = _: Pattern => quote { let nominal: I32 = 3 }\n",
+        "atomic_type I32\n",
+        "applied_type (Ref I32)\n",
+        "nominal_pattern (Some value)\n",
+        "let result: I32 = atomic + applied + nominal\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("atomic and grouped category arguments should compile");
+}
+
+#[test]
+fn type_and_pattern_overlaps_with_expression_overloads_are_ambiguous() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for source in [
+        concat!(
+            "macro choose = _: Expr => quote { 1 }\n",
+            "macro choose = _: Type => quote { 2 }\n",
+            "let result = choose I32\n",
+        ),
+        concat!(
+            "macro choose = _: Type => quote { 1 }\n",
+            "macro choose = _: Pattern => quote { 2 }\n",
+            "let result = choose (I32)\n",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("overlapping syntax categories should be ambiguous");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == "ambiguous invocation of macro `choose`")
+        );
+    }
+}
+
+#[test]
+fn diagnoses_invalid_type_and_pattern_macro_inputs_and_splices() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (source, expected) in [
+        (
+            "macro consume = _: Type => quote { 1 }\nlet result = consume (I32 ->)\n",
+            "argument 1 of macro `consume` must be a type",
+        ),
+        (
+            "macro invalid = value: Pattern => quote { let generated: $value = 1 }\ninvalid name\n",
+            "type splice `$value` contains pattern syntax",
+        ),
+        (
+            "macro invalid = value: Type => quote { let $value = 1 }\ninvalid I32\n",
+            "pattern splice `$value` contains type syntax",
+        ),
+        (
+            "def runtime = value => value\nlet result = runtime (I32 -> I32)\n",
+            "grouped type or pattern syntax requires a matching macro parameter",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should parse losslessly");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("invalid category syntax should fail expansion or resolution");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
+            "expected `{expected}`, found {diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
+fn type_and_pattern_overloads_are_more_specific_than_syntax() {
+    let module = type_check(concat!(
+        "macro choose_type = _: Syntax => quote { let type_choice: String = \"syntax\" }\n",
+        "macro choose_type = _: Type => quote { let type_choice: I32 = 1 }\n",
+        "macro choose_pattern = _: Syntax => quote { let pattern_choice: String = \"syntax\" }\n",
+        "macro choose_pattern = _: Pattern => quote { let pattern_choice: I32 = 2 }\n",
+        "choose_type I32\n",
+        "choose_pattern (Some value)\n",
+        "let result: I32 = type_choice + pattern_choice\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("category overloads should beat Syntax");
+}
+
+#[test]
 fn expands_macros_and_splices_inside_generated_items() {
     let module = type_check(concat!(
         "macro expression_identity = value: Expr => quote { $value }\n",

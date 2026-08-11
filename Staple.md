@@ -95,9 +95,35 @@ macro conditional =
         match $condition {
             True => $then_branch,
             False => $else_branch,
-        }
     }
+}
 ```
+
+`Type` and `Pattern` parameters accept opaque type and pattern syntax. One
+atomic name may be passed directly; compound syntax uses an outer pair of
+parentheses that delimits the macro argument and is not part of its value:
+
+```staple
+inspect_type I32
+inspect_type (I32 -> I32)
+inspect_type (Result I32 Error)
+inspect_type ((I32, String))
+
+inspect_pattern name
+inspect_pattern (Some value)
+inspect_pattern ((left, right))
+```
+
+Consequently, `inspect_type Result I32` is an invocation with separate
+arguments, not one applied type. Type and pattern values have no structural
+fields yet, but may be stored, passed through compile-time helpers, and spliced
+into matching positions in a quotation. For example, `$ty` may appear in a
+type annotation and `$pattern` may appear as a binding, function, or match
+pattern. A category-mismatched splice is rejected during expansion.
+
+When overloads from expression and type or pattern grammars accept the same
+source syntax, the invocation is ambiguous. `Type` and `Pattern` are narrower
+than `Syntax`, but are incomparable with `Expr` and with each other.
 
 The braces in `quote { syntax }` delimit one syntax value and are not part of
 the result. A quotation is parsed as one expression when the whole body can be
@@ -192,10 +218,11 @@ products, matches, literals, recursion, and pure integer operations. It rejects
 external or runtime-only effects. Expansion is limited to 128 nested macros and
 each top-level invocation is limited to 1,000,000 evaluation steps. Syntax
 values are compile-time-only. This release supports expression results, one
-top-level item result, scalar expression splices inside generated items, and
-structured identifier and call expressions. Repeated splices, item sequences,
-item input and inspection, structured access to other expression forms, and
-type or pattern generation remain future work.
+top-level item result, opaque type and pattern inputs with contextual scalar
+splices, scalar expression splices inside generated items, and structured
+identifier and call expressions. Repeated splices, item sequences, item input
+and inspection, structured access to other expression forms, standalone type
+or pattern quotation, and type or pattern output placement remain future work.
 
 Compiler-provided macros use typed bodyless contracts. `std.core` declares
 `pub macro quote: Syntax -> Syntax`, and `std.cinterop` declares

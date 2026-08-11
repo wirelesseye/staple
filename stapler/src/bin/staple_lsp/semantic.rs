@@ -217,7 +217,7 @@ impl<'a> Classifier<'a> {
             Pattern::Nominal(nominal) => {
                 self.collect_pattern_symbols(&nominal.argument, kind, resolved)
             }
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
         }
     }
 
@@ -470,6 +470,7 @@ impl<'a> Classifier<'a> {
                     self.mark_last(&operator.syntax, &operator.name, OPERATOR, 0, 1);
                 }
             }
+            Expression::SyntaxArgument(_) => {}
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression, resolved),
                 QuoteTemplate::Item(item) => self.item(item, resolved),
@@ -536,7 +537,7 @@ impl<'a> Classifier<'a> {
                 self.pattern(&value.argument, kind, resolved);
             }
             Pattern::Wildcard(value) => self.ty(&value.ty, resolved),
-            Pattern::StringLiteral(_) => {}
+            Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
         }
     }
 
@@ -618,7 +619,7 @@ impl<'a> Classifier<'a> {
                 self.ty(&value.argument, resolved);
             }
             Type::Repeated(value) => self.ty(&value.element, resolved),
-            Type::Inferred(_) | Type::StringLiteral(_) => {}
+            Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
         }
     }
 

@@ -1435,7 +1435,7 @@ impl NameResolver {
 
     fn allocate_pattern_symbols(&mut self, pattern: &Pattern) {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
             Pattern::Binding(binding) => {
                 let symbol = SymbolId(self.next_symbol_id);
                 self.next_symbol_id += 1;
@@ -2429,6 +2429,10 @@ impl NameResolver {
                 splice.syntax.span.clone(),
                 "splices are only available during macro expansion",
             )),
+            Expression::SyntaxArgument(argument) => self.diagnostics.push(Diagnostic::new(
+                argument.syntax.span.clone(),
+                "grouped type or pattern syntax requires a matching macro parameter",
+            )),
             Expression::String(_)
             | Expression::CString(_)
             | Expression::Integer(_)
@@ -2504,6 +2508,10 @@ impl NameResolver {
                 self.resolve_type(&application.argument);
             }
             Type::Repeated(repeated) => self.resolve_type(&repeated.element),
+            Type::Splice(splice) => self.diagnostics.push(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "type splices are only available during macro expansion",
+            )),
             Type::Inferred(_) | Type::StringLiteral(_) => {}
         }
     }
@@ -2598,6 +2606,10 @@ impl NameResolver {
                 }));
                 self.resolve_pattern_types(&pattern.argument);
             }
+            Pattern::Splice(splice) => self.diagnostics.push(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "pattern splices are only available during macro expansion",
+            )),
         }
     }
 
@@ -2638,7 +2650,7 @@ impl NameResolver {
                 self.validate_public_representation(&application.argument);
             }
             Type::Repeated(repeated) => self.validate_public_representation(&repeated.element),
-            Type::Inferred(_) | Type::StringLiteral(_) => {}
+            Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
         }
     }
 
@@ -2769,7 +2781,7 @@ impl NameResolver {
 
     fn declare_pattern(&mut self, pattern: &Pattern) {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
             Pattern::Binding(binding) => {
                 if self.nominal_patterns.contains_key(&binding.syntax.id) {
                     return;
@@ -3193,7 +3205,8 @@ impl<'a> InitializationAnalyzer<'a> {
                     );
                 }
             }
-            Expression::Quote(_)
+            Expression::SyntaxArgument(_)
+            | Expression::Quote(_)
             | Expression::Splice(_)
             | Expression::String(_)
             | Expression::CString(_)
@@ -3233,7 +3246,7 @@ impl<'a> InitializationAnalyzer<'a> {
         states: &mut HashMap<SymbolId, InitializationState>,
     ) {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
                     states.insert(symbol, state);

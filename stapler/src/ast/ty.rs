@@ -1,4 +1,4 @@
-use super::Syntax;
+use super::{SpliceExpression, Syntax};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
@@ -10,6 +10,7 @@ pub enum Type {
     Function(FunctionType),
     Application(TypeApplication),
     Repeated(RepeatedType),
+    Splice(SpliceExpression),
 }
 
 impl Type {
@@ -23,6 +24,7 @@ impl Type {
             Self::Function(ty) => &ty.syntax,
             Self::Application(ty) => &ty.syntax,
             Self::Repeated(ty) => &ty.syntax,
+            Self::Splice(ty) => &ty.syntax,
         }
     }
 }

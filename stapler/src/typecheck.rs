@@ -1770,6 +1770,7 @@ impl TypeChecker {
                     )),
                 }
             }
+            Pattern::Splice(_) => {}
         }
     }
 
@@ -2654,7 +2655,9 @@ impl TypeChecker {
                 }
                 instantiated
             }
-            Expression::Quote(_) | Expression::Splice(_) => CheckedType::Error,
+            Expression::SyntaxArgument(_) | Expression::Quote(_) | Expression::Splice(_) => {
+                CheckedType::Error
+            }
             Expression::String(string) => {
                 let decoded = match crate::string_literal::decode(&string.literal) {
                     Ok(value) => value,
@@ -3088,6 +3091,7 @@ impl TypeChecker {
                     ));
                 }
             }
+            Pattern::Splice(_) => {}
         }
     }
 
@@ -4058,6 +4062,7 @@ impl TypeChecker {
                     false,
                 )
             }
+            Type::Splice(_) => CheckedType::Error,
         }
     }
 

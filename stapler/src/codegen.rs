@@ -397,7 +397,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pattern: &Pattern,
     ) -> CodeGenerationResult<()> {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
             Pattern::Binding(binding) => {
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     return Ok(());
@@ -829,6 +829,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 };
                 self.bind_pattern_value(environment, &pattern.argument, value)
             }
+            Pattern::Splice(splice) => Err(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "unexpanded pattern splice",
+            )),
         }
     }
 
@@ -1256,7 +1260,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         pattern: &Pattern,
     ) -> CodeGenerationResult<()> {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
             Pattern::Binding(binding) => {
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     return Ok(());
@@ -1292,7 +1296,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         state: u64,
     ) -> CodeGenerationResult<()> {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => Ok(()),
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => Ok(()),
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) {
                     self.store_global_initialization_state(
@@ -2434,6 +2438,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map(|value| value.as_any_value_enum())
             }
             Expression::CString(string) => self.compile_c_string_literal(string),
+            Expression::SyntaxArgument(argument) => Err(Diagnostic::new(
+                argument.syntax.span.clone(),
+                "unexpanded grouped syntax argument",
+            )),
             Expression::Quote(quote) => Err(Diagnostic::new(
                 quote.syntax.span.clone(),
                 "unexpanded `quote` expression",
@@ -3198,6 +3206,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     ));
                 }
             },
+            Pattern::Splice(splice) => {
+                return Err(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    "unexpanded pattern splice",
+                ));
+            }
         }
         Ok(())
     }

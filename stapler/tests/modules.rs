@@ -846,6 +846,33 @@ fn generated_items_keep_definition_and_splice_hygiene() {
 }
 
 #[test]
+fn generated_type_and_pattern_splices_keep_caller_hygiene() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use helpers (define_alias, destructure)\n",
+            "destructure ((left, right)) (40, 2)\n",
+            "type alias Local = I32;\n",
+            "define_alias Local\n",
+            "let alias_value: Generated = 1\n",
+            "let result: I32 = alias_value + left + right\n",
+        ),
+    );
+    fixture.write(
+        "helpers.sta",
+        concat!(
+            "pub macro define_alias = ty: Type => quote { type alias Generated = $ty }\n",
+            "pub macro destructure = pattern: Pattern => value: Expr => quote { let $pattern = $value }\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("type and pattern splices should retain the caller environment");
+}
+
+#[test]
 fn imports_user_macros_through_selected_and_renamed_forms() {
     let fixture = Fixture::new();
     fixture.write(

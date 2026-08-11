@@ -72,6 +72,8 @@ enum SyntaxValue {
     Ident(crate::NameExpression),
     Call(crate::CallExpression),
     Unstructured(Expression),
+    Type(Type),
+    Pattern(Pattern),
     Item(Box<Item>),
 }
 
@@ -93,8 +95,17 @@ impl SyntaxValue {
             Self::Ident(name) => Some(Expression::Name(name)),
             Self::Call(call) => Some(Expression::Call(call)),
             Self::Unstructured(expression) => Some(expression),
-            Self::Item(_) => None,
+            Self::Type(_) | Self::Pattern(_) | Self::Item(_) => None,
         }
+    }
+}
+
+fn syntax_category(value: &SyntaxValue) -> &'static str {
+    match value {
+        SyntaxValue::Ident(_) | SyntaxValue::Call(_) | SyntaxValue::Unstructured(_) => "expression",
+        SyntaxValue::Type(_) => "type",
+        SyntaxValue::Pattern(_) => "pattern",
+        SyntaxValue::Item(_) => "item",
     }
 }
 
@@ -718,7 +729,7 @@ impl MacroExpander {
                     self.expand_item(module, item, depth + 1);
                 }
             }
-            syntax => {
+            syntax if syntax.to_expression().is_some() => {
                 if definition.result == MetaType::Item {
                     self.diagnostics.push(Diagnostic::new(
                         expression.syntax().span.clone(),
@@ -728,9 +739,7 @@ impl MacroExpander {
                         ),
                     ));
                 } else {
-                    let mut result = syntax
-                        .into_expression()
-                        .expect("non-item syntax must contain an expression");
+                    let mut result = syntax.into_expression().unwrap();
                     for argument in &arguments[definition.arity..] {
                         let mut syntax = result.syntax().clone();
                         syntax.id = self.fresh_id();
@@ -744,6 +753,14 @@ impl MacroExpander {
                     *item = Item::Statement(Box::new(Statement::Expression(result)));
                 }
             }
+            syntax => self.diagnostics.push(Diagnostic::new(
+                expression.syntax().span.clone(),
+                format!(
+                    "macro `{}` produces {} syntax, which cannot replace a top-level item",
+                    key.name,
+                    syntax_category(&syntax)
+                ),
+            )),
         }
         self.expansion_stack.pop();
         true
@@ -843,13 +860,21 @@ impl MacroExpander {
                 }
                 return expression;
             };
+            let category = syntax_category(&result);
             let Some(mut result) = result.into_expression() else {
                 self.diagnostics.push(Diagnostic::new(
                     expression.syntax().span.clone(),
-                    format!(
-                        "macro `{}` produces item syntax and may only be invoked as a standalone top-level item",
-                        key.name
-                    ),
+                    if category == "item" {
+                        format!(
+                            "macro `{}` produces item syntax and may only be invoked as a standalone top-level item",
+                            key.name
+                        )
+                    } else {
+                        format!(
+                            "macro `{}` produces {category} syntax, which cannot be used as an expression",
+                            key.name
+                        )
+                    },
                 ));
                 self.expansion_stack.pop();
                 return expression;
@@ -1138,12 +1163,8 @@ impl MacroExpander {
                 let mut value =
                     self.eval_expression(definition.key.module, body, &mut Environment::new())?;
                 for (expected, argument) in definition.parameters.iter().zip(arguments) {
-                    let argument = meta_argument_expression(expected, argument);
-                    value = self.apply_value(
-                        value,
-                        Value::Syntax(SyntaxValue::from_expression(argument.clone())),
-                        call_span.clone(),
-                    )?;
+                    let argument = self.meta_argument_value(expected, argument)?;
+                    value = self.apply_value(value, Value::Syntax(argument), call_span.clone())?;
                 }
                 match value {
                     Value::Syntax(syntax) => Some(syntax),
@@ -1156,6 +1177,31 @@ impl MacroExpander {
                     }
                 }
             }
+        }
+    }
+
+    fn meta_argument_value(
+        &mut self,
+        expected: &MetaType,
+        argument: &Expression,
+    ) -> Option<SyntaxValue> {
+        match expected {
+            MetaType::Type => {
+                let (syntax, grouped) = category_argument_syntax(argument)?;
+                crate::parser::parse_type_fragment(syntax, grouped, &mut self.next_syntax_id)
+                    .ok()
+                    .map(SyntaxValue::Type)
+            }
+            MetaType::Pattern => {
+                let (syntax, grouped) = category_argument_syntax(argument)?;
+                crate::parser::parse_pattern_fragment(syntax, grouped, &mut self.next_syntax_id)
+                    .ok()
+                    .map(SyntaxValue::Pattern)
+            }
+            MetaType::Item => None,
+            _ => Some(SyntaxValue::from_expression(
+                meta_argument_expression(expected, argument).clone(),
+            )),
         }
     }
 
@@ -1273,6 +1319,13 @@ impl MacroExpander {
                 ));
                 None
             }
+            Expression::SyntaxArgument(argument) => {
+                self.diagnostics.push(Diagnostic::new(
+                    argument.syntax.span.clone(),
+                    "grouped type or pattern syntax may only be passed to a matching macro parameter",
+                ));
+                None
+            }
             Expression::Product(product) => {
                 let mut values = Vec::new();
                 for element in &product.elements {
@@ -1310,18 +1363,21 @@ impl MacroExpander {
                     let mut result =
                         self.invoke_macro(&definition, consumed, expression.syntax().span.clone());
                     if !arguments[definition.arity..].is_empty()
-                        && matches!(result, Some(SyntaxValue::Item(_)))
+                        && result
+                            .as_ref()
+                            .is_some_and(|syntax| syntax.to_expression().is_none())
                     {
                         self.diagnostics.push(Diagnostic::new(
                             expression.syntax().span.clone(),
                             format!(
-                                "item-producing macro `{}` cannot have excess arguments",
+                                "{}-producing macro `{}` cannot have excess arguments",
+                                result.as_ref().map(syntax_category).unwrap_or("syntax"),
                                 key.name
                             ),
                         ));
                         result = None;
                     } else if let Some(syntax) = result.take() {
-                        if matches!(syntax, SyntaxValue::Item(_)) {
+                        if syntax.to_expression().is_none() {
                             result = Some(syntax);
                         } else {
                             let mut expanded = syntax
@@ -1925,7 +1981,7 @@ impl MacroExpander {
                     self.freshen_syntax(&mut operator.syntax, module, mark);
                 }
             }
-            Expression::Quote(_) => {}
+            Expression::SyntaxArgument(_) | Expression::Quote(_) => {}
             Expression::Splice(_)
             | Expression::Name(_)
             | Expression::String(_)
@@ -1997,20 +2053,40 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
 }
 
 fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
-    let argument = meta_argument_expression(expected, argument);
+    let expression_argument = meta_argument_expression(expected, argument);
     match expected {
-        MetaType::Syntax | MetaType::Expr => true,
-        MetaType::Ident(spelling) => match argument {
+        MetaType::Type => category_argument_syntax(argument).is_some_and(|(syntax, grouped)| {
+            let mut next_syntax_id = 0;
+            crate::parser::parse_type_fragment(syntax, grouped, &mut next_syntax_id).is_ok()
+        }),
+        MetaType::Pattern => category_argument_syntax(argument).is_some_and(|(syntax, grouped)| {
+            let mut next_syntax_id = 0;
+            crate::parser::parse_pattern_fragment(syntax, grouped, &mut next_syntax_id).is_ok()
+        }),
+        MetaType::Syntax | MetaType::Expr => !matches!(argument, Expression::SyntaxArgument(_)),
+        MetaType::Ident(spelling) => match expression_argument {
             Expression::Name(name) if is_plain_identifier(name) => spelling
                 .as_ref()
                 .is_none_or(|expected| expected == &name.name),
             _ => false,
         },
-        MetaType::CallExpr => matches!(argument, Expression::Call(_)),
-        MetaType::UnstructuredExpr => {
-            !matches!(argument, Expression::Name(_) | Expression::Call(_))
-        }
-        MetaType::Type | MetaType::Pattern | MetaType::Item => false,
+        MetaType::CallExpr => matches!(expression_argument, Expression::Call(_)),
+        MetaType::UnstructuredExpr => !matches!(
+            expression_argument,
+            Expression::Name(_) | Expression::Call(_)
+        ),
+        MetaType::Item => false,
+    }
+}
+
+fn category_argument_syntax(argument: &Expression) -> Option<(&Syntax, bool)> {
+    match argument {
+        Expression::SyntaxArgument(argument) => Some((&argument.syntax, true)),
+        Expression::Product(product) => Some((&product.syntax, true)),
+        Expression::Name(name) => Some((&name.syntax, false)),
+        Expression::Access(access) => Some((&access.syntax, false)),
+        Expression::String(string) => Some((&string.syntax, false)),
+        _ => None,
     }
 }
 
@@ -2112,7 +2188,10 @@ fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
             Type::Inferred(_) => Some(MetaType::Syntax),
             ty => meta_type(ty),
         },
-        Pattern::Product(_) | Pattern::Nominal(_) | Pattern::StringLiteral(_) => None,
+        Pattern::Product(_)
+        | Pattern::Nominal(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::Splice(_) => None,
     }
 }
 
@@ -2141,7 +2220,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
             type_contains_syntax(&application.callee) || type_contains_syntax(&application.argument)
         }
         Type::Repeated(repeated) => type_contains_syntax(&repeated.element),
-        Type::Inferred(_) | Type::StringLiteral(_) => false,
+        Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => false,
     }
 }
 
@@ -2177,7 +2256,7 @@ fn pattern_contains_syntax(pattern: &Pattern) -> bool {
         Pattern::Product(product) => product.elements.iter().any(pattern_contains_syntax),
         Pattern::Nominal(pattern) => pattern_contains_syntax(&pattern.argument),
         Pattern::Wildcard(wildcard) => type_contains_syntax(&wildcard.ty),
-        Pattern::StringLiteral(_) => false,
+        Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
     }
 }
 
@@ -2190,7 +2269,8 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         };
     }
     match expression {
-        Expression::Quote(_)
+        Expression::SyntaxArgument(_)
+        | Expression::Quote(_)
         | Expression::Splice(_)
         | Expression::Name(_)
         | Expression::Call(_)
@@ -2337,6 +2417,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             };
             pattern.name == name && bind_pattern(&pattern.argument, *value, environment)
         }
+        Pattern::Splice(_) => false,
     }
 }
 
@@ -2350,12 +2431,14 @@ fn matches_pattern_type(ty: &Type, value: &Value) -> bool {
 fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
     match (expected, value) {
         (MetaType::Syntax, Value::Syntax(_)) => true,
-        (MetaType::Expr, Value::Syntax(syntax)) => !matches!(syntax, SyntaxValue::Item(_)),
+        (MetaType::Expr, Value::Syntax(syntax)) => syntax.to_expression().is_some(),
         (MetaType::Ident(spelling), Value::Syntax(SyntaxValue::Ident(name))) => spelling
             .as_ref()
             .is_none_or(|expected| expected == &name.name),
         (MetaType::CallExpr, Value::Syntax(SyntaxValue::Call(_))) => true,
         (MetaType::UnstructuredExpr, Value::Syntax(SyntaxValue::Unstructured(_))) => true,
+        (MetaType::Type, Value::Syntax(SyntaxValue::Type(_))) => true,
+        (MetaType::Pattern, Value::Syntax(SyntaxValue::Pattern(_))) => true,
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
         _ => false,
     }
@@ -2411,14 +2494,17 @@ fn substitute_splices(
     let mut result = expression.clone();
     match &mut result {
         Expression::Function(function) => {
+            substitute_pattern(&mut function.pattern, environment, diagnostics)?;
             *function.body = substitute_splices(&function.body, environment, diagnostics)?
         }
         Expression::Satisfies(satisfies) => {
-            *satisfies.value = substitute_splices(&satisfies.value, environment, diagnostics)?
+            *satisfies.value = substitute_splices(&satisfies.value, environment, diagnostics)?;
+            substitute_type(&mut satisfies.ty, environment, diagnostics)?;
         }
         Expression::Match(match_) => {
             *match_.subject = substitute_splices(&match_.subject, environment, diagnostics)?;
             for arm in &mut match_.arms {
+                substitute_pattern(&mut arm.pattern, environment, diagnostics)?;
                 arm.body = substitute_splices(&arm.body, environment, diagnostics)?;
             }
         }
@@ -2454,6 +2540,7 @@ fn substitute_splices(
             }
         }
         Expression::Quote(_) => {}
+        Expression::SyntaxArgument(_) => {}
         Expression::Splice(_)
         | Expression::Name(_)
         | Expression::String(_)
@@ -2471,11 +2558,10 @@ fn substitute_statement(
 ) -> Option<()> {
     match statement {
         Statement::Binding(binding) => {
-            if let Some(value) = &mut binding.value {
-                *value = substitute_splices(value, environment, diagnostics)?;
-            }
+            substitute_binding(binding, environment, diagnostics)?;
         }
         Statement::PatternBinding(binding) => {
+            substitute_pattern(&mut binding.pattern, environment, diagnostics)?;
             binding.value = substitute_splices(&binding.value, environment, diagnostics)?
         }
         Statement::Assignment(assignment) => {
@@ -2539,8 +2625,163 @@ fn substitute_binding(
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
+    for bound in &mut binding.trait_bounds {
+        substitute_trait_bound(bound, environment, diagnostics)?;
+    }
+    if let Some(annotation) = &mut binding.annotation {
+        substitute_type(annotation, environment, diagnostics)?;
+    }
     if let Some(value) = &mut binding.value {
         *value = substitute_splices(value, environment, diagnostics)?;
+    }
+    Some(())
+}
+
+fn substitute_trait_bound(
+    bound: &mut crate::TraitBound,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    for argument in &mut bound.arguments {
+        substitute_type(argument, environment, diagnostics)?;
+    }
+    Some(())
+}
+
+fn substitute_type(
+    ty: &mut Type,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    if let Type::Splice(splice) = ty {
+        if splice.repeated {
+            diagnostics.push(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "repeated splices are not supported yet",
+            ));
+            return None;
+        }
+        return match environment.get(&splice.name).map(EnvironmentBinding::get) {
+            Some(Value::Syntax(SyntaxValue::Type(value))) => {
+                *ty = value;
+                Some(())
+            }
+            Some(Value::Syntax(value)) => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!(
+                        "type splice `${}` contains {} syntax",
+                        splice.name,
+                        syntax_category(&value)
+                    ),
+                ));
+                None
+            }
+            Some(_) => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!("type splice `${}` does not contain `Syntax`", splice.name),
+                ));
+                None
+            }
+            None => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!("unknown type splice `${}`", splice.name),
+                ));
+                None
+            }
+        };
+    }
+    match ty {
+        Type::Product(product) => {
+            for element in &mut product.elements {
+                substitute_type(&mut element.ty, environment, diagnostics)?;
+            }
+        }
+        Type::Sum(sum) => {
+            for alternative in &mut sum.alternatives {
+                substitute_type(alternative, environment, diagnostics)?;
+            }
+        }
+        Type::Function(function) => {
+            substitute_type(&mut function.parameter, environment, diagnostics)?;
+            substitute_type(&mut function.result, environment, diagnostics)?;
+        }
+        Type::Application(application) => {
+            substitute_type(&mut application.callee, environment, diagnostics)?;
+            substitute_type(&mut application.argument, environment, diagnostics)?;
+        }
+        Type::Repeated(repeated) => {
+            substitute_type(&mut repeated.element, environment, diagnostics)?
+        }
+        Type::Inferred(_) | Type::StringLiteral(_) | Type::Named(_) => {}
+        Type::Splice(_) => unreachable!(),
+    }
+    Some(())
+}
+
+fn substitute_pattern(
+    pattern: &mut Pattern,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    if let Pattern::Splice(splice) = pattern {
+        if splice.repeated {
+            diagnostics.push(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "repeated splices are not supported yet",
+            ));
+            return None;
+        }
+        return match environment.get(&splice.name).map(EnvironmentBinding::get) {
+            Some(Value::Syntax(SyntaxValue::Pattern(value))) => {
+                *pattern = value;
+                Some(())
+            }
+            Some(Value::Syntax(value)) => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!(
+                        "pattern splice `${}` contains {} syntax",
+                        splice.name,
+                        syntax_category(&value)
+                    ),
+                ));
+                None
+            }
+            Some(_) => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!(
+                        "pattern splice `${}` does not contain `Syntax`",
+                        splice.name
+                    ),
+                ));
+                None
+            }
+            None => {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!("unknown pattern splice `${}`", splice.name),
+                ));
+                None
+            }
+        };
+    }
+    match pattern {
+        Pattern::Binding(binding) => substitute_type(&mut binding.ty, environment, diagnostics)?,
+        Pattern::Wildcard(wildcard) => substitute_type(&mut wildcard.ty, environment, diagnostics)?,
+        Pattern::Product(product) => {
+            for element in &mut product.elements {
+                substitute_pattern(element, environment, diagnostics)?;
+            }
+        }
+        Pattern::Nominal(nominal) => {
+            substitute_pattern(&mut nominal.argument, environment, diagnostics)?
+        }
+        Pattern::StringLiteral(_) => {}
+        Pattern::Splice(_) => unreachable!(),
     }
     Some(())
 }
@@ -2557,13 +2798,20 @@ fn substitute_item(
             }
         }
         Item::TraitDeclaration(declaration) => {
+            for prerequisite in &mut declaration.prerequisites {
+                substitute_trait_bound(prerequisite, environment, diagnostics)?;
+            }
             for member in &mut declaration.members {
+                substitute_type(&mut member.annotation, environment, diagnostics)?;
                 if let Some(default) = &mut member.default {
                     *default = substitute_splices(default, environment, diagnostics)?;
                 }
             }
         }
         Item::TraitImplementation(implementation) => {
+            for argument in &mut implementation.arguments {
+                substitute_type(argument, environment, diagnostics)?;
+            }
             for member in &mut implementation.members {
                 member.value = substitute_splices(&member.value, environment, diagnostics)?;
             }
@@ -2571,7 +2819,14 @@ fn substitute_item(
         Item::Statement(statement) => {
             substitute_statement(statement, environment, diagnostics)?;
         }
-        Item::TypeDeclaration(_) => {}
+        Item::TypeDeclaration(declaration) => {
+            for bound in &mut declaration.trait_bounds {
+                substitute_trait_bound(bound, environment, diagnostics)?;
+            }
+            if let Some(underlying) = &mut declaration.underlying {
+                substitute_type(underlying, environment, diagnostics)?;
+            }
+        }
         Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => {
             unreachable!("unsupported item output must be rejected before substitution")
         }
@@ -2654,7 +2909,7 @@ fn alpha_rename_pattern(pattern: &mut Pattern, mark: u64, names: &mut HashMap<St
             }
         }
         Pattern::Nominal(pattern) => alpha_rename_pattern(&mut pattern.argument, mark, names),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
     }
 }
 
@@ -2714,7 +2969,8 @@ fn alpha_rename_expression(
                 alpha_rename_expression(operand, mark, scopes);
             }
         }
-        Expression::Quote(_)
+        Expression::SyntaxArgument(_)
+        | Expression::Quote(_)
         | Expression::Splice(_)
         | Expression::String(_)
         | Expression::CString(_)
@@ -2775,6 +3031,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Access(value) => &mut value.syntax,
         Expression::Index(value) => &mut value.syntax,
         Expression::Infix(value) => &mut value.syntax,
+        Expression::SyntaxArgument(value) => &mut value.syntax,
         Expression::Quote(value) => &mut value.syntax,
         Expression::Splice(value) => &mut value.syntax,
         Expression::Name(value) => &mut value.syntax,
@@ -2813,6 +3070,7 @@ fn freshen_pattern(
             expander.freshen_syntax(&mut nominal.syntax, module, mark);
             freshen_pattern(expander, &mut nominal.argument, module, mark);
         }
+        Pattern::Splice(splice) => expander.freshen_syntax(&mut splice.syntax, module, mark),
     }
 }
 
@@ -2968,6 +3226,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         Type::Function(ty) => &mut ty.syntax,
         Type::Application(ty) => &mut ty.syntax,
         Type::Repeated(ty) => &mut ty.syntax,
+        Type::Splice(ty) => &mut ty.syntax,
     };
     expander.freshen_syntax(syntax, module, mark);
     match ty {
@@ -2991,6 +3250,6 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
             freshen_type(expander, &mut application.argument, module, mark);
         }
         Type::Repeated(repeated) => freshen_type(expander, &mut repeated.element, module, mark),
-        Type::Inferred(_) | Type::StringLiteral(_) | Type::Named(_) => {}
+        Type::Inferred(_) | Type::StringLiteral(_) | Type::Named(_) | Type::Splice(_) => {}
     }
 }

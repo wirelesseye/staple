@@ -12,6 +12,7 @@ pub enum Expression {
     Access(AccessExpression),
     Index(IndexExpression),
     Infix(InfixExpression),
+    SyntaxArgument(SyntaxArgumentExpression),
     Quote(QuoteExpression),
     Splice(SpliceExpression),
     Name(NameExpression),
@@ -34,6 +35,7 @@ impl Expression {
             Self::Access(expression) => &expression.syntax,
             Self::Index(expression) => &expression.syntax,
             Self::Infix(expression) => &expression.syntax,
+            Self::SyntaxArgument(expression) => &expression.syntax,
             Self::Quote(expression) => &expression.syntax,
             Self::Splice(expression) => &expression.syntax,
             Self::Name(expression) => &expression.syntax,
@@ -43,6 +45,15 @@ impl Expression {
             Self::Float(expression) => &expression.syntax,
         }
     }
+}
+
+/// A parenthesized macro argument whose contents are not an expression.
+///
+/// Expansion reparses the inner tokens according to a macro parameter's
+/// syntax category. This node must not survive macro expansion.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyntaxArgumentExpression {
+    pub syntax: Syntax,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

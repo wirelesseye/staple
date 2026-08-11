@@ -29,6 +29,88 @@ pub(crate) fn parse_with_syntax_ids(
     Ok(module)
 }
 
+/// Reinterprets one macro argument's original tokens as exactly one type.
+pub(crate) fn parse_type_fragment(
+    syntax: &Syntax,
+    grouped: bool,
+    next_syntax_id: &mut usize,
+) -> Result<Type, ParseError> {
+    parse_fragment(syntax, grouped, next_syntax_id, |grammar| {
+        grammar.parse_type()
+    })
+}
+
+/// Reinterprets one macro argument's original tokens as exactly one pattern.
+pub(crate) fn parse_pattern_fragment(
+    syntax: &Syntax,
+    grouped: bool,
+    next_syntax_id: &mut usize,
+) -> Result<Pattern, ParseError> {
+    parse_fragment(syntax, grouped, next_syntax_id, |grammar| {
+        grammar.parse_pattern()
+    })
+}
+
+fn parse_fragment<T>(
+    syntax: &Syntax,
+    grouped: bool,
+    next_syntax_id: &mut usize,
+    parse: impl FnOnce(&mut Grammar) -> Result<T, ParseError>,
+) -> Result<T, ParseError> {
+    let all_tokens = &syntax.tokens;
+    let source = all_tokens
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect::<String>();
+    let mut tokens = syntax.tokens().to_vec();
+    if grouped {
+        let first = tokens
+            .iter()
+            .position(|token| !token.kind.is_trivia())
+            .filter(|index| tokens[*index].kind == TokenKind::LParen)
+            .ok_or_else(|| fragment_error(syntax, "expected grouped syntax argument"))?;
+        let last = tokens
+            .iter()
+            .rposition(|token| !token.kind.is_trivia())
+            .filter(|index| tokens[*index].kind == TokenKind::RParen)
+            .ok_or_else(|| fragment_error(syntax, "expected grouped syntax argument"))?;
+        tokens = tokens[first + 1..last].to_vec();
+    }
+    let source_name = match &syntax.span {
+        Span::User { source, .. } => source.clone(),
+        Span::Compiler => None,
+    };
+    let mut grammar = Grammar::new(
+        Arc::from(tokens),
+        Arc::from(source),
+        *next_syntax_id,
+        source_name,
+    );
+    let value = parse(&mut grammar)?;
+    if grammar.peek().is_some() {
+        return Err(grammar.error("expected one complete syntax argument"));
+    }
+    *next_syntax_id = grammar.next_syntax_id;
+    Ok(value)
+}
+
+fn fragment_error(syntax: &Syntax, message: &'static str) -> ParseError {
+    let (offset, location) = match &syntax.span {
+        Span::User {
+            range, location, ..
+        } => (
+            range.start,
+            location.unwrap_or(SourceLocation { line: 1, column: 1 }),
+        ),
+        Span::Compiler => (0, SourceLocation { line: 1, column: 1 }),
+    };
+    ParseError {
+        offset,
+        location,
+        message: message.to_owned(),
+    }
+}
+
 struct Grammar {
     tokens: Arc<[SyntaxToken]>,
     position: usize,
@@ -861,6 +943,20 @@ impl Grammar {
     /// Parses either a binding pattern or a nested product pattern.
     fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
         let start = self.position;
+        if self.eat(TokenKind::Dollar) {
+            if self.quote_depth == 0 {
+                return Err(self.error("splices are only allowed inside `quote`"));
+            }
+            let name = self
+                .expect(TokenKind::Identifier, "expected a splice name after `$`")?
+                .text;
+            let repeated = self.eat(TokenKind::Ellipsis);
+            return Ok(Pattern::Splice(SpliceExpression {
+                syntax: self.syntax(start),
+                name,
+                repeated,
+            }));
+        }
         let mutable = self.eat(TokenKind::Mut);
         if mutable {
             return self.parse_named_pattern_from(start, true);
@@ -932,6 +1028,7 @@ impl Grammar {
                         | TokenKind::Underscore
                         | TokenKind::LParen
                         | TokenKind::String
+                        | TokenKind::Dollar
                 )
             );
         if namespace.is_some() && !adjacent_argument {
@@ -1048,6 +1145,7 @@ impl Grammar {
                     | TokenKind::LParen
                     | TokenKind::Identifier
                     | TokenKind::String
+                    | TokenKind::Dollar
             )
         )
     }
@@ -1055,6 +1153,20 @@ impl Grammar {
     /// Parses a non-function type such as an inferred type, product, or name.
     fn parse_type_atom(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
+        if self.eat(TokenKind::Dollar) {
+            if self.quote_depth == 0 {
+                return Err(self.error("splices are only allowed inside `quote`"));
+            }
+            let name = self
+                .expect(TokenKind::Identifier, "expected a splice name after `$`")?
+                .text;
+            let repeated = self.eat(TokenKind::Ellipsis);
+            return Ok(Type::Splice(SpliceExpression {
+                syntax: self.syntax(start),
+                name,
+                repeated,
+            }));
+        }
         if self.eat(TokenKind::Underscore) {
             return Ok(Type::Inferred(InferredType {
                 syntax: self.syntax(start),
@@ -1221,7 +1333,22 @@ impl Grammar {
         let start = self.position;
         let mut expression = self.parse_access_expression()?;
         while self.starts_atom() {
-            let argument = self.parse_access_expression()?;
+            let checkpoint = self.position;
+            let next_syntax_id = self.next_syntax_id;
+            let argument = match self.parse_access_expression() {
+                Ok(argument) => argument,
+                Err(error)
+                    if self
+                        .tokens
+                        .get(self.next_non_trivia(checkpoint))
+                        .is_some_and(|token| token.kind == TokenKind::LParen) =>
+                {
+                    self.position = checkpoint;
+                    self.next_syntax_id = next_syntax_id;
+                    self.parse_syntax_argument().map_err(|_| error)?
+                }
+                Err(error) => return Err(error),
+            };
             expression = Expression::Call(CallExpression {
                 syntax: self.syntax(start),
                 callee: Box::new(expression),
@@ -1229,6 +1356,46 @@ impl Grammar {
             });
         }
         Ok(expression)
+    }
+
+    /// Captures one balanced parenthesized macro argument after expression
+    /// parsing has failed. Its contents are interpreted during macro matching.
+    fn parse_syntax_argument(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        self.expect(TokenKind::LParen, "expected `(`")?;
+        let mut delimiters = vec![TokenKind::RParen];
+        while let Some(kind) = self.peek() {
+            match kind {
+                TokenKind::LParen => {
+                    self.bump_token();
+                    delimiters.push(TokenKind::RParen);
+                }
+                TokenKind::LBracket => {
+                    self.bump_token();
+                    delimiters.push(TokenKind::RBracket);
+                }
+                TokenKind::LBrace => {
+                    self.bump_token();
+                    delimiters.push(TokenKind::RBrace);
+                }
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    if delimiters.last().copied() != Some(kind) {
+                        return Err(self.error("mismatched delimiter in syntax argument"));
+                    }
+                    self.bump_token();
+                    delimiters.pop();
+                    if delimiters.is_empty() {
+                        return Ok(Expression::SyntaxArgument(SyntaxArgumentExpression {
+                            syntax: self.syntax(start),
+                        }));
+                    }
+                }
+                _ => {
+                    self.bump_token();
+                }
+            }
+        }
+        Err(self.error("expected `)` after syntax argument"))
     }
 
     /// Parses chained named or positional product access.
