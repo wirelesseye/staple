@@ -174,8 +174,42 @@ blocks, trait declarations, and trait implementations. Generated `use`, `mod`,
 and `macro` declarations are rejected because they would require rebuilding
 expansion and loading scopes. An item result is invalid in bindings, function
 bodies, blocks, call arguments, and every other expression position. `Item`
-values may be passed between compile-time helpers, but source syntax cannot yet
-be matched as an `Item` macro argument.
+values may be passed between compile-time helpers. Function-style macros cannot
+accept `Item` parameters.
+
+Modifier macros are the item-input form. They are declared with `macro @name`
+and applied immediately before a resolver-safe definition:
+
+```staple
+macro @identity: Item -> Item = item => item
+
+macro @replace: Expr -> Item -> Item =
+    value => item => quote { let generated = $value }
+
+@identity
+@replace(42)
+def original = () => 0
+```
+
+A modifier has signature `Item -> Item`, or accepts one optional explicit
+`Expr`, `Type`, or `Pattern` argument before the compiler-supplied item. The
+explicit argument is always delimited by parentheses, including an expression
+argument. `Ident`, `CallExpr`, and `UnstructuredExpr` may be used as narrower
+expression parameter types. `Syntax` and `Item` are not valid explicit
+modifier arguments. The modifier must return exactly one `Item`.
+
+Modifier lists are part of item syntax. The closest modifier runs first, so
+`@outer @inner def ...` expands as `outer(inner(def ...))`. A modifier may
+return an item that itself has modifiers; those modifiers are expanded before
+the surrounding chain continues. Modifiers may target `let`, `def`, `type`,
+`extern`, `trait`, and `impl` items. They cannot target expression statements,
+`use`, `mod`, or `macro` declarations. Modifier and function-style macro names
+occupy separate namespaces, and imports, renames, namespaces, and re-exports
+carry both.
+
+`Item` remains structurally opaque: a modifier can preserve, replace, choose,
+or pass its input through compile-time helpers, but cannot inspect item fields
+yet.
 
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while
@@ -220,8 +254,9 @@ each top-level invocation is limited to 1,000,000 evaluation steps. Syntax
 values are compile-time-only. This release supports expression results, one
 top-level item result, opaque type and pattern inputs with contextual scalar
 splices, scalar expression splices inside generated items, and structured
-identifier and call expressions. Repeated splices, item sequences, item input
-and inspection, structured access to other expression forms, standalone type
+identifier and call expressions. It also supports opaque item input through
+modifier macros. Repeated splices, item sequences, function-style item input,
+item inspection, structured access to other expression forms, standalone type
 or pattern quotation, and type or pattern output placement remain future work.
 
 Compiler-provided macros use typed bodyless contracts. `std.core` declares

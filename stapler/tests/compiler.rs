@@ -1772,6 +1772,104 @@ fn expands_explicit_and_inferred_item_macros() {
 }
 
 #[test]
+fn expands_item_modifier_macros_with_nearest_modifier_first() {
+    let module = type_check(concat!(
+        "macro @identity = item => item\n",
+        "macro @outer: Item -> Item = _ => quote { let selected: I32 = 42 }\n",
+        "macro @inner: Item -> Item = _ => quote { let selected: String = \"inner\" }\n",
+        "@identity\n",
+        "@outer\n",
+        "@inner\n",
+        "let original = 0\n",
+        "let result: I32 = selected\n",
+    ));
+    assert!(module.resolved().syntax().items.iter().any(|item| {
+        matches!(item, Item::Statement(statement)
+            if matches!(statement.as_ref(), Statement::Binding(binding)
+                if binding.name == "selected"))
+    }));
+}
+
+#[test]
+fn modifier_arguments_support_expression_type_and_pattern_syntax() {
+    let module = type_check(concat!(
+        "macro @value = value => _ => quote { let generated: I32 = $value }\n",
+        "macro @typed: Type -> Item -> Item = ty => _ => quote { let typed: $ty = 1 }\n",
+        "macro @bind: Pattern -> Item -> Item = pattern => _ => quote { let $pattern = (40, 2) }\n",
+        "@value(42)\n",
+        "let replaced = 0\n",
+        "@typed(I32)\n",
+        "let typed_original = 0\n",
+        "@bind((left, right))\n",
+        "let destructured = 0\n",
+        "let result: I32 = typed + left + right\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("modifier arguments and generated items should compile");
+}
+
+#[test]
+fn expands_modifier_lists_generated_by_item_macros() {
+    let module = type_check(concat!(
+        "macro @replace: Item -> Item = _ => quote { let generated: I32 = 42 }\n",
+        "macro emit: Expr -> Item = _: Expr => quote { @replace let original = 0 }\n",
+        "emit ()\n",
+        "let result: I32 = generated\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generated modifier lists should expand before resolution");
+}
+
+#[test]
+fn diagnoses_invalid_modifier_definitions_and_applications() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (source, expected) in [
+        (
+            "macro @invalid: Syntax -> Item -> Item = value => item => item\n",
+            "modifier macro `@invalid` must have signature `Item -> Item` or `(Expr | Type | Pattern) -> Item -> Item`",
+        ),
+        (
+            "macro @required: Expr -> Item -> Item = value => item => item\n@required\nlet value = 1\n",
+            "modifier macro `@required` requires a parenthesized argument",
+        ),
+        (
+            "macro @plain: Item -> Item = item => item\n@plain(1)\nlet value = 1\n",
+            "modifier macro `@plain` does not accept an argument",
+        ),
+        (
+            "macro ordinary = value => quote { $value }\n@ordinary\nlet value = 1\n",
+            "macro `ordinary` is function-style and cannot be used as modifier `@ordinary`",
+        ),
+        (
+            "macro @identity: Item -> Item = item => item\n@identity\nuse std.core *\n",
+            "modifier macros may only be applied to `let`, `def`, `type`, `extern`, `trait`, or `impl` items",
+        ),
+        (
+            "macro @recurse: Item -> Item = _ => quote { @recurse let value = 1 }\n@recurse\nlet original = 0\n",
+            "recursive modifier macro expansion of `@recurse`",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("invalid modifier use should fail expansion");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
+            "expected `{expected}`, found {diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
 fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
     let module = type_check(concat!(
         "def type_identity: Type -> Type = value => value\n",
@@ -1985,7 +2083,7 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
         ),
         (
             "macro consume = value: Item => quote { 1 }\nconsume candidate\n",
-            "argument 1 of macro `consume` must be an item",
+            "function-style macro `consume` cannot accept `Item`; define a modifier macro with `macro @consume` instead",
         ),
     ] {
         let program = ProgramLoader::new()

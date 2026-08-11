@@ -223,6 +223,22 @@ impl<'a> Classifier<'a> {
 
     fn item(&mut self, item: &Item, resolved: Option<&ResolvedModule>) {
         match item {
+            Item::Modified(value) => {
+                for modifier in &value.modifiers {
+                    if let Some(namespace) = &modifier.namespace {
+                        self.mark_first(&modifier.syntax, namespace, NAMESPACE, 0, 1);
+                    }
+                    self.mark_last(&modifier.syntax, &modifier.name, MACRO, 0, 1);
+                    if let Some(expression) = modifier
+                        .argument
+                        .as_ref()
+                        .and_then(|argument| argument.expression.as_ref())
+                    {
+                        self.expression(expression, resolved);
+                    }
+                }
+                self.item(&value.item, resolved);
+            }
             Item::UseDeclaration(value) => {
                 for part in &value.path {
                     self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);

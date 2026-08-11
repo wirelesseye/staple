@@ -14,6 +14,7 @@ impl Module {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
+    Modified(ModifiedItem),
     UseDeclaration(UseDeclaration),
     Submodule(Submodule),
     ExternBlock(ExternBlock),
@@ -22,6 +23,29 @@ pub enum Item {
     TraitDeclaration(TraitDeclaration),
     TraitImplementation(TraitImplementation),
     Statement(Box<Statement>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModifiedItem {
+    pub syntax: Syntax,
+    pub modifiers: Vec<ModifierInvocation>,
+    pub item: Box<Item>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModifierInvocation {
+    pub syntax: Syntax,
+    pub namespace: Option<String>,
+    pub name: String,
+    pub argument: Option<ModifierArgument>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ModifierArgument {
+    /// Includes the argument-delimiting parentheses.
+    pub syntax: Syntax,
+    /// Present when the contents are also a valid expression.
+    pub expression: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,6 +162,7 @@ pub struct MacroDeclaration {
     pub syntax: Syntax,
     pub visibility: Visibility,
     pub name: String,
+    pub modifier: bool,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
 }

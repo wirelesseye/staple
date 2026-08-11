@@ -846,6 +846,32 @@ fn generated_items_keep_definition_and_splice_hygiene() {
 }
 
 #[test]
+fn imports_function_and_modifier_macros_with_the_same_name() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use helpers identity\n",
+            "let expression: I32 = identity 41\n",
+            "@identity\n",
+            "let item: I32 = expression + 1\n",
+            "let result: I32 = item\n",
+        ),
+    );
+    fixture.write(
+        "helpers.sta",
+        concat!(
+            "pub macro identity: Expr -> Expr = value => quote { $value }\n",
+            "pub macro @identity: Item -> Item = item => item\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("ordinary and modifier macro namespaces should import together");
+}
+
+#[test]
 fn generated_type_and_pattern_splices_keep_caller_hygiene() {
     let fixture = Fixture::new();
     fixture.write(

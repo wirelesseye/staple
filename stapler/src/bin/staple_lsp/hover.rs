@@ -47,6 +47,18 @@ impl Collector<'_> {
 
     fn collect_item_declarations(&mut self, item: &Item) {
         match item {
+            Item::Modified(value) => {
+                for modifier in &value.modifiers {
+                    if let Some(expression) = modifier
+                        .argument
+                        .as_ref()
+                        .and_then(|argument| argument.expression.as_ref())
+                    {
+                        self.collect_expression_declarations(expression);
+                    }
+                }
+                self.collect_item_declarations(&value.item);
+            }
             Item::Submodule(submodule) => self.collect_module_declarations(&submodule.module),
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
@@ -203,6 +215,18 @@ impl Collector<'_> {
 
     fn item(&mut self, item: &Item) {
         match item {
+            Item::Modified(value) => {
+                for modifier in &value.modifiers {
+                    if let Some(expression) = modifier
+                        .argument
+                        .as_ref()
+                        .and_then(|argument| argument.expression.as_ref())
+                    {
+                        self.expression(expression);
+                    }
+                }
+                self.item(&value.item);
+            }
             Item::Submodule(submodule) => {
                 for item in &submodule.module.items {
                     self.item(item);

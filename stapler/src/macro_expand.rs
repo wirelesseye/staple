@@ -2,8 +2,8 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
-    MacroDeclaration, ModuleId, Pattern, Program, Span, Statement, Syntax, SyntaxId, Type, UseKind,
-    Visibility,
+    MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program, Span,
+    Statement, Syntax, SyntaxId, Type, UseKind, Visibility,
 };
 
 const MAX_EXPANSION_DEPTH: usize = 128;
@@ -13,6 +13,7 @@ const MAX_EVALUATION_STEPS: usize = 1_000_000;
 struct MacroKey {
     module: ModuleId,
     name: String,
+    modifier: bool,
     syntax: SyntaxId,
 }
 
@@ -57,6 +58,7 @@ impl MetaType {
 #[derive(Clone, Default)]
 struct ModuleScope {
     macros: HashMap<String, Vec<MacroKey>>,
+    modifiers: HashMap<String, Vec<MacroKey>>,
     namespaces: HashMap<String, ModuleId>,
     helpers: HashMap<String, HelperDefinition>,
 }
@@ -212,6 +214,7 @@ impl MacroExpander {
                         let key = MacroKey {
                             module: source_module.id,
                             name: declaration.name.clone(),
+                            modifier: declaration.modifier,
                             syntax: declaration.syntax.id,
                         };
                         let kind = if Some(source_module.id) == core && declaration.name == "quote"
@@ -237,13 +240,22 @@ impl MacroExpander {
                                     .map(expression_arity)
                                     .unwrap_or(0)
                             });
-                        let (parameters, result) = declaration
+                        let (mut parameters, mut result) = declaration
                             .annotation
                             .as_ref()
                             .and_then(macro_signature)
                             .unwrap_or_else(|| {
                                 inferred_macro_signature(declaration.value.as_ref())
                             });
+                        if declaration.modifier && declaration.annotation.is_none() {
+                            if parameters.len() == 2 && parameters[0] == MetaType::Syntax {
+                                parameters[0] = MetaType::Expr;
+                            }
+                            if let Some(last) = parameters.last_mut() {
+                                *last = MetaType::Item;
+                            }
+                            result = MetaType::Item;
+                        }
                         definitions.insert(
                             key.clone(),
                             MacroDefinition {
@@ -255,8 +267,12 @@ impl MacroExpander {
                                 kind,
                             },
                         );
-                        scopes[source_module.id.0]
-                            .macros
+                        let namespace = if declaration.modifier {
+                            &mut scopes[source_module.id.0].modifiers
+                        } else {
+                            &mut scopes[source_module.id.0].macros
+                        };
+                        namespace
                             .entry(declaration.name.clone())
                             .or_default()
                             .push(key);
@@ -279,13 +295,17 @@ impl MacroExpander {
             }
         }
 
-        let mut public_macros = HashMap::<(ModuleId, String), Vec<MacroKey>>::new();
+        let mut public_macros = HashMap::<(ModuleId, String, bool), Vec<MacroKey>>::new();
         for definition in definitions
             .values()
             .filter(|definition| definition.declaration.visibility == Visibility::Public)
         {
             public_macros
-                .entry((definition.key.module, definition.key.name.clone()))
+                .entry((
+                    definition.key.module,
+                    definition.key.name.clone(),
+                    definition.key.modifier,
+                ))
                 .or_default()
                 .push(definition.key.clone());
         }
@@ -320,8 +340,8 @@ impl MacroExpander {
                         UseKind::Namespace => Vec::new(),
                         UseKind::Glob => previous_macros
                             .keys()
-                            .filter(|(module, _)| *module == imported)
-                            .map(|(_, name)| (name.clone(), name.clone()))
+                            .filter(|(module, _, _)| *module == imported)
+                            .map(|(_, name, _)| (name.clone(), name.clone()))
                             .chain(
                                 previous_helpers
                                     .keys()
@@ -338,10 +358,17 @@ impl MacroExpander {
                         }
                     };
                     for (item, alias) in names {
-                        if let Some(keys) = previous_macros.get(&(imported, item.clone())) {
-                            changed |= public_macros
-                                .insert((source_module.id, alias.clone()), keys.clone())
-                                .is_none();
+                        for modifier in [false, true] {
+                            if let Some(keys) =
+                                previous_macros.get(&(imported, item.clone(), modifier))
+                            {
+                                changed |= public_macros
+                                    .insert(
+                                        (source_module.id, alias.clone(), modifier),
+                                        keys.clone(),
+                                    )
+                                    .is_none();
+                            }
                         }
                         if let Some(helper) = previous_helpers.get(&(imported, item)) {
                             changed |= public_helpers
@@ -356,10 +383,14 @@ impl MacroExpander {
             }
         }
 
-        let mut all_macros = HashMap::<(ModuleId, String), Vec<MacroKey>>::new();
+        let mut all_macros = HashMap::<(ModuleId, String, bool), Vec<MacroKey>>::new();
         for definition in definitions.values() {
             all_macros
-                .entry((definition.key.module, definition.key.name.clone()))
+                .entry((
+                    definition.key.module,
+                    definition.key.name.clone(),
+                    definition.key.modifier,
+                ))
                 .or_default()
                 .push(definition.key.clone());
         }
@@ -378,12 +409,16 @@ impl MacroExpander {
             if let Some(core) = core
                 && source_module.id != core
             {
-                for ((module, name), keys) in &public_macros {
+                for ((module, name, modifier), keys) in &public_macros {
                     if *module != core {
                         continue;
                     }
-                    scopes[source_module.id.0]
-                        .macros
+                    let namespace = if *modifier {
+                        &mut scopes[source_module.id.0].modifiers
+                    } else {
+                        &mut scopes[source_module.id.0].macros
+                    };
+                    namespace
                         .entry(name.clone())
                         .or_insert_with(|| keys.clone());
                 }
@@ -428,11 +463,16 @@ impl MacroExpander {
                         }
                     }
                     UseKind::Glob => {
-                        for ((_, name), keys) in
-                            macros.iter().filter(|((module, _), _)| *module == imported)
+                        for ((_, name, modifier), keys) in macros
+                            .iter()
+                            .filter(|((module, _, _), _)| *module == imported)
                         {
-                            scopes[source_module.id.0]
-                                .macros
+                            let namespace = if *modifier {
+                                &mut scopes[source_module.id.0].modifiers
+                            } else {
+                                &mut scopes[source_module.id.0].macros
+                            };
+                            namespace
                                 .entry(name.clone())
                                 .or_insert_with(|| keys.clone());
                         }
@@ -492,14 +532,20 @@ impl MacroExpander {
         imported: ModuleId,
         item: &str,
         local: &str,
-        public_macros: &HashMap<(ModuleId, String), Vec<MacroKey>>,
+        public_macros: &HashMap<(ModuleId, String, bool), Vec<MacroKey>>,
         public_helpers: &HashMap<(ModuleId, String), HelperDefinition>,
     ) {
-        if let Some(keys) = public_macros.get(&(imported, item.to_owned())) {
-            scope
-                .macros
-                .entry(local.to_owned())
-                .or_insert_with(|| keys.clone());
+        for modifier in [false, true] {
+            if let Some(keys) = public_macros.get(&(imported, item.to_owned(), modifier)) {
+                let namespace = if modifier {
+                    &mut scope.modifiers
+                } else {
+                    &mut scope.macros
+                };
+                namespace
+                    .entry(local.to_owned())
+                    .or_insert_with(|| keys.clone());
+            }
         }
         if let Some(helper) = public_helpers.get(&(imported, item.to_owned())) {
             scope
@@ -510,14 +556,18 @@ impl MacroExpander {
     }
 
     fn validate_definitions(&mut self) {
-        let mut groups = HashMap::<(ModuleId, String), Vec<MacroDefinition>>::new();
+        let mut groups = HashMap::<(ModuleId, String, bool), Vec<MacroDefinition>>::new();
         for definition in self.definitions.values() {
             groups
-                .entry((definition.key.module, definition.key.name.clone()))
+                .entry((
+                    definition.key.module,
+                    definition.key.name.clone(),
+                    definition.key.modifier,
+                ))
                 .or_default()
                 .push(definition.clone());
         }
-        for ((_, name), mut definitions) in groups {
+        for ((_, name, modifier), mut definitions) in groups {
             definitions.sort_by_key(|definition| definition.key.syntax.0);
             for (index, definition) in definitions.iter().enumerate() {
                 if let Some(previous) = definitions[..index]
@@ -527,7 +577,9 @@ impl MacroExpander {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
                         format!(
-                            "duplicate macro overload `{name}: {}`",
+                            "duplicate {}macro overload `{}{name}: {}`",
+                            if modifier { "modifier " } else { "" },
+                            if modifier { "@" } else { "" },
                             format_meta_signature(&definition.parameters)
                         ),
                     ));
@@ -557,7 +609,13 @@ impl MacroExpander {
                     .zip(macro_body_parameter_types(body))
                     .enumerate()
                 {
-                    if body_parameter.is_some_and(|body_parameter| body_parameter != *declared) {
+                    let implicit_modifier_item = definition.key.modifier
+                        && index + 1 == parameters.len()
+                        && *declared == MetaType::Item
+                        && body_parameter == Some(MetaType::Syntax);
+                    if !implicit_modifier_item
+                        && body_parameter.is_some_and(|body_parameter| body_parameter != *declared)
+                    {
                         self.diagnostics.push(Diagnostic::new(
                             body.syntax().span.clone(),
                             format!(
@@ -568,6 +626,38 @@ impl MacroExpander {
                         ));
                     }
                 }
+            }
+            if definition.key.modifier {
+                let valid_parameters = match definition.parameters.as_slice() {
+                    [MetaType::Item] => true,
+                    [argument, MetaType::Item] => matches!(
+                        argument,
+                        MetaType::Expr
+                            | MetaType::Ident(_)
+                            | MetaType::CallExpr
+                            | MetaType::UnstructuredExpr
+                            | MetaType::Type
+                            | MetaType::Pattern
+                    ),
+                    _ => false,
+                };
+                if !valid_parameters || definition.result != MetaType::Item {
+                    self.diagnostics.push(Diagnostic::new(
+                        definition.declaration.syntax.span.clone(),
+                        format!(
+                            "modifier macro `@{}` must have signature `Item -> Item` or `(Expr | Type | Pattern) -> Item -> Item`",
+                            definition.key.name
+                        ),
+                    ));
+                }
+            } else if definition.parameters.contains(&MetaType::Item) {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    format!(
+                        "function-style macro `{}` cannot accept `Item`; define a modifier macro with `macro @{}` instead",
+                        definition.key.name, definition.key.name
+                    ),
+                ));
             }
             match &definition.kind {
                 MacroKind::CString
@@ -629,6 +719,17 @@ impl MacroExpander {
     }
 
     fn expand_item(&mut self, module: ModuleId, item: &mut Item, depth: usize) {
+        if let Item::Modified(modified) = item {
+            let modified = modified.clone();
+            if depth == 0 {
+                self.steps = 0;
+            }
+            if let Some(expanded) = self.apply_modifier_chain(module, modified, depth) {
+                *item = expanded;
+                self.expand_item(module, item, depth + 1);
+            }
+            return;
+        }
         if let Item::Statement(statement) = item
             && let Statement::Expression(expression) = statement.as_ref()
         {
@@ -655,10 +756,288 @@ impl MacroExpander {
                 }
             }
             Item::MacroDeclaration(_)
+            | Item::Modified(_)
             | Item::Submodule(_)
             | Item::UseDeclaration(_)
             | Item::ExternBlock(_)
             | Item::TypeDeclaration(_) => {}
+        }
+    }
+
+    fn apply_modifier_chain(
+        &mut self,
+        module: ModuleId,
+        modified: crate::ModifiedItem,
+        depth: usize,
+    ) -> Option<Item> {
+        let mut current = *modified.item;
+        if let Item::Modified(nested) = current {
+            current = self.apply_modifier_chain(module, nested, depth + 1)?;
+        }
+        if !modifier_target_supported(&current) {
+            self.diagnostics.push(Diagnostic::new(
+                modified.syntax.span,
+                "modifier macros may only be applied to `let`, `def`, `type`, `extern`, `trait`, or `impl` items",
+            ));
+            return None;
+        }
+
+        for invocation in modified.modifiers.into_iter().rev() {
+            if depth >= MAX_EXPANSION_DEPTH {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span.clone(),
+                    "macro expansion exceeded the limit of 128 nested expansions",
+                ));
+                return None;
+            }
+            let (definition, argument) = self.select_modifier(module, &invocation)?;
+            let key = definition.key.clone();
+            if self.expansion_stack.contains(&key) {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span.clone(),
+                    format!("recursive modifier macro expansion of `@{}`", key.name),
+                ));
+                return None;
+            }
+            self.expansion_stack.push(key.clone());
+            let diagnostic_start = self.diagnostics.len();
+            let result = self.invoke_modifier(
+                &definition,
+                argument,
+                current,
+                invocation.syntax.span.clone(),
+            );
+            let Some(mut result) = result else {
+                self.expansion_stack.pop();
+                if self.diagnostics.len() > diagnostic_start {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span.clone(),
+                        format!("while expanding modifier macro `@{}`", key.name),
+                    ));
+                }
+                return None;
+            };
+            if let Item::Modified(nested) = result {
+                let expanded = self.apply_modifier_chain(module, nested, depth + 1);
+                self.expansion_stack.pop();
+                result = expanded?;
+            } else {
+                self.expansion_stack.pop();
+            }
+            if !modifier_target_supported(&result) {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span.clone(),
+                    format!(
+                        "modifier macro `@{}` produced an unsupported item kind",
+                        key.name
+                    ),
+                ));
+                return None;
+            }
+            current = result;
+        }
+        Some(current)
+    }
+
+    fn resolve_modifier(
+        &self,
+        module: ModuleId,
+        invocation: &ModifierInvocation,
+    ) -> Option<Vec<MacroKey>> {
+        let context = invocation
+            .syntax
+            .definition_module()
+            .map(ModuleId)
+            .unwrap_or(module);
+        match &invocation.namespace {
+            None => self.scopes[context.0]
+                .modifiers
+                .get(&invocation.name)
+                .cloned(),
+            Some(namespace) => {
+                let target = self.scopes[context.0].namespaces.get(namespace)?;
+                self.scopes[target.0]
+                    .modifiers
+                    .get(&invocation.name)
+                    .map(|keys| {
+                        keys.iter()
+                            .filter(|key| {
+                                self.definitions[*key].declaration.visibility == Visibility::Public
+                            })
+                            .cloned()
+                            .collect()
+                    })
+            }
+        }
+    }
+
+    fn select_modifier(
+        &mut self,
+        module: ModuleId,
+        invocation: &ModifierInvocation,
+    ) -> Option<(MacroDefinition, Option<SyntaxValue>)> {
+        let Some(keys) = self.resolve_modifier(module, invocation) else {
+            let context = invocation
+                .syntax
+                .definition_module()
+                .map(ModuleId)
+                .unwrap_or(module);
+            let normal_exists = invocation.namespace.is_none()
+                && self.scopes[context.0].macros.contains_key(&invocation.name);
+            self.diagnostics.push(Diagnostic::new(
+                invocation.syntax.span.clone(),
+                if normal_exists {
+                    format!(
+                        "macro `{}` is function-style and cannot be used as modifier `@{}`",
+                        invocation.name, invocation.name
+                    )
+                } else {
+                    format!("unknown modifier macro `@{}`", invocation.name)
+                },
+            ));
+            return None;
+        };
+        let definitions = keys
+            .iter()
+            .filter_map(|key| self.definitions.get(key).cloned())
+            .collect::<Vec<_>>();
+        let matching = definitions
+            .iter()
+            .filter(
+                |definition| match (&invocation.argument, definition.parameters.as_slice()) {
+                    (None, [MetaType::Item]) => true,
+                    (Some(argument), [expected, MetaType::Item]) => {
+                        modifier_argument_matches(expected, argument)
+                    }
+                    _ => false,
+                },
+            )
+            .cloned()
+            .collect::<Vec<_>>();
+        if matching.is_empty() {
+            let expects_argument = definitions
+                .iter()
+                .any(|definition| definition.parameters.len() == 2);
+            let accepts_no_argument = definitions
+                .iter()
+                .any(|definition| definition.parameters == [MetaType::Item]);
+            let message = match (&invocation.argument, expects_argument, accepts_no_argument) {
+                (None, true, false) => format!(
+                    "modifier macro `@{}` requires a parenthesized argument",
+                    invocation.name
+                ),
+                (Some(_), false, true) => format!(
+                    "modifier macro `@{}` does not accept an argument",
+                    invocation.name
+                ),
+                _ => format!(
+                    "no overload of modifier macro `@{}` matches this invocation",
+                    invocation.name
+                ),
+            };
+            self.diagnostics
+                .push(Diagnostic::new(invocation.syntax.span.clone(), message));
+            return None;
+        }
+        let undominated = matching
+            .iter()
+            .filter(|candidate| {
+                !matching.iter().any(|other| {
+                    other.key != candidate.key
+                        && signature_more_specific(&other.parameters, &candidate.parameters)
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let [definition] = undominated.as_slice() else {
+            self.diagnostics.push(Diagnostic::new(
+                invocation.syntax.span.clone(),
+                format!(
+                    "ambiguous invocation of modifier macro `@{}`",
+                    invocation.name
+                ),
+            ));
+            return None;
+        };
+        let argument = match (&invocation.argument, definition.parameters.as_slice()) {
+            (Some(argument), [expected, MetaType::Item]) => {
+                Some(self.modifier_argument_value(expected, argument)?)
+            }
+            (None, [MetaType::Item]) => None,
+            _ => unreachable!("selected modifier signature must match its invocation"),
+        };
+        Some((definition.clone(), argument))
+    }
+
+    fn modifier_argument_value(
+        &mut self,
+        expected: &MetaType,
+        argument: &ModifierArgument,
+    ) -> Option<SyntaxValue> {
+        match expected {
+            MetaType::Type => {
+                crate::parser::parse_type_fragment(&argument.syntax, true, &mut self.next_syntax_id)
+                    .ok()
+                    .map(SyntaxValue::Type)
+            }
+            MetaType::Pattern => crate::parser::parse_pattern_fragment(
+                &argument.syntax,
+                true,
+                &mut self.next_syntax_id,
+            )
+            .ok()
+            .map(SyntaxValue::Pattern),
+            _ => argument.expression.clone().map(|expression| {
+                SyntaxValue::from_expression(
+                    meta_argument_expression(expected, &expression).clone(),
+                )
+            }),
+        }
+    }
+
+    fn invoke_modifier(
+        &mut self,
+        definition: &MacroDefinition,
+        argument: Option<SyntaxValue>,
+        item: Item,
+        call_span: Span,
+    ) -> Option<Item> {
+        let MacroKind::User(body) = &definition.kind else {
+            unreachable!("compiler-provided macros cannot be modifiers")
+        };
+        let mut value =
+            self.eval_expression(definition.key.module, body, &mut Environment::new())?;
+        if let Some(argument) = argument {
+            value = self.apply_value(value, Value::Syntax(argument), call_span.clone())?;
+        }
+        value = self.apply_value(
+            value,
+            Value::Syntax(SyntaxValue::Item(Box::new(item))),
+            call_span,
+        )?;
+        match value {
+            Value::Syntax(SyntaxValue::Item(item)) => Some(*item),
+            Value::Syntax(syntax) => {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    format!(
+                        "modifier macro `@{}` must return `Item`, but returned {} syntax",
+                        definition.key.name,
+                        syntax_category(&syntax)
+                    ),
+                ));
+                None
+            }
+            _ => {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    format!(
+                        "modifier macro `@{}` did not return `Item`",
+                        definition.key.name
+                    ),
+                ));
+                None
+            }
         }
     }
 
@@ -2079,6 +2458,25 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
     }
 }
 
+fn modifier_argument_matches(expected: &MetaType, argument: &ModifierArgument) -> bool {
+    match expected {
+        MetaType::Type => {
+            let mut next_syntax_id = 0;
+            crate::parser::parse_type_fragment(&argument.syntax, true, &mut next_syntax_id).is_ok()
+        }
+        MetaType::Pattern => {
+            let mut next_syntax_id = 0;
+            crate::parser::parse_pattern_fragment(&argument.syntax, true, &mut next_syntax_id)
+                .is_ok()
+        }
+        MetaType::Item | MetaType::Syntax => false,
+        _ => argument
+            .expression
+            .as_ref()
+            .is_some_and(|expression| meta_type_matches(expected, expression)),
+    }
+}
+
 fn category_argument_syntax(argument: &Expression) -> Option<(&Syntax, bool)> {
     match argument {
         Expression::SyntaxArgument(argument) => Some((&argument.syntax, true)),
@@ -2585,18 +2983,35 @@ fn substitute_statement(
 }
 
 fn item_output_supported(item: &Item) -> bool {
-    matches!(
-        item,
+    match item {
+        Item::Modified(modified) => item_output_supported(&modified.item),
         Item::ExternBlock(_)
-            | Item::TypeDeclaration(_)
-            | Item::TraitDeclaration(_)
-            | Item::TraitImplementation(_)
-            | Item::Statement(_)
-    )
+        | Item::TypeDeclaration(_)
+        | Item::TraitDeclaration(_)
+        | Item::TraitImplementation(_)
+        | Item::Statement(_) => true,
+        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => false,
+    }
+}
+
+fn modifier_target_supported(item: &Item) -> bool {
+    match item {
+        Item::Modified(modified) => modifier_target_supported(&modified.item),
+        Item::ExternBlock(_)
+        | Item::TypeDeclaration(_)
+        | Item::TraitDeclaration(_)
+        | Item::TraitImplementation(_) => true,
+        Item::Statement(statement) => matches!(
+            statement.as_ref(),
+            Statement::Binding(_) | Statement::PatternBinding(_)
+        ),
+        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => false,
+    }
 }
 
 fn item_syntax(item: &Item) -> &Syntax {
     match item {
+        Item::Modified(value) => &value.syntax,
         Item::UseDeclaration(value) => &value.syntax,
         Item::Submodule(value) => &value.syntax,
         Item::ExternBlock(value) => &value.syntax,
@@ -2792,6 +3207,16 @@ fn substitute_item(
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
     match item {
+        Item::Modified(modified) => {
+            for modifier in &mut modified.modifiers {
+                if let Some(argument) = &mut modifier.argument
+                    && let Some(expression) = &mut argument.expression
+                {
+                    *expression = substitute_splices(expression, environment, diagnostics)?;
+                }
+            }
+            substitute_item(&mut modified.item, environment, diagnostics)?;
+        }
         Item::ExternBlock(block) => {
             for binding in &mut block.bindings {
                 substitute_binding(binding, environment, diagnostics)?;
@@ -2837,6 +3262,16 @@ fn substitute_item(
 fn alpha_rename_item(item: &mut Item, mark: u64) {
     let mut scopes = Vec::new();
     match item {
+        Item::Modified(modified) => {
+            for modifier in &mut modified.modifiers {
+                if let Some(argument) = &mut modifier.argument
+                    && let Some(expression) = &mut argument.expression
+                {
+                    alpha_rename_expression(expression, mark, &mut scopes);
+                }
+            }
+            alpha_rename_item(&mut modified.item, mark);
+        }
         Item::ExternBlock(block) => {
             for binding in &mut block.bindings {
                 if let Some(value) = &mut binding.value {
@@ -3164,6 +3599,19 @@ fn freshen_trait_bound(
 
 fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId, mark: u64) {
     match item {
+        Item::Modified(modified) => {
+            expander.freshen_syntax(&mut modified.syntax, module, mark);
+            for modifier in &mut modified.modifiers {
+                expander.freshen_syntax(&mut modifier.syntax, module, mark);
+                if let Some(argument) = &mut modifier.argument {
+                    expander.freshen_syntax(&mut argument.syntax, module, mark);
+                    if let Some(expression) = &mut argument.expression {
+                        expander.freshen_expression(expression, module, mark);
+                    }
+                }
+            }
+            freshen_item(expander, &mut modified.item, module, mark);
+        }
         Item::ExternBlock(block) => {
             expander.freshen_syntax(&mut block.syntax, module, mark);
             for binding in &mut block.bindings {

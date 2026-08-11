@@ -172,6 +172,19 @@ impl Grammar {
         let previous = self.newline_terminates_expression;
         self.newline_terminates_expression = true;
         let item_start = self.position;
+        if self.at(TokenKind::At) {
+            let mut modifiers = Vec::new();
+            while self.at(TokenKind::At) {
+                modifiers.push(self.parse_modifier_invocation()?);
+            }
+            let item = Box::new(self.parse_item()?);
+            self.newline_terminates_expression = previous;
+            return Ok(Item::Modified(ModifiedItem {
+                syntax: self.syntax(item_start),
+                modifiers,
+                item,
+            }));
+        }
         let visibility = if self.eat(TokenKind::Pub) {
             Visibility::Public
         } else {
@@ -225,6 +238,63 @@ impl Grammar {
         item
     }
 
+    fn parse_modifier_invocation(&mut self) -> Result<ModifierInvocation, ParseError> {
+        let start = self.position;
+        self.expect(TokenKind::At, "expected `@`")?;
+        let first = self
+            .expect(
+                TokenKind::Identifier,
+                "expected modifier macro name after `@`",
+            )?
+            .text;
+        let (namespace, name) = if self.eat(TokenKind::Dot) {
+            let name = self
+                .expect(
+                    TokenKind::Identifier,
+                    "expected modifier name after namespace",
+                )?
+                .text;
+            (Some(first), name)
+        } else {
+            (None, first)
+        };
+        let argument = self
+            .at(TokenKind::LParen)
+            .then(|| self.parse_modifier_argument())
+            .transpose()?;
+        Ok(ModifierInvocation {
+            syntax: self.syntax(start),
+            namespace,
+            name,
+            argument,
+        })
+    }
+
+    fn parse_modifier_argument(&mut self) -> Result<ModifierArgument, ParseError> {
+        let start = self.position;
+        let next_syntax_id = self.next_syntax_id;
+        self.expect(TokenKind::LParen, "expected `(` after modifier name")?;
+        let expression = self.parse_expression();
+        if let Ok(expression) = expression
+            && self.at(TokenKind::RParen)
+        {
+            self.expect(TokenKind::RParen, "expected `)` after modifier argument")?;
+            return Ok(ModifierArgument {
+                syntax: self.syntax(start),
+                expression: Some(expression),
+            });
+        }
+        self.position = start;
+        self.next_syntax_id = next_syntax_id;
+        let Expression::SyntaxArgument(argument) = self.parse_syntax_argument()? else {
+            unreachable!("syntax argument parser must produce a syntax argument")
+        };
+        Ok(ModifierArgument {
+            syntax: argument.syntax,
+            expression: None,
+        })
+    }
+
     fn parse_submodule(
         &mut self,
         visibility: Visibility,
@@ -263,6 +333,7 @@ impl Grammar {
         start: usize,
     ) -> Result<MacroDeclaration, ParseError> {
         self.expect(TokenKind::Macro, "expected `macro`")?;
+        let modifier = self.eat(TokenKind::At);
         let name = self
             .expect(TokenKind::Identifier, "expected macro name")?
             .text;
@@ -284,6 +355,7 @@ impl Grammar {
             syntax: self.syntax(start),
             visibility,
             name,
+            modifier,
             annotation,
             value,
         })

@@ -62,6 +62,7 @@ pub enum TokenKind {
     FatArrow,
     Ellipsis,
     Dollar,
+    At,
     Backtick,
     Operator,
     Star,

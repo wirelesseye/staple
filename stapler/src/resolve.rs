@@ -1316,7 +1316,7 @@ impl NameResolver {
                         | Statement::Continue(_)
                         | Statement::Expression(_) => {}
                     },
-                    Item::UseDeclaration(_) | Item::Submodule(_) => {}
+                    Item::Modified(_) | Item::UseDeclaration(_) | Item::Submodule(_) => {}
                 }
             }
         }
@@ -1767,6 +1767,7 @@ impl NameResolver {
                     }
                 }
                 Item::UseDeclaration(_)
+                | Item::Modified(_)
                 | Item::Submodule(_)
                 | Item::TypeDeclaration(_)
                 | Item::MacroDeclaration(_)
@@ -1801,7 +1802,7 @@ impl NameResolver {
 
     fn resolve_item(&mut self, item: &Item) {
         match item {
-            Item::UseDeclaration(_) | Item::Submodule(_) => {}
+            Item::Modified(_) | Item::UseDeclaration(_) | Item::Submodule(_) => {}
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
                     if let Some(annotation) = &binding.annotation {

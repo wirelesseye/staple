@@ -101,6 +101,7 @@ impl DeclarationCollector<'_> {
 
     fn item(&mut self, item: &Item) {
         match item {
+            Item::Modified(value) => self.item(&value.item),
             Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
                     self.insert(DefinitionId::Module(id), &value.syntax, &value.name);
@@ -280,6 +281,18 @@ impl Collector<'_> {
 
     fn item(&mut self, item: &Item) {
         match item {
+            Item::Modified(value) => {
+                for modifier in &value.modifiers {
+                    if let Some(expression) = modifier
+                        .argument
+                        .as_ref()
+                        .and_then(|argument| argument.expression.as_ref())
+                    {
+                        self.expression(expression);
+                    }
+                }
+                self.item(&value.item);
+            }
             Item::UseDeclaration(value) => self.use_declaration(value),
             Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {

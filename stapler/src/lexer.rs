@@ -97,6 +97,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
                 "-" => TokenKind::Minus,
                 "/" => TokenKind::Slash,
                 "$" => TokenKind::Dollar,
+                "@" => TokenKind::At,
                 _ => TokenKind::Operator,
             };
         }

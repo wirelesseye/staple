@@ -501,6 +501,37 @@ fn parses_expression_and_single_item_quotations_losslessly() {
 }
 
 #[test]
+fn parses_modifier_macro_definitions_and_item_modifiers_losslessly() {
+    let source = concat!(
+        "macro @identity: Item -> Item = item => item\n",
+        "macro @replace: Expr -> Item -> Item = value => item => quote { let generated = $value }\n",
+        "@identity\n",
+        "@replace(42)\n",
+        "def original = () => 0\n",
+    );
+    let root = parse(source).expect("modifier macros should parse");
+    assert_eq!(root.text(), source);
+    let Item::MacroDeclaration(identity) = &root.items[0] else {
+        panic!("expected modifier declaration");
+    };
+    assert!(identity.modifier);
+    let Item::Modified(modified) = &root.items[2] else {
+        panic!("expected modified item");
+    };
+    assert_eq!(modified.modifiers.len(), 2);
+    assert_eq!(modified.modifiers[0].name, "identity");
+    assert!(modified.modifiers[0].argument.is_none());
+    assert_eq!(modified.modifiers[1].name, "replace");
+    assert!(
+        modified.modifiers[1]
+            .argument
+            .as_ref()
+            .is_some_and(|argument| argument.expression.is_some())
+    );
+    assert!(matches!(modified.item.as_ref(), Item::Statement(_)));
+}
+
+#[test]
 fn parses_grouped_type_and_pattern_macro_arguments_losslessly() {
     let source = concat!(
         "inspect_type (I32 -> I32)\n",
