@@ -243,6 +243,39 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
 }
 
 #[test]
+fn preserves_trait_prerequisites_across_modules() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "traits.sta",
+        concat!(
+            "pub trait Base = T => { base: T -> T }\n",
+            "pub trait Derived = T => Base T => { derived: T -> T }\n",
+        ),
+    );
+    fixture.write(
+        "implementations.sta",
+        concat!(
+            "use traits\n",
+            "impl traits.Derived I32 { def derived = value => value }\n",
+            "impl traits.Base I32 { def base = value => value }\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use traits (Base, Derived)\n",
+            "use implementations\n",
+            "def apply: T => Derived T => T -> T = value => Base.base (Derived.derived value)\n",
+            "let answer: I32 = apply 42\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("imported trait prerequisites should remain available");
+}
+
+#[test]
 fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
     let fixture = Fixture::new();
     fixture.write(

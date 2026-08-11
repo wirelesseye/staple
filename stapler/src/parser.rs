@@ -186,6 +186,7 @@ impl Grammar {
         if type_parameters.is_empty() {
             return Err(self.error("expected trait type parameter followed by `=>`"));
         }
+        let prerequisites = self.parse_trait_bounds()?;
         self.expect(TokenKind::LBrace, "expected `{` before trait members")?;
         let mut members = Vec::new();
         while !self.at(TokenKind::RBrace) {
@@ -215,6 +216,7 @@ impl Grammar {
             visibility,
             name,
             type_parameters,
+            prerequisites,
             members,
         })
     }

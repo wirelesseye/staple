@@ -257,6 +257,9 @@ impl<'a> Classifier<'a> {
                 for parameter in &value.type_parameters {
                     self.type_parameter(parameter, resolved);
                 }
+                for prerequisite in &value.prerequisites {
+                    self.trait_bound(prerequisite, resolved);
+                }
                 for member in &value.members {
                     self.mark_first(
                         &member.syntax,

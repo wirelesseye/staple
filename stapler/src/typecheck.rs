@@ -81,6 +81,7 @@ struct LoopCheckContext {
 
 #[derive(Debug, Clone)]
 struct CheckedTraitImplementation {
+    span: Span,
     trait_id: TraitId,
     arguments: Vec<CheckedType>,
     methods: HashMap<TraitMethodId, FunctionId>,
@@ -589,6 +590,8 @@ pub struct TypeChecker {
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
+    trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
+    trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
     trait_implementations: Vec<CheckedTraitImplementation>,
     impl_function_types: HashMap<FunctionId, CheckedFunctionType>,
@@ -638,6 +641,7 @@ impl TypeChecker {
         self.collect_string_representation(&module);
         self.collect_traits(&module);
         self.collect_trait_implementations(&module);
+        self.validate_trait_implementation_prerequisites(&module);
         self.seed_constructors(&module);
         self.seed_singleton_values(&module);
         self.collect_top_level_bindings(&module);
@@ -784,6 +788,24 @@ impl TypeChecker {
             )),
         }
         for resolved_trait in module.traits().values() {
+            let parameter_arguments = resolved_trait
+                .declaration
+                .type_parameters
+                .iter()
+                .map(|parameter| self.checked_type_parameter_pattern(module, parameter))
+                .collect::<Vec<_>>();
+            self.trait_parameter_arguments
+                .insert(resolved_trait.id, parameter_arguments);
+            let mut prerequisites = Vec::new();
+            for prerequisite in &resolved_trait.declaration.prerequisites {
+                if let Some(prerequisite) = self.resolve_trait_bound(module, prerequisite) {
+                    prerequisites.push(prerequisite);
+                }
+            }
+            self.trait_prerequisites
+                .insert(resolved_trait.id, prerequisites);
+        }
+        for resolved_trait in module.traits().values() {
             for method in &resolved_trait.methods {
                 let member = module.trait_method(*method).expect("resolved trait member");
                 let value_type = self.resolve_source_type(module, &member.annotation);
@@ -917,11 +939,39 @@ impl TypeChecker {
                 }
             }
             self.trait_implementations.push(CheckedTraitImplementation {
+                span,
                 trait_id: implementation.trait_id,
                 arguments,
                 methods: implementation.methods.clone(),
             });
         }
+    }
+
+    fn validate_trait_implementation_prerequisites(&mut self, module: &ResolvedModule) {
+        let mut diagnostics = Vec::new();
+        for implementation in &self.trait_implementations {
+            let bounds = self.expand_trait_bounds(vec![CheckedTraitBound {
+                trait_id: implementation.trait_id,
+                arguments: implementation.arguments.clone(),
+            }]);
+            for prerequisite in bounds.into_iter().skip(1) {
+                if self.trait_obligation_available(prerequisite.trait_id, &prerequisite.arguments) {
+                    continue;
+                }
+                let trait_name = &module.traits()[&prerequisite.trait_id].declaration.name;
+                let arguments = prerequisite
+                    .arguments
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                diagnostics.push(Diagnostic::new(
+                    implementation.span.clone(),
+                    format!("trait prerequisite `{trait_name} {arguments}` is not satisfied"),
+                ));
+            }
+        }
+        self.diagnostics.extend(diagnostics);
     }
 
     fn resolve_trait_arguments(
@@ -1008,6 +1058,52 @@ impl TypeChecker {
             trait_id,
             arguments,
         })
+    }
+
+    fn expand_trait_bounds(&self, bounds: Vec<CheckedTraitBound>) -> Vec<CheckedTraitBound> {
+        let mut expanded = Vec::new();
+        for bound in bounds {
+            self.expand_trait_bound(bound, &mut expanded);
+        }
+        expanded
+    }
+
+    fn expand_trait_bound(&self, bound: CheckedTraitBound, expanded: &mut Vec<CheckedTraitBound>) {
+        if expanded.contains(&bound) {
+            return;
+        }
+        expanded.push(bound.clone());
+        let Some(parameters) = self.trait_parameter_arguments.get(&bound.trait_id) else {
+            return;
+        };
+        let mut substitutions = HashMap::new();
+        if parameters.len() != bound.arguments.len()
+            || !parameters
+                .iter()
+                .zip(&bound.arguments)
+                .all(|(parameter, argument)| {
+                    infer_type_parameters(parameter, argument, &mut substitutions)
+                })
+        {
+            return;
+        }
+        for prerequisite in self
+            .trait_prerequisites
+            .get(&bound.trait_id)
+            .into_iter()
+            .flatten()
+        {
+            let prerequisite = CheckedTraitBound {
+                trait_id: prerequisite.trait_id,
+                arguments: prerequisite
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| substitute_type(argument, &substitutions))
+                    .collect(),
+            };
+            self.expand_trait_bound(prerequisite, expanded);
+        }
     }
 
     fn seed_constructors(&mut self, module: &ResolvedModule) {
@@ -1308,6 +1404,7 @@ impl TypeChecker {
                     bounds.push(bound);
                 }
             }
+            let bounds = self.expand_trait_bounds(bounds);
             if !bounds.is_empty() {
                 self.function_bounds.insert(function.id, bounds);
             }
@@ -3808,6 +3905,7 @@ impl TypeChecker {
                 declaration_bounds.push(bound);
             }
         }
+        let declaration_bounds = self.expand_trait_bounds(declaration_bounds);
         self.active_function_bounds.push(declaration_bounds);
         let template = self.resolve_source_type(
             module,

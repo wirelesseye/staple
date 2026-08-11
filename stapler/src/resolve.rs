@@ -553,6 +553,8 @@ impl NameResolver {
             self.pop_scope();
         }
 
+        self.validate_trait_prerequisite_cycles();
+
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
         }
@@ -1473,6 +1475,15 @@ impl NameResolver {
                 for parameter in &declaration.type_parameters {
                     self.scope_allocated_type_parameter_pattern(parameter);
                 }
+                for prerequisite in &declaration.prerequisites {
+                    if let Some(trait_id) = self.resolve_trait_name(&prerequisite.trait_name) {
+                        self.trait_references
+                            .insert(prerequisite.syntax.id, trait_id);
+                    }
+                    for argument in &prerequisite.arguments {
+                        self.resolve_type(argument);
+                    }
+                }
                 for member in &declaration.members {
                     self.resolve_type(&member.annotation);
                     if declaration.visibility == Visibility::Public {
@@ -1645,6 +1656,57 @@ impl NameResolver {
             }
         }
         self.pop_type_parameter_scope();
+    }
+
+    fn validate_trait_prerequisite_cycles(&mut self) {
+        let adjacency = self
+            .traits
+            .iter()
+            .map(|(trait_id, resolved_trait)| {
+                let prerequisites = resolved_trait
+                    .declaration
+                    .prerequisites
+                    .iter()
+                    .filter_map(|prerequisite| {
+                        Some((
+                            self.trait_references
+                                .get(&prerequisite.syntax.id)
+                                .copied()?,
+                            prerequisite.syntax.span.clone(),
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                (*trait_id, prerequisites)
+            })
+            .collect::<HashMap<_, _>>();
+        let mut traits = adjacency.keys().copied().collect::<Vec<_>>();
+        traits.sort_by_key(|trait_id| trait_id.0);
+        let mut states = HashMap::<TraitId, u8>::new();
+
+        fn visit(
+            trait_id: TraitId,
+            adjacency: &HashMap<TraitId, Vec<(TraitId, Span)>>,
+            states: &mut HashMap<TraitId, u8>,
+            diagnostics: &mut Vec<Diagnostic>,
+        ) {
+            states.insert(trait_id, 1);
+            for (prerequisite, span) in adjacency.get(&trait_id).into_iter().flatten() {
+                match states.get(prerequisite).copied().unwrap_or_default() {
+                    0 => visit(*prerequisite, adjacency, states, diagnostics),
+                    1 => {
+                        diagnostics.push(Diagnostic::new(span.clone(), "cyclic trait prerequisite"))
+                    }
+                    _ => {}
+                }
+            }
+            states.insert(trait_id, 2);
+        }
+
+        for trait_id in traits {
+            if states.get(&trait_id).copied().unwrap_or_default() == 0 {
+                visit(trait_id, &adjacency, &mut states, &mut self.diagnostics);
+            }
+        }
     }
 
     fn push_type_parameter_scope(&mut self) {

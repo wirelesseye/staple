@@ -139,6 +139,7 @@ pub struct TraitDeclaration {
     pub visibility: Visibility,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
+    pub prerequisites: Vec<TraitBound>,
     pub members: Vec<TraitMember>,
 }
 

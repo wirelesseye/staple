@@ -25,7 +25,7 @@ pub trait Divide = T => {
     divide: T -> T -> T
 }
 
-pub trait Compare = T => {
+pub trait Compare = T => Eq T => {
     less_than: T -> T -> Bool
     less_than_or_equal: T -> T -> Bool
     greater_than: T -> T -> Bool

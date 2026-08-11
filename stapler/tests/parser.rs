@@ -161,6 +161,34 @@ fn parses_curried_and_product_trait_parameters_and_arguments() {
 }
 
 #[test]
+fn parses_trait_prerequisites_losslessly() {
+    let source = concat!(
+        "trait Ord = T => Eq T => { compare: T -> T -> I32 }\n",
+        "trait Relation = (Left, Right) => Eq Left => Eq Right => { related: (Left, Right) -> Bool }\n",
+    );
+    let root = parse(source).expect("trait prerequisites should parse");
+    assert_eq!(root.text(), source);
+
+    let Item::TraitDeclaration(ord) = &root.items[0] else {
+        panic!("expected Ord trait");
+    };
+    assert_eq!(ord.prerequisites.len(), 1);
+    assert_eq!(ord.prerequisites[0].trait_name.name, "Eq");
+    assert_eq!(ord.prerequisites[0].arguments.len(), 1);
+
+    let Item::TraitDeclaration(relation) = &root.items[1] else {
+        panic!("expected Relation trait");
+    };
+    assert_eq!(relation.prerequisites.len(), 2);
+    assert!(
+        relation
+            .prerequisites
+            .iter()
+            .all(|prerequisite| prerequisite.trait_name.name == "Eq")
+    );
+}
+
+#[test]
 fn parses_use_declarations_and_public_items_losslessly() {
     let source = concat!(
         "use path.to.another_module\n",

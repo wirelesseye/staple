@@ -2159,6 +2159,81 @@ fn preserves_applied_types_as_unary_trait_arguments() {
 }
 
 #[test]
+fn enforces_and_propagates_transitive_trait_prerequisites() {
+    let module = type_check(concat!(
+        "trait Base = T => { base: T -> T }\n",
+        "trait Middle = T => Base T => { middle: T -> T }\n",
+        "trait Derived = T => Middle T => { derived: T -> T }\n",
+        "impl Derived I32 { def derived = value => value }\n",
+        "impl Middle I32 { def middle = value => value }\n",
+        "impl Base I32 { def base = value => value }\n",
+        "def apply: T => Derived T => T -> T = value => Base.base (Middle.middle (Derived.derived value))\n",
+        "let answer: I32 = apply 42\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("transitive prerequisite dispatch should compile");
+    assert!(llvm.contains("trait.call"));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Base = T => { base: T -> T }\n",
+            "trait Derived = T => Base T => { derived: T -> T }\n",
+            "impl Derived I32 { def derived = value => value }\n",
+        )))
+        .expect_err("implementations must satisfy trait prerequisites");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("trait prerequisite `Base I32` is not satisfied")
+    }));
+}
+
+#[test]
+fn prerequisite_copy_bounds_are_visible_to_ownership_checking() {
+    type_check(concat!(
+        "trait Duplicate = T => Copy T => { duplicate: T -> T }\n",
+        "impl Duplicate I32 { def duplicate = value => value }\n",
+        "def pair: T => Duplicate T => T -> (T, T) = value => (value, value)\n",
+        "let values: (I32, I32) = pair 42\n",
+    ));
+}
+
+#[test]
+fn substitutes_product_parameters_into_multiple_prerequisites() {
+    type_check(concat!(
+        "trait BothEqual = (Left, Right) => Eq Left => Eq Right => { equal: (Left, Left, Right, Right) -> (Bool, Bool) }\n",
+        "impl BothEqual (I32, I32) { def equal = (left_a, left_b, right_a, right_b) => (Eq.equal left_a left_b, Eq.equal right_a right_b) }\n",
+        "def compare_both: (Left, Right) => BothEqual (Left, Right) => (Left, Left, Right, Right) -> (Bool, Bool) = (left_a, left_b, right_a, right_b) => (Eq.equal left_a left_b, Eq.equal right_a right_b)\n",
+        "let result: (Bool, Bool) = compare_both (1, 1, 2, 2)\n",
+    ));
+}
+
+#[test]
+fn rejects_cyclic_trait_prerequisites() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "trait First = T => Second T => { first: T -> T }\n",
+                "trait Second = T => First T => { second: T -> T }\n",
+            ),
+            root,
+        )
+        .expect("cyclic prerequisite source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("prerequisite cycles must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("cyclic trait prerequisite"))
+    );
+}
+
+#[test]
 fn rejects_invalid_multi_parameter_trait_uses_and_members() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(

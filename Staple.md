@@ -729,6 +729,10 @@ trait Add = Left => Right => Output => {
 trait Convert = (From, To) => {
     convert: From -> To
 }
+
+trait Ord = T => Eq T => {
+    compare: T -> T -> I32
+}
 ```
 
 Trait members must have function types, must mention every trait parameter, and
@@ -763,6 +767,20 @@ no visibility modifier: every implementation in the loaded program is available
 globally. Defining the same trait/argument combination twice, including through
 aliases of the same types, is an error.
 
+A trait may place one or more prerequisite bounds between its parameter binders
+and member block. Every implementation must satisfy the instantiated
+prerequisites, and a generic bound makes its prerequisites available
+transitively:
+
+```staple
+def equal_ordered: T => Ord T => T -> T -> Bool = left => right => {
+    left == right
+}
+```
+
+Prerequisite cycles are rejected. Prerequisites participate only in static
+checking and do not add runtime dictionaries or function parameters.
+
 A generic `def` adds one or more trait bounds between its compile-time parameter
 binder and its ordinary function type:
 
@@ -785,7 +803,7 @@ function values and may be called unqualified when unambiguous or qualified as
 Traits use static dispatch. Bounds and implementations add no runtime values or
 function parameters. During monomorphization, Stapler substitutes the concrete
 trait arguments and emits a direct reference to the selected implementation
-member. Trait objects, runtime dictionaries, supertraits, associated items,
+member. Trait objects, runtime dictionaries, associated items,
 default methods, generic implementations, and independently generic trait
 members are not currently supported.
 
@@ -1135,8 +1153,7 @@ Signed integer division uses signed semantics, while unsigned integer division
 uses unsigned semantics. All integer types implement `Eq` for `==` and `!=`, and
 `Compare` for `<`, `<=`, `>`, and `>=`. These operators compare homogeneous
 operands and return `Bool`. Ordering comparisons use signed semantics for signed
-types and unsigned semantics for unsigned types. `Compare` does not currently
-require `Eq`; trait prerequisites will provide that relationship in the future.
+types and unsigned semantics for unsigned types. `Compare T` requires `Eq T`.
 Staple does not currently provide implicit numeric conversions or floating-point
 types.
 
