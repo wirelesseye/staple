@@ -470,7 +470,10 @@ impl<'a> Classifier<'a> {
                     self.mark_last(&operator.syntax, &operator.name, OPERATOR, 0, 1);
                 }
             }
-            Expression::Quote(value) => self.expression(&value.template, resolved),
+            Expression::Quote(value) => match &value.template {
+                QuoteTemplate::Expression(expression) => self.expression(expression, resolved),
+                QuoteTemplate::Item(item) => self.item(item, resolved),
+            },
             Expression::Splice(value) => self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1),
             Expression::Name(value) => {
                 let kind = resolved

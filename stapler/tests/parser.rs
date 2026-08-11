@@ -448,7 +448,56 @@ fn reserves_repeated_splice_syntax() {
     let Expression::Quote(quote) = function.body.as_ref() else {
         panic!("expected quote");
     };
-    assert!(matches!(quote.template.as_ref(), Expression::Splice(splice) if splice.repeated));
+    assert!(matches!(
+        &quote.template,
+        stapler::QuoteTemplate::Expression(template)
+            if matches!(template.as_ref(), Expression::Splice(splice) if splice.repeated)
+    ));
+}
+
+#[test]
+fn parses_expression_and_single_item_quotations_losslessly() {
+    let source = concat!(
+        "macro expression = value => quote { $value }\n",
+        "macro definition = value => quote { def generated = () => $value; }\n",
+        "macro singleton = value => quote { type Generated }\n",
+    );
+    let root = parse(source).expect("expression and item quotations should parse");
+    assert_eq!(root.text(), source);
+
+    let templates = root
+        .items
+        .iter()
+        .map(|item| {
+            let Item::MacroDeclaration(declaration) = item else {
+                panic!("expected macro declaration");
+            };
+            let Some(Expression::Function(function)) = &declaration.value else {
+                panic!("expected macro function");
+            };
+            let Expression::Quote(quote) = function.body.as_ref() else {
+                panic!("expected quotation");
+            };
+            &quote.template
+        })
+        .collect::<Vec<_>>();
+    assert!(matches!(
+        templates[0],
+        stapler::QuoteTemplate::Expression(_)
+    ));
+    assert!(matches!(
+        templates[1],
+        stapler::QuoteTemplate::Item(item)
+            if matches!(item.as_ref(), Item::Statement(statement)
+                if matches!(statement.as_ref(), Statement::Binding(_)))
+    ));
+    assert!(matches!(
+        templates[2],
+        stapler::QuoteTemplate::Item(item)
+            if matches!(item.as_ref(), Item::TypeDeclaration(_))
+    ));
+
+    assert!(parse("macro invalid = _ => quote { def first = 1; def second = 2 }\n").is_err());
 }
 
 #[test]

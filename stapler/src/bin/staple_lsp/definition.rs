@@ -95,38 +95,40 @@ struct DeclarationCollector<'a> {
 impl DeclarationCollector<'_> {
     fn module(&mut self, module: &Module) {
         for item in &module.items {
-            match item {
-                Item::Submodule(value) => {
-                    if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
-                        self.insert(DefinitionId::Module(id), &value.syntax, &value.name);
-                    }
-                    self.module(&value.module);
+            self.item(item);
+        }
+    }
+
+    fn item(&mut self, item: &Item) {
+        match item {
+            Item::Submodule(value) => {
+                if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
+                    self.insert(DefinitionId::Module(id), &value.syntax, &value.name);
                 }
-                Item::ExternBlock(value) => {
-                    for binding in &value.bindings {
-                        self.binding(binding);
-                    }
-                }
-                Item::TypeDeclaration(value) => {
-                    self.declaration(&value.syntax, &value.name);
-                    for parameter in &value.type_parameters {
-                        self.type_parameter(parameter);
-                    }
-                }
-                Item::TraitDeclaration(value) => {
-                    self.declaration(&value.syntax, &value.name);
-                    for parameter in &value.type_parameters {
-                        self.type_parameter(parameter);
-                    }
-                    for member in &value.members {
-                        self.declaration(&member.syntax, &member.name);
-                    }
-                }
-                Item::Statement(value) => self.statement(value),
-                Item::UseDeclaration(_)
-                | Item::MacroDeclaration(_)
-                | Item::TraitImplementation(_) => {}
+                self.module(&value.module);
             }
+            Item::ExternBlock(value) => {
+                for binding in &value.bindings {
+                    self.binding(binding);
+                }
+            }
+            Item::TypeDeclaration(value) => {
+                self.declaration(&value.syntax, &value.name);
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter);
+                }
+            }
+            Item::TraitDeclaration(value) => {
+                self.declaration(&value.syntax, &value.name);
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter);
+                }
+                for member in &value.members {
+                    self.declaration(&member.syntax, &member.name);
+                }
+            }
+            Item::Statement(value) => self.statement(value),
+            Item::UseDeclaration(_) | Item::MacroDeclaration(_) | Item::TraitImplementation(_) => {}
         }
     }
 
@@ -202,7 +204,10 @@ impl DeclarationCollector<'_> {
                     self.expression(operand);
                 }
             }
-            Expression::Quote(value) => self.expression(&value.template),
+            Expression::Quote(value) => match &value.template {
+                QuoteTemplate::Expression(expression) => self.expression(expression),
+                QuoteTemplate::Item(item) => self.item(item),
+            },
             Expression::Splice(_)
             | Expression::Name(_)
             | Expression::String(_)
@@ -478,7 +483,10 @@ impl Collector<'_> {
                     self.add_resolved(&operator.syntax, &operator.name, true);
                 }
             }
-            Expression::Quote(value) => self.expression(&value.template),
+            Expression::Quote(value) => match &value.template {
+                QuoteTemplate::Expression(expression) => self.expression(expression),
+                QuoteTemplate::Item(item) => self.item(item),
+            },
             Expression::Name(value) => self.add_resolved(&value.syntax, &value.name, true),
             Expression::Splice(_)
             | Expression::String(_)

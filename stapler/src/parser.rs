@@ -1345,11 +1345,26 @@ impl Grammar {
         self.quote_depth += 1;
         let previous = self.brace_terminates_expression;
         self.brace_terminates_expression = true;
-        let template = self.parse_expression();
+        let template_start = self.position;
+        let next_syntax_id = self.next_syntax_id;
+        let expression = self.parse_expression();
+        let template = match expression {
+            Ok(expression) if self.at(TokenKind::RBrace) => {
+                Ok(crate::QuoteTemplate::Expression(Box::new(expression)))
+            }
+            _ => {
+                self.position = template_start;
+                self.next_syntax_id = next_syntax_id;
+                self.parse_item().map(|item| {
+                    self.eat(TokenKind::Semicolon);
+                    crate::QuoteTemplate::Item(Box::new(item))
+                })
+            }
+        };
         self.brace_terminates_expression = previous;
         self.quote_depth -= 1;
-        let template = Box::new(template?);
-        self.expect(TokenKind::RBrace, "expected `}` after quoted expression")?;
+        let template = template?;
+        self.expect(TokenKind::RBrace, "expected `}` after quoted syntax")?;
         Ok(QuoteExpression {
             syntax: self.syntax(start),
             template,

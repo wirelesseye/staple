@@ -160,7 +160,12 @@ impl Collector<'_> {
                     self.collect_expression_declarations(operand);
                 }
             }
-            Expression::Quote(quote) => self.collect_expression_declarations(&quote.template),
+            Expression::Quote(quote) => match &quote.template {
+                QuoteTemplate::Expression(expression) => {
+                    self.collect_expression_declarations(expression)
+                }
+                QuoteTemplate::Item(item) => self.collect_item_declarations(item),
+            },
             Expression::Splice(_)
             | Expression::Name(_)
             | Expression::String(_)
@@ -501,7 +506,10 @@ impl Collector<'_> {
                     self.expression(operand);
                 }
             }
-            Expression::Quote(quote) => self.expression(&quote.template),
+            Expression::Quote(quote) => match &quote.template {
+                QuoteTemplate::Expression(expression) => self.expression(expression),
+                QuoteTemplate::Item(item) => self.item(item),
+            },
             Expression::Splice(_)
             | Expression::Name(_)
             | Expression::String(_)

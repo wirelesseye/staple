@@ -99,9 +99,13 @@ macro conditional =
     }
 ```
 
-The braces in `quote { expression }` delimit one expression and are not part of
-the result. `$name` splices an expression supplied by the caller. `$names...`
-is reserved for future syntax sequences and is currently rejected.
+The braces in `quote { syntax }` delimit one syntax value and are not part of
+the result. A quotation is parsed as one expression when the whole body can be
+consumed as an expression; otherwise it is parsed as exactly one item, with an
+optional trailing semicolon. Thus `quote { foo }` remains an expression, while
+item-specific forms such as `let`, `def`, `type`, `extern`, `trait`, `impl`, or
+`pub` produce an `Item`. `$name` splices an expression supplied by the caller.
+`$names...` is reserved for future syntax sequences and is currently rejected.
 
 Identifiers and calls may also be inspected, constructed, and changed as
 compile-time values:
@@ -126,6 +130,26 @@ change `original`. A mutable syntax binding captured by a compile-time function
 is a shared cell, like an ordinary captured mutable binding. Constructed
 identifiers use the macro definition's hygiene context. Syntax values inserted
 as call children retain their existing context.
+
+A macro may return one item when its invocation is the entire top-level
+expression-statement item:
+
+```staple
+macro define_answer: Expr -> Item =
+    value => quote {
+        def answer = () => $value
+    }
+
+define_answer 42
+```
+
+Item-producing macros may generate statements, type declarations, extern
+blocks, trait declarations, and trait implementations. Generated `use`, `mod`,
+and `macro` declarations are rejected because they would require rebuilding
+expansion and loading scopes. An item result is invalid in bindings, function
+bodies, blocks, call arguments, and every other expression position. `Item`
+values may be passed between compile-time helpers, but source syntax cannot yet
+be matched as an `Item` macro argument.
 
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while
@@ -167,10 +191,11 @@ Compile-time evaluation supports pure functions, bindings, mutable local cells,
 products, matches, literals, recursion, and pure integer operations. It rejects
 external or runtime-only effects. Expansion is limited to 128 nested macros and
 each top-level invocation is limited to 1,000,000 evaluation steps. Syntax
-values are compile-time-only. This release supports expression results, scalar
-splices, and structured identifier and call expressions. Repeated splices,
-structured access to other expression forms, and item, type, or pattern
-generation remain future work.
+values are compile-time-only. This release supports expression results, one
+top-level item result, scalar expression splices inside generated items, and
+structured identifier and call expressions. Repeated splices, item sequences,
+item input and inspection, structured access to other expression forms, and
+type or pattern generation remain future work.
 
 Compiler-provided macros use typed bodyless contracts. `std.core` declares
 `pub macro quote: Syntax -> Syntax`, and `std.cinterop` declares

@@ -1745,6 +1745,125 @@ fn rejects_structured_syntax_values_at_runtime() {
 }
 
 #[test]
+fn expands_explicit_and_inferred_item_macros() {
+    let module = type_check(concat!(
+        "macro define_answer: Expr -> Item = value => quote {\n",
+        "    def answer = () => $value\n",
+        "}\n",
+        "def item_identity: Item -> Item = item => item\n",
+        "macro define_type = _: Expr => item_identity quote { type Generated }\n",
+        "define_answer 42\n",
+        "define_type ()\n",
+        "let result: I32 = answer ()\n",
+        "let generated: Generated = Generated\n",
+    ));
+    assert!(module.resolved().syntax().items.iter().any(|item| {
+        matches!(item, Item::Statement(statement)
+            if matches!(statement.as_ref(), Statement::Binding(binding)
+                if binding.name == "answer"))
+    }));
+    assert!(module.resolved().syntax().items.iter().any(|item| {
+        matches!(item, Item::TypeDeclaration(declaration) if declaration.name == "Generated")
+    }));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generated bindings and types should generate code");
+}
+
+#[test]
+fn expands_macros_and_splices_inside_generated_items() {
+    let module = type_check(concat!(
+        "macro expression_identity = value: Expr => quote { $value }\n",
+        "macro define_value = value: Expr => quote {\n",
+        "    let generated: I32 = expression_identity $value\n",
+        "}\n",
+        "define_value 42\n",
+        "let result: I32 = generated\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("nested macros in generated items should expand");
+}
+
+#[test]
+fn generates_extern_trait_and_implementation_items() {
+    let module = type_check(concat!(
+        "macro define_extern = _: Expr => quote {\n",
+        "    extern \"c\" { let generated_external: I32 -> I32 }\n",
+        "}\n",
+        "macro define_trait = _: Expr => quote {\n",
+        "    trait GeneratedTrait = T => { transform: T -> T }\n",
+        "}\n",
+        "macro define_impl = replacement: Expr => quote {\n",
+        "    impl GeneratedTrait I32 { def transform = value => $replacement }\n",
+        "}\n",
+        "define_extern ()\n",
+        "define_trait ()\n",
+        "define_impl 41\n",
+        "let transformed: I32 = GeneratedTrait.transform 1\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generated resolver-safe declaration items should generate code");
+}
+
+#[test]
+fn diagnoses_invalid_item_macro_outputs_and_placements() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (source, expected) in [
+        (
+            "macro invalid: Expr -> Item = value => quote { $value }\ninvalid 1\n",
+            "macro `invalid` declared `Item` but returned expression syntax",
+        ),
+        (
+            "macro emit = value: Expr => quote { let generated = $value }\nlet result = emit 1\n",
+            "macro `emit` produces item syntax and may only be invoked as a standalone top-level item",
+        ),
+        (
+            "macro emit: Expr -> Item = value => quote { let generated = $value }\ndef enclosing = () => { emit 1; () }\n",
+            "macro `emit` produces item syntax and may only be invoked as a standalone top-level item",
+        ),
+        (
+            "macro emit = value: Expr => quote { let generated = $value }\nemit 1 2\n",
+            "item-producing macro `emit` cannot have excess arguments",
+        ),
+        (
+            "macro emit = _: Expr => quote { use std.core * }\nemit ()\n",
+            "item quotations cannot generate `use`, `mod`, or `macro` declarations yet",
+        ),
+        (
+            "macro emit = _: Expr => quote { mod generated {} }\nemit ()\n",
+            "item quotations cannot generate `use`, `mod`, or `macro` declarations yet",
+        ),
+        (
+            "macro emit = _: Expr => quote { macro generated = value => quote { $value } }\nemit ()\n",
+            "item quotations cannot generate `use`, `mod`, or `macro` declarations yet",
+        ),
+        (
+            "macro consume = value: Item => quote { 1 }\nconsume candidate\n",
+            "argument 1 of macro `consume` must be an item",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("invalid item macro use should fail expansion");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
+            "expected `{expected}`, found {diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
 fn evaluates_pure_syntax_helpers_and_conditional_macros() {
     let module = type_check(concat!(
         "def syntax_identity: Syntax -> Syntax = value => value\n",

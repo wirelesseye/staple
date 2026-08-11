@@ -1,4 +1,4 @@
-use super::{Pattern, Statement, Syntax, Type};
+use super::{Item, Pattern, Statement, Syntax, Type};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
@@ -54,7 +54,13 @@ pub struct LoopExpression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuoteExpression {
     pub syntax: Syntax,
-    pub template: Box<Expression>,
+    pub template: QuoteTemplate,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum QuoteTemplate {
+    Expression(Box<Expression>),
+    Item(Box<Item>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

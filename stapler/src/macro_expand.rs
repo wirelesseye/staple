@@ -72,6 +72,7 @@ enum SyntaxValue {
     Ident(crate::NameExpression),
     Call(crate::CallExpression),
     Unstructured(Expression),
+    Item(Box<Item>),
 }
 
 impl SyntaxValue {
@@ -83,15 +84,16 @@ impl SyntaxValue {
         }
     }
 
-    fn to_expression(&self) -> Expression {
+    fn to_expression(&self) -> Option<Expression> {
         self.clone().into_expression()
     }
 
-    fn into_expression(self) -> Expression {
+    fn into_expression(self) -> Option<Expression> {
         match self {
-            Self::Ident(name) => Expression::Name(name),
-            Self::Call(call) => Expression::Call(call),
-            Self::Unstructured(expression) => expression,
+            Self::Ident(name) => Some(Expression::Name(name)),
+            Self::Call(call) => Some(Expression::Call(call)),
+            Self::Unstructured(expression) => Some(expression),
+            Self::Item(_) => None,
         }
     }
 }
@@ -157,7 +159,7 @@ pub(crate) fn expand_program(mut program: Program) -> Result<Program, Vec<Diagno
         let module = source_module.id;
         let mut items = source_module.syntax.items.clone();
         for item in &mut items {
-            expander.expand_item(module, item);
+            expander.expand_item(module, item, 0);
         }
         items.retain(|item| {
             !matches!(item,
@@ -615,21 +617,29 @@ impl MacroExpander {
         }
     }
 
-    fn expand_item(&mut self, module: ModuleId, item: &mut Item) {
+    fn expand_item(&mut self, module: ModuleId, item: &mut Item, depth: usize) {
+        if let Item::Statement(statement) = item
+            && let Statement::Expression(expression) = statement.as_ref()
+        {
+            let expression = expression.clone();
+            if self.expand_top_level_macro(module, item, expression, depth) {
+                return;
+            }
+        }
         match item {
             Item::Statement(statement)
                 if matches!(statement.as_ref(), Statement::Binding(binding)
                     if binding_is_compile_time_helper(binding)) => {}
-            Item::Statement(statement) => self.expand_statement(module, statement, 0),
+            Item::Statement(statement) => self.expand_statement(module, statement, depth),
             Item::TraitImplementation(implementation) => {
                 for member in &mut implementation.members {
-                    member.value = self.expand_expression(module, member.value.clone(), 0);
+                    member.value = self.expand_expression(module, member.value.clone(), depth);
                 }
             }
             Item::TraitDeclaration(declaration) => {
                 for member in &mut declaration.members {
                     if let Some(default) = member.default.take() {
-                        member.default = Some(self.expand_expression(module, default, 0));
+                        member.default = Some(self.expand_expression(module, default, depth));
                     }
                 }
             }
@@ -639,6 +649,104 @@ impl MacroExpander {
             | Item::ExternBlock(_)
             | Item::TypeDeclaration(_) => {}
         }
+    }
+
+    fn expand_top_level_macro(
+        &mut self,
+        module: ModuleId,
+        item: &mut Item,
+        expression: Expression,
+        depth: usize,
+    ) -> bool {
+        let (head, arguments) = flatten_call(&expression);
+        let Some(keys) = self.resolve_macro(module, head) else {
+            return false;
+        };
+        let Some(definition) =
+            self.select_macro(&keys, &arguments, expression.syntax().span.clone())
+        else {
+            return true;
+        };
+        if !matches!(definition.result, MetaType::Syntax | MetaType::Item) {
+            return false;
+        }
+        if depth >= MAX_EXPANSION_DEPTH {
+            self.diagnostics.push(Diagnostic::new(
+                expression.syntax().span.clone(),
+                "macro expansion exceeded the limit of 128 nested expansions",
+            ));
+            return true;
+        }
+        let key = definition.key.clone();
+        if self.expansion_stack.contains(&key) && head.syntax().definition_module().is_some() {
+            self.diagnostics.push(Diagnostic::new(
+                expression.syntax().span.clone(),
+                format!("recursive macro expansion of `{}`", key.name),
+            ));
+            return true;
+        }
+        if depth == 0 {
+            self.steps = 0;
+        }
+        self.expansion_stack.push(key.clone());
+        let consumed = arguments[..definition.arity].to_vec();
+        let diagnostic_start = self.diagnostics.len();
+        let result = self.invoke_macro(&definition, consumed, expression.syntax().span.clone());
+        let Some(result) = result else {
+            self.expansion_stack.pop();
+            if self.diagnostics.len() > diagnostic_start {
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    format!("while expanding macro `{}`", key.name),
+                ));
+            }
+            return true;
+        };
+
+        match result {
+            SyntaxValue::Item(generated) => {
+                if !arguments[definition.arity..].is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        format!(
+                            "item-producing macro `{}` cannot have excess arguments",
+                            key.name
+                        ),
+                    ));
+                } else {
+                    *item = *generated;
+                    self.expand_item(module, item, depth + 1);
+                }
+            }
+            syntax => {
+                if definition.result == MetaType::Item {
+                    self.diagnostics.push(Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        format!(
+                            "macro `{}` declared `Item` but returned expression syntax",
+                            key.name
+                        ),
+                    ));
+                } else {
+                    let mut result = syntax
+                        .into_expression()
+                        .expect("non-item syntax must contain an expression");
+                    for argument in &arguments[definition.arity..] {
+                        let mut syntax = result.syntax().clone();
+                        syntax.id = self.fresh_id();
+                        result = Expression::Call(crate::CallExpression {
+                            syntax,
+                            callee: Box::new(result),
+                            argument: Box::new((*argument).clone()),
+                        });
+                    }
+                    result = self.expand_expression(module, result, depth + 1);
+                    *item = Item::Statement(Box::new(Statement::Expression(result)));
+                }
+            }
+        }
+        self.expansion_stack.pop();
+        true
     }
 
     fn expand_statement(&mut self, module: ModuleId, statement: &mut Statement, depth: usize) {
@@ -692,6 +800,16 @@ impl MacroExpander {
                 return expression;
             };
             let key = definition.key.clone();
+            if definition.result == MetaType::Item {
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    format!(
+                        "macro `{}` produces item syntax and may only be invoked as a standalone top-level item",
+                        key.name
+                    ),
+                ));
+                return expression;
+            }
             if !matches!(definition.result, MetaType::Syntax) && !definition.result.is_expression()
             {
                 self.diagnostics.push(Diagnostic::new(
@@ -715,7 +833,7 @@ impl MacroExpander {
             let diagnostic_start = self.diagnostics.len();
             let expanded =
                 self.invoke_macro(&definition, consumed, expression.syntax().span.clone());
-            let Some(mut result) = expanded else {
+            let Some(result) = expanded else {
                 self.expansion_stack.pop();
                 if self.diagnostics.len() > diagnostic_start {
                     self.diagnostics.push(Diagnostic::new(
@@ -723,6 +841,17 @@ impl MacroExpander {
                         format!("while expanding macro `{}`", key.name),
                     ));
                 }
+                return expression;
+            };
+            let Some(mut result) = result.into_expression() else {
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    format!(
+                        "macro `{}` produces item syntax and may only be invoked as a standalone top-level item",
+                        key.name
+                    ),
+                ));
+                self.expansion_stack.pop();
                 return expression;
             };
             for argument in &arguments[definition.arity..] {
@@ -973,7 +1102,7 @@ impl MacroExpander {
         definition: &MacroDefinition,
         arguments: Vec<&Expression>,
         call_span: Span,
-    ) -> Option<Expression> {
+    ) -> Option<SyntaxValue> {
         if !self.validate_macro_arguments(definition, &arguments) {
             return None;
         }
@@ -991,10 +1120,12 @@ impl MacroExpander {
                 };
                 let mut syntax = string.syntax.clone();
                 syntax.id = self.fresh_id();
-                Some(Expression::CString(crate::CStringExpression {
-                    syntax,
-                    literal: string.literal.clone(),
-                }))
+                Some(SyntaxValue::from_expression(Expression::CString(
+                    crate::CStringExpression {
+                        syntax,
+                        literal: string.literal.clone(),
+                    },
+                )))
             }
             MacroKind::Quote => {
                 self.diagnostics.push(Diagnostic::new(
@@ -1015,7 +1146,7 @@ impl MacroExpander {
                     )?;
                 }
                 match value {
-                    Value::Syntax(expression) => Some(expression.into_expression()),
+                    Value::Syntax(syntax) => Some(syntax),
                     _ => {
                         self.diagnostics.push(Diagnostic::new(
                             definition.declaration.syntax.span.clone(),
@@ -1099,7 +1230,6 @@ impl MacroExpander {
                 let mark = self.next_mark;
                 self.next_mark += 1;
                 self.instantiate_quote(module, &quote.template, environment, mark)
-                    .map(SyntaxValue::from_expression)
                     .map(Value::Syntax)
             }
             Expression::Splice(splice) => {
@@ -1179,19 +1309,37 @@ impl MacroExpander {
                     let consumed = arguments[..definition.arity].to_vec();
                     let mut result =
                         self.invoke_macro(&definition, consumed, expression.syntax().span.clone());
-                    if let Some(mut expanded) = result.take() {
-                        for argument in &arguments[definition.arity..] {
-                            let mut syntax = expanded.syntax().clone();
-                            syntax.id = self.fresh_id();
-                            expanded = Expression::Call(crate::CallExpression {
-                                syntax,
-                                callee: Box::new(expanded),
-                                argument: Box::new((*argument).clone()),
-                            });
-                        }
-                        result = Some(expanded);
+                    if !arguments[definition.arity..].is_empty()
+                        && matches!(result, Some(SyntaxValue::Item(_)))
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            expression.syntax().span.clone(),
+                            format!(
+                                "item-producing macro `{}` cannot have excess arguments",
+                                key.name
+                            ),
+                        ));
+                        result = None;
+                    } else if let Some(syntax) = result.take() {
+                        if matches!(syntax, SyntaxValue::Item(_)) {
+                            result = Some(syntax);
+                        } else {
+                            let mut expanded = syntax
+                                .into_expression()
+                                .expect("non-item syntax must contain an expression");
+                            for argument in &arguments[definition.arity..] {
+                                let mut syntax = expanded.syntax().clone();
+                                syntax.id = self.fresh_id();
+                                expanded = Expression::Call(crate::CallExpression {
+                                    syntax,
+                                    callee: Box::new(expanded),
+                                    argument: Box::new((*argument).clone()),
+                                });
+                            }
+                            result = Some(SyntaxValue::from_expression(expanded));
+                        };
                     }
-                    let result = result.map(SyntaxValue::from_expression).map(Value::Syntax);
+                    let result = result.map(Value::Syntax);
                     self.expansion_stack.pop();
                     return result;
                 }
@@ -1461,8 +1609,8 @@ impl MacroExpander {
                 let syntax = self.generated_syntax(module, span);
                 Some(Value::Syntax(SyntaxValue::Call(crate::CallExpression {
                     syntax,
-                    callee: Box::new(callee.to_expression()),
-                    argument: Box::new(argument.to_expression()),
+                    callee: Box::new(callee.to_expression()?),
+                    argument: Box::new(argument.to_expression()?),
                 })))
             }
             _ => unreachable!(),
@@ -1570,8 +1718,8 @@ impl MacroExpander {
                     return None;
                 };
                 match field.as_str() {
-                    "callee" => call.callee = Box::new(updated.into_expression()),
-                    "argument" => call.argument = Box::new(updated.into_expression()),
+                    "callee" => call.callee = Box::new(updated.into_expression()?),
+                    "argument" => call.argument = Box::new(updated.into_expression()?),
                     _ => unreachable!(),
                 }
                 call.syntax = self.generated_syntax(module, span);
@@ -1684,14 +1832,33 @@ impl MacroExpander {
     fn instantiate_quote(
         &mut self,
         module: ModuleId,
-        template: &Expression,
+        template: &crate::QuoteTemplate,
         environment: &Environment,
         mark: u64,
-    ) -> Option<Expression> {
-        let mut expression = template.clone();
-        alpha_rename_expression(&mut expression, mark, &mut Vec::new());
-        self.freshen_expression(&mut expression, module, mark);
-        substitute_splices(&expression, environment, &mut self.diagnostics)
+    ) -> Option<SyntaxValue> {
+        match template {
+            crate::QuoteTemplate::Expression(template) => {
+                let mut expression = template.as_ref().clone();
+                alpha_rename_expression(&mut expression, mark, &mut Vec::new());
+                self.freshen_expression(&mut expression, module, mark);
+                substitute_splices(&expression, environment, &mut self.diagnostics)
+                    .map(SyntaxValue::from_expression)
+            }
+            crate::QuoteTemplate::Item(template) => {
+                let mut item = template.as_ref().clone();
+                if !item_output_supported(&item) {
+                    self.diagnostics.push(Diagnostic::new(
+                        item_syntax(&item).span.clone(),
+                        "item quotations cannot generate `use`, `mod`, or `macro` declarations yet",
+                    ));
+                    return None;
+                }
+                alpha_rename_item(&mut item, mark);
+                freshen_item(self, &mut item, module, mark);
+                substitute_item(&mut item, environment, &mut self.diagnostics)?;
+                Some(SyntaxValue::Item(Box::new(item)))
+            }
+        }
     }
 
     fn fresh_id(&mut self) -> SyntaxId {
@@ -2182,12 +2349,14 @@ fn matches_pattern_type(ty: &Type, value: &Value) -> bool {
 
 fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
     match (expected, value) {
-        (MetaType::Syntax | MetaType::Expr, Value::Syntax(_)) => true,
+        (MetaType::Syntax, Value::Syntax(_)) => true,
+        (MetaType::Expr, Value::Syntax(syntax)) => !matches!(syntax, SyntaxValue::Item(_)),
         (MetaType::Ident(spelling), Value::Syntax(SyntaxValue::Ident(name))) => spelling
             .as_ref()
             .is_none_or(|expected| expected == &name.name),
         (MetaType::CallExpr, Value::Syntax(SyntaxValue::Call(_))) => true,
         (MetaType::UnstructuredExpr, Value::Syntax(SyntaxValue::Unstructured(_))) => true,
+        (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
         _ => false,
     }
 }
@@ -2210,7 +2379,19 @@ fn substitute_splices(
             return None;
         }
         return match environment.get(&splice.name).map(EnvironmentBinding::get) {
-            Some(Value::Syntax(expression)) => Some(expression.into_expression()),
+            Some(Value::Syntax(expression)) => match expression.into_expression() {
+                Some(expression) => Some(expression),
+                None => {
+                    diagnostics.push(Diagnostic::new(
+                        splice.syntax.span.clone(),
+                        format!(
+                            "splice `${}` contains item syntax, not expression syntax",
+                            splice.name
+                        ),
+                    ));
+                    None
+                }
+            },
             Some(_) => {
                 diagnostics.push(Diagnostic::new(
                     splice.syntax.span.clone(),
@@ -2315,6 +2496,142 @@ fn substitute_statement(
         }
     }
     Some(())
+}
+
+fn item_output_supported(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::ExternBlock(_)
+            | Item::TypeDeclaration(_)
+            | Item::TraitDeclaration(_)
+            | Item::TraitImplementation(_)
+            | Item::Statement(_)
+    )
+}
+
+fn item_syntax(item: &Item) -> &Syntax {
+    match item {
+        Item::UseDeclaration(value) => &value.syntax,
+        Item::Submodule(value) => &value.syntax,
+        Item::ExternBlock(value) => &value.syntax,
+        Item::TypeDeclaration(value) => &value.syntax,
+        Item::MacroDeclaration(value) => &value.syntax,
+        Item::TraitDeclaration(value) => &value.syntax,
+        Item::TraitImplementation(value) => &value.syntax,
+        Item::Statement(value) => statement_syntax(value),
+    }
+}
+
+fn statement_syntax(statement: &Statement) -> &Syntax {
+    match statement {
+        Statement::Binding(value) => &value.syntax,
+        Statement::PatternBinding(value) => &value.syntax,
+        Statement::Assignment(value) => &value.syntax,
+        Statement::Return(value) => &value.syntax,
+        Statement::Break(value) => &value.syntax,
+        Statement::Continue(value) => &value.syntax,
+        Statement::Expression(value) => value.syntax(),
+    }
+}
+
+fn substitute_binding(
+    binding: &mut Binding,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    if let Some(value) = &mut binding.value {
+        *value = substitute_splices(value, environment, diagnostics)?;
+    }
+    Some(())
+}
+
+fn substitute_item(
+    item: &mut Item,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    match item {
+        Item::ExternBlock(block) => {
+            for binding in &mut block.bindings {
+                substitute_binding(binding, environment, diagnostics)?;
+            }
+        }
+        Item::TraitDeclaration(declaration) => {
+            for member in &mut declaration.members {
+                if let Some(default) = &mut member.default {
+                    *default = substitute_splices(default, environment, diagnostics)?;
+                }
+            }
+        }
+        Item::TraitImplementation(implementation) => {
+            for member in &mut implementation.members {
+                member.value = substitute_splices(&member.value, environment, diagnostics)?;
+            }
+        }
+        Item::Statement(statement) => {
+            substitute_statement(statement, environment, diagnostics)?;
+        }
+        Item::TypeDeclaration(_) => {}
+        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => {
+            unreachable!("unsupported item output must be rejected before substitution")
+        }
+    }
+    Some(())
+}
+
+fn alpha_rename_item(item: &mut Item, mark: u64) {
+    let mut scopes = Vec::new();
+    match item {
+        Item::ExternBlock(block) => {
+            for binding in &mut block.bindings {
+                if let Some(value) = &mut binding.value {
+                    alpha_rename_expression(value, mark, &mut scopes);
+                }
+            }
+        }
+        Item::TraitDeclaration(declaration) => {
+            for member in &mut declaration.members {
+                if let Some(default) = &mut member.default {
+                    alpha_rename_expression(default, mark, &mut scopes);
+                }
+            }
+        }
+        Item::TraitImplementation(implementation) => {
+            for member in &mut implementation.members {
+                alpha_rename_expression(&mut member.value, mark, &mut scopes);
+            }
+        }
+        Item::Statement(statement) => match statement.as_mut() {
+            Statement::Binding(binding) => {
+                if let Some(value) = &mut binding.value {
+                    alpha_rename_expression(value, mark, &mut scopes);
+                }
+            }
+            Statement::PatternBinding(binding) => {
+                alpha_rename_expression(&mut binding.value, mark, &mut scopes)
+            }
+            Statement::Assignment(assignment) => {
+                alpha_rename_expression(&mut assignment.target, mark, &mut scopes);
+                alpha_rename_expression(&mut assignment.value, mark, &mut scopes);
+            }
+            Statement::Return(return_) => {
+                alpha_rename_expression(&mut return_.value, mark, &mut scopes)
+            }
+            Statement::Break(break_) => {
+                if let Some(value) = &mut break_.value {
+                    alpha_rename_expression(value, mark, &mut scopes);
+                }
+            }
+            Statement::Continue(_) => {}
+            Statement::Expression(expression) => {
+                alpha_rename_expression(expression, mark, &mut scopes)
+            }
+        },
+        Item::TypeDeclaration(_) => {}
+        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => {
+            unreachable!("unsupported item output must be rejected before hygiene")
+        }
+    }
 }
 
 fn hygienic_name(name: &str, mark: u64) -> String {
@@ -2506,15 +2823,7 @@ fn freshen_statement(
     mark: u64,
 ) {
     match statement {
-        Statement::Binding(binding) => {
-            expander.freshen_syntax(&mut binding.syntax, module, mark);
-            if let Some(annotation) = &mut binding.annotation {
-                freshen_type(expander, annotation, module, mark);
-            }
-            if let Some(value) = &mut binding.value {
-                expander.freshen_expression(value, module, mark);
-            }
-        }
+        Statement::Binding(binding) => freshen_binding(expander, binding, module, mark),
         Statement::PatternBinding(binding) => {
             expander.freshen_syntax(&mut binding.syntax, module, mark);
             freshen_pattern(expander, &mut binding.pattern, module, mark);
@@ -2539,6 +2848,113 @@ fn freshen_statement(
             expander.freshen_syntax(&mut continue_.syntax, module, mark);
         }
         Statement::Expression(expression) => expander.freshen_expression(expression, module, mark),
+    }
+}
+
+fn freshen_binding(
+    expander: &mut MacroExpander,
+    binding: &mut Binding,
+    module: ModuleId,
+    mark: u64,
+) {
+    expander.freshen_syntax(&mut binding.syntax, module, mark);
+    for parameter in &mut binding.type_parameters {
+        freshen_type_parameter(expander, parameter, module, mark);
+    }
+    for bound in &mut binding.trait_bounds {
+        freshen_trait_bound(expander, bound, module, mark);
+    }
+    if let Some(annotation) = &mut binding.annotation {
+        freshen_type(expander, annotation, module, mark);
+    }
+    if let Some(value) = &mut binding.value {
+        expander.freshen_expression(value, module, mark);
+    }
+}
+
+fn freshen_type_parameter(
+    expander: &mut MacroExpander,
+    parameter: &mut crate::TypeParameterPattern,
+    module: ModuleId,
+    mark: u64,
+) {
+    match parameter {
+        crate::TypeParameterPattern::Binding(binding) => {
+            expander.freshen_syntax(&mut binding.syntax, module, mark)
+        }
+        crate::TypeParameterPattern::Product(product) => {
+            expander.freshen_syntax(&mut product.syntax, module, mark);
+            for element in &mut product.elements {
+                freshen_type_parameter(expander, element, module, mark);
+            }
+        }
+    }
+}
+
+fn freshen_trait_bound(
+    expander: &mut MacroExpander,
+    bound: &mut crate::TraitBound,
+    module: ModuleId,
+    mark: u64,
+) {
+    expander.freshen_syntax(&mut bound.syntax, module, mark);
+    expander.freshen_syntax(&mut bound.trait_name.syntax, module, mark);
+    for argument in &mut bound.arguments {
+        freshen_type(expander, argument, module, mark);
+    }
+}
+
+fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId, mark: u64) {
+    match item {
+        Item::ExternBlock(block) => {
+            expander.freshen_syntax(&mut block.syntax, module, mark);
+            for binding in &mut block.bindings {
+                freshen_binding(expander, binding, module, mark);
+            }
+        }
+        Item::TypeDeclaration(declaration) => {
+            expander.freshen_syntax(&mut declaration.syntax, module, mark);
+            for parameter in &mut declaration.type_parameters {
+                freshen_type_parameter(expander, parameter, module, mark);
+            }
+            for bound in &mut declaration.trait_bounds {
+                freshen_trait_bound(expander, bound, module, mark);
+            }
+            if let Some(underlying) = &mut declaration.underlying {
+                freshen_type(expander, underlying, module, mark);
+            }
+        }
+        Item::TraitDeclaration(declaration) => {
+            expander.freshen_syntax(&mut declaration.syntax, module, mark);
+            for parameter in &mut declaration.type_parameters {
+                freshen_type_parameter(expander, parameter, module, mark);
+            }
+            for prerequisite in &mut declaration.prerequisites {
+                freshen_trait_bound(expander, prerequisite, module, mark);
+            }
+            for member in &mut declaration.members {
+                expander.freshen_syntax(&mut member.syntax, module, mark);
+                freshen_type(expander, &mut member.annotation, module, mark);
+                if let Some(default) = &mut member.default {
+                    expander.freshen_expression(default, module, mark);
+                }
+            }
+        }
+        Item::TraitImplementation(implementation) => {
+            expander.freshen_syntax(&mut implementation.syntax, module, mark);
+            expander.freshen_syntax(&mut implementation.trait_name.syntax, module, mark);
+            for argument in &mut implementation.arguments {
+                freshen_type(expander, argument, module, mark);
+            }
+            for member in &mut implementation.members {
+                expander.freshen_syntax(&mut member.syntax, module, mark);
+                expander.freshen_expression(&mut member.value, module, mark);
+            }
+        }
+        Item::Statement(statement) => freshen_statement(expander, statement, module, mark),
+        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => {
+            unreachable!("unsupported item output must be rejected before freshening")
+        }
     }
 }
 

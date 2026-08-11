@@ -819,6 +819,33 @@ fn imports_user_macros_with_definition_site_hygiene() {
 }
 
 #[test]
+fn generated_items_keep_definition_and_splice_hygiene() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use helpers define_generated\n",
+            "let caller_value: I32 = 2\n",
+            "define_generated caller_value\n",
+            "let result: I32 = generated ()\n",
+        ),
+    );
+    fixture.write(
+        "helpers.sta",
+        concat!(
+            "let private_value: I32 = 40\n",
+            "pub macro define_generated: Expr -> Item = body => quote {\n",
+            "    pub def generated = () => private_value + $body\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("generated item names and splices should retain their hygiene contexts");
+}
+
+#[test]
 fn imports_user_macros_through_selected_and_renamed_forms() {
     let fixture = Fixture::new();
     fixture.write(
