@@ -803,15 +803,46 @@ fn propagates_each_residual_variant_and_joins_explicit_returns() {
 }
 
 #[test]
-fn rejects_invalid_sum_alternatives_and_ambiguous_nominal_heads() {
+fn supports_arbitrary_sized_sum_alternatives_and_typed_matches() {
+    let module = type_check(concat!(
+        "def select = value: I32 | String => match value {\n",
+        "  number: I32 => number,\n",
+        "  text: String => 0,\n",
+        "}\n",
+        "let integer: I32 | String = 41\n",
+        "let text: I32 | String = \"hello\"\n",
+        "let pair: (I32, I32) | F64 = (1, 2)\n",
+        "def identity = value: I32 => value\n",
+        "let function: (I32 -> I32) | String = identity\n",
+        "let applied: Ok I32 | Ok String = Ok(3)\n",
+        "def small: () -> I32 | String = () => 7\n",
+        "let widened: I32 | String | F64 = small()\n",
+        "def generic: T => T -> T | String = value => value\n",
+        "generic 9\n",
+        "select(integer)\n",
+        "select(text)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("arbitrary sized sum alternatives should lower to LLVM");
+}
+
+#[test]
+fn rejects_unsized_sum_alternatives_and_ambiguous_nominal_patterns() {
     for (source, expected) in [
         (
-            "let value: I32 | Ok I32\n",
-            "not a represented nominal type",
+            "let value: I32[] | String\n",
+            "must be a fully known sized type",
         ),
         (
-            "let value: Ok I32 | Ok String\n",
-            "multiple applications of the same nominal type",
+            concat!(
+                "def inspect = value: Ok I32 | Ok String => match value {\n",
+                "  Ok(payload) => 0,\n",
+                "  _ => 1,\n",
+                "}\n",
+            ),
+            "selects more than one alternative",
         ),
     ] {
         let diagnostics = TypeChecker::new()
@@ -3208,7 +3239,7 @@ fn supports_contextual_string_literal_types_and_widening() {
 }
 
 #[test]
-fn rejects_invalid_string_literal_narrowing_and_unrestricted_mixed_sums() {
+fn rejects_invalid_string_literal_narrowing() {
     for (source, expected) in [
         (
             "def invalid: () -> \"yes\" | \"no\" = () => \"maybe\"\n",
@@ -3217,10 +3248,6 @@ fn rejects_invalid_string_literal_narrowing_and_unrestricted_mixed_sums() {
         (
             "let broad: String = \"yes\"\nlet narrow: \"yes\" | \"no\" = broad\n",
             "expected `\"no\" | \"yes\"`, found `String`",
-        ),
-        (
-            "type Some = String\nlet value: Some | String\n",
-            "unrestricted `String` cannot be mixed",
         ),
     ] {
         let diagnostics = TypeChecker::new()

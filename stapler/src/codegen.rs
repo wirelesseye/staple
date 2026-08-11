@@ -16,7 +16,8 @@ use inkwell::{
 };
 
 use crate::typecheck::{
-    contains_type_parameter, erased_ref_length, infer_type_parameters, substitute_type,
+    contains_type_parameter, erased_ref_length, infer_type_parameters, select_sum_alternative,
+    substitute_type,
 };
 use crate::{
     CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic, Expression,
@@ -54,6 +55,13 @@ struct ModuleEmitter<'module, 'context> {
     initializers: HashMap<ModuleId, inkwell::values::FunctionValue<'context>>,
     size_type: inkwell::types::IntType<'context>,
     target_data: TargetData,
+}
+
+#[derive(Clone, Copy)]
+struct SumStorage<'context> {
+    tag: inkwell::values::PointerValue<'context>,
+    payload: inkwell::values::PointerValue<'context>,
+    alignment: u32,
 }
 
 #[derive(Clone, Default)]
@@ -2058,20 +2066,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         {
             let source = substitute_type(coercion.source, &self.active_type_substitutions);
             let target = substitute_type(coercion.target, &self.active_type_substitutions);
-            if matches!(
-                (&source, &target),
-                (CheckedType::Ref(_), CheckedType::Ref(target))
-                    if matches!(target.as_ref(), CheckedType::ErasedProduct(_))
-            ) {
-                self.coerce_erased_ref_value(
-                    value,
-                    &source,
-                    &target,
-                    expression.syntax().span.clone(),
-                )?
-            } else {
-                self.coerce_sum_value(value, &source, &target, expression.syntax().span.clone())?
-            }
+            self.coerce_value(value, &source, &target, expression.syntax().span.clone())?
         } else {
             value
         };
@@ -2776,6 +2771,74 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         failure: inkwell::basic_block::BasicBlock<'context>,
     ) -> CodeGenerationResult<()> {
         match pattern {
+            Pattern::Binding(binding) if matches!(value_type, CheckedType::Sum(_)) => {
+                let selected = self
+                    .typed_module
+                    .type_of_pattern(binding.syntax.id)
+                    .cloned()
+                    .map(|ty| substitute_type(ty, &self.active_type_substitutions))
+                    .ok_or_else(|| {
+                        Diagnostic::new(binding.syntax.span.clone(), "untyped match binding")
+                    })?;
+                if &selected == value_type {
+                    self.bind_pattern_value(environment, pattern, value)?;
+                    self.builder
+                        .build_unconditional_branch(success)
+                        .map_err(compiler_diagnostic)?;
+                    return Ok(());
+                }
+                let CheckedType::Sum(sum) = value_type else {
+                    unreachable!()
+                };
+                let index = sum
+                    .alternatives
+                    .iter()
+                    .position(|alternative| alternative == &selected)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            "typed match pattern does not select a sum alternative",
+                        )
+                    })?;
+                let BasicValueEnum::StructValue(sum_value) = value else {
+                    return Err(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        "sum match value has an invalid representation",
+                    ));
+                };
+                let tag = self
+                    .builder
+                    .build_extract_value(sum_value, 0, "match.tag")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let selected_block = self.context.append_basic_block(
+                    success.get_parent().expect("match function"),
+                    "match.typed.selected",
+                );
+                let matches = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        tag,
+                        self.context.i32_type().const_int(index as u64, false),
+                        "match.typed.tag",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_conditional_branch(matches, selected_block, failure)
+                    .map_err(compiler_diagnostic)?;
+                self.builder.position_at_end(selected_block);
+                let payload = self.extract_sum_alternative(
+                    sum_value,
+                    sum,
+                    index,
+                    binding.syntax.span.clone(),
+                )?;
+                self.bind_pattern_value(environment, pattern, payload)?;
+                self.builder
+                    .build_unconditional_branch(success)
+                    .map_err(compiler_diagnostic)?;
+            }
             Pattern::Binding(_) | Pattern::Wildcard(_) => {
                 self.bind_pattern_value(environment, pattern, value)?;
                 self.builder
@@ -2799,8 +2862,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         let index = sum
                             .alternatives
                             .iter()
-                            .position(|alternative| {
-                                matches!(alternative, CheckedType::StringLiteralSet(_))
+                            .position(|alternative| match alternative {
+                                CheckedType::String => true,
+                                CheckedType::StringLiteralSet(values) => values.contains(&literal),
+                                _ => false,
                             })
                             .ok_or_else(|| {
                                 Diagnostic::new(
@@ -3181,51 +3246,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .get_field_type_at_index(1)
             .expect("sum payload field");
         let target_alignment = self.target_data.get_abi_alignment(&target_payload_type);
+        let storage = SumStorage {
+            tag: target_tag,
+            payload: target_payload,
+            alignment: target_alignment,
+        };
 
         match source {
-            CheckedType::Distinct { .. } | CheckedType::StringLiteralSet(_) => {
-                let index = target_sum
-                    .alternatives
-                    .iter()
-                    .position(|alternative| sum_alternative_accepts(source, alternative))
-                    .ok_or_else(|| {
-                        Diagnostic::new(
-                            span.clone(),
-                            "sum injection target is missing its source alternative",
-                        )
-                    })?;
-                self.builder
-                    .build_store(
-                        target_tag,
-                        self.context.i32_type().const_int(index as u64, false),
-                    )
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-                let source_type = self.compile_type(source)?;
-                let source_value = value_as_basic(value).ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "sum alternative is not a first-class value")
-                })?;
-                let source_slot = self
-                    .builder
-                    .build_alloca(source_type, "sum.source")
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-                self.builder
-                    .build_store(source_slot, source_value)
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-                let size = self
-                    .size_type
-                    .const_int(self.target_data.get_store_size(&source_type), false);
-                self.builder
-                    .build_memcpy(
-                        target_payload,
-                        target_alignment,
-                        source_slot,
-                        self.target_data.get_abi_alignment(&source_type),
-                        size,
-                    )
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-            }
             CheckedType::Sum(source_sum) => {
-                let source_type = self.compile_sum_type(source_sum)?;
                 let source_value = value_as_basic(value)
                     .and_then(|value| match value {
                         BasicValueEnum::StructValue(value) => Some(value),
@@ -3234,80 +3262,164 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(span.clone(), "sum value has an invalid representation")
                     })?;
-                let source_slot = self
-                    .builder
-                    .build_alloca(source_type, "sum.source")
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-                self.builder
-                    .build_store(source_slot, source_value)
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-                let source_payload = self
-                    .builder
-                    .build_struct_gep(source_type, source_slot, 1, "sum.source.payload")
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-                let source_payload_type = source_type
-                    .get_field_type_at_index(1)
-                    .expect("sum payload field");
                 let source_tag = self
                     .builder
                     .build_extract_value(source_value, 0, "sum.source.tag")
                     .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
                     .into_int_value();
-                let mut translated = self.context.i32_type().const_zero();
+                let function = self
+                    .builder
+                    .get_insert_block()
+                    .and_then(|block| block.get_parent())
+                    .expect("sum coercion is in a function");
+                let merge = self.context.append_basic_block(function, "sum.coerce.done");
+                let cases = source_sum
+                    .alternatives
+                    .iter()
+                    .enumerate()
+                    .map(|(index, _)| {
+                        (
+                            self.context.i32_type().const_int(index as u64, false),
+                            self.context.append_basic_block(function, "sum.coerce.case"),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                self.builder
+                    .build_switch(source_tag, merge, &cases)
+                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                 for (source_index, alternative) in source_sum.alternatives.iter().enumerate() {
-                    let Some(target_index) = target_sum
-                        .alternatives
-                        .iter()
-                        .position(|candidate| sum_alternative_accepts(alternative, candidate))
+                    self.builder.position_at_end(cases[source_index].1);
+                    let Some(target_index) =
+                        select_sum_alternative(alternative, &target_sum.alternatives)
+                            .ok()
+                            .flatten()
                     else {
+                        // Propagating bindings narrow away their selected success tag before
+                        // widening the residual variants into the function result.
+                        self.builder
+                            .build_unreachable()
+                            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
                         continue;
                     };
-                    let matches = self
-                        .builder
-                        .build_int_compare(
-                            inkwell::IntPredicate::EQ,
-                            source_tag,
-                            self.context
-                                .i32_type()
-                                .const_int(source_index as u64, false),
-                            "sum.tag.matches",
-                        )
+                    let payload = self.extract_sum_alternative(
+                        source_value,
+                        source_sum,
+                        source_index,
+                        span.clone(),
+                    )?;
+                    let target_alternative = &target_sum.alternatives[target_index];
+                    let payload = self.coerce_value(
+                        payload.as_any_value_enum(),
+                        alternative,
+                        target_alternative,
+                        span.clone(),
+                    )?;
+                    self.store_sum_payload(
+                        payload,
+                        target_alternative,
+                        target_index,
+                        &storage,
+                        span.clone(),
+                    )?;
+                    self.builder
+                        .build_unconditional_branch(merge)
                         .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-                    translated = self
-                        .builder
-                        .build_select(
-                            matches,
-                            self.context
-                                .i32_type()
-                                .const_int(target_index as u64, false),
-                            translated,
-                            "sum.tag.translate",
-                        )
-                        .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
-                        .into_int_value();
                 }
-                self.builder
-                    .build_store(target_tag, translated)
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-                self.builder
-                    .build_memcpy(
-                        target_payload,
-                        target_alignment,
-                        source_payload,
-                        self.target_data.get_abi_alignment(&source_payload_type),
-                        self.size_type.const_int(
-                            self.target_data.get_store_size(&source_payload_type),
-                            false,
-                        ),
-                    )
-                    .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+                self.builder.position_at_end(merge);
             }
-            _ => return Err(Diagnostic::new(span, "invalid sum coercion source")),
+            _ => {
+                let index = select_sum_alternative(source, &target_sum.alternatives)
+                    .ok()
+                    .flatten()
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            span.clone(),
+                            "sum injection target is missing a unique source alternative",
+                        )
+                    })?;
+                let target_alternative = &target_sum.alternatives[index];
+                let value = self.coerce_value(value, source, target_alternative, span.clone())?;
+                self.store_sum_payload(value, target_alternative, index, &storage, span.clone())?;
+            }
         }
         self.builder
             .build_load(target_type, target_slot, "sum.value")
             .map(|value| value.as_any_value_enum())
             .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    fn store_sum_payload(
+        &mut self,
+        value: AnyValueEnum<'context>,
+        value_type: &CheckedType,
+        index: usize,
+        storage: &SumStorage<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        self.builder
+            .build_store(
+                storage.tag,
+                self.context.i32_type().const_int(index as u64, false),
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let source_type = self.compile_type(value_type)?;
+        let source_value = value_as_basic(value).ok_or_else(|| {
+            Diagnostic::new(span.clone(), "sum alternative is not a first-class value")
+        })?;
+        let source_slot = self
+            .builder
+            .build_alloca(source_type, "sum.source")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.builder
+            .build_store(source_slot, source_value)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        let size = self
+            .size_type
+            .const_int(self.target_data.get_store_size(&source_type), false);
+        self.builder
+            .build_memcpy(
+                storage.payload,
+                storage.alignment,
+                source_slot,
+                self.target_data.get_abi_alignment(&source_type),
+                size,
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        Ok(())
+    }
+
+    fn coerce_value(
+        &mut self,
+        value: AnyValueEnum<'context>,
+        source: &CheckedType,
+        target: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if source == target
+            || matches!(
+                (source, target),
+                (CheckedType::StringLiteralSet(_), CheckedType::String)
+                    | (
+                        CheckedType::StringLiteralSet(_),
+                        CheckedType::StringLiteralSet(_)
+                    )
+            )
+        {
+            Ok(value)
+        } else if matches!(
+            (source, target),
+            (CheckedType::Ref(_), CheckedType::Ref(target))
+                if matches!(target.as_ref(), CheckedType::ErasedProduct(_))
+        ) {
+            self.coerce_erased_ref_value(value, source, target, span)
+        } else if matches!(target, CheckedType::Sum(_)) {
+            self.coerce_sum_value(value, source, target, span)
+        } else {
+            Err(Diagnostic::new(
+                span,
+                format!("unsupported runtime coercion from `{source}` to `{target}`"),
+            ))
+        }
     }
 
     fn extract_sum_alternative(
@@ -5613,13 +5725,6 @@ fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {
         AnyValueEnum::VectorValue(value) => Some(value.into()),
         _ => None,
     }
-}
-
-fn sum_alternative_accepts(source: &CheckedType, target: &CheckedType) -> bool {
-    source == target
-        || matches!((source, target),
-            (CheckedType::StringLiteralSet(source), CheckedType::StringLiteralSet(target))
-                if source.iter().all(|value| target.contains(value)))
 }
 
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {

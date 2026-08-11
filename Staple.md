@@ -1338,7 +1338,7 @@ does not create a separate nominal identity.
 
 ### Sum types
 
-A sum type lists the nominal variants which a value may contain:
+A sum type lists the variants which a value may contain:
 
 Staple’s sum types are open: their alternatives are ordinary types rather than cases owned by the sum.
 
@@ -1354,25 +1354,39 @@ public represented type from `std.core`:
 pub(repr) type Ok = T => T
 ```
 
-Every alternative must currently be a fully applied represented nominal type.
-Primitive, product, function, opaque, and partially applied types cannot be
-alternatives. A transparent alias may name a sum or nominal alternative, but
-does not introduce another variant identity.
+Every alternative must be a fully known, sized value type. Primitive, product,
+function, opaque, reference, and fully applied nominal types may all be
+alternatives. Unsized and partially applied types cannot be alternatives. A
+transparent alias may name a sum or alternative, but does not introduce another
+variant identity.
 
 Sums are unordered, flattened, and duplicate-free. Consequently `A | B` and
 `B | A` are the same type, nested sums are flattened, and `A | A` is `A`.
-Different applications of one constructor, such as `Ok I32 | Ok String`, may
-not occur in one sum because a nominal pattern would not distinguish them.
+Variant identity is the complete type, so different applications of one
+constructor, such as `Ok I32 | Ok String`, are distinct alternatives. A nominal
+pattern must select exactly one alternative; use a typed binding to disambiguate
+repeated nominal constructors.
 
 Type application binds more tightly than `|`, and `|` binds more tightly than
 the function arrow. Thus `String -> Ok Tree | IOError` is a function returning
 the sum.
 
-A nominal value is injected implicitly when a sum is expected. A smaller sum
-is likewise widened implicitly to a sum containing all of its alternatives.
-Sums cannot be narrowed implicitly. Standalone nominal values retain their
-zero-cost representation; a value acquires a runtime tag only while stored in
-a sum.
+Values of any alternative type are injected implicitly when a sum is expected.
+A smaller sum is likewise widened implicitly to a sum containing all of its
+alternatives. Sums cannot be narrowed implicitly. Standalone values retain
+their ordinary representation; a value acquires a runtime tag only while stored
+in a sum. An exact alternative is preferred; otherwise the value must have
+exactly one alternative to which it can be coerced. A typed match binding
+selects and extracts an arbitrary variant:
+
+```staple
+def describe = value: I32 | String => match value {
+    number: I32 => number,
+    text: String => 0,
+}
+```
+
+An untyped binding or `_` matches the whole sum.
 
 #### Propagating bindings
 
