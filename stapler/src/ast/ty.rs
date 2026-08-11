@@ -147,5 +147,5 @@ pub struct TypeApplication {
 pub struct TraitBound {
     pub syntax: Syntax,
     pub trait_name: NamedType,
-    pub argument: Type,
+    pub arguments: Vec<Type>,
 }

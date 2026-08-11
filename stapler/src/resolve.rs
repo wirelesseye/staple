@@ -32,7 +32,7 @@ pub struct MacroId(pub usize);
 pub struct ResolvedTrait {
     pub id: TraitId,
     pub declaration: crate::TraitDeclaration,
-    pub parameter: TypeParameterId,
+    pub parameters: Vec<TypeParameterId>,
     pub methods: Vec<TraitMethodId>,
 }
 
@@ -40,7 +40,7 @@ pub struct ResolvedTrait {
 pub struct ResolvedTraitImplementation {
     pub syntax: SyntaxId,
     pub trait_id: TraitId,
-    pub target: Type,
+    pub arguments: Vec<Type>,
     pub methods: HashMap<TraitMethodId, FunctionId>,
 }
 
@@ -1015,10 +1015,10 @@ impl NameResolver {
                                 format!("duplicate trait definition of `{}`", declaration.name),
                             ));
                         }
-                        let parameter = TypeParameterId(self.next_type_parameter_id);
-                        self.next_type_parameter_id += 1;
-                        self.type_parameters
-                            .insert(declaration.parameter.syntax.id, parameter);
+                        let mut parameters = Vec::new();
+                        for pattern in &declaration.type_parameters {
+                            self.allocate_type_parameter_pattern(pattern, &mut parameters);
+                        }
                         let mut methods = Vec::new();
                         for member in &declaration.members {
                             let method = TraitMethodId(self.next_trait_method_id);
@@ -1042,7 +1042,7 @@ impl NameResolver {
                             ResolvedTrait {
                                 id,
                                 declaration: declaration.clone(),
-                                parameter,
+                                parameters,
                                 methods,
                             },
                         );
@@ -1450,7 +1450,9 @@ impl NameResolver {
                     if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
                         self.trait_references.insert(bound.syntax.id, trait_id);
                     }
-                    self.resolve_type(&bound.argument);
+                    for argument in &bound.arguments {
+                        self.resolve_type(argument);
+                    }
                 }
                 if let Some(underlying) = &declaration.underlying {
                     self.resolve_type(underlying);
@@ -1464,20 +1466,13 @@ impl NameResolver {
                 let _ = declaration;
             }
             Item::TraitDeclaration(declaration) => {
-                let Some(id) = self.declared_traits[self.current_module.0]
-                    .get(&declaration.name)
-                    .copied()
-                else {
+                if !self.declared_traits[self.current_module.0].contains_key(&declaration.name) {
                     return;
-                };
+                }
                 self.push_type_parameter_scope();
-                self.type_parameter_scopes
-                    .last_mut()
-                    .expect("trait parameter scope")
-                    .insert(
-                        declaration.parameter.name.clone(),
-                        self.traits[&id].parameter,
-                    );
+                for parameter in &declaration.type_parameters {
+                    self.scope_allocated_type_parameter_pattern(parameter);
+                }
                 for member in &declaration.members {
                     self.resolve_type(&member.annotation);
                     if declaration.visibility == Visibility::Public {
@@ -1488,7 +1483,9 @@ impl NameResolver {
             }
             Item::TraitImplementation(implementation) => {
                 let trait_id = self.resolve_trait_name(&implementation.trait_name);
-                self.resolve_type(&implementation.target);
+                for argument in &implementation.arguments {
+                    self.resolve_type(argument);
+                }
                 let mut methods = HashMap::new();
                 for member in &implementation.members {
                     let method = trait_id.and_then(|trait_id| {
@@ -1540,7 +1537,7 @@ impl NameResolver {
                         .push(ResolvedTraitImplementation {
                             syntax: implementation.syntax.id,
                             trait_id,
-                            target: implementation.target.clone(),
+                            arguments: implementation.arguments.clone(),
                             methods,
                         });
                 }
@@ -1627,7 +1624,9 @@ impl NameResolver {
             if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
                 self.trait_references.insert(bound.syntax.id, trait_id);
             }
-            self.resolve_type(&bound.argument);
+            for argument in &bound.arguments {
+                self.resolve_type(argument);
+            }
         }
         if let Some(value) = &binding.value {
             self.resolve_expression(
@@ -1684,6 +1683,50 @@ impl NameResolver {
             TypeParameterPattern::Product(product) => {
                 for element in &product.elements {
                     self.declare_type_parameter_pattern(element);
+                }
+            }
+        }
+    }
+
+    fn allocate_type_parameter_pattern(
+        &mut self,
+        pattern: &TypeParameterPattern,
+        parameters: &mut Vec<TypeParameterId>,
+    ) {
+        match pattern {
+            TypeParameterPattern::Binding(binding) => {
+                let id = TypeParameterId(self.next_type_parameter_id);
+                self.next_type_parameter_id += 1;
+                self.type_parameters.insert(binding.syntax.id, id);
+                self.type_parameter_sized.insert(id, binding.sized);
+                parameters.push(id);
+            }
+            TypeParameterPattern::Product(product) => {
+                for element in &product.elements {
+                    self.allocate_type_parameter_pattern(element, parameters);
+                }
+            }
+        }
+    }
+
+    fn scope_allocated_type_parameter_pattern(&mut self, pattern: &TypeParameterPattern) {
+        match pattern {
+            TypeParameterPattern::Binding(binding) => {
+                let id = self.type_parameters[&binding.syntax.id];
+                let scope = self
+                    .type_parameter_scopes
+                    .last_mut()
+                    .expect("type parameter scope");
+                if scope.insert(binding.name.clone(), id).is_some() {
+                    self.diagnostics.push(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        format!("duplicate compile-time parameter `{}`", binding.name),
+                    ));
+                }
+            }
+            TypeParameterPattern::Product(product) => {
+                for element in &product.elements {
+                    self.scope_allocated_type_parameter_pattern(element);
                 }
             }
         }

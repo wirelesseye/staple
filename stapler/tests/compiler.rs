@@ -2125,6 +2125,78 @@ fn type_checks_static_traits_and_bounded_generic_functions() {
 }
 
 #[test]
+fn type_checks_product_and_curried_multi_parameter_traits() {
+    let module = type_check(concat!(
+        "trait Add = Left => Right => Output => { add: (Left, Right) -> Output }\n",
+        "trait Convert = (From, To) => { convert: From -> To }\n",
+        "impl Add I32 I32 I32 { def add = (left, right) => left + right }\n",
+        "impl Convert (I32, String) { def convert = value => \"converted\" }\n",
+        "def combine: (L, R, O) => Add L R O => (L, R) -> O = pair => Add.add pair\n",
+        "let total: I32 = combine (20, 22)\n",
+        "let converted: String = Convert.convert total\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("multi-parameter trait calls should compile");
+    assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn preserves_applied_types_as_unary_trait_arguments() {
+    let module = type_check(concat!(
+        "type Box = T => (value: T)\n",
+        "trait Echo = T => { echo: T -> T }\n",
+        "impl Echo Box I32 { def echo = value => value }\n",
+        "def echo_box: T => Echo Box T => (Box T) -> Box T = value => Echo.echo value\n",
+        "let boxed: Box I32 = Box 42\n",
+        "let echoed: Box I32 = echo_box boxed\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("legacy unary applied trait arguments should compile");
+}
+
+#[test]
+fn rejects_invalid_multi_parameter_trait_uses_and_members() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Add = Left => Right => Output => { add: (Left, Right) -> Output }\n",
+            "impl Add I32 I32 { def add = pair => 0 }\n",
+        )))
+        .expect_err("trait implementation arity must match the declaration");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expects 3 compile-time arguments, found 2")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "trait Invalid = Left => Right => { keep_left: Left -> Left }\n",
+        ))
+        .expect_err("every member must mention every trait parameter");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("must mention trait parameter `Right`")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Convert = (From, To) => { convert: From -> To }\n",
+            "impl Convert I32 { def convert = value => value }\n",
+        )))
+        .expect_err("product binders require product arguments");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("compile-time product parameter requires a product type argument")
+    }));
+}
+
+#[test]
 fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(

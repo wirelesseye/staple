@@ -13,13 +13,13 @@ const MAX_PRODUCT_ARITY: usize = 65_535;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedTraitBound {
     pub trait_id: TraitId,
-    pub argument: CheckedType,
+    pub arguments: Vec<CheckedType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedTraitDispatch {
     pub method: TraitMethodId,
-    pub target: CheckedType,
+    pub arguments: Vec<CheckedType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,7 +82,7 @@ struct LoopCheckContext {
 #[derive(Debug, Clone)]
 struct CheckedTraitImplementation {
     trait_id: TraitId,
-    target: CheckedType,
+    arguments: Vec<CheckedType>,
     methods: HashMap<TraitMethodId, FunctionId>,
 }
 
@@ -529,7 +529,9 @@ impl TypedModule {
         self.trait_implementations
             .iter()
             .find(|implementation| {
-                implementation.trait_id == drop_trait && &implementation.target == value_type
+                implementation.trait_id == drop_trait
+                    && implementation.arguments.len() == 1
+                    && &implementation.arguments[0] == value_type
             })
             .and_then(|implementation| implementation.methods.values().next().copied())
     }
@@ -568,13 +570,13 @@ impl TypedModule {
     pub(crate) fn trait_impl_method(
         &self,
         trait_id: TraitId,
-        target: &CheckedType,
+        arguments: &[CheckedType],
         method: TraitMethodId,
     ) -> Option<FunctionId> {
         self.trait_implementations
             .iter()
             .find(|implementation| {
-                implementation.trait_id == trait_id && &implementation.target == target
+                implementation.trait_id == trait_id && implementation.arguments == arguments
             })
             .and_then(|implementation| implementation.methods.get(&method).copied())
     }
@@ -724,6 +726,8 @@ impl TypeChecker {
         match self.sized_trait.and_then(|id| module.traits().get(&id)) {
             Some(sized)
                 if sized.declaration.visibility == crate::Visibility::Public
+                    && sized.declaration.type_parameters.len() == 1
+                    && sized.parameters.len() == 1
                     && sized.declaration.members.is_empty() => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
@@ -733,6 +737,8 @@ impl TypeChecker {
         match self.copy_trait.and_then(|id| module.traits().get(&id)) {
             Some(copy)
                 if copy.declaration.visibility == crate::Visibility::Public
+                    && copy.declaration.type_parameters.len() == 1
+                    && copy.parameters.len() == 1
                     && copy.declaration.members.is_empty() => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
@@ -745,6 +751,8 @@ impl TypeChecker {
         {
             Some(string_type)
                 if string_type.declaration.visibility == crate::Visibility::Public
+                    && string_type.declaration.type_parameters.len() == 1
+                    && string_type.parameters.len() == 1
                     && string_type.declaration.members.is_empty() => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
@@ -754,6 +762,8 @@ impl TypeChecker {
         match self.drop_trait.and_then(|id| module.traits().get(&id)) {
             Some(drop)
                 if drop.declaration.visibility == crate::Visibility::Public
+                    && drop.declaration.type_parameters.len() == 1
+                    && drop.parameters.len() == 1
                     && drop.declaration.members.len() == 1
                     && drop.declaration.members[0].name == "drop" => {}
             _ => self.diagnostics.push(Diagnostic::new(
@@ -764,6 +774,8 @@ impl TypeChecker {
         match self.default_trait.and_then(|id| module.traits().get(&id)) {
             Some(default)
                 if default.declaration.visibility == crate::Visibility::Public
+                    && default.declaration.type_parameters.len() == 1
+                    && default.parameters.len() == 1
                     && default.declaration.members.len() == 1
                     && default.declaration.members[0].name == "default" => {}
             _ => self.diagnostics.push(Diagnostic::new(
@@ -781,14 +793,22 @@ impl TypeChecker {
                         "trait members must have function types",
                     ));
                 }
-                if !contains_type_parameter_id(&value_type, resolved_trait.parameter) {
-                    self.diagnostics.push(Diagnostic::new(
-                        member.syntax.span.clone(),
-                        format!(
-                            "trait member `{}` must mention trait parameter `{}`",
-                            member.name, resolved_trait.declaration.parameter.name
-                        ),
-                    ));
+                let parameter_names = resolved_trait
+                    .declaration
+                    .type_parameters
+                    .iter()
+                    .flat_map(TypeParameterPattern::names)
+                    .collect::<Vec<_>>();
+                for (parameter, name) in resolved_trait.parameters.iter().zip(parameter_names) {
+                    if !contains_type_parameter_id(&value_type, *parameter) {
+                        self.diagnostics.push(Diagnostic::new(
+                            member.syntax.span.clone(),
+                            format!(
+                                "trait member `{}` must mention trait parameter `{name}`",
+                                member.name
+                            ),
+                        ));
+                    }
                 }
                 if contains_inferred_type(&value_type) {
                     self.diagnostics.push(Diagnostic::new(
@@ -803,44 +823,62 @@ impl TypeChecker {
 
     fn collect_trait_implementations(&mut self, module: &ResolvedModule) {
         for implementation in module.trait_implementations() {
+            let span = implementation
+                .arguments
+                .first()
+                .map(|argument| argument.syntax().span.clone())
+                .unwrap_or(Span::Compiler);
             if Some(implementation.trait_id) == self.sized_trait {
                 self.diagnostics.push(Diagnostic::new(
-                    implementation.target.syntax().span.clone(),
+                    span,
                     "`Sized` is implemented structurally and cannot be implemented explicitly",
                 ));
                 continue;
             }
             if Some(implementation.trait_id) == self.copy_trait {
                 self.diagnostics.push(Diagnostic::new(
-                    implementation.target.syntax().span.clone(),
+                    span,
                     "`Copy` is implemented structurally and cannot be implemented explicitly",
                 ));
                 continue;
             }
             if Some(implementation.trait_id) == self.string_type_trait {
                 self.diagnostics.push(Diagnostic::new(
-                    implementation.target.syntax().span.clone(),
+                    span,
                     "`StringType` is compiler-defined and cannot be implemented explicitly",
                 ));
                 continue;
             }
-            let target = self.resolve_source_type(module, &implementation.target);
+            let Some((arguments, substitutions)) = self.resolve_trait_arguments(
+                module,
+                implementation.trait_id,
+                &implementation.arguments,
+                span.clone(),
+            ) else {
+                continue;
+            };
+            let target = &arguments[0];
             if Some(implementation.trait_id) == self.default_trait
                 && matches!(target, CheckedType::Product(_))
             {
                 self.diagnostics.push(Diagnostic::new(
-                    implementation.target.syntax().span.clone(),
+                    span,
                     "`Default` is derived structurally for products and cannot be implemented explicitly",
                 ));
                 continue;
             }
-            if contains_type_parameter(&target)
-                || contains_inferred_type(&target)
-                || !target.is_fully_known()
-            {
+            if arguments.iter().any(|argument| {
+                contains_type_parameter(argument)
+                    || contains_inferred_type(argument)
+                    || !argument.is_fully_known()
+            }) {
                 self.diagnostics.push(Diagnostic::new(
-                    implementation.target.syntax().span.clone(),
-                    "trait implementation target must be fully concrete",
+                    span,
+                    if arguments.len() == 1 {
+                        "trait implementation target must be fully concrete"
+                    } else {
+                        "trait implementation arguments must be fully concrete"
+                    },
                 ));
                 continue;
             }
@@ -848,17 +886,17 @@ impl TypeChecker {
                 && !matches!(target, CheckedType::Distinct { .. })
             {
                 self.diagnostics.push(Diagnostic::new(
-                    implementation.target.syntax().span.clone(),
+                    span,
                     "`Drop` may only be implemented for a represented nominal type",
                 ));
                 continue;
             }
             if self.trait_implementations.iter().any(|existing| {
-                existing.trait_id == implementation.trait_id && existing.target == target
+                existing.trait_id == implementation.trait_id && existing.arguments == arguments
             }) {
                 self.diagnostics.push(Diagnostic::new(
-                    implementation.target.syntax().span.clone(),
-                    format!("duplicate trait implementation for `{target}`"),
+                    span,
+                    "duplicate trait implementation for these arguments",
                 ));
                 continue;
             }
@@ -867,13 +905,11 @@ impl TypeChecker {
                 let member = module.trait_method(*method).expect("resolved trait member");
                 let Some(function_id) = implementation.methods.get(method).copied() else {
                     self.diagnostics.push(Diagnostic::new(
-                        implementation.target.syntax().span.clone(),
+                        span.clone(),
                         format!("implementation is missing member `{}`", member.name),
                     ));
                     continue;
                 };
-                let mut substitutions = HashMap::new();
-                substitutions.insert(resolved_trait.parameter, target.clone());
                 let expected =
                     substitute_type(self.trait_method_types[method].clone(), &substitutions);
                 if let CheckedType::Function(function_type) = expected {
@@ -882,10 +918,96 @@ impl TypeChecker {
             }
             self.trait_implementations.push(CheckedTraitImplementation {
                 trait_id: implementation.trait_id,
-                target,
+                arguments,
                 methods: implementation.methods.clone(),
             });
         }
+    }
+
+    fn resolve_trait_arguments(
+        &mut self,
+        module: &ResolvedModule,
+        trait_id: TraitId,
+        source_arguments: &[Type],
+        span: Span,
+    ) -> Option<(Vec<CheckedType>, HashMap<TypeParameterId, CheckedType>)> {
+        let resolved_trait = &module.traits()[&trait_id];
+        // Before traits had arity, a unary trait target such as `Box I32` was
+        // stored as one applied type. Preserve that source form by rejoining
+        // the application spine when the resolved trait is unary.
+        let normalized_arguments;
+        let source_arguments = if resolved_trait.declaration.type_parameters.len() == 1
+            && source_arguments.len() > 1
+        {
+            let mut application = source_arguments[0].clone();
+            for argument in &source_arguments[1..] {
+                application = Type::Application(crate::TypeApplication {
+                    syntax: application.syntax().clone(),
+                    callee: Box::new(application),
+                    argument: Box::new(argument.clone()),
+                });
+            }
+            normalized_arguments = vec![application];
+            normalized_arguments.as_slice()
+        } else {
+            source_arguments
+        };
+        if source_arguments.len() != resolved_trait.declaration.type_parameters.len() {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!(
+                    "trait `{}` expects {} compile-time argument{}, found {}",
+                    resolved_trait.declaration.name,
+                    resolved_trait.declaration.type_parameters.len(),
+                    if resolved_trait.declaration.type_parameters.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    source_arguments.len()
+                ),
+            ));
+            return None;
+        }
+        let arguments = source_arguments
+            .iter()
+            .map(|argument| self.resolve_source_type(module, argument))
+            .collect::<Vec<_>>();
+        let mut substitutions = HashMap::new();
+        // `Sized T` must be expressible while `T` is unsized: the obligation
+        // itself is what proves that the argument satisfies `Sized`.
+        if Some(trait_id) == self.sized_trait {
+            return Some((arguments, substitutions));
+        }
+        for (pattern, argument) in resolved_trait
+            .declaration
+            .type_parameters
+            .iter()
+            .zip(&arguments)
+        {
+            if !self.bind_type_argument(module, pattern, argument, &mut substitutions) {
+                return None;
+            }
+        }
+        Some((arguments, substitutions))
+    }
+
+    fn resolve_trait_bound(
+        &mut self,
+        module: &ResolvedModule,
+        bound: &crate::TraitBound,
+    ) -> Option<CheckedTraitBound> {
+        let trait_id = module.trait_for(bound.syntax.id)?;
+        let (arguments, _) = self.resolve_trait_arguments(
+            module,
+            trait_id,
+            &bound.arguments,
+            bound.syntax.span.clone(),
+        )?;
+        Some(CheckedTraitBound {
+            trait_id,
+            arguments,
+        })
     }
 
     fn seed_constructors(&mut self, module: &ResolvedModule) {
@@ -1180,16 +1302,12 @@ impl TypeChecker {
                     .insert(symbol, CheckedType::Function(function_type.clone()));
             }
             self.function_types.insert(function.id, function_type);
-            let bounds = function
-                .trait_bounds
-                .iter()
-                .filter_map(|bound| {
-                    Some(CheckedTraitBound {
-                        trait_id: module.trait_for(bound.syntax.id)?,
-                        argument: self.resolve_source_type(module, &bound.argument),
-                    })
-                })
-                .collect::<Vec<_>>();
+            let mut bounds = Vec::new();
+            for bound in &function.trait_bounds {
+                if let Some(bound) = self.resolve_trait_bound(module, bound) {
+                    bounds.push(bound);
+                }
+            }
             if !bounds.is_empty() {
                 self.function_bounds.insert(function.id, bounds);
             }
@@ -3088,20 +3206,39 @@ impl TypeChecker {
             let trait_id = module
                 .trait_for_method(*method)
                 .expect("trait method owner");
-            let parameter = module.traits()[&trait_id].parameter;
-            let Some(target) = substitutions.get(&parameter).cloned() else {
+            let resolved_trait = &module.traits()[&trait_id];
+            if !resolved_trait
+                .parameters
+                .iter()
+                .all(|parameter| substitutions.contains_key(parameter))
+            {
                 continue;
-            };
-            if !self.trait_obligation_available(trait_id, &target) {
+            }
+            let arguments = resolved_trait
+                .declaration
+                .type_parameters
+                .iter()
+                .map(|pattern| {
+                    substitute_type(
+                        self.checked_type_parameter_pattern(module, pattern),
+                        &substitutions,
+                    )
+                })
+                .collect::<Vec<_>>();
+            if !self.trait_obligation_available(trait_id, &arguments) {
                 unavailable = true;
                 continue;
             }
-            matches.push((*method, target, substitute_type(template, &substitutions)));
+            matches.push((
+                *method,
+                arguments,
+                substitute_type(template, &substitutions),
+            ));
         }
         if matches.len() == 1 {
-            let (method, target, value_type) = matches.pop().expect("one method match");
+            let (method, arguments, value_type) = matches.pop().expect("one method match");
             self.trait_dispatches
-                .insert(syntax, CheckedTraitDispatch { method, target });
+                .insert(syntax, CheckedTraitDispatch { method, arguments });
             return value_type;
         }
         self.diagnostics.push(Diagnostic::new(
@@ -3111,20 +3248,30 @@ impl TypeChecker {
             } else if unavailable {
                 "no trait implementation or matching bound is available"
             } else {
-                "could not infer the trait method's target type"
+                "could not infer all trait method arguments"
             },
         ));
         CheckedType::Error
     }
 
-    fn trait_obligation_available(&self, trait_id: TraitId, target: &CheckedType) -> bool {
+    fn trait_obligation_available(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
+        let [target] = arguments else {
+            return self.active_function_bounds.iter().rev().any(|bounds| {
+                bounds
+                    .iter()
+                    .any(|bound| bound.trait_id == trait_id && bound.arguments == arguments)
+            }) || arguments
+                .iter()
+                .all(|argument| !contains_type_parameter(argument))
+                && self.trait_implementations.iter().any(|implementation| {
+                    implementation.trait_id == trait_id && implementation.arguments == arguments
+                });
+        };
         if Some(trait_id) == self.sized_trait {
             return target.is_sized()
-                || self
-                    .active_function_bounds
-                    .iter()
-                    .flatten()
-                    .any(|bound| bound.trait_id == trait_id && &bound.argument == target);
+                || self.active_function_bounds.iter().flatten().any(|bound| {
+                    bound.trait_id == trait_id && bound.arguments.as_slice() == arguments
+                });
         }
         if Some(trait_id) == self.copy_trait {
             let bounds = self
@@ -3145,11 +3292,9 @@ impl TypeChecker {
             return matches!(
                 target,
                 CheckedType::String | CheckedType::StringLiteralSet(_)
-            ) || self
-                .active_function_bounds
-                .iter()
-                .flatten()
-                .any(|bound| bound.trait_id == trait_id && &bound.argument == target);
+            ) || self.active_function_bounds.iter().flatten().any(|bound| {
+                bound.trait_id == trait_id && bound.arguments.as_slice() == arguments
+            });
         }
         if Some(trait_id) == self.default_trait {
             let bounds = self
@@ -3160,15 +3305,18 @@ impl TypeChecker {
                 .collect::<Vec<_>>();
             return is_default_type(target, trait_id, &self.trait_implementations, &bounds);
         }
-        if !contains_type_parameter(target) {
+        if arguments
+            .iter()
+            .all(|argument| !contains_type_parameter(argument))
+        {
             return self.trait_implementations.iter().any(|implementation| {
-                implementation.trait_id == trait_id && &implementation.target == target
+                implementation.trait_id == trait_id && implementation.arguments == arguments
             });
         }
         self.active_function_bounds.iter().rev().any(|bounds| {
             bounds
                 .iter()
-                .any(|bound| bound.trait_id == trait_id && &bound.argument == target)
+                .any(|bound| bound.trait_id == trait_id && bound.arguments == arguments)
         })
     }
 
@@ -3212,11 +3360,15 @@ impl TypeChecker {
             return;
         }
         for bound in bounds {
-            let argument = substitute_type(bound.argument, &substitutions);
-            if !self.trait_obligation_available(bound.trait_id, &argument) {
+            let arguments = bound
+                .arguments
+                .into_iter()
+                .map(|argument| substitute_type(argument, &substitutions))
+                .collect::<Vec<_>>();
+            if !self.trait_obligation_available(bound.trait_id, &arguments) {
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
-                    format!("trait bound is not satisfied for `{argument}`"),
+                    trait_bound_failure(&arguments),
                 ));
             }
         }
@@ -3601,15 +3753,18 @@ impl TypeChecker {
             }
         }
         for bound in &declaration.trait_bounds {
-            let Some(trait_id) = module.trait_for(bound.syntax.id) else {
+            let Some(checked_bound) = self.resolve_trait_bound(module, bound) else {
                 continue;
             };
-            let argument = self.resolve_source_type(module, &bound.argument);
-            let argument = substitute_type(argument, &substitutions);
-            if !self.trait_obligation_available(trait_id, &argument) {
+            let arguments = checked_bound
+                .arguments
+                .into_iter()
+                .map(|argument| substitute_type(argument, &substitutions))
+                .collect::<Vec<_>>();
+            if !self.trait_obligation_available(checked_bound.trait_id, &arguments) {
                 self.diagnostics.push(Diagnostic::new(
                     bound.syntax.span.clone(),
-                    format!("trait bound is not satisfied for `{argument}`"),
+                    trait_bound_failure(&arguments),
                 ));
                 return CheckedType::Error;
             }
@@ -3647,16 +3802,12 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         }
-        let declaration_bounds = declaration
-            .trait_bounds
-            .iter()
-            .filter_map(|bound| {
-                Some(CheckedTraitBound {
-                    trait_id: module.trait_for(bound.syntax.id)?,
-                    argument: self.resolve_source_type(module, &bound.argument),
-                })
-            })
-            .collect();
+        let mut declaration_bounds = Vec::new();
+        for bound in &declaration.trait_bounds {
+            if let Some(bound) = self.resolve_trait_bound(module, bound) {
+                declaration_bounds.push(bound);
+            }
+        }
         self.active_function_bounds.push(declaration_bounds);
         let template = self.resolve_source_type(
             module,
@@ -4646,9 +4797,24 @@ fn has_drop_implementation(
 ) -> bool {
     drop_trait.is_some_and(|drop_trait| {
         implementations.iter().any(|implementation| {
-            implementation.trait_id == drop_trait && &implementation.target == value_type
+            implementation.trait_id == drop_trait
+                && implementation.arguments.len() == 1
+                && &implementation.arguments[0] == value_type
         })
     })
+}
+
+fn trait_bound_failure(arguments: &[CheckedType]) -> String {
+    if let [argument] = arguments {
+        format!("trait bound is not satisfied for `{argument}`")
+    } else {
+        let arguments = arguments
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("trait bound is not satisfied for `({arguments})`")
+    }
 }
 
 fn is_copy_type(
@@ -4681,9 +4847,11 @@ fn is_copy_type(
         | CheckedType::Function(_) => true,
         CheckedType::CString => false,
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
-            bounds
-                .iter()
-                .any(|bound| bound.trait_id == copy_trait && &bound.argument == value_type)
+            bounds.iter().any(|bound| {
+                bound.trait_id == copy_trait
+                    && bound.arguments.len() == 1
+                    && &bound.arguments[0] == value_type
+            })
         }),
         CheckedType::Product(product) => product.elements.iter().all(|element| {
             is_copy_type(
@@ -4741,7 +4909,9 @@ fn is_default_type(
     bounds: &[CheckedTraitBound],
 ) -> bool {
     if implementations.iter().any(|implementation| {
-        implementation.trait_id == default_trait && &implementation.target == value_type
+        implementation.trait_id == default_trait
+            && implementation.arguments.len() == 1
+            && &implementation.arguments[0] == value_type
     }) {
         return true;
     }
@@ -4749,9 +4919,11 @@ fn is_default_type(
         CheckedType::Product(product) => product.elements.iter().all(|element| {
             is_default_type(&element.value_type, default_trait, implementations, bounds)
         }),
-        CheckedType::Parameter { .. } => bounds
-            .iter()
-            .any(|bound| bound.trait_id == default_trait && &bound.argument == value_type),
+        CheckedType::Parameter { .. } => bounds.iter().any(|bound| {
+            bound.trait_id == default_trait
+                && bound.arguments.len() == 1
+                && &bound.arguments[0] == value_type
+        }),
         _ => false,
     }
 }

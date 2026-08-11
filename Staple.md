@@ -713,15 +713,25 @@ explicit `impl Sized` declarations are rejected.
 
 ### Traits and bounded generic functions
 
-A trait declares a set of functions for one type parameter:
+A trait declares a set of functions for one or more compile-time parameters.
+Like functions and type definitions, its parameters may be curried or grouped
+in a product binder:
 
 ```staple
 trait ToString = T => {
     to_string: T -> String
 }
+
+trait Add = Left => Right => Output => {
+    add: (Left, Right) -> Output
+}
+
+trait Convert = (From, To) => {
+    convert: From -> To
+}
 ```
 
-Trait members must have function types, must mention the trait parameter, and
+Trait members must have function types, must mention every trait parameter, and
 cannot contain inferred types. Traits may be exported with `pub trait` and are
 imported with the same namespace, selected, renamed, and glob forms as other
 public declarations.
@@ -735,12 +745,23 @@ impl ToString I32 {
         // ...
     }
 }
+
+impl Add I32 I32 I32 {
+    def add = (left, right) => left + right
+}
+
+impl Convert (I32, String) {
+    def convert = value => "converted"
+}
 ```
 
-Implementation targets may be built-in, nominal, product, pointer, or function
-types. Implementations have no visibility modifier: every implementation in the
-loaded program is available globally. Defining the same trait/type pair twice,
-including through two aliases of the same type, is an error.
+Curried binders consume successive arguments, while a product binder consumes
+one product argument. Parentheses group an applied or otherwise complex type as
+one argument. Implementation arguments may be built-in, nominal, product,
+pointer, or function types and must all be fully concrete. Implementations have
+no visibility modifier: every implementation in the loaded program is available
+globally. Defining the same trait/argument combination twice, including through
+aliases of the same types, is an error.
 
 A generic `def` adds one or more trait bounds between its compile-time parameter
 binder and its ordinary function type:
@@ -748,6 +769,10 @@ binder and its ordinary function type:
 ```staple
 def print: T => ToString T => T -> () = value => {
     print_string (to_string value)
+}
+
+def combine: (L, R, O) => Add L R O => (L, R) -> O = pair => {
+    Add.add pair
 }
 ```
 
@@ -759,7 +784,7 @@ function values and may be called unqualified when unambiguous or qualified as
 
 Traits use static dispatch. Bounds and implementations add no runtime values or
 function parameters. During monomorphization, Stapler substitutes the concrete
-type arguments and emits a direct reference to the selected implementation
+trait arguments and emits a direct reference to the selected implementation
 member. Trait objects, runtime dictionaries, supertraits, associated items,
 default methods, generic implementations, and independently generic trait
 members are not currently supported.

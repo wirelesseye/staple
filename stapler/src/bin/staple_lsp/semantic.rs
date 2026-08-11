@@ -254,13 +254,9 @@ impl<'a> Classifier<'a> {
                     DECLARATION | DEFINITION | READONLY,
                     1,
                 );
-                self.mark_last(
-                    &value.parameter.syntax,
-                    &value.parameter.name,
-                    TYPE_PARAMETER,
-                    DECLARATION | DEFINITION | READONLY,
-                    1,
-                );
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter, resolved);
+                }
                 for member in &value.members {
                     self.mark_first(
                         &member.syntax,
@@ -280,7 +276,9 @@ impl<'a> Classifier<'a> {
                     0,
                     1,
                 );
-                self.ty(&value.target, resolved);
+                for argument in &value.arguments {
+                    self.ty(argument, resolved);
+                }
                 for member in &value.members {
                     self.mark_first(
                         &member.syntax,
@@ -513,7 +511,9 @@ impl<'a> Classifier<'a> {
             0,
             1,
         );
-        self.ty(&bound.argument, resolved);
+        for argument in &bound.arguments {
+            self.ty(argument, resolved);
+        }
     }
 
     fn ty(&mut self, ty: &Type, resolved: Option<&ResolvedModule>) {

@@ -101,7 +101,8 @@ fn parses_traits_implementations_and_bounds_losslessly() {
         Item::TraitDeclaration(declaration)
             if declaration.visibility == Visibility::Public
                 && declaration.name == "ToString"
-                && declaration.parameter.name == "T"
+                && declaration.type_parameters.len() == 1
+                && declaration.type_parameters[0].names() == ["T"]
                 && declaration.members.len() == 1
     ));
     assert!(matches!(
@@ -116,6 +117,47 @@ fn parses_traits_implementations_and_bounds_losslessly() {
     assert_eq!(binding.type_parameters.len(), 1);
     assert_eq!(binding.trait_bounds.len(), 1);
     assert_eq!(binding.trait_bounds[0].trait_name.name, "ToString");
+}
+
+#[test]
+fn parses_curried_and_product_trait_parameters_and_arguments() {
+    let source = concat!(
+        "trait Add = Left => Right => Output => { add: (Left, Right) -> Output }\n",
+        "trait Convert = (From, To) => { convert: From -> To }\n",
+        "impl Add I32 I32 I32 { def add = (left, right) => left + right }\n",
+        "impl Convert (I32, String) { def convert = value => \"converted\" }\n",
+        "def combine: (L, R, O) => Add L R O => (L, R) -> O = pair => Add.add pair\n",
+    );
+    let root = parse(source).expect("multi-parameter trait syntax should parse");
+    assert_eq!(root.text(), source);
+
+    let Item::TraitDeclaration(add) = &root.items[0] else {
+        panic!("expected Add trait");
+    };
+    assert_eq!(add.type_parameters.len(), 3);
+    assert_eq!(add.type_parameters[0].names(), ["Left"]);
+    assert_eq!(add.type_parameters[1].names(), ["Right"]);
+    assert_eq!(add.type_parameters[2].names(), ["Output"]);
+
+    let Item::TraitDeclaration(convert) = &root.items[1] else {
+        panic!("expected Convert trait");
+    };
+    assert_eq!(convert.type_parameters.len(), 1);
+    assert_eq!(convert.type_parameters[0].names(), ["From", "To"]);
+
+    let Item::TraitImplementation(add_impl) = &root.items[2] else {
+        panic!("expected Add implementation");
+    };
+    assert_eq!(add_impl.arguments.len(), 3);
+    let Item::TraitImplementation(convert_impl) = &root.items[3] else {
+        panic!("expected Convert implementation");
+    };
+    assert_eq!(convert_impl.arguments.len(), 1);
+
+    let Statement::Binding(combine) = statement(&root.items[4]) else {
+        panic!("expected bounded function");
+    };
+    assert_eq!(combine.trait_bounds[0].arguments.len(), 3);
 }
 
 #[test]

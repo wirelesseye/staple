@@ -182,19 +182,10 @@ impl Grammar {
             .expect(TokenKind::Identifier, "expected trait name")?
             .text;
         self.expect(TokenKind::Equals, "expected `=` after trait name")?;
-        let parameter_start = self.position;
-        let parameter_name = self
-            .expect(TokenKind::Identifier, "expected trait type parameter")?
-            .text;
-        let parameter = TypeParameterBinding {
-            syntax: self.syntax(parameter_start),
-            name: parameter_name,
-            sized: true,
-        };
-        self.expect(
-            TokenKind::FatArrow,
-            "expected `=>` after trait type parameter",
-        )?;
+        let type_parameters = self.parse_type_parameters()?;
+        if type_parameters.is_empty() {
+            return Err(self.error("expected trait type parameter followed by `=>`"));
+        }
         self.expect(TokenKind::LBrace, "expected `{` before trait members")?;
         let mut members = Vec::new();
         while !self.at(TokenKind::RBrace) {
@@ -223,7 +214,7 @@ impl Grammar {
             syntax: self.syntax(start),
             visibility,
             name,
-            parameter,
+            type_parameters,
             members,
         })
     }
@@ -250,7 +241,7 @@ impl Grammar {
             namespace,
             name,
         };
-        let target = self.parse_type()?;
+        let arguments = split_trait_arguments(self.parse_type()?);
         self.expect(
             TokenKind::LBrace,
             "expected `{` before implementation members",
@@ -284,7 +275,7 @@ impl Grammar {
         Ok(TraitImplementation {
             syntax: self.syntax(start),
             trait_name,
-            target,
+            arguments,
             members,
         })
     }
@@ -695,7 +686,7 @@ impl Grammar {
                 self.position = checkpoint;
                 break;
             }
-            let argument = self.parse_type_union()?;
+            let arguments = split_trait_arguments(self.parse_type_union()?);
             if !self.eat(TokenKind::FatArrow) {
                 self.position = checkpoint;
                 break;
@@ -708,7 +699,7 @@ impl Grammar {
                     namespace,
                     name,
                 },
-                argument,
+                arguments,
             });
         }
         Ok(bounds)
@@ -1692,6 +1683,20 @@ fn find_type_parameter_binding_mut<'a>(
         }
     }
     None
+}
+
+/// Splits the outer application spine of a trait use into its compile-time
+/// arguments. Parenthesized types remain product nodes, so they continue to
+/// group a complex type into one argument just as they do for type application.
+fn split_trait_arguments(mut ty: Type) -> Vec<Type> {
+    let mut arguments = Vec::new();
+    while let Type::Application(application) = ty {
+        arguments.push(*application.argument);
+        ty = *application.callee;
+    }
+    arguments.push(ty);
+    arguments.reverse();
+    arguments
 }
 
 fn is_symbol_kind(kind: TokenKind) -> bool {

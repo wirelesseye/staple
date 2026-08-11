@@ -1,6 +1,4 @@
-use super::{
-    Expression, NamedType, Syntax, TraitBound, Type, TypeParameterBinding, TypeParameterPattern,
-};
+use super::{Expression, NamedType, Syntax, TraitBound, Type, TypeParameterPattern};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
@@ -140,7 +138,7 @@ pub struct TraitDeclaration {
     pub syntax: Syntax,
     pub visibility: Visibility,
     pub name: String,
-    pub parameter: TypeParameterBinding,
+    pub type_parameters: Vec<TypeParameterPattern>,
     pub members: Vec<TraitMember>,
 }
 
@@ -155,7 +153,7 @@ pub struct TraitMember {
 pub struct TraitImplementation {
     pub syntax: Syntax,
     pub trait_name: NamedType,
-    pub target: Type,
+    pub arguments: Vec<Type>,
     pub members: Vec<ImplementationMember>,
 }
 

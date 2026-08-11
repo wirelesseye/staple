@@ -2089,11 +2089,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .trait_dispatch_for(expression.syntax().id)
             .cloned()
         {
-            let target = substitute_type(dispatch.target, &self.active_type_substitutions);
-            if contains_type_parameter(&target) {
+            let arguments = dispatch
+                .arguments
+                .into_iter()
+                .map(|argument| substitute_type(argument, &self.active_type_substitutions))
+                .collect::<Vec<_>>();
+            if arguments.iter().any(contains_type_parameter) {
                 return Err(Diagnostic::new(
                     expression.syntax().span.clone(),
-                    "trait method target is not fully specialized",
+                    "trait method arguments are not fully specialized",
                 ));
             }
             let trait_id = self
@@ -2103,11 +2107,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .expect("trait method owner");
             let function_id = self
                 .typed_module
-                .trait_impl_method(trait_id, &target, dispatch.method)
+                .trait_impl_method(trait_id, &arguments, dispatch.method)
                 .ok_or_else(|| {
                     Diagnostic::new(
                         expression.syntax().span.clone(),
-                        format!("no trait implementation is available for `{target}`"),
+                        "no trait implementation is available for these arguments",
                     )
                 })?;
             return self
@@ -2498,7 +2502,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         let function_id = self
             .typed_module
-            .trait_impl_method(default_trait, value_type, method)
+            .trait_impl_method(default_trait, std::slice::from_ref(value_type), method)
             .ok_or_else(|| {
                 Diagnostic::new(
                     span.clone(),
@@ -3914,7 +3918,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .trait_dispatch_for(call.callee.syntax().id)
             .cloned()
         {
-            let target = substitute_type(dispatch.target, &self.active_type_substitutions);
+            let arguments = dispatch
+                .arguments
+                .into_iter()
+                .map(|argument| substitute_type(argument, &self.active_type_substitutions))
+                .collect::<Vec<_>>();
+            let target = &arguments[0];
             let trait_id = self
                 .typed_module
                 .resolved()
@@ -3936,11 +3945,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             let function_id = self
                 .typed_module
-                .trait_impl_method(trait_id, &target, dispatch.method)
+                .trait_impl_method(trait_id, &arguments, dispatch.method)
                 .ok_or_else(|| {
                     Diagnostic::new(
                         call.callee.syntax().span.clone(),
-                        format!("no trait implementation is available for `{target}`"),
+                        "no trait implementation is available for these arguments",
                     )
                 })?;
             let function = self.functions[&function_id];
