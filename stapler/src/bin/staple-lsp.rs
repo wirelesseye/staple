@@ -69,7 +69,9 @@ fn run() -> Result<(), String> {
         published_by_root: HashMap::new(),
         stdlib,
     };
-    server.event_loop()?;
+    let result = server.event_loop();
+    drop(server);
+    result?;
     io_threads.join().map_err(|error| error.to_string())
 }
 

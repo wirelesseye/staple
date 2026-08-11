@@ -11,6 +11,8 @@ async function activate(context) {
   const command = configuration.get("languageServer.path", "staple-lsp");
   const standardLibrary = configuration.get("standardLibrary.path", "");
   const args = standardLibrary ? ["--stdlib", standardLibrary] : [];
+  const outputChannel = vscode.window.createOutputChannel("Staple");
+  context.subscriptions.push(outputChannel);
 
   const watcher = vscode.workspace.createFileSystemWatcher("**/*.sta");
   context.subscriptions.push(watcher);
@@ -25,10 +27,21 @@ async function activate(context) {
         configurationSection: "staple",
         fileEvents: watcher,
       },
+      outputChannel,
     },
   );
 
-  await client.start();
+  try {
+    await client.start();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    outputChannel.appendLine(`Failed to start the Staple language server: ${message}`);
+    outputChannel.show(true);
+    void vscode.window.showErrorMessage(
+      `Failed to start the Staple language server: ${message}`,
+    );
+    throw error;
+  }
 }
 
 async function deactivate() {
