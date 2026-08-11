@@ -540,7 +540,8 @@ impl Collector<'_> {
                 self.pattern(&nominal.argument);
             }
             Pattern::Binding(binding) => self.ty(&binding.ty),
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(wildcard) => self.ty(&wildcard.ty),
+            Pattern::StringLiteral(_) => {}
         }
     }
 

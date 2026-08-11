@@ -503,7 +503,8 @@ impl Collector<'_> {
                 self.add_resolved(&value.syntax, &value.name, false);
                 self.pattern(&value.argument);
             }
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(value) => self.ty(&value.ty),
+            Pattern::StringLiteral(_) => {}
         }
     }
 

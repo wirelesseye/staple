@@ -866,8 +866,16 @@ impl Grammar {
             return self.parse_named_pattern_from(start, true);
         }
         if self.eat(TokenKind::Underscore) {
+            let ty = if self.eat(TokenKind::Colon) {
+                self.parse_type_union()?
+            } else {
+                Type::Inferred(InferredType {
+                    syntax: self.syntax(start),
+                })
+            };
             Ok(Pattern::Wildcard(WildcardPattern {
                 syntax: self.syntax(start),
+                ty,
             }))
         } else if self.peek() == Some(TokenKind::String) {
             let literal = self.bump_token().expect("peeked string").text;

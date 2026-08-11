@@ -13,7 +13,7 @@ pub macro if =
 pub macro if =
     condition: Expr =>
     then_branch: Expr =>
-    Ident "else" =>
+    _: Ident "else" =>
     else_branch: Expr =>
     quote {
         match $condition {

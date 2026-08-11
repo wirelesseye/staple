@@ -1576,15 +1576,10 @@ fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
             Type::Inferred(_) => Some(MetaType::Syntax),
             ty => meta_type(ty),
         },
-        Pattern::Wildcard(_) => Some(MetaType::Syntax),
-        Pattern::Nominal(pattern) if pattern.namespace.is_none() && pattern.name == "Ident" => {
-            let Pattern::StringLiteral(literal) = pattern.argument.as_ref() else {
-                return None;
-            };
-            crate::string_literal::decode(&literal.literal)
-                .ok()
-                .map(|spelling| MetaType::Ident(Some(spelling)))
-        }
+        Pattern::Wildcard(wildcard) => match &wildcard.ty {
+            Type::Inferred(_) => Some(MetaType::Syntax),
+            ty => meta_type(ty),
+        },
         Pattern::Product(_) | Pattern::Nominal(_) | Pattern::StringLiteral(_) => None,
     }
 }
@@ -1642,7 +1637,8 @@ fn pattern_contains_syntax(pattern: &Pattern) -> bool {
         Pattern::Binding(binding) => type_contains_syntax(&binding.ty),
         Pattern::Product(product) => product.elements.iter().any(pattern_contains_syntax),
         Pattern::Nominal(pattern) => pattern_contains_syntax(&pattern.argument),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) => false,
+        Pattern::Wildcard(wildcard) => type_contains_syntax(&wildcard.ty),
+        Pattern::StringLiteral(_) => false,
     }
 }
 
@@ -2064,7 +2060,10 @@ fn freshen_pattern(
             expander.freshen_syntax(&mut binding.syntax, module, mark);
             freshen_type(expander, &mut binding.ty, module, mark);
         }
-        Pattern::Wildcard(wildcard) => expander.freshen_syntax(&mut wildcard.syntax, module, mark),
+        Pattern::Wildcard(wildcard) => {
+            expander.freshen_syntax(&mut wildcard.syntax, module, mark);
+            freshen_type(expander, &mut wildcard.ty, module, mark);
+        }
         Pattern::StringLiteral(literal) => {
             expander.freshen_syntax(&mut literal.syntax, module, mark)
         }

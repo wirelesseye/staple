@@ -847,7 +847,7 @@ fn preserves_macro_overload_sets_through_imports_and_reexports() {
         "helpers.sta",
         concat!(
             "pub macro reveal = value: Expr => quote { $value }\n",
-            "pub macro reveal = value: Expr => Ident \"with\" => replacement: Expr => quote { $replacement }\n",
+            "pub macro reveal = value: Expr => _: Ident \"with\" => replacement: Expr => quote { $replacement }\n",
         ),
     );
     fixture.write("bridge.sta", "pub use helpers reveal\n");

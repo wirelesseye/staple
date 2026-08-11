@@ -79,14 +79,14 @@ generic syntax type whose argument constrains its spelling. `Ident String`
 accepts any identifier and `Ident "else"` accepts exactly the identifier
 `else`. The compiler-owned, methodless `StringType` trait is satisfied by
 `String` and every string literal type, and constrains the argument of `Ident`.
-It cannot be implemented explicitly. A literal identifier parameter may be
-left unbound or given a binding when its syntax is needed:
+It cannot be implemented explicitly. A literal identifier parameter may use a
+typed wildcard when its syntax is not needed, or a binding when it is:
 
 ```staple
 macro conditional =
     condition: Expr =>
     then_branch: Expr =>
-    Ident "else" =>
+    _: Ident "else" =>
     else_branch: Expr =>
     quote {
         match $condition {
@@ -639,6 +639,13 @@ A binding pattern normally has a name and a type:
 
 ```staple
 s: String => s
+```
+
+Use `_` when a parameter is intentionally unused. It may carry the same type
+annotation as a named binding, but it does not introduce a name:
+
+```staple
+_: String => ()
 ```
 
 The type may be omitted when a surrounding function type supplies it:

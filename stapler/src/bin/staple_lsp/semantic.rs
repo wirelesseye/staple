@@ -532,7 +532,8 @@ impl<'a> Classifier<'a> {
                 self.mark_first(&value.syntax, &value.name, TYPE, 0, 1);
                 self.pattern(&value.argument, kind, resolved);
             }
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(value) => self.ty(&value.ty, resolved),
+            Pattern::StringLiteral(_) => {}
         }
     }
 

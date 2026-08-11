@@ -2543,7 +2543,8 @@ impl NameResolver {
 
     fn resolve_pattern_types(&mut self, pattern: &Pattern) {
         match pattern {
-            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Wildcard(wildcard) => self.resolve_type(&wildcard.ty),
+            Pattern::StringLiteral(_) => {}
             Pattern::Binding(binding) => {
                 let resolution_name = binding.resolution_name.as_deref().unwrap_or(&binding.name);
                 if !binding.mutable

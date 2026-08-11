@@ -73,6 +73,23 @@ fn parses_match_expressions_and_wildcards_losslessly() {
 }
 
 #[test]
+fn parses_typed_wildcard_parameters_losslessly() {
+    let source = "def discard = _: String => ()\n";
+    let root = parse(source).expect("typed wildcard parameter should parse");
+    assert_eq!(root.text(), source);
+    let Statement::Binding(discard) = statement(&root.items[0]) else {
+        panic!("expected discard binding");
+    };
+    let Some(Expression::Function(function)) = &discard.value else {
+        panic!("expected discard function");
+    };
+    assert!(matches!(
+        function.pattern,
+        Pattern::Wildcard(ref wildcard) if !matches!(wildcard.ty, Type::Inferred(_))
+    ));
+}
+
+#[test]
 fn rejects_malformed_match_expressions() {
     assert!(parse("match value {}\n").is_err());
     assert!(parse("match value { Ok x x, IOError y => y }\n").is_err());
@@ -396,7 +413,7 @@ fn parses_macro_bodies_quotes_and_splices_losslessly() {
 fn parses_typed_macro_parameters_and_literal_identifiers() {
     let source = concat!(
         "macro conditional = condition: Expr => then_branch: Expr => ",
-        "Ident \"else\" => else_branch: Expr => quote { $else_branch }\n",
+        "_: Ident \"else\" => else_branch: Expr => quote { $else_branch }\n",
     );
     let root = parse(source).expect("typed macro parameters should parse");
     assert_eq!(root.text(), source);
@@ -414,9 +431,7 @@ fn parses_typed_macro_parameters_and_literal_identifiers() {
     };
     assert!(matches!(
         keyword.pattern,
-        Pattern::Nominal(ref pattern)
-            if pattern.name == "Ident"
-                && matches!(pattern.argument.as_ref(), Pattern::StringLiteral(_))
+        Pattern::Wildcard(ref pattern) if !matches!(pattern.ty, Type::Inferred(_))
     ));
 }
 

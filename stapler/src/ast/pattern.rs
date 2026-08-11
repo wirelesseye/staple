@@ -23,9 +23,7 @@ impl Pattern {
     pub fn ty(&self) -> Type {
         match self {
             Self::Binding(pattern) => pattern.ty.clone(),
-            Self::Wildcard(pattern) => Type::Inferred(super::InferredType {
-                syntax: pattern.syntax.clone(),
-            }),
+            Self::Wildcard(pattern) => pattern.ty.clone(),
             Self::StringLiteral(pattern) => Type::StringLiteral(super::StringLiteralType {
                 syntax: pattern.syntax.clone(),
                 literal: pattern.literal.clone(),
@@ -72,6 +70,7 @@ pub struct StringLiteralPattern {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WildcardPattern {
     pub syntax: Syntax,
+    pub ty: Type,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -1650,7 +1650,16 @@ impl TypeChecker {
         self.pattern_types
             .insert(pattern.syntax().id, value_type.clone());
         match pattern {
-            Pattern::Wildcard(_) => {}
+            Pattern::Wildcard(wildcard) => {
+                if !matches!(wildcard.ty, Type::Inferred(_)) {
+                    let declared = self.resolve_source_type(module, &wildcard.ty);
+                    self.require_compatible(
+                        value_type.clone(),
+                        declared,
+                        wildcard.syntax.span.clone(),
+                    );
+                }
+            }
             Pattern::StringLiteral(pattern) => {
                 let Ok(value) = crate::string_literal::decode(&pattern.literal) else {
                     return;
@@ -2771,6 +2780,9 @@ impl TypeChecker {
             &previous_patterns,
             &Pattern::Wildcard(crate::WildcardPattern {
                 syntax: match_.syntax.clone(),
+                ty: Type::Inferred(crate::InferredType {
+                    syntax: match_.syntax.clone(),
+                }),
             }),
         ) {
             let missing = if let CheckedType::Sum(sum) = &source {
@@ -2939,6 +2951,27 @@ impl TypeChecker {
                 } else if declared != CheckedType::Error {
                     self.diagnostics.push(Diagnostic::new(
                         binding.syntax.span.clone(),
+                        format!(
+                            "typed pattern `{declared}` does not select an alternative of `{value_type}`"
+                        ),
+                    ));
+                }
+            }
+            Pattern::Wildcard(wildcard)
+                if !matches!(wildcard.ty, Type::Inferred(_))
+                    && matches!(value_type, CheckedType::Sum(_)) =>
+            {
+                let declared = self.resolve_source_type(module, &wildcard.ty);
+                let CheckedType::Sum(sum) = value_type else {
+                    unreachable!()
+                };
+                if sum.alternatives.contains(&declared) {
+                    self.pattern_types
+                        .insert(pattern.syntax().id, declared.clone());
+                    self.bind_pattern_types(module, pattern, &declared);
+                } else if declared != CheckedType::Error {
+                    self.diagnostics.push(Diagnostic::new(
+                        wildcard.syntax.span.clone(),
                         format!(
                             "typed pattern `{declared}` does not select an alternative of `{value_type}`"
                         ),

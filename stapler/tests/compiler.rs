@@ -1564,7 +1564,7 @@ fn expands_typed_macros_with_literal_identifier_parameters() {
         "macro conditional =\n",
         "    condition: Expr =>\n",
         "    then_branch: Expr =>\n",
-        "    Ident \"else\" =>\n",
+        "    _: Ident \"else\" =>\n",
         "    else_branch: Expr => quote {\n",
         "        match $condition {\n",
         "            True() => $then_branch,\n",
@@ -1615,11 +1615,11 @@ fn expands_standard_while_with_loop_control() {
 fn macro_overloads_choose_longest_then_most_specific() {
     let module = type_check(concat!(
         "macro select = value: Expr => quote { 10 }\n",
-        "macro select = value: Expr => Ident \"with\" => replacement: Expr => quote { $replacement }\n",
+        "macro select = value: Expr => _: Ident \"with\" => replacement: Expr => quote { $replacement }\n",
         "macro classify = value: Syntax => quote { 1 }\n",
         "macro classify = value: Expr => quote { 2 }\n",
         "macro classify = value: Ident String => quote { 3 }\n",
-        "macro classify = Ident \"else\" => quote { 4 }\n",
+        "macro classify = _: Ident \"else\" => quote { 4 }\n",
         "let longest: I32 = select 0 with 20\n",
         "let specific: I32 = classify else\n",
     ));
@@ -1701,7 +1701,7 @@ fn rejects_a_mismatched_literal_identifier_macro_argument() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "macro conditional = value: Expr => Ident \"else\" => quote { $value }\n",
+                "macro conditional = value: Expr => _: Ident \"else\" => quote { $value }\n",
                 "conditional 1 otherwise\n",
             ),
             root,
@@ -1714,6 +1714,26 @@ fn rejects_a_mismatched_literal_identifier_macro_argument() {
         diagnostic
             .message
             .contains("argument 2 of macro `conditional` must be identifier `else`")
+    }));
+}
+
+#[test]
+fn rejects_bare_literal_identifier_macro_parameters() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "macro conditional = value: Expr => Ident \"else\" => quote { $value }\n",
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("bare literal identifier parameters should fail");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("parameters must match atomic syntax values")
     }));
 }
 
@@ -2073,6 +2093,11 @@ fn rejects_untyped_parameters_without_a_function_annotation() {
             .iter()
             .any(|diagnostic| diagnostic.message.contains("could not fully infer"))
     );
+}
+
+#[test]
+fn supports_typed_wildcard_parameters() {
+    type_check("def demo = _: String => ()\ndemo \"unused\"\n");
 }
 
 #[test]
