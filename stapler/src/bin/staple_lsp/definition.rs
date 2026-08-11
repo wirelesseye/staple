@@ -102,6 +102,8 @@ impl DeclarationCollector<'_> {
     fn item(&mut self, item: &Item) {
         match item {
             Item::Modified(value) => self.item(&value.item),
+            Item::VisibilityMacroInvocation(value) => self.expression(&value.expression),
+            Item::VisibilitySplice(value) => self.item(&value.item),
             Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
                     self.insert(DefinitionId::Module(id), &value.syntax, &value.name);
@@ -205,7 +207,7 @@ impl DeclarationCollector<'_> {
                     self.expression(operand);
                 }
             }
-            Expression::SyntaxArgument(_) => {}
+            Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression),
                 QuoteTemplate::Item(item) => self.item(item),
@@ -293,6 +295,8 @@ impl Collector<'_> {
                 }
                 self.item(&value.item);
             }
+            Item::VisibilityMacroInvocation(value) => self.expression(&value.expression),
+            Item::VisibilitySplice(value) => self.item(&value.item),
             Item::UseDeclaration(value) => self.use_declaration(value),
             Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
@@ -497,7 +501,7 @@ impl Collector<'_> {
                     self.add_resolved(&operator.syntax, &operator.name, true);
                 }
             }
-            Expression::SyntaxArgument(_) => {}
+            Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression),
                 QuoteTemplate::Item(item) => self.item(item),

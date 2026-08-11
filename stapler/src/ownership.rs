@@ -285,7 +285,10 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 true
             }
-            Expression::SyntaxArgument(_) | Expression::Quote(_) | Expression::Splice(_) => true,
+            Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_) => true,
             Expression::String(_)
             | Expression::CString(_)
             | Expression::Integer(_)

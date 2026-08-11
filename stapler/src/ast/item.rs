@@ -15,6 +15,8 @@ impl Module {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     Modified(ModifiedItem),
+    VisibilityMacroInvocation(VisibilityMacroInvocation),
+    VisibilitySplice(VisibilitySplice),
     UseDeclaration(UseDeclaration),
     Submodule(Submodule),
     ExternBlock(ExternBlock),
@@ -23,6 +25,33 @@ pub enum Item {
     TraitDeclaration(TraitDeclaration),
     TraitImplementation(TraitImplementation),
     Statement(Box<Statement>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibilityMacroInvocation {
+    pub syntax: Syntax,
+    pub visibility: VisibilitySyntax,
+    pub expression: Expression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibilitySplice {
+    pub syntax: Syntax,
+    pub name: String,
+    pub item: Box<Item>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VisibilityKind {
+    Private,
+    Public,
+    PublicRepr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibilitySyntax {
+    pub syntax: Syntax,
+    pub kind: VisibilityKind,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

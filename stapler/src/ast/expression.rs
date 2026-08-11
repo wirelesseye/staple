@@ -1,4 +1,4 @@
-use super::{Item, Pattern, Statement, Syntax, Type};
+use super::{Item, Pattern, Statement, Syntax, Type, VisibilitySyntax};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
@@ -13,6 +13,7 @@ pub enum Expression {
     Index(IndexExpression),
     Infix(InfixExpression),
     SyntaxArgument(SyntaxArgumentExpression),
+    VisibilityArgument(VisibilitySyntax),
     Quote(QuoteExpression),
     Splice(SpliceExpression),
     Name(NameExpression),
@@ -36,6 +37,7 @@ impl Expression {
             Self::Index(expression) => &expression.syntax,
             Self::Infix(expression) => &expression.syntax,
             Self::SyntaxArgument(expression) => &expression.syntax,
+            Self::VisibilityArgument(expression) => &expression.syntax,
             Self::Quote(expression) => &expression.syntax,
             Self::Splice(expression) => &expression.syntax,
             Self::Name(expression) => &expression.syntax,

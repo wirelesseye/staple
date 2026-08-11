@@ -61,7 +61,7 @@ work with structured syntax instead of assembling source-code strings.
 
 Expression macros transform compiler-owned syntax values before ordinary name
 resolution and type checking. `Syntax` is the permissive sum of `Expr`, `Type`,
-`Pattern`, and `Item`. `Expr` is currently the sum of `Ident String`,
+`Pattern`, `Item`, and `Visibility`. `Expr` is currently the sum of `Ident String`,
 `CallExpr`, and `UnstructuredExpr`. `CallExpr` exposes `callee: Expr` and
 `argument: Expr`; `UnstructuredExpr` preserves every other expression form
 without exposing its fields yet. A macro body is a curried compile-time Staple
@@ -211,6 +211,57 @@ carry both.
 or pass its input through compile-time helpers, but cannot inspect item fields
 yet.
 
+Visibility is also compiler-owned syntax. Its three atomic variants are
+`Private`, `Public`, and `PublicRepr`. They can be matched and passed through
+compile-time helpers accepting `Visibility`, but cannot survive expansion as
+runtime values. `MacroCallVisibility` is a special marker permitted only as
+the first parameter of a function-style macro:
+
+```staple
+macro define_alias =
+    vis: MacroCallVisibility =>
+    ty: Type =>
+    quote { $vis type alias Generated = $ty }
+
+pub define_alias I32
+```
+
+`pub` or `pub(repr)` before the macro name supplies `Public` or `PublicRepr`.
+An unprefixed call supplies `Private`. The captured value is accepted anywhere
+that expects `Visibility`; this is a compiler-owned compatibility rule rather
+than general language subtyping. A prefixed call is parsed in module-item
+grammar, but its macro may return either an item or an expression. Normal
+syntax placement rules still reject type, pattern, or visibility results that
+have no valid placement.
+
+An ordinary `Visibility` parameter may appear in any position. At that
+position `pub` or `pub(repr)` consumes one source atom; if neither is present,
+`Private` is injected without consuming the following argument:
+
+```staple
+macro configure =
+    value: Expr =>
+    vis: Visibility =>
+    ty: Type => ...
+
+configure value I32
+configure value pub I32
+configure value pub(repr) I32
+```
+
+Visibility-aware overload matching ranks candidates by source atoms consumed,
+not by the number of parameters after implicit values are inserted. Therefore
+an ordinary overload and an implicitly-private overload consuming the same
+source syntax are ambiguous. An explicit prefix before the macro name selects
+only overloads beginning with `MacroCallVisibility`.
+
+Inside an item quotation, a visibility value may be spliced immediately before
+a declaration. `Private` emits no prefix, `Public` emits `pub`, and
+`PublicRepr` emits `pub(repr)`. Existing declaration rules are checked after
+substitution, so `PublicRepr` is valid only on a represented distinct type.
+Modifiers surrounding a visibility-aware call run after that call has produced
+its item.
+
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while
 spliced expressions retain their caller environment. A macro consumes the
@@ -255,7 +306,7 @@ values are compile-time-only. This release supports expression results, one
 top-level item result, opaque type and pattern inputs with contextual scalar
 splices, scalar expression splices inside generated items, and structured
 identifier and call expressions. It also supports opaque item input through
-modifier macros. Repeated splices, item sequences, function-style item input,
+modifier macros and atomic visibility syntax. Repeated splices, item sequences, function-style item input,
 item inspection, structured access to other expression forms, standalone type
 or pattern quotation, and type or pattern output placement remain future work.
 

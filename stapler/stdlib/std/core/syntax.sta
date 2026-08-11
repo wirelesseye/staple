@@ -13,8 +13,16 @@ pub type Type = opaque
 pub type Pattern = opaque
 pub type Item = opaque
 
+// Compiler-owned visibility syntax. MacroCallVisibility is an invocation
+// marker whose value is usable as Visibility inside compile-time code.
+pub type Private
+pub type Public
+pub type PublicRepr
+pub type alias Visibility = Private | Public | PublicRepr
+pub type MacroCallVisibility = opaque
+
 // A sealed compiler-defined marker: String and every string literal type
 // satisfy it. It has no runtime methods or user implementations.
 pub trait StringType = T => {}
 
-pub type alias Syntax = Expr | Type | Pattern | Item
+pub type alias Syntax = Expr | Type | Pattern | Item | Visibility

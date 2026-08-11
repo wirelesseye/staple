@@ -59,6 +59,10 @@ impl Collector<'_> {
                 }
                 self.collect_item_declarations(&value.item);
             }
+            Item::VisibilityMacroInvocation(value) => {
+                self.collect_expression_declarations(&value.expression)
+            }
+            Item::VisibilitySplice(value) => self.collect_item_declarations(&value.item),
             Item::Submodule(submodule) => self.collect_module_declarations(&submodule.module),
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
@@ -172,7 +176,7 @@ impl Collector<'_> {
                     self.collect_expression_declarations(operand);
                 }
             }
-            Expression::SyntaxArgument(_) => {}
+            Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(quote) => match &quote.template {
                 QuoteTemplate::Expression(expression) => {
                     self.collect_expression_declarations(expression)
@@ -227,6 +231,8 @@ impl Collector<'_> {
                 }
                 self.item(&value.item);
             }
+            Item::VisibilityMacroInvocation(value) => self.expression(&value.expression),
+            Item::VisibilitySplice(value) => self.item(&value.item),
             Item::Submodule(submodule) => {
                 for item in &submodule.module.items {
                     self.item(item);
@@ -531,7 +537,7 @@ impl Collector<'_> {
                     self.expression(operand);
                 }
             }
-            Expression::SyntaxArgument(_) => {}
+            Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(quote) => match &quote.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression),
                 QuoteTemplate::Item(item) => self.item(item),

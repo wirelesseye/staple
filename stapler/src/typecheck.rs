@@ -1268,6 +1268,8 @@ impl TypeChecker {
                     }
                     Item::UseDeclaration(_)
                     | Item::Modified(_)
+                    | Item::VisibilityMacroInvocation(_)
+                    | Item::VisibilitySplice(_)
                     | Item::Submodule(_)
                     | Item::TypeDeclaration(_)
                     | Item::MacroDeclaration(_)
@@ -1827,6 +1829,8 @@ impl TypeChecker {
             }
             Item::UseDeclaration(_)
             | Item::Modified(_)
+            | Item::VisibilityMacroInvocation(_)
+            | Item::VisibilitySplice(_)
             | Item::Submodule(_)
             | Item::TypeDeclaration(_)
             | Item::MacroDeclaration(_)
@@ -2657,9 +2661,10 @@ impl TypeChecker {
                 }
                 instantiated
             }
-            Expression::SyntaxArgument(_) | Expression::Quote(_) | Expression::Splice(_) => {
-                CheckedType::Error
-            }
+            Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_) => CheckedType::Error,
             Expression::String(string) => {
                 let decoded = match crate::string_literal::decode(&string.literal) {
                     Ok(value) => value,

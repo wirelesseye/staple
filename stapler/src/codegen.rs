@@ -2502,6 +2502,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let llvm_type = self.compile_float_type(float_type);
                 Ok(llvm_type.const_float(value).as_any_value_enum())
             }
+            Expression::VisibilityArgument(_) => {
+                unreachable!("visibility syntax must be eliminated during macro expansion")
+            }
         }
     }
 

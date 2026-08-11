@@ -1825,6 +1825,142 @@ fn expands_modifier_lists_generated_by_item_macros() {
 }
 
 #[test]
+fn expands_visibility_aware_macros_and_contextual_visibility_splices() {
+    let module = type_check(concat!(
+        "def normalize_visibility: Visibility -> Visibility = value => value\n",
+        "def visibility_number: Visibility -> Expr = value => match value {\n",
+        "    Private => quote { 1 },\n",
+        "    Public => quote { 2 },\n",
+        "    PublicRepr => quote { 3 },\n",
+        "}\n",
+        "macro define_alias = vis: MacroCallVisibility => ty: Type => {\n",
+        "    let actual = normalize_visibility vis\n",
+        "    quote { $actual type alias Generated = $ty }\n",
+        "}\n",
+        "macro classify = before: Expr => vis: Visibility => after: Expr => {\n",
+        "    let number = visibility_number vis\n",
+        "    number\n",
+        "}\n",
+        "macro call_visibility = vis: MacroCallVisibility => visibility_number vis\n",
+        "macro first_visibility = vis: Visibility => value: Expr => visibility_number vis\n",
+        "macro final_visibility = value: Expr => vis: Visibility => visibility_number vis\n",
+        "pub define_alias I32\n",
+        "let implicit: I32 = classify 10 20\n",
+        "let public: I32 = classify 10 pub 20\n",
+        "let represented: I32 = classify 10 pub(repr) 20\n",
+        "let private_call: I32 = call_visibility\n",
+        "let first_private: I32 = first_visibility 0\n",
+        "let first_public: I32 = first_visibility pub 0\n",
+        "let final_private: I32 = final_visibility 0\n",
+        "let final_public: I32 = final_visibility 0 pub\n",
+        "let generated: Generated = 42\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("visibility-aware macro output should compile");
+}
+
+#[test]
+fn public_repr_macro_call_can_generate_a_public_representation() {
+    let module = type_check(concat!(
+        "macro define_box = vis: MacroCallVisibility => quote { $vis type Box = I32 }\n",
+        "pub(repr) define_box\n",
+        "let boxed: Box = Box 42\n",
+    ));
+    assert!(module.resolved().syntax().items.iter().any(|item| {
+        matches!(item, Item::TypeDeclaration(declaration)
+            if declaration.name == "Box"
+                && declaration.visibility == stapler::Visibility::Public
+                && declaration.representation_visibility == stapler::Visibility::Public)
+    }));
+}
+
+#[test]
+fn modifiers_compose_after_visibility_aware_item_calls() {
+    let module = type_check(concat!(
+        "macro @identity: Item -> Item = item => item\n",
+        "macro define = vis: MacroCallVisibility => quote { $vis let generated: I32 = 42 }\n",
+        "@identity\n",
+        "pub define\n",
+        "let result: I32 = generated\n",
+    ));
+    assert!(module.resolved().syntax().items.iter().any(|item| {
+        matches!(item, Item::Statement(statement)
+            if matches!(statement.as_ref(), Statement::Binding(binding)
+                if binding.name == "generated"
+                    && binding.visibility == stapler::Visibility::Public))
+    }));
+}
+
+#[test]
+fn diagnoses_invalid_visibility_macro_uses() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (source, expected) in [
+        (
+            "macro invalid: Expr -> MacroCallVisibility -> Expr = left => vis => left\n",
+            "macro `invalid` may use `MacroCallVisibility` only as its first parameter",
+        ),
+        (
+            "def invalid: MacroCallVisibility -> Visibility = value => value\n",
+            "`MacroCallVisibility` may only be the first parameter of a function-style macro",
+        ),
+        (
+            "macro ordinary: Expr -> Expr = value => quote { $value }\npub ordinary 1\n",
+            "macro `ordinary` has no overload whose first parameter is `MacroCallVisibility`",
+        ),
+        (
+            "macro invalid = vis: MacroCallVisibility => quote { $vis type alias Generated = I32 }\npub(repr) invalid\n",
+            "`PublicRepr` visibility requires a represented distinct type",
+        ),
+        (
+            "macro @identity: Item -> Item = item => item\nmacro expression = vis: MacroCallVisibility => quote { 1 }\n@identity\npub expression\n",
+            "modifier macros may only be applied to `let`, `def`, `type`, `extern`, `trait`, or `impl` items",
+        ),
+        (
+            "let visibility = Private\n",
+            "`Private` syntax values are compile-time-only",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("invalid visibility syntax should fail expansion");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
+            "expected `{expected}`, found {diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
+fn implicit_macro_call_visibility_can_make_overloads_ambiguous() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = concat!(
+        "macro choose: Expr -> Expr = value => quote { $value }\n",
+        "macro choose: MacroCallVisibility -> Expr -> Expr = vis => value => quote { $value }\n",
+        "let result = choose 1\n",
+    );
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(source, root)
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("equal-consumption overloads should be ambiguous");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "ambiguous invocation of macro `choose`")
+    );
+}
+
+#[test]
 fn diagnoses_invalid_modifier_definitions_and_applications() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for (source, expected) in [

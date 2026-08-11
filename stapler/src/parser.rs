@@ -185,6 +185,25 @@ impl Grammar {
                 item,
             }));
         }
+        if self.quote_depth > 0 && self.at(TokenKind::Dollar) {
+            self.expect(TokenKind::Dollar, "expected `$`")?;
+            let name = self
+                .expect(
+                    TokenKind::Identifier,
+                    "expected a visibility splice name after `$`",
+                )?
+                .text;
+            if self.eat(TokenKind::Ellipsis) {
+                return Err(self.error("repeated visibility splices are not supported"));
+            }
+            let item = Box::new(self.parse_item()?);
+            self.newline_terminates_expression = previous;
+            return Ok(Item::VisibilitySplice(VisibilitySplice {
+                syntax: self.syntax(item_start),
+                name,
+                item,
+            }));
+        }
         let visibility = if self.eat(TokenKind::Pub) {
             Visibility::Public
         } else {
@@ -204,6 +223,30 @@ impl Grammar {
             } else {
                 Visibility::Private
             };
+        let visibility_syntax = if representation_visibility == Visibility::Public {
+            Some(VisibilitySyntax {
+                syntax: self.syntax(item_start),
+                kind: VisibilityKind::PublicRepr,
+            })
+        } else if visibility == Visibility::Public {
+            Some(VisibilitySyntax {
+                syntax: self.syntax(item_start),
+                kind: VisibilityKind::Public,
+            })
+        } else {
+            None
+        };
+        if let Some(visibility) = visibility_syntax
+            && self.peek() == Some(TokenKind::Identifier)
+        {
+            let expression = self.parse_expression()?;
+            self.newline_terminates_expression = previous;
+            return Ok(Item::VisibilityMacroInvocation(VisibilityMacroInvocation {
+                syntax: self.syntax(item_start),
+                visibility,
+                expression,
+            }));
+        }
         if representation_visibility == Visibility::Public && self.peek() != Some(TokenKind::Type) {
             return Err(self.error("`pub(repr)` may only modify a type declaration"));
         }
@@ -1523,6 +1566,27 @@ impl Grammar {
         match self.peek() {
             Some(TokenKind::Match) => self.parse_match_expression().map(Expression::Match),
             Some(TokenKind::Loop) => self.parse_loop_expression().map(Expression::Loop),
+            Some(TokenKind::Pub) => {
+                let start = self.position;
+                self.expect(TokenKind::Pub, "expected `pub`")?;
+                let kind = if self.eat(TokenKind::LParen) {
+                    let repr = self.expect(
+                        TokenKind::Identifier,
+                        "expected `repr` in visibility argument",
+                    )?;
+                    if repr.text != "repr" {
+                        return Err(self.error("expected `repr` in visibility argument"));
+                    }
+                    self.expect(TokenKind::RParen, "expected `)` after `repr`")?;
+                    VisibilityKind::PublicRepr
+                } else {
+                    VisibilityKind::Public
+                };
+                Ok(Expression::VisibilityArgument(VisibilitySyntax {
+                    syntax: self.syntax(start),
+                    kind,
+                }))
+            }
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
             Some(TokenKind::LParen) if self.parenthesized_operator() => self.parse_operator_value(),
             Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
@@ -1742,6 +1806,7 @@ impl Grammar {
                     | TokenKind::LParen
                     | TokenKind::Match
                     | TokenKind::Loop
+                    | TokenKind::Pub
                     | TokenKind::Identifier
                     | TokenKind::Dollar
                     | TokenKind::String

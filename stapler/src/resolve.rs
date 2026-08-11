@@ -1316,7 +1316,11 @@ impl NameResolver {
                         | Statement::Continue(_)
                         | Statement::Expression(_) => {}
                     },
-                    Item::Modified(_) | Item::UseDeclaration(_) | Item::Submodule(_) => {}
+                    Item::Modified(_)
+                    | Item::VisibilityMacroInvocation(_)
+                    | Item::VisibilitySplice(_)
+                    | Item::UseDeclaration(_)
+                    | Item::Submodule(_) => {}
                 }
             }
         }
@@ -1768,6 +1772,8 @@ impl NameResolver {
                 }
                 Item::UseDeclaration(_)
                 | Item::Modified(_)
+                | Item::VisibilityMacroInvocation(_)
+                | Item::VisibilitySplice(_)
                 | Item::Submodule(_)
                 | Item::TypeDeclaration(_)
                 | Item::MacroDeclaration(_)
@@ -1802,7 +1808,11 @@ impl NameResolver {
 
     fn resolve_item(&mut self, item: &Item) {
         match item {
-            Item::Modified(_) | Item::UseDeclaration(_) | Item::Submodule(_) => {}
+            Item::Modified(_)
+            | Item::VisibilityMacroInvocation(_)
+            | Item::VisibilitySplice(_)
+            | Item::UseDeclaration(_)
+            | Item::Submodule(_) => {}
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
                     if let Some(annotation) = &binding.annotation {
@@ -2433,6 +2443,10 @@ impl NameResolver {
             Expression::SyntaxArgument(argument) => self.diagnostics.push(Diagnostic::new(
                 argument.syntax.span.clone(),
                 "grouped type or pattern syntax requires a matching macro parameter",
+            )),
+            Expression::VisibilityArgument(argument) => self.diagnostics.push(Diagnostic::new(
+                argument.syntax.span.clone(),
+                "visibility syntax requires a matching macro parameter",
             )),
             Expression::String(_)
             | Expression::CString(_)
@@ -3207,6 +3221,7 @@ impl<'a> InitializationAnalyzer<'a> {
                 }
             }
             Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
             | Expression::Quote(_)
             | Expression::Splice(_)
             | Expression::String(_)

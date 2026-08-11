@@ -532,6 +532,46 @@ fn parses_modifier_macro_definitions_and_item_modifiers_losslessly() {
 }
 
 #[test]
+fn parses_visibility_aware_macro_calls_and_splices_losslessly() {
+    let source = concat!(
+        "macro define = vis: MacroCallVisibility => ty: Type => quote { $vis type Generated = $ty }\n",
+        "pub define I32\n",
+        "pub(repr) define I32\n",
+        "configure value pub I32\n",
+        "configure value pub(repr) I32\n",
+    );
+    let root = parse(source).expect("visibility syntax should parse");
+    assert_eq!(root.text(), source);
+    let Item::MacroDeclaration(declaration) = &root.items[0] else {
+        panic!("expected macro declaration");
+    };
+    let Some(Expression::Function(function)) = &declaration.value else {
+        panic!("expected macro body");
+    };
+    let Expression::Function(function) = function.body.as_ref() else {
+        panic!("expected second macro parameter");
+    };
+    let Expression::Quote(quote) = function.body.as_ref() else {
+        panic!("expected item quotation");
+    };
+    assert!(matches!(
+        &quote.template,
+        stapler::QuoteTemplate::Item(item)
+            if matches!(item.as_ref(), Item::VisibilitySplice(_))
+    ));
+    assert!(matches!(
+        &root.items[1],
+        Item::VisibilityMacroInvocation(invocation)
+            if invocation.visibility.kind == stapler::VisibilityKind::Public
+    ));
+    assert!(matches!(
+        &root.items[2],
+        Item::VisibilityMacroInvocation(invocation)
+            if invocation.visibility.kind == stapler::VisibilityKind::PublicRepr
+    ));
+}
+
+#[test]
 fn parses_grouped_type_and_pattern_macro_arguments_losslessly() {
     let source = concat!(
         "inspect_type (I32 -> I32)\n",

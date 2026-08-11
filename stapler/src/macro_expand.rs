@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
     MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program, Span,
-    Statement, Syntax, SyntaxId, Type, UseKind, Visibility,
+    Statement, Syntax, SyntaxId, Type, UseKind, Visibility, VisibilityKind, VisibilitySyntax,
 };
 
 const MAX_EXPANSION_DEPTH: usize = 128;
@@ -34,6 +34,19 @@ struct MacroDefinition {
     kind: MacroKind,
 }
 
+#[derive(Clone)]
+enum MacroArgument {
+    Expression(Expression),
+    Visibility(VisibilitySyntax),
+}
+
+#[derive(Clone)]
+struct SelectedMacro {
+    definition: MacroDefinition,
+    arguments: Vec<MacroArgument>,
+    consumed: usize,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum MetaType {
     Syntax,
@@ -44,6 +57,8 @@ enum MetaType {
     Type,
     Pattern,
     Item,
+    Visibility,
+    MacroCallVisibility,
 }
 
 impl MetaType {
@@ -77,6 +92,7 @@ enum SyntaxValue {
     Type(Type),
     Pattern(Pattern),
     Item(Box<Item>),
+    Visibility(VisibilitySyntax),
 }
 
 impl SyntaxValue {
@@ -84,6 +100,7 @@ impl SyntaxValue {
         match expression {
             Expression::Name(name) => Self::Ident(name),
             Expression::Call(call) => Self::Call(call),
+            Expression::VisibilityArgument(visibility) => Self::Visibility(visibility),
             expression => Self::Unstructured(expression),
         }
     }
@@ -97,7 +114,7 @@ impl SyntaxValue {
             Self::Ident(name) => Some(Expression::Name(name)),
             Self::Call(call) => Some(Expression::Call(call)),
             Self::Unstructured(expression) => Some(expression),
-            Self::Type(_) | Self::Pattern(_) | Self::Item(_) => None,
+            Self::Type(_) | Self::Pattern(_) | Self::Item(_) | Self::Visibility(_) => None,
         }
     }
 }
@@ -108,6 +125,7 @@ fn syntax_category(value: &SyntaxValue) -> &'static str {
         SyntaxValue::Type(_) => "type",
         SyntaxValue::Pattern(_) => "pattern",
         SyntaxValue::Item(_) => "item",
+        SyntaxValue::Visibility(_) => "visibility",
     }
 }
 
@@ -152,6 +170,16 @@ pub(crate) fn expand_program(mut program: Program) -> Result<Program, Vec<Diagno
     expander.validate_definitions();
     for module in program.modules() {
         for item in &module.syntax.items {
+            if let Item::Statement(statement) = item
+                && let Statement::Binding(binding) = statement.as_ref()
+                && binding.kind == BindingKind::Def
+                && binding_uses_macro_call_visibility(binding)
+            {
+                expander.diagnostics.push(Diagnostic::new(
+                    binding.syntax.span.clone(),
+                    "`MacroCallVisibility` may only be the first parameter of a function-style macro",
+                ));
+            }
             if let Item::Statement(statement) = item
                 && let Statement::Binding(binding) = statement.as_ref()
                 && binding.kind != BindingKind::Def
@@ -659,6 +687,37 @@ impl MacroExpander {
                     ),
                 ));
             }
+            if definition.key.modifier
+                && definition.parameters.iter().any(|parameter| {
+                    matches!(
+                        parameter,
+                        MetaType::Visibility | MetaType::MacroCallVisibility
+                    )
+                })
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    "modifier macros do not accept visibility parameters",
+                ));
+            }
+            if !definition.key.modifier
+                && (definition
+                    .parameters
+                    .iter()
+                    .enumerate()
+                    .any(|(index, parameter)| {
+                        *parameter == MetaType::MacroCallVisibility && index != 0
+                    })
+                    || definition.result == MetaType::MacroCallVisibility)
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    format!(
+                        "macro `{}` may use `MacroCallVisibility` only as its first parameter",
+                        definition.key.name
+                    ),
+                ));
+            }
             match &definition.kind {
                 MacroKind::CString
                     if definition.parameters != [MetaType::Expr]
@@ -719,6 +778,23 @@ impl MacroExpander {
     }
 
     fn expand_item(&mut self, module: ModuleId, item: &mut Item, depth: usize) {
+        if let Item::VisibilityMacroInvocation(invocation) = item {
+            let invocation = invocation.clone();
+            if let Some(expanded) =
+                self.expand_visibility_macro_invocation(module, invocation, depth)
+            {
+                *item = expanded;
+                self.expand_item(module, item, depth + 1);
+            }
+            return;
+        }
+        if let Item::VisibilitySplice(splice) = item {
+            self.diagnostics.push(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "visibility splices are only available while evaluating `quote`",
+            ));
+            return;
+        }
         if let Item::Modified(modified) = item {
             let modified = modified.clone();
             if depth == 0 {
@@ -757,11 +833,122 @@ impl MacroExpander {
             }
             Item::MacroDeclaration(_)
             | Item::Modified(_)
+            | Item::VisibilityMacroInvocation(_)
+            | Item::VisibilitySplice(_)
             | Item::Submodule(_)
             | Item::UseDeclaration(_)
             | Item::ExternBlock(_)
             | Item::TypeDeclaration(_) => {}
         }
+    }
+
+    fn expand_visibility_macro_invocation(
+        &mut self,
+        module: ModuleId,
+        invocation: crate::VisibilityMacroInvocation,
+        depth: usize,
+    ) -> Option<Item> {
+        let (head, arguments) = flatten_call(&invocation.expression);
+        let Some(keys) = self.resolve_macro(module, head) else {
+            self.diagnostics.push(Diagnostic::new(
+                invocation.syntax.span.clone(),
+                "a leading `pub` or `pub(repr)` must prefix a macro whose first parameter is `MacroCallVisibility`",
+            ));
+            return None;
+        };
+        let selected = self.select_macro(
+            &keys,
+            &arguments,
+            Some(&invocation.visibility),
+            invocation.syntax.span.clone(),
+        )?;
+        if depth >= MAX_EXPANSION_DEPTH {
+            self.diagnostics.push(Diagnostic::new(
+                invocation.syntax.span.clone(),
+                "macro expansion exceeded the limit of 128 nested expansions",
+            ));
+            return None;
+        }
+        let definition = selected.definition;
+        let consumed_count = selected.consumed;
+        let key = definition.key.clone();
+        if self.expansion_stack.contains(&key) {
+            self.diagnostics.push(Diagnostic::new(
+                invocation.syntax.span.clone(),
+                format!("recursive macro expansion of `{}`", key.name),
+            ));
+            return None;
+        }
+        self.expansion_stack.push(key.clone());
+        let diagnostic_start = self.diagnostics.len();
+        let result = self.invoke_macro(
+            &definition,
+            selected.arguments,
+            invocation.syntax.span.clone(),
+        );
+        let Some(result) = result else {
+            self.expansion_stack.pop();
+            if self.diagnostics.len() > diagnostic_start {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    format!("while expanding macro `{}`", key.name),
+                ));
+            }
+            return None;
+        };
+        let result = match result {
+            SyntaxValue::Item(item) => {
+                if arguments[consumed_count..].is_empty() {
+                    Some(*item)
+                } else {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span.clone(),
+                        format!(
+                            "item-producing macro `{}` cannot have excess arguments",
+                            key.name
+                        ),
+                    ));
+                    None
+                }
+            }
+            syntax if syntax.to_expression().is_some() => {
+                if definition.result == MetaType::Item {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span.clone(),
+                        format!(
+                            "macro `{}` declared `Item` but returned expression syntax",
+                            key.name
+                        ),
+                    ));
+                    None
+                } else {
+                    let mut expression = syntax.into_expression().unwrap();
+                    for argument in &arguments[consumed_count..] {
+                        let mut syntax = expression.syntax().clone();
+                        syntax.id = self.fresh_id();
+                        expression = Expression::Call(crate::CallExpression {
+                            syntax,
+                            callee: Box::new(expression),
+                            argument: Box::new((*argument).clone()),
+                        });
+                    }
+                    Some(Item::Statement(Box::new(Statement::Expression(expression))))
+                }
+            }
+            syntax => {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span.clone(),
+                    format!(
+                        "macro `{}` produces {} syntax, which cannot replace a top-level item",
+                        key.name,
+                        syntax_category(&syntax)
+                    ),
+                ));
+                None
+            }
+        };
+        self.expansion_stack.pop();
+        result
     }
 
     fn apply_modifier_chain(
@@ -773,6 +960,9 @@ impl MacroExpander {
         let mut current = *modified.item;
         if let Item::Modified(nested) = current {
             current = self.apply_modifier_chain(module, nested, depth + 1)?;
+        }
+        if let Item::VisibilityMacroInvocation(invocation) = current {
+            current = self.expand_visibility_macro_invocation(module, invocation, depth + 1)?;
         }
         if !modifier_target_supported(&current) {
             self.diagnostics.push(Diagnostic::new(
@@ -1052,11 +1242,13 @@ impl MacroExpander {
         let Some(keys) = self.resolve_macro(module, head) else {
             return false;
         };
-        let Some(definition) =
-            self.select_macro(&keys, &arguments, expression.syntax().span.clone())
+        let Some(selected) =
+            self.select_macro(&keys, &arguments, None, expression.syntax().span.clone())
         else {
             return true;
         };
+        let definition = selected.definition;
+        let consumed_count = selected.consumed;
         if !matches!(definition.result, MetaType::Syntax | MetaType::Item) {
             return false;
         }
@@ -1079,9 +1271,12 @@ impl MacroExpander {
             self.steps = 0;
         }
         self.expansion_stack.push(key.clone());
-        let consumed = arguments[..definition.arity].to_vec();
         let diagnostic_start = self.diagnostics.len();
-        let result = self.invoke_macro(&definition, consumed, expression.syntax().span.clone());
+        let result = self.invoke_macro(
+            &definition,
+            selected.arguments,
+            expression.syntax().span.clone(),
+        );
         let Some(result) = result else {
             self.expansion_stack.pop();
             if self.diagnostics.len() > diagnostic_start {
@@ -1095,7 +1290,7 @@ impl MacroExpander {
 
         match result {
             SyntaxValue::Item(generated) => {
-                if !arguments[definition.arity..].is_empty() {
+                if !arguments[consumed_count..].is_empty() {
                     self.diagnostics.push(Diagnostic::new(
                         expression.syntax().span.clone(),
                         format!(
@@ -1119,7 +1314,7 @@ impl MacroExpander {
                     ));
                 } else {
                     let mut result = syntax.into_expression().unwrap();
-                    for argument in &arguments[definition.arity..] {
+                    for argument in &arguments[consumed_count..] {
                         let mut syntax = result.syntax().clone();
                         syntax.id = self.fresh_id();
                         result = Expression::Call(crate::CallExpression {
@@ -1190,11 +1385,13 @@ impl MacroExpander {
         }
         let (head, arguments) = flatten_call(&expression);
         if let Some(keys) = self.resolve_macro(module, head) {
-            let Some(definition) =
-                self.select_macro(&keys, &arguments, expression.syntax().span.clone())
+            let Some(selected) =
+                self.select_macro(&keys, &arguments, None, expression.syntax().span.clone())
             else {
                 return expression;
             };
+            let definition = selected.definition;
+            let consumed_count = selected.consumed;
             let key = definition.key.clone();
             if definition.result == MetaType::Item {
                 self.diagnostics.push(Diagnostic::new(
@@ -1225,10 +1422,12 @@ impl MacroExpander {
                 self.steps = 0;
             }
             self.expansion_stack.push(key.clone());
-            let consumed = arguments[..definition.arity].to_vec();
             let diagnostic_start = self.diagnostics.len();
-            let expanded =
-                self.invoke_macro(&definition, consumed, expression.syntax().span.clone());
+            let expanded = self.invoke_macro(
+                &definition,
+                selected.arguments,
+                expression.syntax().span.clone(),
+            );
             let Some(result) = expanded else {
                 self.expansion_stack.pop();
                 if self.diagnostics.len() > diagnostic_start {
@@ -1258,7 +1457,7 @@ impl MacroExpander {
                 self.expansion_stack.pop();
                 return expression;
             };
-            for argument in &arguments[definition.arity..] {
+            for argument in &arguments[consumed_count..] {
                 let mut syntax = result.syntax().clone();
                 syntax.id = self.fresh_id();
                 result = Expression::Call(crate::CallExpression {
@@ -1273,7 +1472,10 @@ impl MacroExpander {
         }
 
         if let Expression::Name(name) = head
-            && matches!(name.name.as_str(), "Ident" | "CallExpr")
+            && matches!(
+                name.name.as_str(),
+                "Ident" | "CallExpr" | "Private" | "Public" | "PublicRepr"
+            )
         {
             self.diagnostics.push(Diagnostic::new(
                 expression.syntax().span.clone(),
@@ -1345,6 +1547,13 @@ impl MacroExpander {
                 ));
                 Expression::Quote(quote)
             }
+            Expression::VisibilityArgument(visibility) => {
+                self.diagnostics.push(Diagnostic::new(
+                    visibility.syntax.span.clone(),
+                    "visibility syntax may only be passed to a matching macro parameter",
+                ));
+                Expression::VisibilityArgument(visibility)
+            }
             Expression::Splice(splice) => {
                 self.diagnostics.push(Diagnostic::new(
                     splice.syntax.span.clone(),
@@ -1400,26 +1609,49 @@ impl MacroExpander {
         &mut self,
         keys: &[MacroKey],
         arguments: &[&Expression],
+        call_visibility: Option<&VisibilitySyntax>,
         span: Span,
-    ) -> Option<MacroDefinition> {
+    ) -> Option<SelectedMacro> {
         let definitions = keys
             .iter()
             .filter_map(|key| self.definitions.get(key).cloned())
             .collect::<Vec<_>>();
         let mut complete = definitions
             .iter()
-            .filter(|definition| {
-                arguments.len() >= definition.arity
-                    && definition
-                        .parameters
-                        .iter()
-                        .zip(arguments)
-                        .all(|(expected, argument)| meta_type_matches(expected, argument))
+            .filter_map(|definition| {
+                match_macro_arguments(definition, arguments, call_visibility).map(
+                    |(matched_arguments, consumed)| SelectedMacro {
+                        definition: definition.clone(),
+                        arguments: matched_arguments,
+                        consumed,
+                    },
+                )
             })
-            .cloned()
             .collect::<Vec<_>>();
         if complete.is_empty() {
-            if let [definition] = definitions.as_slice()
+            let has_visibility_parameters = definitions.iter().any(|definition| {
+                definition.parameters.iter().any(|parameter| {
+                    matches!(
+                        parameter,
+                        MetaType::Visibility | MetaType::MacroCallVisibility
+                    )
+                })
+            });
+            if call_visibility.is_some() {
+                let name = keys
+                    .first()
+                    .map(|key| key.name.as_str())
+                    .unwrap_or("<macro>");
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "macro `{name}` has no overload whose first parameter is `MacroCallVisibility`"
+                    ),
+                ));
+                return None;
+            }
+            if !has_visibility_parameters
+                && let [definition] = definitions.as_slice()
                 && arguments.len() >= definition.arity
             {
                 self.validate_macro_arguments(definition, &arguments[..definition.arity]);
@@ -1428,7 +1660,8 @@ impl MacroExpander {
             let mut arities = definitions
                 .iter()
                 .filter(|definition| {
-                    arguments.len() < definition.arity
+                    !has_visibility_parameters
+                        && arguments.len() < definition.arity
                         && definition
                             .parameters
                             .iter()
@@ -1466,20 +1699,23 @@ impl MacroExpander {
             self.diagnostics.push(Diagnostic::new(span, message));
             return None;
         }
-        let longest = complete.iter().map(|definition| definition.arity).max()?;
-        complete.retain(|definition| definition.arity == longest);
+        let longest = complete.iter().map(|selected| selected.consumed).max()?;
+        complete.retain(|selected| selected.consumed == longest);
         let undominated = complete
             .iter()
             .filter(|candidate| {
                 !complete.iter().any(|other| {
-                    other.key != candidate.key
-                        && signature_more_specific(&other.parameters, &candidate.parameters)
+                    other.definition.key != candidate.definition.key
+                        && signature_more_specific(
+                            &other.definition.parameters,
+                            &candidate.definition.parameters,
+                        )
                 })
             })
             .cloned()
             .collect::<Vec<_>>();
-        if let [definition] = undominated.as_slice() {
-            return Some(definition.clone());
+        if let [selected] = undominated.as_slice() {
+            return Some(selected.clone());
         }
         let name = keys
             .first()
@@ -1489,7 +1725,8 @@ impl MacroExpander {
             span,
             format!("ambiguous invocation of macro `{name}`"),
         ));
-        for definition in undominated {
+        for selected in undominated {
+            let definition = selected.definition;
             self.diagnostics.push(Diagnostic::new(
                 definition.declaration.syntax.span.clone(),
                 format!(
@@ -1504,15 +1741,15 @@ impl MacroExpander {
     fn invoke_macro(
         &mut self,
         definition: &MacroDefinition,
-        arguments: Vec<&Expression>,
+        arguments: Vec<MacroArgument>,
         call_span: Span,
     ) -> Option<SyntaxValue> {
-        if !self.validate_macro_arguments(definition, &arguments) {
-            return None;
-        }
         match &definition.kind {
             MacroKind::CString => {
                 let [argument] = arguments.as_slice() else {
+                    return None;
+                };
+                let MacroArgument::Expression(argument) = argument else {
                     return None;
                 };
                 let Expression::String(string) = argument else {
@@ -1542,7 +1779,14 @@ impl MacroExpander {
                 let mut value =
                     self.eval_expression(definition.key.module, body, &mut Environment::new())?;
                 for (expected, argument) in definition.parameters.iter().zip(arguments) {
-                    let argument = self.meta_argument_value(expected, argument)?;
+                    let argument = match argument {
+                        MacroArgument::Expression(argument) => {
+                            self.meta_argument_value(expected, &argument)?
+                        }
+                        MacroArgument::Visibility(visibility) => {
+                            SyntaxValue::Visibility(visibility)
+                        }
+                    };
                     value = self.apply_value(value, Value::Syntax(argument), call_span.clone())?;
                 }
                 match value {
@@ -1564,6 +1808,13 @@ impl MacroExpander {
         expected: &MetaType,
         argument: &Expression,
     ) -> Option<SyntaxValue> {
+        if let Expression::VisibilityArgument(visibility) = argument {
+            return matches!(
+                expected,
+                MetaType::Syntax | MetaType::Visibility | MetaType::MacroCallVisibility
+            )
+            .then(|| SyntaxValue::Visibility(visibility.clone()));
+        }
         match expected {
             MetaType::Type => {
                 let (syntax, grouped) = category_argument_syntax(argument)?;
@@ -1576,6 +1827,12 @@ impl MacroExpander {
                 crate::parser::parse_pattern_fragment(syntax, grouped, &mut self.next_syntax_id)
                     .ok()
                     .map(SyntaxValue::Pattern)
+            }
+            MetaType::Visibility | MetaType::MacroCallVisibility => {
+                let Expression::VisibilityArgument(visibility) = argument else {
+                    return None;
+                };
+                Some(SyntaxValue::Visibility(visibility.clone()))
             }
             MetaType::Item => None,
             _ => Some(SyntaxValue::from_expression(
@@ -1604,6 +1861,8 @@ impl MacroExpander {
                     MetaType::Type => "a type".to_owned(),
                     MetaType::Pattern => "a pattern".to_owned(),
                     MetaType::Item => "an item".to_owned(),
+                    MetaType::Visibility => "visibility syntax".to_owned(),
+                    MetaType::MacroCallVisibility => "macro-call visibility".to_owned(),
                     MetaType::Syntax | MetaType::Expr => "an expression".to_owned(),
                 };
                 self.diagnostics.push(Diagnostic::new(
@@ -1705,6 +1964,9 @@ impl MacroExpander {
                 ));
                 None
             }
+            Expression::VisibilityArgument(visibility) => {
+                Some(Value::Syntax(SyntaxValue::Visibility(visibility.clone())))
+            }
             Expression::Product(product) => {
                 let mut values = Vec::new();
                 for element in &product.elements {
@@ -1727,8 +1989,14 @@ impl MacroExpander {
             Expression::Call(call) => {
                 let (head, arguments) = flatten_call(expression);
                 if let Some(keys) = self.resolve_macro(module, head) {
-                    let definition =
-                        self.select_macro(&keys, &arguments, expression.syntax().span.clone())?;
+                    let selected = self.select_macro(
+                        &keys,
+                        &arguments,
+                        None,
+                        expression.syntax().span.clone(),
+                    )?;
+                    let definition = selected.definition;
+                    let consumed_count = selected.consumed;
                     let key = definition.key.clone();
                     if self.expansion_stack.contains(&key) {
                         self.diagnostics.push(Diagnostic::new(
@@ -1738,10 +2006,12 @@ impl MacroExpander {
                         return None;
                     }
                     self.expansion_stack.push(key.clone());
-                    let consumed = arguments[..definition.arity].to_vec();
-                    let mut result =
-                        self.invoke_macro(&definition, consumed, expression.syntax().span.clone());
-                    if !arguments[definition.arity..].is_empty()
+                    let mut result = self.invoke_macro(
+                        &definition,
+                        selected.arguments,
+                        expression.syntax().span.clone(),
+                    );
+                    if !arguments[consumed_count..].is_empty()
                         && result
                             .as_ref()
                             .is_some_and(|syntax| syntax.to_expression().is_none())
@@ -1762,7 +2032,7 @@ impl MacroExpander {
                             let mut expanded = syntax
                                 .into_expression()
                                 .expect("non-item syntax must contain an expression");
-                            for argument in &arguments[definition.arity..] {
+                            for argument in &arguments[consumed_count..] {
                                 let mut syntax = expanded.syntax().clone();
                                 syntax.id = self.fresh_id();
                                 expanded = Expression::Call(crate::CallExpression {
@@ -2360,7 +2630,9 @@ impl MacroExpander {
                     self.freshen_syntax(&mut operator.syntax, module, mark);
                 }
             }
-            Expression::SyntaxArgument(_) | Expression::Quote(_) => {}
+            Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_) => {}
             Expression::Splice(_)
             | Expression::Name(_)
             | Expression::String(_)
@@ -2406,6 +2678,8 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "Type" => Some(MetaType::Type),
             "Pattern" => Some(MetaType::Pattern),
             "Item" => Some(MetaType::Item),
+            "Visibility" => Some(MetaType::Visibility),
+            "MacroCallVisibility" => Some(MetaType::MacroCallVisibility),
             _ => None,
         },
         Type::Application(application) => {
@@ -2442,7 +2716,13 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             let mut next_syntax_id = 0;
             crate::parser::parse_pattern_fragment(syntax, grouped, &mut next_syntax_id).is_ok()
         }),
-        MetaType::Syntax | MetaType::Expr => !matches!(argument, Expression::SyntaxArgument(_)),
+        MetaType::Visibility => matches!(argument, Expression::VisibilityArgument(_)),
+        MetaType::MacroCallVisibility => false,
+        MetaType::Syntax => !matches!(argument, Expression::SyntaxArgument(_)),
+        MetaType::Expr => !matches!(
+            argument,
+            Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_)
+        ),
         MetaType::Ident(spelling) => match expression_argument {
             Expression::Name(name) if is_plain_identifier(name) => spelling
                 .as_ref()
@@ -2452,9 +2732,60 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
         MetaType::CallExpr => matches!(expression_argument, Expression::Call(_)),
         MetaType::UnstructuredExpr => !matches!(
             expression_argument,
-            Expression::Name(_) | Expression::Call(_)
+            Expression::Name(_) | Expression::Call(_) | Expression::VisibilityArgument(_)
         ),
         MetaType::Item => false,
+    }
+}
+
+fn match_macro_arguments(
+    definition: &MacroDefinition,
+    arguments: &[&Expression],
+    call_visibility: Option<&VisibilitySyntax>,
+) -> Option<(Vec<MacroArgument>, usize)> {
+    let mut matched = Vec::with_capacity(definition.parameters.len());
+    let mut parameter_index = 0;
+    let mut argument_index = 0;
+
+    if definition.parameters.first() == Some(&MetaType::MacroCallVisibility) {
+        matched.push(MacroArgument::Visibility(
+            call_visibility.cloned().unwrap_or_else(private_visibility),
+        ));
+        parameter_index += 1;
+    } else if call_visibility.is_some() {
+        return None;
+    }
+
+    for expected in &definition.parameters[parameter_index..] {
+        match expected {
+            MetaType::Visibility => {
+                if let Some(Expression::VisibilityArgument(visibility)) =
+                    arguments.get(argument_index).copied()
+                {
+                    matched.push(MacroArgument::Visibility(visibility.clone()));
+                    argument_index += 1;
+                } else {
+                    matched.push(MacroArgument::Visibility(private_visibility()));
+                }
+            }
+            MetaType::MacroCallVisibility => return None,
+            _ => {
+                let argument = arguments.get(argument_index).copied()?;
+                if !meta_type_matches(expected, argument) {
+                    return None;
+                }
+                matched.push(MacroArgument::Expression(argument.clone()));
+                argument_index += 1;
+            }
+        }
+    }
+    Some((matched, argument_index))
+}
+
+fn private_visibility() -> VisibilitySyntax {
+    VisibilitySyntax {
+        syntax: Syntax::compiler(),
+        kind: VisibilityKind::Private,
     }
 }
 
@@ -2469,7 +2800,10 @@ fn modifier_argument_matches(expected: &MetaType, argument: &ModifierArgument) -
             crate::parser::parse_pattern_fragment(&argument.syntax, true, &mut next_syntax_id)
                 .is_ok()
         }
-        MetaType::Item | MetaType::Syntax => false,
+        MetaType::Item
+        | MetaType::Syntax
+        | MetaType::Visibility
+        | MetaType::MacroCallVisibility => false,
         _ => argument
             .expression
             .as_ref()
@@ -2512,6 +2846,7 @@ fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
                 | (MetaType::CallExpr, MetaType::Expr)
                 | (MetaType::UnstructuredExpr, MetaType::Expr)
                 | (MetaType::Ident(Some(_)), MetaType::Ident(None))
+                | (MetaType::MacroCallVisibility, MetaType::Visibility)
         )
 }
 
@@ -2537,6 +2872,8 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Type => "Type".to_owned(),
             MetaType::Pattern => "Pattern".to_owned(),
             MetaType::Item => "Item".to_owned(),
+            MetaType::Visibility => "Visibility".to_owned(),
+            MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
         })
         .collect::<Vec<_>>()
         .join(" -> ")
@@ -2605,6 +2942,11 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Type"
                 | "Pattern"
                 | "Item"
+                | "Visibility"
+                | "MacroCallVisibility"
+                | "Private"
+                | "Public"
+                | "PublicRepr"
         ),
         Type::Function(function) => {
             type_contains_syntax(&function.parameter) || type_contains_syntax(&function.result)
@@ -2635,6 +2977,56 @@ fn binding_contains_syntax(binding: &Binding) -> bool {
             .value
             .as_ref()
             .is_some_and(expression_parameter_contains_syntax)
+}
+
+fn binding_uses_macro_call_visibility(binding: &Binding) -> bool {
+    binding
+        .annotation
+        .as_ref()
+        .is_some_and(|annotation| type_contains_named(annotation, "MacroCallVisibility"))
+        || binding.value.as_ref().is_some_and(|value| {
+            let mut current = value;
+            while let Expression::Function(function) = current {
+                let contains = match &function.pattern {
+                    Pattern::Binding(binding) => {
+                        type_contains_named(&binding.ty, "MacroCallVisibility")
+                    }
+                    Pattern::Wildcard(wildcard) => {
+                        type_contains_named(&wildcard.ty, "MacroCallVisibility")
+                    }
+                    _ => false,
+                };
+                if contains {
+                    return true;
+                }
+                current = &function.body;
+            }
+            false
+        })
+}
+
+fn type_contains_named(ty: &Type, expected: &str) -> bool {
+    match ty {
+        Type::Named(named) => named.namespace.is_none() && named.name == expected,
+        Type::Function(function) => {
+            type_contains_named(&function.parameter, expected)
+                || type_contains_named(&function.result, expected)
+        }
+        Type::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| type_contains_named(&element.ty, expected)),
+        Type::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .any(|alternative| type_contains_named(alternative, expected)),
+        Type::Application(application) => {
+            type_contains_named(&application.callee, expected)
+                || type_contains_named(&application.argument, expected)
+        }
+        Type::Repeated(repeated) => type_contains_named(&repeated.element, expected),
+        Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => false,
+    }
 }
 
 fn expression_parameter_contains_syntax(expression: &Expression) -> bool {
@@ -2668,6 +3060,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
     }
     match expression {
         Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
         | Expression::Quote(_)
         | Expression::Splice(_)
         | Expression::Name(_)
@@ -2760,6 +3153,11 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             crate::string_literal::decode(&pattern.literal).is_ok_and(|literal| literal == value)
         }
         Pattern::Binding(binding) => {
+            if let Value::Syntax(SyntaxValue::Visibility(visibility)) = &value
+                && visibility_pattern_matches(&binding.name, visibility.kind)
+            {
+                return true;
+            }
             if !matches_pattern_type(&binding.ty, &value) {
                 return false;
             }
@@ -2810,6 +3208,12 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     environment,
                 );
             }
+            if pattern.namespace.is_none()
+                && let Value::Syntax(SyntaxValue::Visibility(visibility)) = &value
+                && visibility_pattern_matches(&pattern.name, visibility.kind)
+            {
+                return bind_pattern(&pattern.argument, Value::Product(Vec::new()), environment);
+            }
             let Value::Nominal(name, value) = value else {
                 return false;
             };
@@ -2817,6 +3221,15 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
         }
         Pattern::Splice(_) => false,
     }
+}
+
+fn visibility_pattern_matches(name: &str, kind: VisibilityKind) -> bool {
+    matches!(
+        (name, kind),
+        ("Private", VisibilityKind::Private)
+            | ("Public", VisibilityKind::Public)
+            | ("PublicRepr", VisibilityKind::PublicRepr)
+    )
 }
 
 fn matches_pattern_type(ty: &Type, value: &Value) -> bool {
@@ -2838,6 +3251,10 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         (MetaType::Type, Value::Syntax(SyntaxValue::Type(_))) => true,
         (MetaType::Pattern, Value::Syntax(SyntaxValue::Pattern(_))) => true,
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
+        (
+            MetaType::Visibility | MetaType::MacroCallVisibility,
+            Value::Syntax(SyntaxValue::Visibility(_)),
+        ) => true,
         _ => false,
     }
 }
@@ -2860,14 +3277,15 @@ fn substitute_splices(
             return None;
         }
         return match environment.get(&splice.name).map(EnvironmentBinding::get) {
-            Some(Value::Syntax(expression)) => match expression.into_expression() {
+            Some(Value::Syntax(expression)) => match expression.clone().into_expression() {
                 Some(expression) => Some(expression),
                 None => {
                     diagnostics.push(Diagnostic::new(
                         splice.syntax.span.clone(),
                         format!(
-                            "splice `${}` contains item syntax, not expression syntax",
-                            splice.name
+                            "splice `${}` contains {} syntax, not expression syntax",
+                            splice.name,
+                            syntax_category(&expression)
                         ),
                     ));
                     None
@@ -2938,7 +3356,7 @@ fn substitute_splices(
             }
         }
         Expression::Quote(_) => {}
-        Expression::SyntaxArgument(_) => {}
+        Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
         Expression::Splice(_)
         | Expression::Name(_)
         | Expression::String(_)
@@ -2985,6 +3403,8 @@ fn substitute_statement(
 fn item_output_supported(item: &Item) -> bool {
     match item {
         Item::Modified(modified) => item_output_supported(&modified.item),
+        Item::VisibilitySplice(splice) => item_output_supported(&splice.item),
+        Item::VisibilityMacroInvocation(_) => true,
         Item::ExternBlock(_)
         | Item::TypeDeclaration(_)
         | Item::TraitDeclaration(_)
@@ -2997,6 +3417,8 @@ fn item_output_supported(item: &Item) -> bool {
 fn modifier_target_supported(item: &Item) -> bool {
     match item {
         Item::Modified(modified) => modifier_target_supported(&modified.item),
+        Item::VisibilityMacroInvocation(_) => true,
+        Item::VisibilitySplice(splice) => modifier_target_supported(&splice.item),
         Item::ExternBlock(_)
         | Item::TypeDeclaration(_)
         | Item::TraitDeclaration(_)
@@ -3012,6 +3434,8 @@ fn modifier_target_supported(item: &Item) -> bool {
 fn item_syntax(item: &Item) -> &Syntax {
     match item {
         Item::Modified(value) => &value.syntax,
+        Item::VisibilityMacroInvocation(value) => &value.syntax,
+        Item::VisibilitySplice(value) => &value.syntax,
         Item::UseDeclaration(value) => &value.syntax,
         Item::Submodule(value) => &value.syntax,
         Item::ExternBlock(value) => &value.syntax,
@@ -3206,6 +3630,37 @@ fn substitute_item(
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
+    if let Item::VisibilitySplice(splice) = item {
+        let value = environment.get(&splice.name).map(EnvironmentBinding::get);
+        let Some(Value::Syntax(SyntaxValue::Visibility(visibility))) = value else {
+            diagnostics.push(Diagnostic::new(
+                splice.syntax.span.clone(),
+                match value {
+                    Some(Value::Syntax(value)) => format!(
+                        "visibility splice `${}` contains {} syntax",
+                        splice.name,
+                        syntax_category(&value)
+                    ),
+                    Some(_) => format!(
+                        "visibility splice `${}` does not contain `Syntax`",
+                        splice.name
+                    ),
+                    None => format!("unknown visibility splice `${}`", splice.name),
+                },
+            ));
+            return None;
+        };
+        let mut replacement = (*splice.item).clone();
+        apply_visibility_to_item(
+            &mut replacement,
+            visibility.kind,
+            splice.syntax.span.clone(),
+            diagnostics,
+        )?;
+        substitute_item(&mut replacement, environment, diagnostics)?;
+        *item = replacement;
+        return Some(());
+    }
     match item {
         Item::Modified(modified) => {
             for modifier in &mut modified.modifiers {
@@ -3217,6 +3672,11 @@ fn substitute_item(
             }
             substitute_item(&mut modified.item, environment, diagnostics)?;
         }
+        Item::VisibilityMacroInvocation(invocation) => {
+            invocation.expression =
+                substitute_splices(&invocation.expression, environment, diagnostics)?;
+        }
+        Item::VisibilitySplice(_) => unreachable!(),
         Item::ExternBlock(block) => {
             for binding in &mut block.bindings {
                 substitute_binding(binding, environment, diagnostics)?;
@@ -3259,6 +3719,75 @@ fn substitute_item(
     Some(())
 }
 
+fn apply_visibility_to_item(
+    item: &mut Item,
+    kind: VisibilityKind,
+    span: Span,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    if let Item::Modified(modified) = item {
+        return apply_visibility_to_item(&mut modified.item, kind, span, diagnostics);
+    }
+    let public = if kind == VisibilityKind::Private {
+        Visibility::Private
+    } else {
+        Visibility::Public
+    };
+    match item {
+        Item::ExternBlock(block) if kind != VisibilityKind::PublicRepr => block.visibility = public,
+        Item::TypeDeclaration(declaration) => {
+            declaration.visibility = public;
+            declaration.representation_visibility = if kind == VisibilityKind::PublicRepr {
+                Visibility::Public
+            } else {
+                Visibility::Private
+            };
+            if kind == VisibilityKind::PublicRepr
+                && (declaration.kind != crate::TypeDeclarationKind::Distinct
+                    || declaration.underlying.is_none())
+            {
+                diagnostics.push(Diagnostic::new(
+                    span,
+                    "`PublicRepr` visibility requires a represented distinct type",
+                ));
+                return None;
+            }
+        }
+        Item::TraitDeclaration(declaration) if kind != VisibilityKind::PublicRepr => {
+            declaration.visibility = public
+        }
+        Item::Statement(statement) => {
+            let Statement::Binding(binding) = statement.as_mut() else {
+                diagnostics.push(Diagnostic::new(
+                    span,
+                    "visibility may only be spliced onto a declaration item",
+                ));
+                return None;
+            };
+            if kind == VisibilityKind::PublicRepr {
+                diagnostics.push(Diagnostic::new(
+                    span,
+                    "`PublicRepr` visibility may only be applied to a represented distinct type",
+                ));
+                return None;
+            }
+            binding.visibility = public;
+        }
+        _ => {
+            diagnostics.push(Diagnostic::new(
+                span,
+                if kind == VisibilityKind::PublicRepr {
+                    "`PublicRepr` visibility may only be applied to a represented distinct type"
+                } else {
+                    "visibility may only be spliced onto `let`, `def`, `type`, `extern`, or `trait` declarations"
+                },
+            ));
+            return None;
+        }
+    }
+    Some(())
+}
+
 fn alpha_rename_item(item: &mut Item, mark: u64) {
     let mut scopes = Vec::new();
     match item {
@@ -3272,6 +3801,10 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
             }
             alpha_rename_item(&mut modified.item, mark);
         }
+        Item::VisibilityMacroInvocation(invocation) => {
+            alpha_rename_expression(&mut invocation.expression, mark, &mut scopes);
+        }
+        Item::VisibilitySplice(splice) => alpha_rename_item(&mut splice.item, mark),
         Item::ExternBlock(block) => {
             for binding in &mut block.bindings {
                 if let Some(value) = &mut binding.value {
@@ -3405,6 +3938,7 @@ fn alpha_rename_expression(
             }
         }
         Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
         | Expression::Quote(_)
         | Expression::Splice(_)
         | Expression::String(_)
@@ -3467,6 +4001,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Index(value) => &mut value.syntax,
         Expression::Infix(value) => &mut value.syntax,
         Expression::SyntaxArgument(value) => &mut value.syntax,
+        Expression::VisibilityArgument(value) => &mut value.syntax,
         Expression::Quote(value) => &mut value.syntax,
         Expression::Splice(value) => &mut value.syntax,
         Expression::Name(value) => &mut value.syntax,
@@ -3611,6 +4146,15 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
                 }
             }
             freshen_item(expander, &mut modified.item, module, mark);
+        }
+        Item::VisibilityMacroInvocation(invocation) => {
+            expander.freshen_syntax(&mut invocation.syntax, module, mark);
+            expander.freshen_syntax(&mut invocation.visibility.syntax, module, mark);
+            expander.freshen_expression(&mut invocation.expression, module, mark);
+        }
+        Item::VisibilitySplice(splice) => {
+            expander.freshen_syntax(&mut splice.syntax, module, mark);
+            freshen_item(expander, &mut splice.item, module, mark);
         }
         Item::ExternBlock(block) => {
             expander.freshen_syntax(&mut block.syntax, module, mark);

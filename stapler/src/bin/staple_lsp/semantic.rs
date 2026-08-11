@@ -239,6 +239,14 @@ impl<'a> Classifier<'a> {
                 }
                 self.item(&value.item, resolved);
             }
+            Item::VisibilityMacroInvocation(value) => {
+                self.visibility(&value.visibility);
+                self.expression(&value.expression, resolved);
+            }
+            Item::VisibilitySplice(value) => {
+                self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1);
+                self.item(&value.item, resolved);
+            }
             Item::UseDeclaration(value) => {
                 for part in &value.path {
                     self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
@@ -487,6 +495,7 @@ impl<'a> Classifier<'a> {
                 }
             }
             Expression::SyntaxArgument(_) => {}
+            Expression::VisibilityArgument(value) => self.visibility(value),
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression, resolved),
                 QuoteTemplate::Item(item) => self.item(item, resolved),
@@ -517,6 +526,13 @@ impl<'a> Classifier<'a> {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
+        }
+    }
+
+    fn visibility(&mut self, visibility: &VisibilitySyntax) {
+        self.mark_first(&visibility.syntax, "pub", KEYWORD, 0, 1);
+        if visibility.kind == VisibilityKind::PublicRepr {
+            self.mark_last(&visibility.syntax, "repr", KEYWORD, 0, 1);
         }
     }
 

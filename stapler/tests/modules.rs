@@ -872,6 +872,32 @@ fn imports_function_and_modifier_macros_with_the_same_name() {
 }
 
 #[test]
+fn imports_and_reexports_visibility_aware_macros() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use facade define\n",
+            "pub define\n",
+            "let result: I32 = generated\n",
+        ),
+    );
+    fixture.write("facade.sta", "pub use helpers define\n");
+    fixture.write(
+        "helpers.sta",
+        concat!(
+            "pub macro define = vis: MacroCallVisibility => quote {\n",
+            "    $vis let generated: I32 = 42\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("visibility-aware macros should survive imports and re-exports");
+}
+
+#[test]
 fn generated_type_and_pattern_splices_keep_caller_hygiene() {
     let fixture = Fixture::new();
     fixture.write(
