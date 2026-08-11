@@ -171,7 +171,7 @@ impl Server {
                 Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
                         kind: MarkupKind::Markdown,
-                        value: format!("```staple\n{}\n```", entry.value_type),
+                        value: format!("```staple\n{}\n```", entry.signature),
                     }),
                     range: Some(Range::new(
                         Position::new(start_line, start_character),
