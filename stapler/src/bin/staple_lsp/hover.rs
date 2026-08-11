@@ -208,11 +208,17 @@ impl Collector<'_> {
                 }
             }
             Item::MacroDeclaration(declaration) => {
+                if let Some(annotation) = &declaration.annotation {
+                    self.ty(annotation);
+                }
                 if let Some(value) = &declaration.value {
                     self.expression(value);
                 }
             }
             Item::TraitImplementation(implementation) => {
+                for argument in &implementation.arguments {
+                    self.ty(argument);
+                }
                 for member in &implementation.members {
                     let value_type = self
                         .typed
@@ -230,6 +236,12 @@ impl Collector<'_> {
                 }
             }
             Item::TraitDeclaration(declaration) => {
+                for parameter in &declaration.type_parameters {
+                    self.type_parameter(parameter);
+                }
+                for prerequisite in &declaration.prerequisites {
+                    self.trait_bound(prerequisite);
+                }
                 for member in &declaration.members {
                     self.named(
                         &member.syntax,
@@ -240,14 +252,83 @@ impl Collector<'_> {
                             member.annotation.syntax().text().trim()
                         ),
                     );
+                    self.ty(&member.annotation);
                     if let Some(default) = &member.default {
                         self.expression(default);
                     }
                 }
             }
+            Item::TypeDeclaration(declaration) => self.type_declaration(declaration),
             Item::Statement(statement) => self.statement(statement),
-            Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
+            Item::UseDeclaration(_) => {}
         }
+    }
+
+    fn type_declaration(&mut self, declaration: &TypeDeclaration) {
+        if let Some((id, _)) = self
+            .typed
+            .resolved()
+            .type_declarations()
+            .iter()
+            .find(|(_, candidate)| candidate.syntax.id == declaration.syntax.id)
+            && let Some(signature) = self.type_signature(*id, declaration.syntax.id)
+        {
+            self.named(&declaration.syntax, &declaration.name, signature);
+        }
+        for parameter in &declaration.type_parameters {
+            self.type_parameter(parameter);
+        }
+        for bound in &declaration.trait_bounds {
+            self.trait_bound(bound);
+        }
+        if let Some(underlying) = &declaration.underlying {
+            self.ty(underlying);
+        }
+    }
+
+    fn type_signature(&self, id: TypeId, from_syntax: SyntaxId) -> Option<String> {
+        let resolved = self.typed.resolved();
+        let declaration = resolved.type_declarations().get(&id)?;
+        let from_module = resolved
+            .module_for_syntax(from_syntax)
+            .unwrap_or_else(|| resolved.program().entry());
+        let representation_is_visible = declaration.kind == TypeDeclarationKind::Alias
+            || resolved.representation_visible_from(id, from_module);
+        if !representation_is_visible && declaration.type_parameters.is_empty() {
+            return Some(format!("type {}", declaration.name));
+        }
+        let representation = if representation_is_visible {
+            declaration
+                .underlying
+                .as_ref()
+                .map(|ty| ty.syntax().text().trim().to_owned())
+                .unwrap_or_else(|| match declaration.kind {
+                    TypeDeclarationKind::Opaque => "opaque".to_owned(),
+                    TypeDeclarationKind::Singleton => "()".to_owned(),
+                    TypeDeclarationKind::Alias | TypeDeclarationKind::Distinct => "...".to_owned(),
+                })
+        } else {
+            "...".to_owned()
+        };
+        let alias = if declaration.kind == TypeDeclarationKind::Alias {
+            " alias"
+        } else {
+            ""
+        };
+        let parameters = declaration
+            .type_parameters
+            .iter()
+            .map(|parameter| parameter.syntax().text().trim().to_owned())
+            .collect::<Vec<_>>();
+        let parameters = if parameters.is_empty() {
+            String::new()
+        } else {
+            format!("{} => ", parameters.join(" => "))
+        };
+        Some(format!(
+            "type{alias} {} = {parameters}{representation}",
+            declaration.name
+        ))
     }
 
     fn statement(&mut self, statement: &Statement) {
@@ -317,6 +398,15 @@ impl Collector<'_> {
                 format!("{prefix} {}: {value_type}", binding.name),
             );
         }
+        for parameter in &binding.type_parameters {
+            self.type_parameter(parameter);
+        }
+        for bound in &binding.trait_bounds {
+            self.trait_bound(bound);
+        }
+        if let Some(annotation) = &binding.annotation {
+            self.ty(annotation);
+        }
         if let Some(value) = &binding.value {
             self.expression(value);
         }
@@ -346,7 +436,10 @@ impl Collector<'_> {
                 self.pattern(&function.pattern);
                 self.expression(&function.body);
             }
-            Expression::Satisfies(satisfies) => self.expression(&satisfies.value),
+            Expression::Satisfies(satisfies) => {
+                self.expression(&satisfies.value);
+                self.ty(&satisfies.ty);
+            }
             Expression::Match(match_) => {
                 self.expression(&match_.subject);
                 for arm in &match_.arms {
@@ -419,8 +512,62 @@ impl Collector<'_> {
                     self.pattern(element);
                 }
             }
-            Pattern::Nominal(nominal) => self.pattern(&nominal.argument),
-            Pattern::Binding(_) | Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+            Pattern::Nominal(nominal) => {
+                if let Some(id) = self.typed.resolved().type_for_pattern(nominal.syntax.id)
+                    && let Some(signature) = self.type_signature(id, nominal.syntax.id)
+                {
+                    self.named(&nominal.syntax, &nominal.name, signature);
+                }
+                self.pattern(&nominal.argument);
+            }
+            Pattern::Binding(binding) => self.ty(&binding.ty),
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
+        }
+    }
+
+    fn type_parameter(&mut self, parameter: &TypeParameterPattern) {
+        if let TypeParameterPattern::Product(product) = parameter {
+            for element in &product.elements {
+                self.type_parameter(element);
+            }
+        }
+    }
+
+    fn trait_bound(&mut self, bound: &TraitBound) {
+        for argument in &bound.arguments {
+            self.ty(argument);
+        }
+    }
+
+    fn ty(&mut self, ty: &Type) {
+        match ty {
+            Type::Named(named) => {
+                if let Some(id) = self.typed.resolved().type_for(named.syntax.id)
+                    && let Some(signature) = self.type_signature(id, named.syntax.id)
+                {
+                    self.named(&named.syntax, &named.name, signature);
+                }
+            }
+            Type::Product(product) => {
+                for element in &product.elements {
+                    self.ty(&element.ty);
+                }
+            }
+            Type::Sum(sum) => {
+                for alternative in &sum.alternatives {
+                    self.ty(alternative);
+                }
+            }
+            Type::Function(function) => {
+                self.ty(&function.parameter);
+                self.ty(&function.result);
+            }
+            Type::Application(application) => {
+                self.ty(&application.callee);
+                self.ty(&application.argument);
+            }
+            Type::Repeated(repeated) => self.ty(&repeated.element),
+            Type::Inferred(_) | Type::StringLiteral(_) => {}
         }
     }
 
@@ -565,6 +712,84 @@ mod tests {
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "dependency.imported_value"
                 && entry.signature == "let imported_value: I32"
+        }));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn formats_local_type_declarations_and_references() {
+        let source = concat!(
+            "type Box = T => (value: T)\n",
+            "type alias Pair = (A, B) => (A, B)\n",
+            "def keep: Box I32 -> Box I32 = value => value\n",
+            "def pair: Pair (I32, I32) -> Pair (I32, I32) = value => value\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-local-types-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "Box" && entry.signature == "type Box = T => (value: T)"
+        }));
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "Pair"
+                && entry.signature == "type alias Pair = (A, B) => (A, B)"
+        }));
+    }
+
+    #[test]
+    fn respects_imported_type_representation_visibility() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-hover-import-types-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("dependency.sta"),
+            concat!(
+                "pub type Hidden = I32\n",
+                "pub type HiddenGeneric = T => T\n",
+                "pub(repr) type Visible = I32\n",
+                "pub type alias Alias = I32\n",
+            ),
+        )
+        .unwrap();
+        let source = concat!(
+            "use dependency (Hidden, HiddenGeneric, Visible, Alias)\n",
+            "def hidden: Hidden -> Hidden = value => value\n",
+            "def hidden_generic: HiddenGeneric I32 -> HiddenGeneric I32 = value => value\n",
+            "def visible: Visible -> Visible = value => value\n",
+            "def alias_value: Alias -> Alias = value => value\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "Hidden" && entry.signature == "type Hidden"
+        }));
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "HiddenGeneric"
+                && entry.signature == "type HiddenGeneric = T => ..."
+        }));
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "Visible" && entry.signature == "type Visible = I32"
+        }));
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "Alias" && entry.signature == "type alias Alias = I32"
         }));
 
         std::fs::remove_dir_all(root).unwrap();
