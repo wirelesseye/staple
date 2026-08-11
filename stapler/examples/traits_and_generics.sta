@@ -13,8 +13,8 @@ impl Label I32 {
 
 impl Label Bool {
     def label = value => match value {
-        True() => "true",
-        False() => "false",
+        True => "true",
+        False => "false",
     }
 }
 

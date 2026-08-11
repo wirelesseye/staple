@@ -2234,7 +2234,32 @@ impl NameResolver {
     fn resolve_pattern_types(&mut self, pattern: &Pattern) {
         match pattern {
             Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
-            Pattern::Binding(binding) => self.resolve_type(&binding.ty),
+            Pattern::Binding(binding) => {
+                let resolution_name = binding.resolution_name.as_deref().unwrap_or(&binding.name);
+                if !binding.mutable
+                    && matches!(binding.ty, Type::Inferred(_))
+                    && let Some(symbol) = binding
+                        .syntax
+                        .definition_module()
+                        .and_then(|module| {
+                            self.definition_context_values
+                                .get(module)
+                                .and_then(|values| values.get(resolution_name))
+                                .copied()
+                        })
+                        .or_else(|| self.lookup(resolution_name))
+                    && let Some(id) = self.singleton_values.get(&symbol).copied()
+                {
+                    self.nominal_patterns.insert(binding.syntax.id, id);
+                    if let Some(pattern_symbol) = self.declared_symbols.remove(&binding.syntax.id) {
+                        self.symbols.remove(&binding.syntax.id);
+                        self.symbol_modules.remove(&pattern_symbol);
+                        self.mutable_symbols.remove(&pattern_symbol);
+                    }
+                } else {
+                    self.resolve_type(&binding.ty);
+                }
+            }
             Pattern::Product(product) => {
                 for element in &product.elements {
                     self.resolve_pattern_types(element);
@@ -2421,6 +2446,9 @@ impl NameResolver {
         match pattern {
             Pattern::Wildcard(_) | Pattern::StringLiteral(_) => {}
             Pattern::Binding(binding) => {
+                if self.nominal_patterns.contains_key(&binding.syntax.id) {
+                    return;
+                }
                 if let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied() {
                     self.declare_symbol(
                         &binding.name,

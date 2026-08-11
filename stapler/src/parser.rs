@@ -917,6 +917,7 @@ impl Grammar {
             syntax: self.syntax(start),
             mutable,
             name,
+            resolution_name: None,
             ty,
         }))
     }

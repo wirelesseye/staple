@@ -464,6 +464,13 @@ impl<'a> Classifier<'a> {
     fn pattern(&mut self, pattern: &Pattern, kind: u32, resolved: Option<&ResolvedModule>) {
         match pattern {
             Pattern::Binding(value) => {
+                if resolved
+                    .and_then(|module| module.type_for_pattern(value.syntax.id))
+                    .is_some()
+                {
+                    self.mark_last(&value.syntax, &value.name, TYPE, READONLY, 1);
+                    return;
+                }
                 self.mark_last(
                     &value.syntax,
                     &value.name,

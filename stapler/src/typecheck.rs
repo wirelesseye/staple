@@ -1663,6 +1663,20 @@ impl TypeChecker {
                 }
             }
             Pattern::Binding(binding) => {
+                if let Some(expected_id) = module.type_for_pattern(binding.syntax.id) {
+                    if !matches!(value_type, CheckedType::Distinct { id, .. } if *id == expected_id)
+                        && *value_type != CheckedType::Error
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            format!(
+                                "singleton pattern `{}` cannot match `{value_type}`",
+                                binding.name
+                            ),
+                        ));
+                    }
+                    return;
+                }
                 let value_type = if matches!(binding.ty, Type::Inferred(_)) {
                     value_type.clone()
                 } else {
@@ -2876,6 +2890,38 @@ impl TypeChecker {
         self.pattern_types
             .insert(pattern.syntax().id, value_type.clone());
         match pattern {
+            Pattern::Binding(binding) if module.type_for_pattern(binding.syntax.id).is_some() => {
+                let expected_id = module
+                    .type_for_pattern(binding.syntax.id)
+                    .expect("checked singleton pattern");
+                let selected = match value_type {
+                    CheckedType::Sum(sum) => {
+                        let matches = sum
+                            .alternatives
+                            .iter()
+                            .filter(|alternative| {
+                                matches!(alternative, CheckedType::Distinct { id, .. } if *id == expected_id)
+                            })
+                            .collect::<Vec<_>>();
+                        (matches.len() == 1).then(|| (*matches[0]).clone())
+                    }
+                    CheckedType::Distinct { id, .. } if *id == expected_id => {
+                        Some(value_type.clone())
+                    }
+                    _ => None,
+                };
+                if let Some(selected) = selected {
+                    self.pattern_types.insert(binding.syntax.id, selected);
+                } else if *value_type != CheckedType::Error {
+                    self.diagnostics.push(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        format!(
+                            "singleton pattern `{}` cannot match `{value_type}`",
+                            binding.name
+                        ),
+                    ));
+                }
+            }
             Pattern::Binding(binding)
                 if !matches!(binding.ty, Type::Inferred(_))
                     && matches!(value_type, CheckedType::Sum(_)) =>
@@ -3040,6 +3086,20 @@ impl TypeChecker {
         match &types[0] {
             CheckedType::Sum(sum) => {
                 let alternatives = match candidate[0] {
+                    CoveragePattern::Pattern(Pattern::Binding(binding))
+                        if module.type_for_pattern(binding.syntax.id).is_some() =>
+                    {
+                        let selected_id = module
+                            .type_for_pattern(binding.syntax.id)
+                            .expect("resolved singleton pattern");
+                        sum.alternatives
+                            .iter()
+                            .position(|alternative| {
+                                matches!(alternative, CheckedType::Distinct { id, .. } if *id == selected_id)
+                            })
+                            .into_iter()
+                            .collect()
+                    }
                     CoveragePattern::Pattern(Pattern::Binding(binding))
                         if !matches!(binding.ty, Type::Inferred(_)) =>
                     {
@@ -3285,6 +3345,17 @@ impl TypeChecker {
         sum: &CheckedSumType,
     ) -> Option<Vec<CoveragePattern<'a>>> {
         if let CoveragePattern::Pattern(Pattern::Binding(binding)) = row[0]
+            && let Some(selected_id) = module.type_for_pattern(binding.syntax.id)
+        {
+            if !matches!(&sum.alternatives[index], CheckedType::Distinct { id, .. } if *id == selected_id)
+            {
+                return None;
+            }
+            let mut result = vec![CoveragePattern::Any];
+            result.extend_from_slice(&row[1..]);
+            return Some(result);
+        }
+        if let CoveragePattern::Pattern(Pattern::Binding(binding)) = row[0]
             && !matches!(binding.ty, Type::Inferred(_))
         {
             let selected = self.pattern_types.get(&binding.syntax.id)?;
@@ -3358,6 +3429,16 @@ impl TypeChecker {
         row: &[CoveragePattern<'a>],
         id: TypeId,
     ) -> Option<Vec<CoveragePattern<'a>>> {
+        if let CoveragePattern::Pattern(Pattern::Binding(binding)) = row[0]
+            && let Some(selected_id) = module.type_for_pattern(binding.syntax.id)
+        {
+            if selected_id != id {
+                return None;
+            }
+            let mut result = vec![CoveragePattern::Any];
+            result.extend_from_slice(&row[1..]);
+            return Some(result);
+        }
         let first = Self::canonical_coverage_pattern(row[0]);
         let head = match first {
             CoveragePattern::Any => CoveragePattern::Any,

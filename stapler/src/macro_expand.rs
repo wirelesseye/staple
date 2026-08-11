@@ -1865,6 +1865,9 @@ fn hygienic_name(name: &str, mark: u64) -> String {
 fn alpha_rename_pattern(pattern: &mut Pattern, mark: u64, names: &mut HashMap<String, String>) {
     match pattern {
         Pattern::Binding(binding) => {
+            binding
+                .resolution_name
+                .get_or_insert_with(|| binding.name.clone());
             let renamed = hygienic_name(&binding.name, mark);
             names.insert(binding.name.clone(), renamed.clone());
             binding.name = renamed;

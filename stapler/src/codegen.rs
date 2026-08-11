@@ -752,6 +752,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Pattern::StringLiteral(_) => Ok(()),
             Pattern::Binding(binding) => {
+                if self
+                    .typed_module
+                    .resolved()
+                    .type_for_pattern(binding.syntax.id)
+                    .is_some()
+                {
+                    return Ok(());
+                }
                 value.set_name(&binding.name);
                 let symbol = self
                     .typed_module
@@ -2771,6 +2779,69 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         failure: inkwell::basic_block::BasicBlock<'context>,
     ) -> CodeGenerationResult<()> {
         match pattern {
+            Pattern::Binding(binding)
+                if self
+                    .typed_module
+                    .resolved()
+                    .type_for_pattern(binding.syntax.id)
+                    .is_some() =>
+            {
+                let selected_id = self
+                    .typed_module
+                    .resolved()
+                    .type_for_pattern(binding.syntax.id)
+                    .expect("resolved singleton pattern");
+                match value_type {
+                    CheckedType::Sum(sum) => {
+                        let index = sum
+                            .alternatives
+                            .iter()
+                            .position(|alternative| {
+                                matches!(alternative, CheckedType::Distinct { id, .. } if *id == selected_id)
+                            })
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    binding.syntax.span.clone(),
+                                    "singleton pattern does not select a sum alternative",
+                                )
+                            })?;
+                        let BasicValueEnum::StructValue(sum_value) = value else {
+                            return Err(Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                "sum match value has an invalid representation",
+                            ));
+                        };
+                        let tag = self
+                            .builder
+                            .build_extract_value(sum_value, 0, "match.tag")
+                            .map_err(compiler_diagnostic)?
+                            .into_int_value();
+                        let matches = self
+                            .builder
+                            .build_int_compare(
+                                inkwell::IntPredicate::EQ,
+                                tag,
+                                self.context.i32_type().const_int(index as u64, false),
+                                "match.singleton.tag",
+                            )
+                            .map_err(compiler_diagnostic)?;
+                        self.builder
+                            .build_conditional_branch(matches, success, failure)
+                            .map_err(compiler_diagnostic)?;
+                    }
+                    CheckedType::Distinct { id, .. } if *id == selected_id => {
+                        self.builder
+                            .build_unconditional_branch(success)
+                            .map_err(compiler_diagnostic)?;
+                    }
+                    _ => {
+                        return Err(Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            "checked singleton pattern has an incompatible value",
+                        ));
+                    }
+                }
+            }
             Pattern::Binding(binding) if matches!(value_type, CheckedType::Sum(_)) => {
                 let selected = self
                     .typed_module

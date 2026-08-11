@@ -68,8 +68,8 @@ an omitted parameter type means `Syntax`:
 ```staple
 macro choose = condition => then => else => quote {
     match $condition {
-        True() => $then,
-        False() => $else,
+        True => $then,
+        False => $else,
     }
 }
 ```
@@ -90,8 +90,8 @@ macro conditional =
     else_branch: Expr =>
     quote {
         match $condition {
-            True() => $then_branch,
-            False() => $else_branch,
+            True => $then_branch,
+            False => $else_branch,
         }
     }
 ```
@@ -909,8 +909,7 @@ after the final expression does not discard that value.
 
 ## Match expressions
 
-`match` exhaustively selects an alternative of an open sum and produces a
-value:
+`match` exhaustively selects an alternative of an sum and produces a value:
 
 ```staple
 def unwrap = result: Ok I32 | IOError => match result {
@@ -925,16 +924,20 @@ commas, and a trailing comma is permitted. Each arm has its own scope, so names
 introduced by its pattern are visible only in that arm's expression.
 
 A nominal pattern selects one sum alternative and may recursively destructure
-its representation with binding, product, nominal, and wildcard patterns. The
-existing empty representation syntax selects singleton alternatives, including
-the standard-library boolean values:
+its representation with binding, product, nominal, and wildcard patterns. A
+bare singleton name selects its unique alternative, including the
+standard-library boolean values:
 
 ```staple
 match value {
-    True() => "yes",
-    False() => "no",
+    True => "yes",
+    False => "no",
 }
 ```
+
+Bare names which do not resolve to singleton values remain binding patterns.
+An annotation or `mut` always makes a name a binding. The explicit empty
+representation forms `True()` and `False()` remain accepted.
 
 A binding pattern at the root is a catch-all and binds the complete subject value.
 `_` is a wildcard pattern which matches without binding a name; wildcards may
@@ -945,8 +948,8 @@ sum alternatives, and coverage is checked across every possible combination:
 
 ```staple
 def same = (left: Bool, right: Bool) => match (left, right) {
-    (True(), True()) => True,
-    (False(), False()) => True,
+    (True, True) => True,
+    (False, False) => True,
     _ => False,
 }
 ```
@@ -956,7 +959,7 @@ include a catch-all. Duplicate or otherwise redundant arms are errors. Literal
 patterns, alternative patterns, and match guards are not currently supported.
 
 An expected type is applied to every arm. Without one, equal arm types remain
-that type; differing represented nominal results are joined into an open sum by
+that type; differing represented nominal results are joined into an sum by
 the same rules used for inferred function results. Arms which return from the
 enclosing function do not contribute to the match value type. If every arm
 returns, the match itself does not continue.
@@ -1235,12 +1238,21 @@ distinct from `()` and from every other singleton type. A public singleton
 exports its value together with its type; `pub(repr)` is neither needed nor
 accepted. A private singleton keeps both names private.
 
-The unique value is not a function and cannot be called. In a pattern, the
-nominal form uses an empty representation pattern:
+The unique value is not a function and cannot be called. In a match pattern,
+its bare name selects the singleton without binding a variable:
 
 ```staple
-let Ready() = state
+pub type Waiting
+let status: Ready | Waiting = state
+
+match status {
+    Ready => (),
+    Waiting => (),
+}
 ```
+
+The explicit nominal form `Ready()` remains available, including in
+destructuring and propagating bindings.
 
 The same form can select a singleton alternative in a propagating binding:
 

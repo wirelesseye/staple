@@ -6,8 +6,8 @@ pub(repr) type Missing = String
 pub(repr) type Invalid = String
 
 def lookup: Bool -> Found I32 | Missing | Invalid = available => match available {
-    True() => Found(42),
-    False() => Missing("not found"),
+    True => Found(42),
+    False => Missing("not found"),
 }
 
 // `?` unwraps Found and immediately returns either residual alternative.
