@@ -269,6 +269,9 @@ impl<'a> Classifier<'a> {
                         1,
                     );
                     self.ty(&member.annotation, resolved);
+                    if let Some(default) = &member.default {
+                        self.expression(default, resolved);
+                    }
                 }
             }
             Item::TraitImplementation(value) => {

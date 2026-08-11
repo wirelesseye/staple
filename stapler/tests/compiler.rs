@@ -2125,6 +2125,98 @@ fn type_checks_static_traits_and_bounded_generic_functions() {
 }
 
 #[test]
+fn uses_generic_default_trait_members_and_concrete_overrides() {
+    let module = type_check(concat!(
+        "trait Increment = T => {\n",
+        "  increment: T -> T\n",
+        "  twice: T -> T = value => increment (increment value)\n",
+        "}\n",
+        "impl Increment I32 { def increment = value => value + 1 }\n",
+        "let direct: I32 = Increment.twice 40\n",
+        "let first_class: I32 -> I32 = Increment.twice\n",
+        "let answer: I32 = first_class direct\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("default trait members should specialize and compile");
+    assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
+    let module = type_check(concat!(
+        "trait Same = T => Eq T => { same: (T, T) -> Bool = (left, right) => Eq.equal left right }\n",
+        "trait Select = Value => { select: (Bool, Value, Value) -> Value = (condition, left, right) => if condition left else right }\n",
+        "trait First = (Left, Right) => { first: (Left, Right) -> Left = (left, right) => left }\n",
+        "impl Same I32 {}\n",
+        "impl Select I32 {}\n",
+        "impl First (I32, String) {}\n",
+        "let condition: Bool = Same.same (42, 42)\n",
+        "let selected: I32 = Select.select (condition, 1, 2)\n",
+        "let first: I32 = First.first (selected, \"ignored\")\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("prerequisite and macro-using defaults should compile");
+}
+
+#[test]
+fn explicit_trait_members_override_defaults() {
+    let module = type_check(concat!(
+        "trait Identity = T => { identity: T -> T = value => value }\n",
+        "impl Identity I32 { def identity = value => value + 1 }\n",
+        "let answer: I32 = Identity.identity 41\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("explicit overrides should compile");
+}
+
+#[test]
+fn specializes_recursive_default_trait_members() {
+    let module = type_check(concat!(
+        "trait Recursive = T => { recurse: T -> T = value => Recursive.recurse value }\n",
+        "impl Recursive I32 {}\n",
+        "let result: I32 = Recursive.recurse 1\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("recursive defaults should reuse their specialization");
+}
+
+#[test]
+fn rejects_invalid_default_trait_member_bodies() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "trait Invalid = T => { identity: T -> T = value => \"wrong\" }\n",
+        ))
+        .expect_err("default bodies must match their member type");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("expected `T`, found `String`") })
+    );
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("trait Invalid = T => { identity: T -> T = 42 }\n", root)
+        .expect("invalid default source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("default bodies must be function values");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("default trait member implementations must be function values")
+    }));
+}
+
+#[test]
 fn type_checks_product_and_curried_multi_parameter_traits() {
     let module = type_check(concat!(
         "trait Add = Left => Right => Output => { add: (Left, Right) -> Output }\n",

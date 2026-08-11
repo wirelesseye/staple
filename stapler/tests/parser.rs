@@ -189,6 +189,25 @@ fn parses_trait_prerequisites_losslessly() {
 }
 
 #[test]
+fn parses_default_trait_members_losslessly() {
+    let source = concat!(
+        "trait Increment = T => {\n",
+        "  increment: T -> T\n",
+        "  twice: T -> T = value => increment (increment value)\n",
+        "  identity: T -> T = value => { value }\n",
+        "}\n",
+    );
+    let root = parse(source).expect("default trait members should parse");
+    assert_eq!(root.text(), source);
+    let Item::TraitDeclaration(trait_) = &root.items[0] else {
+        panic!("expected trait declaration");
+    };
+    assert!(trait_.members[0].default.is_none());
+    assert!(trait_.members[1].default.is_some());
+    assert!(trait_.members[2].default.is_some());
+}
+
+#[test]
 fn parses_use_declarations_and_public_items_losslessly() {
     let source = concat!(
         "use path.to.another_module\n",

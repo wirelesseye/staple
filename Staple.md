@@ -733,6 +733,11 @@ trait Convert = (From, To) => {
 trait Ord = T => Eq T => {
     compare: T -> T -> I32
 }
+
+trait Increment = T => {
+    increment: T -> T
+    increment_twice: T -> T = value => increment (increment value)
+}
 ```
 
 Trait members must have function types, must mention every trait parameter, and
@@ -781,6 +786,12 @@ def equal_ordered: T => Ord T => T -> T -> Bool = left => right => {
 Prerequisite cycles are rejected. Prerequisites participate only in static
 checking and do not add runtime dictionaries or function parameters.
 
+A member may provide a default function body after `=`. An implementation may
+omit a defaulted member or replace it with an explicit member of the same name.
+Calls from a default body use normal trait dispatch, so an explicit member on
+the concrete implementation overrides a sibling default. Default bodies are
+generic over the trait parameters and are monomorphized only when used.
+
 A generic `def` adds one or more trait bounds between its compile-time parameter
 binder and its ordinary function type:
 
@@ -804,7 +815,7 @@ Traits use static dispatch. Bounds and implementations add no runtime values or
 function parameters. During monomorphization, Stapler substitutes the concrete
 trait arguments and emits a direct reference to the selected implementation
 member. Trait objects, runtime dictionaries, associated items,
-default methods, generic implementations, and independently generic trait
+generic implementations, and independently generic trait
 members are not currently supported.
 
 ## Function application

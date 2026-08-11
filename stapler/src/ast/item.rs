@@ -148,6 +148,7 @@ pub struct TraitMember {
     pub syntax: Syntax,
     pub name: String,
     pub annotation: Type,
+    pub default: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

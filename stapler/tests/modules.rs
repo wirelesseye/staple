@@ -276,6 +276,39 @@ fn preserves_trait_prerequisites_across_modules() {
 }
 
 #[test]
+fn imports_and_specializes_default_trait_members() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "traits.sta",
+        concat!(
+            "pub trait Increment = T => {\n",
+            "  increment: T -> T\n",
+            "  twice: T -> T = value => increment (increment value)\n",
+            "}\n",
+        ),
+    );
+    fixture.write(
+        "implementations.sta",
+        concat!(
+            "use traits\n",
+            "impl traits.Increment I32 { def increment = value => value + 1 }\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use traits Increment\n",
+            "use implementations\n",
+            "let answer: I32 = Increment.twice 40\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("imported default trait members should specialize");
+}
+
+#[test]
 fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
     let fixture = Fixture::new();
     fixture.write(

@@ -42,8 +42,15 @@ impl Collector<'_> {
                     self.expression(&member.value);
                 }
             }
+            Item::TraitDeclaration(declaration) => {
+                for member in &declaration.members {
+                    if let Some(default) = &member.default {
+                        self.expression(default);
+                    }
+                }
+            }
             Item::Statement(statement) => self.statement(statement),
-            Item::UseDeclaration(_) | Item::TypeDeclaration(_) | Item::TraitDeclaration(_) => {}
+            Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
         }
     }
 

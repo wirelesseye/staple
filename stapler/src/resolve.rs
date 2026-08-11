@@ -34,6 +34,7 @@ pub struct ResolvedTrait {
     pub declaration: crate::TraitDeclaration,
     pub parameters: Vec<TypeParameterId>,
     pub methods: Vec<TraitMethodId>,
+    pub default_methods: HashMap<TraitMethodId, FunctionId>,
 }
 
 #[derive(Debug, Clone)]
@@ -1046,6 +1047,7 @@ impl NameResolver {
                                 declaration: declaration.clone(),
                                 parameters,
                                 methods,
+                                default_methods: HashMap::new(),
                             },
                         );
                         if declaration.visibility == Visibility::Public {
@@ -1468,9 +1470,12 @@ impl NameResolver {
                 let _ = declaration;
             }
             Item::TraitDeclaration(declaration) => {
-                if !self.declared_traits[self.current_module.0].contains_key(&declaration.name) {
+                let Some(trait_id) = self.declared_traits[self.current_module.0]
+                    .get(&declaration.name)
+                    .copied()
+                else {
                     return;
-                }
+                };
                 self.push_type_parameter_scope();
                 for parameter in &declaration.type_parameters {
                     self.scope_allocated_type_parameter_pattern(parameter);
@@ -1484,12 +1489,39 @@ impl NameResolver {
                         self.resolve_type(argument);
                     }
                 }
+                let mut default_methods = HashMap::new();
                 for member in &declaration.members {
                     self.resolve_type(&member.annotation);
                     if declaration.visibility == Visibility::Public {
                         self.validate_public_representation(&member.annotation);
                     }
+                    let Some(default) = &member.default else {
+                        continue;
+                    };
+                    self.binding_type_parameters
+                        .insert(member.syntax.id, declaration.type_parameters.clone());
+                    let function_name = format!("trait.default.{}.{}", trait_id.0, member.name);
+                    self.resolve_expression(
+                        default,
+                        Some(&member.annotation),
+                        Some((&function_name, member.syntax.id)),
+                    );
+                    let method = self.trait_member_ids[&(trait_id, member.name.clone())];
+                    if let Some(function) =
+                        self.function_expressions.get(&default.syntax().id).copied()
+                    {
+                        default_methods.insert(method, function);
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            default.syntax().span.clone(),
+                            "default trait member implementations must be function values",
+                        ));
+                    }
                 }
+                self.traits
+                    .get_mut(&trait_id)
+                    .expect("resolved trait")
+                    .default_methods = default_methods;
                 self.pop_type_parameter_scope();
             }
             Item::TraitImplementation(implementation) => {

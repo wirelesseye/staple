@@ -531,11 +531,17 @@ impl MacroExpander {
                     member.value = self.expand_expression(module, member.value.clone(), 0);
                 }
             }
+            Item::TraitDeclaration(declaration) => {
+                for member in &mut declaration.members {
+                    if let Some(default) = member.default.take() {
+                        member.default = Some(self.expand_expression(module, default, 0));
+                    }
+                }
+            }
             Item::MacroDeclaration(_)
             | Item::UseDeclaration(_)
             | Item::ExternBlock(_)
-            | Item::TypeDeclaration(_)
-            | Item::TraitDeclaration(_) => {}
+            | Item::TypeDeclaration(_) => {}
         }
     }
 

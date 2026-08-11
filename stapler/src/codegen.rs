@@ -2114,8 +2114,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "no trait implementation is available for these arguments",
                     )
                 })?;
+            let function = self.trait_method_code(
+                trait_id,
+                &arguments,
+                dispatch.method,
+                expression.syntax().span.clone(),
+            )?;
             return self
-                .build_closure(environment, function_id, expression.syntax().span.clone())
+                .build_closure_with_code(
+                    environment,
+                    function_id,
+                    function,
+                    expression.syntax().span.clone(),
+                )
                 .map(|closure| closure.as_any_value_enum());
         }
         match expression {
@@ -2459,6 +2470,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
     }
 
+    fn trait_method_code(
+        &mut self,
+        trait_id: crate::TraitId,
+        arguments: &[CheckedType],
+        method: crate::TraitMethodId,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
+        let function_id = self
+            .typed_module
+            .trait_impl_method(trait_id, arguments, method)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "no trait implementation is available"))?;
+        if let Some(function) = self.functions.get(&function_id).copied() {
+            return Ok(function);
+        }
+        let function_type = self
+            .typed_module
+            .instantiated_trait_method_type(trait_id, arguments, method)
+            .ok_or_else(|| Diagnostic::new(span, "trait method has no concrete function type"))?;
+        self.ensure_function_specialization(function_id, &function_type)
+    }
+
     fn compile_default_value(
         &mut self,
         value_type: &CheckedType,
@@ -2500,16 +2532,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             return Ok(result.as_any_value_enum());
         }
 
-        let function_id = self
-            .typed_module
-            .trait_impl_method(default_trait, std::slice::from_ref(value_type), method)
-            .ok_or_else(|| {
-                Diagnostic::new(
-                    span.clone(),
-                    format!("no `Default` implementation is available for `{value_type}`"),
-                )
-            })?;
-        let function = self.functions[&function_id];
+        let function = self.trait_method_code(
+            default_trait,
+            std::slice::from_ref(value_type),
+            method,
+            span.clone(),
+        )?;
         let environment = self.context.ptr_type(AddressSpace::default()).const_null();
         self.builder
             .build_direct_call(function, &[environment.into()], "default.call")
@@ -3943,16 +3971,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     call.syntax.span.clone(),
                 );
             }
-            let function_id = self
-                .typed_module
-                .trait_impl_method(trait_id, &arguments, dispatch.method)
-                .ok_or_else(|| {
-                    Diagnostic::new(
-                        call.callee.syntax().span.clone(),
-                        "no trait implementation is available for these arguments",
-                    )
-                })?;
-            let function = self.functions[&function_id];
+            let function = self.trait_method_code(
+                trait_id,
+                &arguments,
+                dispatch.method,
+                call.callee.syntax().span.clone(),
+            )?;
             let expected_count = function.count_params() as usize - 1;
             let mut arguments =
                 self.compile_arguments(environment, &call.argument, expected_count, false)?;

@@ -407,6 +407,8 @@ pub struct TypedModule {
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
+    trait_method_types: HashMap<TraitMethodId, CheckedType>,
+    trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
     trait_implementations: Vec<CheckedTraitImplementation>,
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
@@ -581,6 +583,36 @@ impl TypedModule {
             })
             .and_then(|implementation| implementation.methods.get(&method).copied())
     }
+
+    pub(crate) fn instantiated_trait_method_type(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+        method: TraitMethodId,
+    ) -> Option<CheckedFunctionType> {
+        let parameters = self.trait_parameter_arguments.get(&trait_id)?;
+        if parameters.len() != arguments.len() {
+            return None;
+        }
+        let mut substitutions = HashMap::new();
+        if !parameters
+            .iter()
+            .zip(arguments)
+            .all(|(parameter, argument)| {
+                infer_type_parameters(parameter, argument, &mut substitutions)
+            })
+        {
+            return None;
+        }
+        let value_type = substitute_type(
+            self.trait_method_types.get(&method)?.clone(),
+            &substitutions,
+        );
+        let CheckedType::Function(function) = value_type else {
+            return None;
+        };
+        Some(function)
+    }
 }
 
 #[derive(Default)]
@@ -592,6 +624,7 @@ pub struct TypeChecker {
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
     trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
+    default_function_traits: HashMap<FunctionId, TraitId>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
     trait_implementations: Vec<CheckedTraitImplementation>,
     impl_function_types: HashMap<FunctionId, CheckedFunctionType>,
@@ -674,6 +707,8 @@ impl TypeChecker {
             symbol_types: self.symbol_types,
             function_types: self.function_types,
             function_bounds: self.function_bounds,
+            trait_method_types: self.trait_method_types,
+            trait_parameter_arguments: self.trait_parameter_arguments,
             trait_dispatches: self.trait_dispatches,
             trait_implementations: self.trait_implementations,
             expression_coercions: self.expression_coercions,
@@ -838,6 +873,13 @@ impl TypeChecker {
                         "trait member types cannot contain `_`",
                     ));
                 }
+                if let Some(function) = resolved_trait.default_methods.get(method).copied()
+                    && let CheckedType::Function(function_type) = value_type.clone()
+                {
+                    self.impl_function_types.insert(function, function_type);
+                    self.default_function_traits
+                        .insert(function, resolved_trait.id);
+                }
                 self.trait_method_types.insert(*method, value_type);
             }
         }
@@ -923,9 +965,14 @@ impl TypeChecker {
                 continue;
             }
             let resolved_trait = &module.traits()[&implementation.trait_id];
+            let mut methods = implementation.methods.clone();
             for method in &resolved_trait.methods {
                 let member = module.trait_method(*method).expect("resolved trait member");
                 let Some(function_id) = implementation.methods.get(method).copied() else {
+                    if let Some(default) = resolved_trait.default_methods.get(method).copied() {
+                        methods.insert(*method, default);
+                        continue;
+                    }
                     self.diagnostics.push(Diagnostic::new(
                         span.clone(),
                         format!("implementation is missing member `{}`", member.name),
@@ -942,7 +989,7 @@ impl TypeChecker {
                 span,
                 trait_id: implementation.trait_id,
                 arguments,
-                methods: implementation.methods.clone(),
+                methods,
             });
         }
     }
@@ -1331,6 +1378,13 @@ impl TypeChecker {
         for function in module.functions() {
             if let Some(expected) = self.impl_function_types.get(&function.id).cloned() {
                 self.function_types.insert(function.id, expected);
+                if let Some(trait_id) = self.default_function_traits.get(&function.id).copied() {
+                    let bounds = self.expand_trait_bounds(vec![CheckedTraitBound {
+                        trait_id,
+                        arguments: self.trait_parameter_arguments[&trait_id].clone(),
+                    }]);
+                    self.function_bounds.insert(function.id, bounds);
+                }
                 continue;
             }
             let mut parameter = self.resolve_source_type(module, &function.pattern.ty());

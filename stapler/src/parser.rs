@@ -203,10 +203,16 @@ impl Grammar {
             let annotation = self.parse_type();
             self.newline_terminates_type = previous;
             let annotation = annotation?;
+            let default = if self.eat(TokenKind::Equals) {
+                Some(self.parse_expression()?)
+            } else {
+                None
+            };
             members.push(TraitMember {
                 syntax: self.syntax(member_start),
                 name: member_name,
                 annotation,
+                default,
             });
             self.eat(TokenKind::Semicolon);
         }
