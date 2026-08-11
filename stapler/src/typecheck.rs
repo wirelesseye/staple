@@ -1178,6 +1178,9 @@ impl TypeChecker {
 
     fn seed_constructors(&mut self, module: &ResolvedModule) {
         for (symbol, id) in module.constructors() {
+            if module.builtin_type(*id) == Some(BuiltinType::Syntax) {
+                continue;
+            }
             let declaration = self.type_declarations[id].clone();
             let Some(underlying) = declaration.underlying.as_ref() else {
                 continue;
@@ -4179,6 +4182,13 @@ impl TypeChecker {
         if module.builtin_type(id) == Some(BuiltinType::Ref) {
             return CheckedType::Ref(Box::new(arguments[0].clone()));
         }
+        if module.builtin_type(id) == Some(BuiltinType::Syntax) {
+            return CheckedType::Opaque {
+                id,
+                name: display_name,
+                arguments,
+            };
+        }
         if declaration.kind == TypeDeclarationKind::Opaque {
             return CheckedType::Opaque {
                 id,
@@ -4400,6 +4410,22 @@ impl TypeChecker {
                     name: "CPointer".to_owned(),
                     arguments: Vec::new(),
                 },
+                BuiltinType::Syntax => {
+                    let declaration = &self.type_declarations[&id];
+                    if declaration.type_parameters.is_empty() {
+                        CheckedType::Opaque {
+                            id,
+                            name: module.type_name(id).unwrap_or(&named.name).to_owned(),
+                            arguments: Vec::new(),
+                        }
+                    } else {
+                        CheckedType::TypeConstructor {
+                            id,
+                            name: module.type_name(id).unwrap_or(&named.name).to_owned(),
+                            arguments: Vec::new(),
+                        }
+                    }
+                }
             };
         }
         if let Some(value_type) = self.resolved_named_types.get(&id) {

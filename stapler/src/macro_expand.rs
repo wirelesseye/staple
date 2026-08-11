@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
@@ -38,9 +38,20 @@ enum MetaType {
     Syntax,
     Expr,
     Ident(Option<String>),
+    CallExpr,
+    UnstructuredExpr,
     Type,
     Pattern,
     Item,
+}
+
+impl MetaType {
+    fn is_expression(&self) -> bool {
+        matches!(
+            self,
+            Self::Expr | Self::Ident(_) | Self::CallExpr | Self::UnstructuredExpr
+        )
+    }
 }
 
 #[derive(Clone, Default)]
@@ -57,8 +68,37 @@ struct HelperDefinition {
 }
 
 #[derive(Clone)]
+enum SyntaxValue {
+    Ident(crate::NameExpression),
+    Call(crate::CallExpression),
+    Unstructured(Expression),
+}
+
+impl SyntaxValue {
+    fn from_expression(expression: Expression) -> Self {
+        match expression {
+            Expression::Name(name) => Self::Ident(name),
+            Expression::Call(call) => Self::Call(call),
+            expression => Self::Unstructured(expression),
+        }
+    }
+
+    fn to_expression(&self) -> Expression {
+        self.clone().into_expression()
+    }
+
+    fn into_expression(self) -> Expression {
+        match self {
+            Self::Ident(name) => Expression::Name(name),
+            Self::Call(call) => Expression::Call(call),
+            Self::Unstructured(expression) => expression,
+        }
+    }
+}
+
+#[derive(Clone)]
 enum Value {
-    Syntax(Expression),
+    Syntax(SyntaxValue),
     Function {
         module: ModuleId,
         function: crate::FunctionExpression,
@@ -71,7 +111,26 @@ enum Value {
     Nominal(String, Box<Value>),
 }
 
-type Environment = HashMap<String, Value>;
+#[derive(Clone)]
+struct EnvironmentBinding {
+    value: Rc<RefCell<Value>>,
+    mutable: bool,
+}
+
+impl EnvironmentBinding {
+    fn new(value: Value, mutable: bool) -> Self {
+        Self {
+            value: Rc::new(RefCell::new(value)),
+            mutable,
+        }
+    }
+
+    fn get(&self) -> Value {
+        self.value.borrow().clone()
+    }
+}
+
+type Environment = HashMap<String, EnvironmentBinding>;
 
 pub(crate) fn expand_program(mut program: Program) -> Result<Program, Vec<Diagnostic>> {
     let mut expander = MacroExpander::new(&program);
@@ -558,6 +617,9 @@ impl MacroExpander {
 
     fn expand_item(&mut self, module: ModuleId, item: &mut Item) {
         match item {
+            Item::Statement(statement)
+                if matches!(statement.as_ref(), Statement::Binding(binding)
+                    if binding_is_compile_time_helper(binding)) => {}
             Item::Statement(statement) => self.expand_statement(module, statement, 0),
             Item::TraitImplementation(implementation) => {
                 for member in &mut implementation.members {
@@ -630,7 +692,8 @@ impl MacroExpander {
                 return expression;
             };
             let key = definition.key.clone();
-            if !matches!(definition.result, MetaType::Syntax | MetaType::Expr) {
+            if !matches!(definition.result, MetaType::Syntax) && !definition.result.is_expression()
+            {
                 self.diagnostics.push(Diagnostic::new(
                     expression.syntax().span.clone(),
                     format!("macro `{}` does not produce expression syntax", key.name),
@@ -674,6 +737,16 @@ impl MacroExpander {
             let result = self.expand_expression(module, result, depth + 1);
             self.expansion_stack.pop();
             return result;
+        }
+
+        if let Expression::Name(name) = head
+            && matches!(name.name.as_str(), "Ident" | "CallExpr")
+        {
+            self.diagnostics.push(Diagnostic::new(
+                expression.syntax().span.clone(),
+                format!("`{}` syntax values are compile-time-only", name.name),
+            ));
+            return expression;
         }
 
         match expression {
@@ -933,15 +1006,16 @@ impl MacroExpander {
             MacroKind::User(body) => {
                 let mut value =
                     self.eval_expression(definition.key.module, body, &mut Environment::new())?;
-                for argument in arguments {
+                for (expected, argument) in definition.parameters.iter().zip(arguments) {
+                    let argument = meta_argument_expression(expected, argument);
                     value = self.apply_value(
                         value,
-                        Value::Syntax(argument.clone()),
+                        Value::Syntax(SyntaxValue::from_expression(argument.clone())),
                         call_span.clone(),
                     )?;
                 }
                 match value {
-                    Value::Syntax(expression) => Some(expression),
+                    Value::Syntax(expression) => Some(expression.into_expression()),
                     _ => {
                         self.diagnostics.push(Diagnostic::new(
                             definition.declaration.syntax.span.clone(),
@@ -969,6 +1043,8 @@ impl MacroExpander {
                         format!("identifier `{spelling}`")
                     }
                     MetaType::Ident(None) => "an identifier".to_owned(),
+                    MetaType::CallExpr => "a call expression".to_owned(),
+                    MetaType::UnstructuredExpr => "an unstructured expression".to_owned(),
                     MetaType::Type => "a type".to_owned(),
                     MetaType::Pattern => "a pattern".to_owned(),
                     MetaType::Item => "an item".to_owned(),
@@ -1023,6 +1099,7 @@ impl MacroExpander {
                 let mark = self.next_mark;
                 self.next_mark += 1;
                 self.instantiate_quote(module, &quote.template, environment, mark)
+                    .map(SyntaxValue::from_expression)
                     .map(Value::Syntax)
             }
             Expression::Splice(splice) => {
@@ -1034,7 +1111,7 @@ impl MacroExpander {
             }
             Expression::Name(name) => {
                 if let Some(value) = environment.get(&name.name) {
-                    return Some(value.clone());
+                    return Some(value.get());
                 }
                 if let Some(helper) = self.scopes[module.0].helpers.get(&name.name).cloned() {
                     if matches!(helper.binding.value, Some(Expression::Function(_))) {
@@ -1114,7 +1191,7 @@ impl MacroExpander {
                         }
                         result = Some(expanded);
                     }
-                    let result = result.map(Value::Syntax);
+                    let result = result.map(SyntaxValue::from_expression).map(Value::Syntax);
                     self.expansion_stack.pop();
                     return result;
                 }
@@ -1122,6 +1199,14 @@ impl MacroExpander {
                     && name.name.chars().next().is_some_and(char::is_uppercase)
                 {
                     let argument = self.eval_expression(module, &call.argument, environment)?;
+                    if matches!(name.name.as_str(), "Ident" | "CallExpr") {
+                        return self.construct_syntax(
+                            module,
+                            &name.name,
+                            argument,
+                            call.syntax.span.clone(),
+                        );
+                    }
                     return Some(Value::Nominal(name.name.clone(), Box::new(argument)));
                 }
                 let callee = self.eval_expression(module, &call.callee, environment)?;
@@ -1141,6 +1226,30 @@ impl MacroExpander {
                     return Some(Value::Helper(helper.module, helper.binding));
                 }
                 let value = self.eval_expression(module, &access.value, environment)?;
+                if let Value::Syntax(SyntaxValue::Call(call)) = value {
+                    return match &access.accessor {
+                        Accessor::Name(name) if name == "callee" => Some(Value::Syntax(
+                            SyntaxValue::from_expression((*call.callee).clone()),
+                        )),
+                        Accessor::Name(name) if name == "argument" => Some(Value::Syntax(
+                            SyntaxValue::from_expression((*call.argument).clone()),
+                        )),
+                        Accessor::Name(name) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                format!("call syntax has no field `{name}`"),
+                            ));
+                            None
+                        }
+                        Accessor::Index(_) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                "call syntax fields must be accessed by name",
+                            ));
+                            None
+                        }
+                    };
+                }
                 let Value::Product(elements) = value else {
                     self.diagnostics.push(Diagnostic::new(
                         access.syntax.span.clone(),
@@ -1218,7 +1327,10 @@ impl MacroExpander {
                                 return None;
                             };
                             let value = self.eval_expression(module, value, &mut local)?;
-                            local.insert(binding.name.clone(), value);
+                            local.insert(
+                                binding.name.clone(),
+                                EnvironmentBinding::new(value, binding.mutable),
+                            );
                         }
                         Statement::PatternBinding(binding) => {
                             let value = self.eval_expression(module, &binding.value, &mut local)?;
@@ -1227,11 +1339,17 @@ impl MacroExpander {
                             }
                         }
                         Statement::Assignment(assignment) => {
-                            self.diagnostics.push(Diagnostic::new(
+                            let value =
+                                self.eval_expression(module, &assignment.value, &mut local)?;
+                            if !self.assign_compile_time(
+                                module,
+                                &assignment.target,
+                                value,
+                                &mut local,
                                 assignment.syntax.span.clone(),
-                                "mutation is not allowed during compile-time evaluation",
-                            ));
-                            return None;
+                            ) {
+                                return None;
+                            }
                         }
                         Statement::Expression(value) => {
                             result = self.eval_expression(module, value, &mut local)?
@@ -1262,6 +1380,227 @@ impl MacroExpander {
                 self.diagnostics.push(Diagnostic::new(
                     expression.syntax().span.clone(),
                     "C strings are not compile-time values",
+                ));
+                None
+            }
+        }
+    }
+
+    fn construct_syntax(
+        &mut self,
+        module: ModuleId,
+        constructor: &str,
+        argument: Value,
+        span: Span,
+    ) -> Option<Value> {
+        match constructor {
+            "Ident" => {
+                let Value::String(literal) = argument else {
+                    self.diagnostics
+                        .push(Diagnostic::new(span, "`Ident` requires a string spelling"));
+                    return None;
+                };
+                let spelling = crate::string_literal::decode(&literal).unwrap_or(literal);
+                let tokens = crate::lexer::lex(&spelling)
+                    .into_iter()
+                    .filter(|token| !token.kind.is_trivia())
+                    .collect::<Vec<_>>();
+                if !matches!(tokens.as_slice(), [token]
+                    if token.kind == crate::TokenKind::Identifier && token.text == spelling)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        format!("`{spelling}` is not a valid identifier spelling"),
+                    ));
+                    return None;
+                }
+                let syntax = self.generated_syntax(module, span);
+                Some(Value::Syntax(SyntaxValue::Ident(crate::NameExpression {
+                    syntax,
+                    name: spelling,
+                })))
+            }
+            "CallExpr" => {
+                let Value::Product(elements) = argument else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`CallExpr` requires `(callee: Expr, argument: Expr)`",
+                    ));
+                    return None;
+                };
+                let [(callee_name, callee), (argument_name, argument)] = elements.as_slice() else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`CallExpr` requires exactly `callee` and `argument` fields",
+                    ));
+                    return None;
+                };
+                if callee_name.as_deref() != Some("callee")
+                    || argument_name.as_deref() != Some("argument")
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`CallExpr` fields must be named `callee` and `argument`",
+                    ));
+                    return None;
+                }
+                let Value::Syntax(callee) = callee else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`CallExpr.callee` must contain `Expr`",
+                    ));
+                    return None;
+                };
+                let Value::Syntax(argument) = argument else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`CallExpr.argument` must contain `Expr`",
+                    ));
+                    return None;
+                };
+                let syntax = self.generated_syntax(module, span);
+                Some(Value::Syntax(SyntaxValue::Call(crate::CallExpression {
+                    syntax,
+                    callee: Box::new(callee.to_expression()),
+                    argument: Box::new(argument.to_expression()),
+                })))
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    fn generated_syntax(&mut self, module: ModuleId, span: Span) -> Syntax {
+        let mark = self.next_mark;
+        self.next_mark += 1;
+        Syntax::synthetic(self.fresh_id(), span).generated(module.0, mark)
+    }
+
+    fn assign_compile_time(
+        &mut self,
+        module: ModuleId,
+        target: &Expression,
+        replacement: Value,
+        environment: &mut Environment,
+        span: Span,
+    ) -> bool {
+        let mut fields = Vec::new();
+        let mut root = target;
+        while let Expression::Access(access) = root {
+            let Accessor::Name(field) = &access.accessor else {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "compile-time assignment only supports named fields",
+                ));
+                return false;
+            };
+            fields.push(field.clone());
+            root = &access.value;
+        }
+        fields.reverse();
+        let Expression::Name(name) = root else {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                "invalid compile-time assignment target",
+            ));
+            return false;
+        };
+        let Some(binding) = environment.get(&name.name).cloned() else {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("unknown compile-time binding `{}`", name.name),
+            ));
+            return false;
+        };
+        if !binding.mutable {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!(
+                    "cannot assign to immutable compile-time binding `{}`",
+                    name.name
+                ),
+            ));
+            return false;
+        }
+        let current = binding.get();
+        let Some(updated) =
+            self.replace_compile_time_path(module, current, &fields, replacement, span)
+        else {
+            return false;
+        };
+        *binding.value.borrow_mut() = updated;
+        true
+    }
+
+    fn replace_compile_time_path(
+        &mut self,
+        module: ModuleId,
+        current: Value,
+        fields: &[String],
+        replacement: Value,
+        span: Span,
+    ) -> Option<Value> {
+        let Some((field, remaining)) = fields.split_first() else {
+            return Some(replacement);
+        };
+        match current {
+            Value::Syntax(SyntaxValue::Call(mut call)) => {
+                let child = match field.as_str() {
+                    "callee" => SyntaxValue::from_expression((*call.callee).clone()),
+                    "argument" => SyntaxValue::from_expression((*call.argument).clone()),
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            span,
+                            format!("call syntax has no field `{field}`"),
+                        ));
+                        return None;
+                    }
+                };
+                let updated = self.replace_compile_time_path(
+                    module,
+                    Value::Syntax(child),
+                    remaining,
+                    replacement,
+                    span.clone(),
+                )?;
+                let Value::Syntax(updated) = updated else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        format!("`CallExpr.{field}` must contain `Expr`"),
+                    ));
+                    return None;
+                };
+                match field.as_str() {
+                    "callee" => call.callee = Box::new(updated.into_expression()),
+                    "argument" => call.argument = Box::new(updated.into_expression()),
+                    _ => unreachable!(),
+                }
+                call.syntax = self.generated_syntax(module, span);
+                Some(Value::Syntax(SyntaxValue::Call(call)))
+            }
+            Value::Product(mut elements) => {
+                let Some((_, child)) = elements
+                    .iter_mut()
+                    .find(|(name, _)| name.as_deref() == Some(field))
+                else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        format!("compile-time product has no field `{field}`"),
+                    ));
+                    return None;
+                };
+                *child = self.replace_compile_time_path(
+                    module,
+                    child.clone(),
+                    remaining,
+                    replacement,
+                    span,
+                )?;
+                Some(Value::Product(elements))
+            }
+            _ => {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!("compile-time value has no field `{field}`"),
                 ));
                 None
             }
@@ -1460,6 +1799,8 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "Syntax" => Some(MetaType::Syntax),
             "Expr" => Some(MetaType::Expr),
             "Ident" => Some(MetaType::Ident(None)),
+            "CallExpr" => Some(MetaType::CallExpr),
+            "UnstructuredExpr" => Some(MetaType::UnstructuredExpr),
             "Type" => Some(MetaType::Type),
             "Pattern" => Some(MetaType::Pattern),
             "Item" => Some(MetaType::Item),
@@ -1489,6 +1830,7 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
 }
 
 fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
+    let argument = meta_argument_expression(expected, argument);
     match expected {
         MetaType::Syntax | MetaType::Expr => true,
         MetaType::Ident(spelling) => match argument {
@@ -1497,8 +1839,27 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
                 .is_none_or(|expected| expected == &name.name),
             _ => false,
         },
+        MetaType::CallExpr => matches!(argument, Expression::Call(_)),
+        MetaType::UnstructuredExpr => {
+            !matches!(argument, Expression::Name(_) | Expression::Call(_))
+        }
         MetaType::Type | MetaType::Pattern | MetaType::Item => false,
     }
+}
+
+fn meta_argument_expression<'a>(expected: &MetaType, argument: &'a Expression) -> &'a Expression {
+    if matches!(expected, MetaType::Syntax | MetaType::Expr) {
+        return argument;
+    }
+    let mut argument = argument;
+    while let Expression::Product(product) = argument
+        && let [element] = product.elements.as_slice()
+        && element.name.is_none()
+        && !element.spread
+    {
+        argument = &element.value;
+    }
+    argument
 }
 
 fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
@@ -1507,6 +1868,8 @@ fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
         || matches!(
             (left, right),
             (MetaType::Ident(_), MetaType::Expr)
+                | (MetaType::CallExpr, MetaType::Expr)
+                | (MetaType::UnstructuredExpr, MetaType::Expr)
                 | (MetaType::Ident(Some(_)), MetaType::Ident(None))
         )
 }
@@ -1528,6 +1891,8 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Expr => "Expr".to_owned(),
             MetaType::Ident(None) => "Ident String".to_owned(),
             MetaType::Ident(Some(spelling)) => format!("Ident {spelling:?}"),
+            MetaType::CallExpr => "CallExpr".to_owned(),
+            MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
             MetaType::Type => "Type".to_owned(),
             MetaType::Pattern => "Pattern".to_owned(),
             MetaType::Item => "Item".to_owned(),
@@ -1588,7 +1953,14 @@ fn type_contains_syntax(ty: &Type) -> bool {
     match ty {
         Type::Named(named) => matches!(
             named.name.as_str(),
-            "Syntax" | "Expr" | "Ident" | "Type" | "Pattern" | "Item"
+            "Syntax"
+                | "Expr"
+                | "Ident"
+                | "CallExpr"
+                | "UnstructuredExpr"
+                | "Type"
+                | "Pattern"
+                | "Item"
         ),
         Type::Function(function) => {
             type_contains_syntax(&function.parameter) || type_contains_syntax(&function.result)
@@ -1719,6 +2091,9 @@ fn is_plain_identifier(name: &crate::NameExpression) -> bool {
         .tokens()
         .iter()
         .filter(|token| !token.kind.is_trivia());
+    if tokens.clone().next().is_none() {
+        return name.syntax.definition_module().is_some();
+    }
     matches!(tokens.next(), Some(token) if token.kind == crate::TokenKind::Identifier)
         && tokens.next().is_none()
 }
@@ -1732,7 +2107,7 @@ fn bool_value(value: bool) -> Value {
 
 fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) -> bool {
     match pattern {
-        Pattern::Wildcard(_) => true,
+        Pattern::Wildcard(pattern) => matches_pattern_type(&pattern.ty, &value),
         Pattern::StringLiteral(pattern) => {
             let Value::String(value) = value else {
                 return false;
@@ -1740,7 +2115,13 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             crate::string_literal::decode(&pattern.literal).is_ok_and(|literal| literal == value)
         }
         Pattern::Binding(binding) => {
-            environment.insert(binding.name.clone(), value);
+            if !matches_pattern_type(&binding.ty, &value) {
+                return false;
+            }
+            environment.insert(
+                binding.name.clone(),
+                EnvironmentBinding::new(value, binding.mutable),
+            );
             true
         }
         Pattern::Product(product) => {
@@ -1757,11 +2138,30 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
         Pattern::Nominal(pattern) => {
             if pattern.namespace.is_none()
                 && pattern.name == "Ident"
-                && let Value::Syntax(Expression::Name(name)) = &value
+                && let Value::Syntax(SyntaxValue::Ident(name)) = &value
             {
                 return bind_pattern(
                     &pattern.argument,
                     Value::String(name.name.clone()),
+                    environment,
+                );
+            }
+            if pattern.namespace.is_none()
+                && pattern.name == "CallExpr"
+                && let Value::Syntax(SyntaxValue::Call(call)) = value
+            {
+                return bind_pattern(
+                    &pattern.argument,
+                    Value::Product(vec![
+                        (
+                            Some("callee".to_owned()),
+                            Value::Syntax(SyntaxValue::from_expression(*call.callee)),
+                        ),
+                        (
+                            Some("argument".to_owned()),
+                            Value::Syntax(SyntaxValue::from_expression(*call.argument)),
+                        ),
+                    ]),
                     environment,
                 );
             }
@@ -1770,6 +2170,25 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             };
             pattern.name == name && bind_pattern(&pattern.argument, *value, environment)
         }
+    }
+}
+
+fn matches_pattern_type(ty: &Type, value: &Value) -> bool {
+    match ty {
+        Type::Inferred(_) => true,
+        ty => meta_type(ty).is_none_or(|expected| meta_type_matches_value(&expected, value)),
+    }
+}
+
+fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
+    match (expected, value) {
+        (MetaType::Syntax | MetaType::Expr, Value::Syntax(_)) => true,
+        (MetaType::Ident(spelling), Value::Syntax(SyntaxValue::Ident(name))) => spelling
+            .as_ref()
+            .is_none_or(|expected| expected == &name.name),
+        (MetaType::CallExpr, Value::Syntax(SyntaxValue::Call(_))) => true,
+        (MetaType::UnstructuredExpr, Value::Syntax(SyntaxValue::Unstructured(_))) => true,
+        _ => false,
     }
 }
 
@@ -1790,8 +2209,8 @@ fn substitute_splices(
             ));
             return None;
         }
-        return match environment.get(&splice.name) {
-            Some(Value::Syntax(expression)) => Some(expression.clone()),
+        return match environment.get(&splice.name).map(EnvironmentBinding::get) {
+            Some(Value::Syntax(expression)) => Some(expression.into_expression()),
             Some(_) => {
                 diagnostics.push(Diagnostic::new(
                     splice.syntax.span.clone(),

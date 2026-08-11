@@ -1542,6 +1542,209 @@ fn expands_user_defined_macros_hygienically() {
 }
 
 #[test]
+fn inspects_identifier_and_call_syntax() {
+    let module = type_check(concat!(
+        "macro call_argument = value: CallExpr => match value {\n",
+        "    CallExpr (_, argument) => argument,\n",
+        "}\n",
+        "macro call_callee = value: CallExpr => value.callee\n",
+        "macro classify_ident = value: Ident String => match value {\n",
+        "    Ident \"target\" => quote { 1 },\n",
+        "    Ident _ => quote { 2 },\n",
+        "}\n",
+        "def identity = (value: I32) => value\n",
+        "let argument: I32 = call_argument (identity 41)\n",
+        "let callee: I32 = call_callee (identity 42) 0\n",
+        "let spelling: I32 = classify_ident target\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("structured syntax inspection should generate code");
+}
+
+#[test]
+fn constructs_identifier_and_call_syntax() {
+    let module = type_check(concat!(
+        "macro generated_name = _: Expr => Ident \"answer\"\n",
+        "macro generated_call = callee: Expr => argument: Expr =>\n",
+        "    CallExpr (callee: callee, argument: argument)\n",
+        "def identity = (value: I32) => value\n",
+        "let answer: I32 = 40\n",
+        "let name: I32 = generated_name ()\n",
+        "let call: I32 = generated_call identity 42\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("constructed syntax should generate code");
+}
+
+#[test]
+fn structured_syntax_overloads_use_leaf_specificity() {
+    let module = type_check(concat!(
+        "macro classify = _: Expr => quote { 1 }\n",
+        "macro classify = _: CallExpr => quote { 2 }\n",
+        "macro classify = _: UnstructuredExpr => quote { 3 }\n",
+        "macro classify_name = _: Expr => quote { 4 }\n",
+        "macro classify_name = _: Ident String => quote { 5 }\n",
+        "let call: I32 = classify (f 0)\n",
+        "let other: I32 = classify 0\n",
+        "let name: I32 = classify_name identifier\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("structured syntax overloads should select a unique leaf");
+}
+
+#[test]
+fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygiene() {
+    let module = type_check(concat!(
+        "macro definition_name = _: Expr => Ident \"captured\"\n",
+        "macro apply = callee: Expr => argument: Expr =>\n",
+        "    CallExpr (callee: callee, argument: argument)\n",
+        "let captured: I32 = 7\n",
+        "def definition_site = (captured: String) => definition_name ()\n",
+        "def caller_site = (local: (I32 -> I32)) => apply local 8\n",
+        "let first: I32 = definition_site \"shadow\"\n",
+        "let second: I32 = caller_site (value => value)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("constructed syntax should retain the appropriate hygiene context");
+}
+
+#[test]
+fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
+    let module = type_check(concat!(
+        "macro replace_call = value: CallExpr => replacement: Expr => {\n",
+        "    let original = value\n",
+        "    let mut changed = value\n",
+        "    changed.argument = replacement\n",
+        "    quote { ($original, $changed) }\n",
+        "}\n",
+        "macro replace_from_closure = value: CallExpr => replacement: Expr => {\n",
+        "    let mut changed = value\n",
+        "    let update = () => { changed.argument = replacement; () }\n",
+        "    update ()\n",
+        "    changed\n",
+        "}\n",
+        "def identity = (value: I32) => value\n",
+        "let pair: (I32, I32) = replace_call (identity 1) 2\n",
+        "let captured: I32 = replace_from_closure (identity 3) 4\n",
+    ));
+    let pair = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| {
+            let Item::Statement(statement) = item else {
+                return None;
+            };
+            let Statement::Binding(binding) = statement.as_ref() else {
+                return None;
+            };
+            (binding.name == "pair").then_some(binding.value.as_ref()?)
+        })
+        .expect("expanded pair binding");
+    let stapler::Expression::Product(pair) = pair else {
+        panic!("replacement macro should expand to a product");
+    };
+    let arguments = pair
+        .elements
+        .iter()
+        .map(|element| {
+            let stapler::Expression::Call(call) = &element.value else {
+                panic!("pair element should remain a call");
+            };
+            let stapler::Expression::Integer(argument) = call.argument.as_ref() else {
+                panic!("call argument should be an integer");
+            };
+            argument.literal.as_str()
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(arguments, ["1", "2"]);
+
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("mutated syntax should generate code");
+}
+
+#[test]
+fn diagnoses_invalid_structured_syntax_operations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (source, expected) in [
+        (
+            "macro invalid = value: CallExpr => { value.argument = quote { 1 }; value }\ninvalid (f 0)\n",
+            "cannot assign to immutable compile-time binding `value`",
+        ),
+        (
+            "macro invalid = value: CallExpr => value.missing\ninvalid (f 0)\n",
+            "call syntax has no field `missing`",
+        ),
+        (
+            "macro invalid = value: Expr => CallExpr (callee: value, argument: 1)\ninvalid f\n",
+            "`CallExpr.argument` must contain `Expr`",
+        ),
+        (
+            "macro invalid = value: Expr => Ident \"not an identifier\"\ninvalid f\n",
+            "`not an identifier` is not a valid identifier spelling",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("invalid structured syntax operation should fail expansion");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
+            "expected `{expected}`, found {diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
+fn rejects_structured_syntax_values_at_runtime() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (source, expected) in [
+        (
+            "let generated: CallExpr\n",
+            "`Syntax` values are compile-time-only",
+        ),
+        (
+            "let generated = Ident \"name\"\n",
+            "`Ident` syntax values are compile-time-only",
+        ),
+        (
+            "let generated = CallExpr (callee: 1, argument: 2)\n",
+            "`CallExpr` syntax values are compile-time-only",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("runtime syntax values should fail expansion");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
+            "expected `{expected}`, found {diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
 fn evaluates_pure_syntax_helpers_and_conditional_macros() {
     let module = type_check(concat!(
         "def syntax_identity: Syntax -> Syntax = value => value\n",

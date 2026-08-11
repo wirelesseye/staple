@@ -64,6 +64,7 @@ pub enum BuiltinType {
     CChar,
     CString,
     CPointer,
+    Syntax,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -830,6 +831,18 @@ impl NameResolver {
         }
         self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
+        for name in [
+            "Ident",
+            "CallExpr",
+            "UnstructuredExpr",
+            "Expr",
+            "Type",
+            "Pattern",
+            "Item",
+            "Syntax",
+        ] {
+            self.register_builtin_type(core, "std.core", name, BuiltinType::Syntax);
+        }
 
         if let Some(cinterop) = program.standard_library_cinterop() {
             self.register_builtin_type(cinterop, "std.cinterop", "CChar", BuiltinType::CChar);
@@ -1074,7 +1087,7 @@ impl NameResolver {
                     "standard library type `String` must not accept compile-time arguments",
                 ));
             }
-        } else {
+        } else if builtin != BuiltinType::Syntax {
             let valid_kind = if builtin == BuiltinType::Ref {
                 declaration.kind == crate::TypeDeclarationKind::Distinct
                     && declaration.representation_visibility == Visibility::Public

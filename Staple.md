@@ -60,10 +60,13 @@ being reduced immediately to semantic values. Metaprograms should be able to
 work with structured syntax instead of assembling source-code strings.
 
 Expression macros transform compiler-owned syntax values before ordinary name
-resolution and type checking. `Syntax` is the permissive sum of `Expr`,
-`Ident String`, `Type`, `Pattern`, and `Item`. A macro body is a curried
-compile-time Staple function. Every parameter consumes one atomic syntax unit;
-an omitted parameter type means `Syntax`:
+resolution and type checking. `Syntax` is the permissive sum of `Expr`, `Type`,
+`Pattern`, and `Item`. `Expr` is currently the sum of `Ident String`,
+`CallExpr`, and `UnstructuredExpr`. `CallExpr` exposes `callee: Expr` and
+`argument: Expr`; `UnstructuredExpr` preserves every other expression form
+without exposing its fields yet. A macro body is a curried compile-time Staple
+function. Every parameter consumes one atomic syntax unit; an omitted parameter
+type means `Syntax`:
 
 ```staple
 macro choose = condition => then => else => quote {
@@ -99,6 +102,30 @@ macro conditional =
 The braces in `quote { expression }` delimit one expression and are not part of
 the result. `$name` splices an expression supplied by the caller. `$names...`
 is reserved for future syntax sequences and is currently rejected.
+
+Identifiers and calls may also be inspected, constructed, and changed as
+compile-time values:
+
+```staple
+macro replace_argument = value: CallExpr => replacement: Expr => {
+    let original = value
+    let mut changed = value
+    changed.argument = replacement
+    quote { ($original, $changed) }
+}
+
+macro build_call = _: Expr => {
+    let name = Ident "generated"
+    let call = CallExpr (callee: name, argument: quote { 1 })
+    call
+}
+```
+
+Syntax mutation follows ordinary value semantics: changing `changed` does not
+change `original`. A mutable syntax binding captured by a compile-time function
+is a shared cell, like an ordinary captured mutable binding. Constructed
+identifiers use the macro definition's hygiene context. Syntax values inserted
+as call children retain their existing context.
 
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while
@@ -136,12 +163,13 @@ while condition body
 The condition is evaluated before every iteration, and the loop returns `()`
 when it becomes `False`.
 
-Compile-time evaluation supports pure functions, bindings, products, matches,
-literals, recursion, and pure integer operations. It rejects external or
-runtime-only effects. Expansion is limited to 128 nested macros and each
-top-level invocation is limited to 1,000,000 evaluation steps. `Syntax` is
-opaque and compile-time-only. This release supports expression results and
-scalar splices; syntax inspection, repeated splices, and item, type, or pattern
+Compile-time evaluation supports pure functions, bindings, mutable local cells,
+products, matches, literals, recursion, and pure integer operations. It rejects
+external or runtime-only effects. Expansion is limited to 128 nested macros and
+each top-level invocation is limited to 1,000,000 evaluation steps. Syntax
+values are compile-time-only. This release supports expression results, scalar
+splices, and structured identifier and call expressions. Repeated splices,
+structured access to other expression forms, and item, type, or pattern
 generation remain future work.
 
 Compiler-provided macros use typed bodyless contracts. `std.core` declares
