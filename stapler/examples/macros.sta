@@ -1,0 +1,58 @@
+// Typed macro parameters, literal identifiers, overloads, and hygiene.
+use std.io println
+
+// Typed parameters require expressions, so invalid calls are rejected during
+// macro expansion rather than later during type checking.
+macro select =
+    condition: Expr =>
+    when_true: Expr =>
+    quote {
+        match $condition {
+            True => $when_true,
+            False => (),
+        }
+    }
+
+// A longer overload accepts `else` as syntax, not as a runtime value. When
+// both overloads match, Staple selects the complete overload that consumes the
+// most syntax atoms.
+macro select =
+    condition: Expr =>
+    when_true: Expr =>
+    _: Ident "else" =>
+    when_false: Expr =>
+    quote {
+        match $condition {
+            True => $when_true,
+            False => $when_false,
+        }
+    }
+
+let true_condition: Bool = True
+let false_condition: Bool = False
+
+select true_condition (println "the short macro form ran")
+select false_condition (println "the true branch ran") else (println "the else branch ran")
+
+def definition_site_identity: I32 -> I32 = value => value
+
+// Names written directly in a quote resolve where the macro is defined, while
+// `$value` keeps the caller's environment.
+macro hygienic_identity = value: Expr => quote {
+    definition_site_identity $value
+}
+
+let answer: I32 = {
+    let definition_site_identity: I32 -> I32 = _ => 0
+    hygienic_identity 42
+}
+
+// Giving the result an explicit type also shows that the generated call
+// returned the spliced caller value, despite the shadowing binding above.
+let checked_answer: I32 = answer
+println "macro hygiene kept the definition-site binding"
+
+// Arguments left after expansion are applied to the generated expression as
+// ordinary calls.
+macro identity = value: Expr => quote { $value }
+identity println "arguments can follow a macro expansion"
