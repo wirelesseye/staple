@@ -59,28 +59,42 @@ struct RawToken {
     priority: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SemanticEntry {
+    pub start: usize,
+    pub end: usize,
+    pub token_type: u32,
+    pub modifiers: u32,
+}
+
 pub fn tokens(
     source: &str,
     module: Option<&Module>,
     resolved: Option<&ResolvedModule>,
 ) -> Vec<SemanticToken> {
+    encode(source, &entries(source, module, resolved))
+}
+
+pub fn entries(
+    source: &str,
+    module: Option<&Module>,
+    resolved: Option<&ResolvedModule>,
+) -> Vec<SemanticEntry> {
     let mut classifier = Classifier::new(source);
     if let Some(module) = module {
         classifier.module(module, resolved);
     }
-    classifier.encode()
+    classifier.finish()
 }
 
-struct Classifier<'a> {
-    source: &'a str,
+struct Classifier {
     tokens: HashMap<(usize, usize), RawToken>,
     symbols: HashMap<SymbolId, u32>,
 }
 
-impl<'a> Classifier<'a> {
-    fn new(source: &'a str) -> Self {
+impl Classifier {
+    fn new(source: &str) -> Self {
         let mut this = Self {
-            source,
             tokens: HashMap::new(),
             symbols: HashMap::new(),
         };
@@ -648,43 +662,54 @@ impl<'a> Classifier<'a> {
             .or_insert(token);
     }
 
-    fn encode(self) -> Vec<SemanticToken> {
+    fn finish(self) -> Vec<SemanticEntry> {
         let mut raw = self.tokens.into_values().collect::<Vec<_>>();
         raw.sort_by_key(|token| (token.start, token.end));
-        let mut absolute = Vec::new();
-        for token in raw {
-            for (start, end) in split_lines(self.source, token.start, token.end) {
-                let (line, column) = position(self.source, start);
-                let length = self.source[start..end].encode_utf16().count() as u32;
-                if length > 0 {
-                    absolute.push((line, column, length, token.kind, token.modifiers));
-                }
-            }
-        }
-        absolute.sort_by_key(|token| (token.0, token.1));
-        let mut previous_line = 0;
-        let mut previous_column = 0;
-        absolute
-            .into_iter()
-            .map(|(line, column, length, kind, modifiers)| {
-                let delta_line = line - previous_line;
-                let delta_start = if delta_line == 0 {
-                    column - previous_column
-                } else {
-                    column
-                };
-                previous_line = line;
-                previous_column = column;
-                SemanticToken {
-                    delta_line,
-                    delta_start,
-                    length,
-                    token_type: kind,
-                    token_modifiers_bitset: modifiers,
-                }
+        raw.into_iter()
+            .map(|token| SemanticEntry {
+                start: token.start,
+                end: token.end,
+                token_type: token.kind,
+                modifiers: token.modifiers,
             })
             .collect()
     }
+}
+
+pub fn encode(source: &str, entries: &[SemanticEntry]) -> Vec<SemanticToken> {
+    let mut absolute = Vec::new();
+    for token in entries {
+        for (start, end) in split_lines(source, token.start, token.end) {
+            let (line, column) = position(source, start);
+            let length = source[start..end].encode_utf16().count() as u32;
+            if length > 0 {
+                absolute.push((line, column, length, token.token_type, token.modifiers));
+            }
+        }
+    }
+    absolute.sort_by_key(|token| (token.0, token.1));
+    let mut previous_line = 0;
+    let mut previous_column = 0;
+    absolute
+        .into_iter()
+        .map(|(line, column, length, kind, modifiers)| {
+            let delta_line = line - previous_line;
+            let delta_start = if delta_line == 0 {
+                column - previous_column
+            } else {
+                column
+            };
+            previous_line = line;
+            previous_column = column;
+            SemanticToken {
+                delta_line,
+                delta_start,
+                length,
+                token_type: kind,
+                token_modifiers_bitset: modifiers,
+            }
+        })
+        .collect()
 }
 
 fn split_lines(source: &str, mut start: usize, end: usize) -> Vec<(usize, usize)> {

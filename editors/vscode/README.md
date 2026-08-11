@@ -10,6 +10,8 @@ Basic Visual Studio Code support for the Staple programming language.
 - Line-comment toggling and bracket matching
 - Semantic highlighting for namespaces, types, traits, macros, functions,
   parameters, variables, and properties
+- Preservation of unchanged semantic highlighting and hover information while
+  the current edit contains compiler errors
 - Live parse, import, name-resolution, type, and ownership diagnostics
 - Hover information for inferred expression, binding, and parameter types
 

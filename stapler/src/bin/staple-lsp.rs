@@ -14,7 +14,7 @@ use lsp_types::notification::{
 use lsp_types::request::{HoverRequest, Request as _, SemanticTokensFullRequest};
 use lsp_types::*;
 use staple_lsp::hover::{self, HoverEntry};
-use staple_lsp::semantic;
+use staple_lsp::semantic::{self, SemanticEntry};
 use stapler::{Diagnostic as StapleDiagnostic, NameResolver, ProgramLoader, Span, TypeChecker};
 
 #[derive(Default)]
@@ -22,6 +22,14 @@ struct Document {
     text: String,
     version: i32,
     semantic_tokens: Vec<SemanticToken>,
+    hover_entries: Vec<HoverEntry>,
+    last_successful: Option<SuccessfulAnalysis>,
+}
+
+#[derive(Clone)]
+struct SuccessfulAnalysis {
+    source: String,
+    semantic_entries: Vec<SemanticEntry>,
     hover_entries: Vec<HoverEntry>,
 }
 
@@ -212,6 +220,7 @@ impl Server {
                         version: params.text_document.version,
                         semantic_tokens: Vec::new(),
                         hover_entries: Vec::new(),
+                        last_successful: None,
                     },
                 );
                 self.analyze(&uri)?;
@@ -266,6 +275,7 @@ impl Server {
         let mut grouped: HashMap<Uri, Vec<lsp_types::Diagnostic>> = HashMap::new();
         let mut resolved_for_tokens = None;
         let mut hover_entries = Vec::new();
+        let mut analysis_succeeded = false;
         if let Some(module) = &parsed {
             let mut loader = ProgramLoader::new();
             if let Some(stdlib) = &self.stdlib {
@@ -295,7 +305,10 @@ impl Server {
                     Ok(resolved) => {
                         resolved_for_tokens = Some(resolved.clone());
                         match TypeChecker::new().check(resolved) {
-                            Ok(typed) => hover_entries = hover::entries(module, &typed),
+                            Ok(typed) => {
+                                hover_entries = hover::entries(module, &typed);
+                                analysis_succeeded = true;
+                            }
                             Err(diagnostics) => {
                                 add_compiler_diagnostics(&mut grouped, diagnostics, uri, &text)
                             }
@@ -311,9 +324,25 @@ impl Server {
             ));
         }
 
-        let tokens = semantic::tokens(&text, parsed.as_ref(), resolved_for_tokens.as_ref());
-        self.documents.get_mut(uri).unwrap().semantic_tokens = tokens;
-        self.documents.get_mut(uri).unwrap().hover_entries = hover_entries;
+        let current_semantic =
+            semantic::entries(&text, parsed.as_ref(), resolved_for_tokens.as_ref());
+        let document = self.documents.get_mut(uri).unwrap();
+        if analysis_succeeded {
+            document.semantic_tokens = semantic::encode(&text, &current_semantic);
+            document.hover_entries = hover_entries.clone();
+            document.last_successful = Some(SuccessfulAnalysis {
+                source: text.clone(),
+                semantic_entries: current_semantic,
+                hover_entries,
+            });
+        } else if let Some(successful) = &document.last_successful {
+            let merged_semantic = merge_semantic_entries(&text, current_semantic, successful);
+            document.semantic_tokens = semantic::encode(&text, &merged_semantic);
+            document.hover_entries = remap_hover_entries(&text, successful);
+        } else {
+            document.semantic_tokens = semantic::encode(&text, &current_semantic);
+            document.hover_entries.clear();
+        }
 
         let old = self.published_by_root.remove(uri).unwrap_or_default();
         let new = grouped.keys().cloned().collect::<HashSet<_>>();
@@ -351,6 +380,113 @@ impl Server {
                 params,
             )))
             .map_err(|error| error.to_string())
+    }
+}
+
+fn merge_semantic_entries(
+    source: &str,
+    current: Vec<SemanticEntry>,
+    successful: &SuccessfulAnalysis,
+) -> Vec<SemanticEntry> {
+    let change = TextChange::between(&successful.source, source);
+    let mut merged = current
+        .into_iter()
+        .map(|entry| ((entry.start, entry.end), entry))
+        .collect::<HashMap<_, _>>();
+    for entry in &successful.semantic_entries {
+        if entry.token_type > semantic::PROPERTY {
+            continue;
+        }
+        let Some((start, end)) = change.remap(entry.start, entry.end) else {
+            continue;
+        };
+        if successful.source.get(entry.start..entry.end) != source.get(start..end) {
+            continue;
+        }
+        merged.insert(
+            (start, end),
+            SemanticEntry {
+                start,
+                end,
+                token_type: entry.token_type,
+                modifiers: entry.modifiers,
+            },
+        );
+    }
+    let mut entries = merged.into_values().collect::<Vec<_>>();
+    entries.sort_by_key(|entry| (entry.start, entry.end));
+    entries
+}
+
+fn remap_hover_entries(source: &str, successful: &SuccessfulAnalysis) -> Vec<HoverEntry> {
+    let change = TextChange::between(&successful.source, source);
+    successful
+        .hover_entries
+        .iter()
+        .filter_map(|entry| {
+            let (start, end) = change.remap(entry.range.start, entry.range.end)?;
+            let range = start..end;
+            (successful.source.get(entry.range.clone())? == source.get(range.clone())?).then(|| {
+                HoverEntry {
+                    range,
+                    signature: entry.signature.clone(),
+                }
+            })
+        })
+        .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextChange {
+    unchanged_prefix: usize,
+    old_suffix_start: usize,
+    new_suffix_start: usize,
+}
+
+impl TextChange {
+    fn between(old: &str, new: &str) -> Self {
+        let mut prefix = old
+            .as_bytes()
+            .iter()
+            .zip(new.as_bytes())
+            .take_while(|(left, right)| left == right)
+            .count();
+        while !old.is_char_boundary(prefix) || !new.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+
+        let maximum_suffix = old.len().saturating_sub(prefix).min(new.len() - prefix);
+        let mut suffix = old
+            .as_bytes()
+            .iter()
+            .rev()
+            .zip(new.as_bytes().iter().rev())
+            .take(maximum_suffix)
+            .take_while(|(left, right)| left == right)
+            .count();
+        while !old.is_char_boundary(old.len() - suffix) || !new.is_char_boundary(new.len() - suffix)
+        {
+            suffix -= 1;
+        }
+
+        Self {
+            unchanged_prefix: prefix,
+            old_suffix_start: old.len() - suffix,
+            new_suffix_start: new.len() - suffix,
+        }
+    }
+
+    fn remap(self, start: usize, end: usize) -> Option<(usize, usize)> {
+        if end <= self.unchanged_prefix {
+            Some((start, end))
+        } else if start >= self.old_suffix_start {
+            Some((
+                self.new_suffix_start + start - self.old_suffix_start,
+                self.new_suffix_start + end - self.old_suffix_start,
+            ))
+        } else {
+            None
+        }
     }
 }
 
@@ -490,6 +626,53 @@ mod tests {
     }
 
     #[test]
+    fn preserves_unchanged_successful_semantics_and_hover_after_an_edit() {
+        let old = "def good = () => 1\ngood\n";
+        let new = "def good = () => 1\nbroken ???\ngood\n";
+        let declaration = old.find("good").unwrap();
+        let reference = old.rfind("good").unwrap();
+        let successful = SuccessfulAnalysis {
+            source: old.to_owned(),
+            semantic_entries: vec![
+                SemanticEntry {
+                    start: declaration,
+                    end: declaration + 4,
+                    token_type: semantic::FUNCTION,
+                    modifiers: 0,
+                },
+                SemanticEntry {
+                    start: reference,
+                    end: reference + 4,
+                    token_type: semantic::FUNCTION,
+                    modifiers: 0,
+                },
+            ],
+            hover_entries: vec![HoverEntry {
+                range: reference..reference + 4,
+                signature: "def good: () -> I32".to_owned(),
+            }],
+        };
+
+        let semantics = merge_semantic_entries(new, Vec::new(), &successful);
+        assert_eq!(semantics.len(), 2);
+        assert!(
+            semantics
+                .iter()
+                .all(|entry| entry.token_type == semantic::FUNCTION)
+        );
+        assert!(
+            semantics
+                .iter()
+                .all(|entry| &new[entry.start..entry.end] == "good")
+        );
+
+        let hover = remap_hover_entries(new, &successful);
+        assert_eq!(hover.len(), 1);
+        assert_eq!(&new[hover[0].range.clone()], "good");
+        assert_eq!(hover[0].signature, "def good: () -> I32");
+    }
+
+    #[test]
     fn serves_the_core_protocol_in_memory() {
         let (server_connection, client) = Connection::memory();
         let server = std::thread::spawn(|| {
@@ -585,7 +768,7 @@ mod tests {
                     content_changes: vec![TextDocumentContentChangeEvent {
                         range: None,
                         range_length: None,
-                        text: "let okay = 1\n".to_owned(),
+                        text: "let okay = 1\nokay\n".to_owned(),
                     }],
                 },
             )))
@@ -619,6 +802,50 @@ mod tests {
         let hover: Option<Hover> = serde_json::from_value(response.result.unwrap()).unwrap();
         assert!(
             matches!(hover, Some(Hover { contents: HoverContents::Markup(content), .. }) if content.value.contains("I32"))
+        );
+
+        client
+            .sender
+            .send(Message::Notification(Notification::new(
+                DidChangeTextDocument::METHOD.to_owned(),
+                DidChangeTextDocumentParams {
+                    text_document: VersionedTextDocumentIdentifier::new(uri.clone(), 3),
+                    content_changes: vec![TextDocumentContentChangeEvent {
+                        range: None,
+                        range_length: None,
+                        text: "let okay = 1\nbroken ???\nokay\n".to_owned(),
+                    }],
+                },
+            )))
+            .unwrap();
+        let Message::Notification(notification) = recv(&client) else {
+            panic!("expected current diagnostics")
+        };
+        let diagnostics: PublishDiagnosticsParams =
+            serde_json::from_value(notification.params).unwrap();
+        assert!(!diagnostics.diagnostics.is_empty());
+
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: 5.into(),
+                method: HoverRequest::METHOD.to_owned(),
+                params: serde_json::to_value(HoverParams {
+                    text_document_position_params: TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(uri.clone()),
+                        Position::new(2, 1),
+                    ),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                })
+                .unwrap(),
+            }))
+            .unwrap();
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected preserved hover response")
+        };
+        let hover: Option<Hover> = serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(
+            matches!(hover, Some(Hover { contents: HoverContents::Markup(content), .. }) if content.value.contains("let okay: I32"))
         );
 
         client
