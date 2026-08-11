@@ -1336,9 +1336,11 @@ type alias Person = (
 Here, `person` is exactly the named product type on the right-hand side. The alias
 does not create a separate nominal identity.
 
-### Open sum types
+### Sum types
 
 A sum type lists the nominal variants which a value may contain:
+
+Staple’s sum types are open: their alternatives are ordinary types rather than cases owned by the sum.
 
 ```staple
 Ok Tree | IOError | ParseError
