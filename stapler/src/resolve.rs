@@ -414,6 +414,34 @@ fn is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId) -> b
     false
 }
 
+fn add_private_candidate(candidates: &mut HashMap<String, Vec<String>>, name: &str, module: &str) {
+    let modules = candidates.entry(name.to_owned()).or_default();
+    if !modules.iter().any(|candidate| candidate == module) {
+        modules.push(module.to_owned());
+    }
+}
+
+fn unknown_item_message(
+    kind: &str,
+    name: &str,
+    candidates: &HashMap<String, Vec<String>>,
+) -> String {
+    let base = format!("unknown {kind} `{name}`");
+    let Some(modules) = candidates.get(name) else {
+        return base;
+    };
+    if let [module] = modules.as_slice() {
+        format!("{base}; `{name}` exists in module `{module}`, but it is private")
+    } else {
+        let modules = modules
+            .iter()
+            .map(|module| format!("`{module}`"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("{base}; private items named `{name}` exist in modules {modules}")
+    }
+}
+
 fn extend_interface(exported: &mut Interface, imported: &Interface) -> bool {
     let mut changed = false;
     for name in imported.values.keys() {
@@ -470,6 +498,9 @@ pub struct NameResolver {
     imported_fixities: HashMap<String, Fixity>,
     imported_macros: HashMap<String, Vec<MacroId>>,
     imported_traits: HashMap<String, TraitId>,
+    private_glob_values: HashMap<String, Vec<String>>,
+    private_glob_types: HashMap<String, Vec<String>>,
+    private_glob_traits: HashMap<String, Vec<String>>,
     visible_trait_methods: HashMap<String, Vec<TraitMethodId>>,
     type_parameter_scopes: Vec<HashMap<String, TypeParameterId>>,
     prelude_values: HashMap<String, SymbolId>,
@@ -580,6 +611,9 @@ impl NameResolver {
             self.imported_fixities.clear();
             self.imported_macros.clear();
             self.imported_traits.clear();
+            self.private_glob_values.clear();
+            self.private_glob_types.clear();
+            self.private_glob_traits.clear();
             self.visible_trait_methods.clear();
             self.prelude_values.clear();
             self.prelude_types.clear();
@@ -1316,6 +1350,9 @@ impl NameResolver {
             } else {
                 self.interfaces[imported.0].clone()
             };
+            if declaration.kind == UseKind::Glob {
+                self.record_private_glob_items(imported, declaration, &interface);
+            }
             match &declaration.kind {
                 UseKind::Namespace => {
                     let name = declaration
@@ -1388,6 +1425,36 @@ impl NameResolver {
             types: self.declared_types[module.0].clone(),
             macros: self.declared_macros[module.0].clone(),
             traits: self.declared_traits[module.0].clone(),
+        }
+    }
+
+    fn record_private_glob_items(
+        &mut self,
+        module: ModuleId,
+        declaration: &crate::UseDeclaration,
+        imported: &Interface,
+    ) {
+        let local = self.local_interface(module);
+        let module_name = declaration.path.join(".");
+        for name in local.values.keys() {
+            if !imported.values.contains_key(name) {
+                add_private_candidate(&mut self.private_glob_values, name, &module_name);
+            }
+        }
+        for name in local.macros.keys() {
+            if !imported.macros.contains_key(name) {
+                add_private_candidate(&mut self.private_glob_values, name, &module_name);
+            }
+        }
+        for name in local.types.keys() {
+            if !imported.types.contains_key(name) {
+                add_private_candidate(&mut self.private_glob_types, name, &module_name);
+            }
+        }
+        for name in local.traits.keys() {
+            if !imported.traits.contains_key(name) {
+                add_private_candidate(&mut self.private_glob_traits, name, &module_name);
+            }
         }
     }
 
@@ -2153,10 +2220,12 @@ impl NameResolver {
                         format!("macro `{}` must be invoked", name.name),
                     ))
                 }
-                (None, _) => self.diagnostics.push(Diagnostic::new(
-                    name.syntax.span.clone(),
-                    format!("unknown name `{}`", name.name),
-                )),
+                (None, _) => {
+                    let message =
+                        unknown_item_message("name", &name.name, &self.private_glob_values);
+                    self.diagnostics
+                        .push(Diagnostic::new(name.syntax.span.clone(), message));
+                }
             },
             Expression::Quote(quote) => self.diagnostics.push(Diagnostic::new(
                 quote.syntax.span.clone(),
@@ -2216,10 +2285,10 @@ impl NameResolver {
                 if let Some(id) = resolved {
                     self.named_types.insert(named.syntax.id, id);
                 } else if named.name != "int" {
-                    self.diagnostics.push(Diagnostic::new(
-                        named.syntax.span.clone(),
-                        format!("unknown type `{}`", named.name),
-                    ));
+                    let message =
+                        unknown_item_message("type", &named.name, &self.private_glob_types);
+                    self.diagnostics
+                        .push(Diagnostic::new(named.syntax.span.clone(), message));
                 }
             }
             Type::Product(product) => {
@@ -2261,10 +2330,9 @@ impl NameResolver {
         if let Some(id) = resolved {
             self.trait_references.insert(name.syntax.id, id);
         } else {
-            self.diagnostics.push(Diagnostic::new(
-                name.syntax.span.clone(),
-                format!("unknown trait `{}`", name.name),
-            ));
+            let message = unknown_item_message("trait", &name.name, &self.private_glob_traits);
+            self.diagnostics
+                .push(Diagnostic::new(name.syntax.span.clone(), message));
         }
         resolved
     }

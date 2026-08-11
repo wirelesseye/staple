@@ -271,6 +271,28 @@ fn submodules_do_not_inherit_parent_items_implicitly() {
 }
 
 #[test]
+fn unknown_names_report_private_glob_candidates() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "mod submodule {\n",
+            "    def id: T => T -> T = x => x\n",
+            "}\n",
+            "use submodule *\n",
+            "id 42\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("a private item should not be imported by a glob");
+    assert!(
+        error.contains("unknown name `id`; `id` exists in module `submodule`, but it is private")
+    );
+}
+
+#[test]
 fn inline_glob_reexports_types_traits_and_macros() {
     let fixture = Fixture::new();
     fixture.write(
