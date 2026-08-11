@@ -71,32 +71,36 @@ pub fn tokens(
     source: &str,
     module: Option<&Module>,
     resolved: Option<&ResolvedModule>,
+    typed: Option<&TypedModule>,
 ) -> Vec<SemanticToken> {
-    encode(source, &entries(source, module, resolved))
+    encode(source, &entries(source, module, resolved, typed))
 }
 
 pub fn entries(
     source: &str,
     module: Option<&Module>,
     resolved: Option<&ResolvedModule>,
+    typed: Option<&TypedModule>,
 ) -> Vec<SemanticEntry> {
-    let mut classifier = Classifier::new(source);
+    let mut classifier = Classifier::new(source, typed);
     if let Some(module) = module {
         classifier.module(module, resolved);
     }
     classifier.finish()
 }
 
-struct Classifier {
+struct Classifier<'a> {
     tokens: HashMap<(usize, usize), RawToken>,
     symbols: HashMap<SymbolId, u32>,
+    typed: Option<&'a TypedModule>,
 }
 
-impl Classifier {
-    fn new(source: &str) -> Self {
+impl<'a> Classifier<'a> {
+    fn new(source: &str, typed: Option<&'a TypedModule>) -> Self {
         let mut this = Self {
             tokens: HashMap::new(),
             symbols: HashMap::new(),
+            typed,
         };
         for token in lex(source) {
             let kind = match token.kind {
@@ -181,14 +185,20 @@ impl Classifier {
 
     fn collect_binding_symbol(&mut self, binding: &Binding, resolved: &ResolvedModule) {
         if let Some(symbol) = resolved.symbol_for(binding.syntax.id) {
-            self.symbols.insert(
-                symbol,
-                if binding.kind == BindingKind::Def {
-                    FUNCTION
-                } else {
-                    VARIABLE
-                },
-            );
+            let kind = self.value_symbol_kind(symbol);
+            self.symbols.insert(symbol, kind);
+        }
+    }
+
+    fn value_symbol_kind(&self, symbol: SymbolId) -> u32 {
+        if self
+            .typed
+            .and_then(|typed| typed.type_of_symbol(symbol))
+            .is_some_and(|ty| matches!(ty, CheckedType::Function(_)))
+        {
+            FUNCTION
+        } else {
+            VARIABLE
         }
     }
 
@@ -348,11 +358,10 @@ impl Classifier {
     }
 
     fn binding(&mut self, binding: &Binding, resolved: Option<&ResolvedModule>) {
-        let kind = if binding.kind == BindingKind::Def {
-            FUNCTION
-        } else {
-            VARIABLE
-        };
+        let kind = resolved
+            .and_then(|module| module.symbol_for(binding.syntax.id))
+            .map(|symbol| self.value_symbol_kind(symbol))
+            .unwrap_or(VARIABLE);
         let modifiers = DECLARATION | DEFINITION | if binding.mutable { 0 } else { READONLY };
         self.mark_declaration(
             &binding.syntax,
@@ -466,7 +475,12 @@ impl Classifier {
             Expression::Name(value) => {
                 let kind = resolved
                     .and_then(|module| module.symbol_for(value.syntax.id))
-                    .and_then(|symbol| self.symbols.get(&symbol).copied())
+                    .map(|symbol| {
+                        self.symbols
+                            .get(&symbol)
+                            .copied()
+                            .unwrap_or_else(|| self.value_symbol_kind(symbol))
+                    })
                     .unwrap_or(VARIABLE);
                 let readonly = resolved
                     .and_then(|module| module.symbol_for(value.syntax.id))
@@ -826,7 +840,7 @@ mod tests {
 
     #[test]
     fn malformed_source_keeps_lexical_tokens() {
-        let result = tokens("def broken = \"unterminated", None, None);
+        let result = tokens("def broken = \"unterminated", None, None, None);
         assert!(result.iter().any(|token| token.token_type == KEYWORD));
         assert!(result.iter().any(|token| token.token_type == STRING));
     }
@@ -857,18 +871,18 @@ mod tests {
             "mod child { def nested = () => 1 }\n",
         );
         let module = parse(source).unwrap();
-        let labels = labels(source, &tokens(source, Some(&module), None));
+        let labels = labels(source, &tokens(source, Some(&module), None, None));
         for expected in [
             ("tools", NAMESPACE),
             ("Item", TYPE),
             ("Show", INTERFACE),
             ("identity", MACRO),
-            ("project", FUNCTION),
+            ("project", VARIABLE),
             ("T", TYPE_PARAMETER),
             ("value", PARAMETER),
             ("field", PROPERTY),
             ("child", NAMESPACE),
-            ("nested", FUNCTION),
+            ("nested", VARIABLE),
         ] {
             assert!(
                 labels.contains(&expected),
@@ -886,8 +900,12 @@ mod tests {
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
         let module = parse(source).unwrap();
-        let labels = labels(source, &tokens(source, Some(&module), Some(&resolved)));
+        let labels = labels(
+            source,
+            &tokens(source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
         assert!(
             labels
                 .iter()
@@ -895,6 +913,74 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn binding_colour_follows_checked_type_instead_of_keyword() {
+        let source = concat!(
+            "def regular = 1\n",
+            "let callable = () => 1\n",
+            "let result = regular\n",
+            "callable ()\n",
+        );
+        let path = std::env::temp_dir().join("staple-semantic-binding-types.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let labels = labels(
+            source,
+            &tokens(source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
+
+        assert!(labels.contains(&("regular", VARIABLE)));
+        assert!(labels.contains(&("callable", FUNCTION)));
+        assert!(
+            labels
+                .iter()
+                .filter(|token| **token == ("callable", FUNCTION))
+                .count()
+                >= 2
+        );
+    }
+
+    #[test]
+    fn imported_binding_references_follow_their_checked_type() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-semantic-import-types-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("dependency.sta"),
+            "pub let imported_function = () => 1\npub def imported_value = 2\n",
+        )
+        .unwrap();
+        let source = concat!(
+            "use dependency (imported_function, imported_value)\n",
+            "imported_function ()\n",
+            "imported_value\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let labels = labels(
+            source,
+            &tokens(source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
+
+        assert!(labels.contains(&("imported_function", FUNCTION)));
+        assert!(labels.contains(&("imported_value", VARIABLE)));
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn labels<'a>(source: &'a str, tokens: &[SemanticToken]) -> Vec<(&'a str, u32)> {

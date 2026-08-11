@@ -50,7 +50,7 @@
             "1": { "name": "storage.type.function.staple" },
             "2": { "name": "storage.modifier.fixity.staple" },
             "3": { "name": "constant.numeric.integer.precedence.staple" },
-            "4": { "name": "entity.name.function.staple" }
+            "4": { "name": "variable.other.readwrite.staple" }
           }
         },
         {
@@ -92,7 +92,7 @@
           "captures": {
             "1": { "name": "storage.type.binding.staple" },
             "2": { "name": "storage.modifier.mutable.staple" },
-            "3": { "name": "entity.name.variable.staple" }
+            "3": { "name": "variable.other.readwrite.staple" }
           }
         }
       ]

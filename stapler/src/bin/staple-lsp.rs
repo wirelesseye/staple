@@ -257,7 +257,7 @@ impl Server {
         let text = document.text.clone();
         let version = document.version;
         let Some(path) = uri_to_path(uri) else {
-            let tokens = semantic::tokens(&text, stapler::parse(&text).ok().as_ref(), None);
+            let tokens = semantic::tokens(&text, stapler::parse(&text).ok().as_ref(), None, None);
             self.documents.get_mut(uri).unwrap().semantic_tokens = tokens;
             self.documents.get_mut(uri).unwrap().hover_entries.clear();
             return self.publish(
@@ -274,6 +274,7 @@ impl Server {
         let parsed = stapler::parse(&text).ok();
         let mut grouped: HashMap<Uri, Vec<lsp_types::Diagnostic>> = HashMap::new();
         let mut resolved_for_tokens = None;
+        let mut typed_for_tokens = None;
         let mut hover_entries = Vec::new();
         let mut analysis_succeeded = false;
         if let Some(module) = &parsed {
@@ -307,6 +308,7 @@ impl Server {
                         match TypeChecker::new().check(resolved) {
                             Ok(typed) => {
                                 hover_entries = hover::entries(module, &typed);
+                                typed_for_tokens = Some(typed);
                                 analysis_succeeded = true;
                             }
                             Err(diagnostics) => {
@@ -324,8 +326,12 @@ impl Server {
             ));
         }
 
-        let current_semantic =
-            semantic::entries(&text, parsed.as_ref(), resolved_for_tokens.as_ref());
+        let current_semantic = semantic::entries(
+            &text,
+            parsed.as_ref(),
+            resolved_for_tokens.as_ref(),
+            typed_for_tokens.as_ref(),
+        );
         let document = self.documents.get_mut(uri).unwrap();
         if analysis_succeeded {
             document.semantic_tokens = semantic::encode(&text, &current_semantic);
