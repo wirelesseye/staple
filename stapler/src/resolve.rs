@@ -404,6 +404,16 @@ struct Interface {
     traits: HashMap<String, TraitId>,
 }
 
+fn is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId) -> bool {
+    while let Some(parent) = program.parent_module(module) {
+        if parent == ancestor {
+            return true;
+        }
+        module = parent;
+    }
+    false
+}
+
 fn extend_interface(exported: &mut Interface, imported: &Interface) -> bool {
     let mut changed = false;
     for name in imported.values.keys() {
@@ -577,6 +587,7 @@ impl NameResolver {
             self.prelude_macros.clear();
             self.prelude_traits.clear();
             self.push_scope();
+            self.install_child_namespaces(&program, source_module.id);
             self.install_prelude(&program, source_module.id);
             self.install_imports(&program, source_module.id);
             self.install_local_traits(source_module.id);
@@ -1138,7 +1149,7 @@ impl NameResolver {
                         | Statement::Continue(_)
                         | Statement::Expression(_) => {}
                     },
-                    Item::UseDeclaration(_) => {}
+                    Item::UseDeclaration(_) | Item::Submodule(_) => {}
                 }
             }
         }
@@ -1152,6 +1163,16 @@ impl NameResolver {
         self.definition_context_namespaces = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
+        for module in program.modules() {
+            for item in &module.syntax.items {
+                if let Item::Submodule(submodule) = item
+                    && let Some(child) = program.child_module(submodule.syntax.id)
+                {
+                    self.definition_context_namespaces[module.id.0]
+                        .insert(submodule.name.clone(), child);
+                }
+            }
+        }
         if let Some(core) = program.standard_library_core() {
             for module in program.modules() {
                 if module.id != core {
@@ -1172,40 +1193,46 @@ impl NameResolver {
                 let Some(imported) = program.imported_module(use_.syntax.id) else {
                     continue;
                 };
+                let interface = if use_.visibility == Visibility::Private
+                    && is_ancestor(program, imported, module.id)
+                {
+                    self.local_interface(imported)
+                } else {
+                    self.interfaces[imported.0].clone()
+                };
                 match &use_.kind {
                     UseKind::Glob => {
                         self.definition_context_values[module.id.0]
-                            .extend(self.interfaces[imported.0].values.clone());
-                        self.definition_context_types[module.id.0]
-                            .extend(self.interfaces[imported.0].types.clone());
+                            .extend(interface.values.clone());
+                        self.definition_context_types[module.id.0].extend(interface.types.clone());
                         self.definition_context_fixities[module.id.0]
-                            .extend(self.interfaces[imported.0].fixities.clone());
+                            .extend(interface.fixities.clone());
                     }
                     UseKind::Selected(names) => {
                         for name in names {
-                            if let Some(symbol) = self.interfaces[imported.0].values.get(name) {
+                            if let Some(symbol) = interface.values.get(name) {
                                 self.definition_context_values[module.id.0]
                                     .insert(name.clone(), *symbol);
                             }
-                            if let Some(ty) = self.interfaces[imported.0].types.get(name) {
+                            if let Some(ty) = interface.types.get(name) {
                                 self.definition_context_types[module.id.0]
                                     .insert(name.clone(), *ty);
                             }
-                            if let Some(fixity) = self.interfaces[imported.0].fixities.get(name) {
+                            if let Some(fixity) = interface.fixities.get(name) {
                                 self.definition_context_fixities[module.id.0]
                                     .insert(name.clone(), *fixity);
                             }
                         }
                     }
                     UseKind::Renamed { item, alias } => {
-                        if let Some(symbol) = self.interfaces[imported.0].values.get(item) {
+                        if let Some(symbol) = interface.values.get(item) {
                             self.definition_context_values[module.id.0]
                                 .insert(alias.clone(), *symbol);
                         }
-                        if let Some(ty) = self.interfaces[imported.0].types.get(item) {
+                        if let Some(ty) = interface.types.get(item) {
                             self.definition_context_types[module.id.0].insert(alias.clone(), *ty);
                         }
-                        if let Some(fixity) = self.interfaces[imported.0].fixities.get(item) {
+                        if let Some(fixity) = interface.fixities.get(item) {
                             self.definition_context_fixities[module.id.0]
                                 .insert(alias.clone(), *fixity);
                         }
@@ -1282,6 +1309,13 @@ impl NameResolver {
             let Some(imported) = program.imported_module(declaration.syntax.id) else {
                 continue;
             };
+            let interface = if declaration.visibility == Visibility::Private
+                && is_ancestor(program, imported, module)
+            {
+                self.local_interface(imported)
+            } else {
+                self.interfaces[imported.0].clone()
+            };
             match &declaration.kind {
                 UseKind::Namespace => {
                     let name = declaration
@@ -1296,28 +1330,26 @@ impl NameResolver {
                     }
                 }
                 UseKind::Glob => {
-                    for (name, symbol) in self.interfaces[imported.0].values.clone() {
-                        if let Some(fixity) =
-                            self.interfaces[imported.0].fixities.get(&name).copied()
-                        {
+                    for (name, symbol) in interface.values.clone() {
+                        if let Some(fixity) = interface.fixities.get(&name).copied() {
                             self.imported_fixities.insert(name.clone(), fixity);
                         }
                         self.insert_imported_value(name, symbol, declaration.syntax.span.clone());
                     }
-                    for (name, ty) in self.interfaces[imported.0].types.clone() {
+                    for (name, ty) in interface.types.clone() {
                         self.insert_imported_type(name, ty, declaration.syntax.span.clone());
                     }
-                    for (name, macro_id) in self.interfaces[imported.0].macros.clone() {
+                    for (name, macro_id) in interface.macros.clone() {
                         self.insert_imported_macro(name, macro_id, declaration.syntax.span.clone());
                     }
-                    for (name, trait_id) in self.interfaces[imported.0].traits.clone() {
+                    for (name, trait_id) in interface.traits.clone() {
                         self.insert_imported_trait(name, trait_id, declaration.syntax.span.clone());
                     }
                 }
                 UseKind::Selected(names) => {
                     for name in names {
                         self.install_selected(
-                            imported,
+                            &interface,
                             name,
                             name,
                             declaration.syntax.span.clone(),
@@ -1325,9 +1357,37 @@ impl NameResolver {
                     }
                 }
                 UseKind::Renamed { item, alias } => {
-                    self.install_selected(imported, item, alias, declaration.syntax.span.clone());
+                    self.install_selected(&interface, item, alias, declaration.syntax.span.clone());
                 }
             }
+        }
+    }
+
+    fn install_child_namespaces(&mut self, program: &Program, module: ModuleId) {
+        for item in &program.module(module).syntax.items {
+            let Item::Submodule(submodule) = item else {
+                continue;
+            };
+            let Some(child) = program.child_module(submodule.syntax.id) else {
+                continue;
+            };
+            if self
+                .namespaces
+                .insert(submodule.name.clone(), child)
+                .is_some()
+            {
+                self.duplicate_import(&submodule.name, submodule.syntax.span.clone());
+            }
+        }
+    }
+
+    fn local_interface(&self, module: ModuleId) -> Interface {
+        Interface {
+            values: self.module_values[module.0].clone(),
+            fixities: self.declared_fixities[module.0].clone(),
+            types: self.declared_types[module.0].clone(),
+            macros: self.declared_macros[module.0].clone(),
+            traits: self.declared_traits[module.0].clone(),
         }
     }
 
@@ -1348,24 +1408,24 @@ impl NameResolver {
         }
     }
 
-    fn install_selected(&mut self, module: ModuleId, item: &str, local: &str, span: Span) {
+    fn install_selected(&mut self, interface: &Interface, item: &str, local: &str, span: Span) {
         let mut found = false;
-        if let Some(symbol) = self.interfaces[module.0].values.get(item).copied() {
+        if let Some(symbol) = interface.values.get(item).copied() {
             found = true;
-            if let Some(fixity) = self.interfaces[module.0].fixities.get(item).copied() {
+            if let Some(fixity) = interface.fixities.get(item).copied() {
                 self.imported_fixities.insert(local.to_owned(), fixity);
             }
             self.insert_imported_value(local.to_owned(), symbol, span.clone());
         }
-        if let Some(ty) = self.interfaces[module.0].types.get(item).copied() {
+        if let Some(ty) = interface.types.get(item).copied() {
             found = true;
             self.insert_imported_type(local.to_owned(), ty, span.clone());
         }
-        if let Some(macro_id) = self.interfaces[module.0].macros.get(item).cloned() {
+        if let Some(macro_id) = interface.macros.get(item).cloned() {
             found = true;
             self.insert_imported_macro(local.to_owned(), macro_id, span.clone());
         }
-        if let Some(trait_id) = self.interfaces[module.0].traits.get(item).copied() {
+        if let Some(trait_id) = interface.traits.get(item).copied() {
             found = true;
             self.insert_imported_trait(local.to_owned(), trait_id, span.clone());
         }
@@ -1456,6 +1516,7 @@ impl NameResolver {
                     }
                 }
                 Item::UseDeclaration(_)
+                | Item::Submodule(_)
                 | Item::TypeDeclaration(_)
                 | Item::MacroDeclaration(_)
                 | Item::TraitDeclaration(_)
@@ -1489,7 +1550,7 @@ impl NameResolver {
 
     fn resolve_item(&mut self, item: &Item) {
         match item {
-            Item::UseDeclaration(_) => {}
+            Item::UseDeclaration(_) | Item::Submodule(_) => {}
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
                     if let Some(annotation) = &binding.annotation {

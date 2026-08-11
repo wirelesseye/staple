@@ -27,6 +27,11 @@ struct Collector<'a> {
 impl Collector<'_> {
     fn item(&mut self, item: &Item) {
         match item {
+            Item::Submodule(submodule) => {
+                for item in &submodule.module.items {
+                    self.item(item);
+                }
+            }
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
                     self.binding(binding);

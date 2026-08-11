@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inkwell::context::Context;
-use stapler::{CodeGenerator, NameResolver, ProgramLoader, TypeChecker};
+use stapler::{CodeGenerator, Item, NameResolver, ProgramLoader, TypeChecker};
 
 struct Fixture {
     root: PathBuf,
@@ -172,6 +172,175 @@ fn reexports_public_items_through_selected_renamed_glob_and_chained_uses() {
     fixture
         .compile()
         .expect("public uses should re-export every imported item kind");
+}
+
+#[test]
+fn inline_submodules_import_ancestors_and_reexport_public_items() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "library.sta",
+        concat!(
+            "let private_parent: I32 = 40\n",
+            "mod child {\n",
+            "    use super private_parent\n",
+            "    pub def add_two: I32 -> I32 = value => value + private_parent\n",
+            "}\n",
+            "mod extras { pub let answer: I32 = 42 }\n",
+            "pub use child add_two\n",
+            "pub use extras *\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        "use library (add_two, answer)\nlet result: I32 = add_two 2\nlet copied: I32 = answer\n",
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("children should import ancestors and support re-exports");
+    assert!(llvm.contains("add_two"));
+}
+
+#[test]
+fn recursively_nested_submodules_use_super_and_initialize_once() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "library.sta",
+        concat!(
+            "let root: I32 = 40\n",
+            "pub mod outer {\n",
+            "    use super root\n",
+            "    let offset: I32 = 1\n",
+            "    pub mod inner {\n",
+            "        use super (offset)\n",
+            "        use super.super root as base\n",
+            "        pub let answer: I32 = base + offset + 1\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        "use library.outer.inner answer\nlet result: I32 = answer\n",
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("recursive relative imports should compile");
+    for initializer in ["m1", "m2", "m3"] {
+        assert_eq!(
+            llvm.matches(&format!("call void @__staple_init_{initializer}()"))
+                .count(),
+            1,
+            "each file and inline module should initialize exactly once",
+        );
+    }
+}
+
+#[test]
+fn external_imports_traverse_public_inline_submodules() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub mod api { pub let answer: I32 = 42 }\n");
+    fixture.write(
+        "main.sta",
+        "use library.api answer\nlet result: I32 = answer\n",
+    );
+    fixture
+        .compile()
+        .expect("public inline paths should be externally importable");
+
+    fixture.write("library.sta", "mod hidden { pub let answer: I32 = 42 }\n");
+    fixture.write("main.sta", "use library.hidden answer\n");
+    let error = fixture
+        .compile()
+        .expect_err("private inline paths must not be externally importable");
+    assert!(error.contains("private"));
+}
+
+#[test]
+fn submodules_do_not_inherit_parent_items_implicitly() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        "let parent_value: I32 = 42\nmod child { let copy: I32 = parent_value }\n",
+    );
+    let error = fixture
+        .compile()
+        .expect_err("parent items should require an explicit import");
+    assert!(error.contains("parent_value"));
+}
+
+#[test]
+fn inline_glob_reexports_types_traits_and_macros() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "library.sta",
+        concat!(
+            "mod child {\n",
+            "    pub type alias Number = I32\n",
+            "    pub trait Identity = T => { identity: T -> T }\n",
+            "    pub macro reveal = item => quote { $item }\n",
+            "}\n",
+            "pub use child *\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use library *\n",
+            "impl Identity I32 { def identity = value => value }\n",
+            "let answer: Number = identity (reveal 42)\n",
+        ),
+    );
+    fixture
+        .compile()
+        .expect("glob re-exports should preserve every named item kind");
+}
+
+#[test]
+fn rejects_reexporting_a_private_item_from_an_ancestor() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        "let hidden = 42\nmod child { pub use super hidden }\n",
+    );
+    let error = fixture
+        .compile()
+        .expect_err("a public use must not expose a private ancestor item");
+    assert!(error.contains("no public item named `hidden`"));
+}
+
+#[test]
+fn a_complete_file_path_precedes_an_inline_submodule_path() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "library.sta",
+        "pub mod api { pub let inline_answer: I32 = 1 }\n",
+    );
+    fixture.write("library/api.sta", "pub let file_answer: I32 = 2\n");
+    fixture.write("main.sta", "use library.api file_answer\n");
+
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .load_path(&fixture.root.join("main.sta"))
+        .expect("the complete file path should load");
+    let Item::UseDeclaration(use_) = &program.module(program.entry()).syntax.items[0] else {
+        panic!("expected use declaration");
+    };
+    let imported = program
+        .imported_module(use_.syntax.id)
+        .expect("use should resolve");
+    assert!(program.module(imported).path.ends_with("library/api.sta"));
+}
+
+#[test]
+fn rejects_super_at_a_file_module_root() {
+    let fixture = Fixture::new();
+    fixture.write("main.sta", "use super value\n");
+    let error = fixture
+        .compile()
+        .expect_err("a file module has no lexical parent");
+    assert!(error.contains("`super` has no parent module"));
 }
 
 #[test]

@@ -15,12 +15,21 @@ impl Module {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Item {
     UseDeclaration(UseDeclaration),
+    Submodule(Submodule),
     ExternBlock(ExternBlock),
     TypeDeclaration(TypeDeclaration),
     MacroDeclaration(MacroDeclaration),
     TraitDeclaration(TraitDeclaration),
     TraitImplementation(TraitImplementation),
     Statement(Box<Statement>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Submodule {
+    pub syntax: Syntax,
+    pub visibility: Visibility,
+    pub name: String,
+    pub module: Module,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -29,6 +29,7 @@ pub enum TokenKind {
     Def,
     Extern,
     Type,
+    Mod,
     Macro,
     Trait,
     Impl,

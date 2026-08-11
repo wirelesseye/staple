@@ -116,6 +116,9 @@ impl Grammar {
             Some(TokenKind::Use) => self
                 .parse_use_declaration(visibility, item_start)
                 .map(Item::UseDeclaration),
+            Some(TokenKind::Mod) => self
+                .parse_submodule(visibility, item_start)
+                .map(Item::Submodule),
             Some(TokenKind::Extern) => self
                 .parse_extern_block(visibility, item_start)
                 .map(Item::ExternBlock),
@@ -138,6 +141,38 @@ impl Grammar {
         };
         self.newline_terminates_expression = previous;
         item
+    }
+
+    fn parse_submodule(
+        &mut self,
+        visibility: Visibility,
+        start: usize,
+    ) -> Result<Submodule, ParseError> {
+        self.expect(TokenKind::Mod, "expected `mod`")?;
+        let name = self
+            .expect(TokenKind::Identifier, "expected submodule name")?
+            .text;
+        self.expect(TokenKind::LBrace, "expected `{` after submodule name")?;
+        let module_start = self.position;
+        let mut items = Vec::new();
+        while self.peek().is_some() && !self.at(TokenKind::RBrace) {
+            items.push(self.parse_item()?);
+            self.eat(TokenKind::Semicolon);
+        }
+        if self.peek().is_none() {
+            return Err(self.error("expected `}` after submodule items"));
+        }
+        let module = Module {
+            syntax: self.syntax(module_start),
+            items,
+        };
+        self.expect(TokenKind::RBrace, "expected `}` after submodule items")?;
+        Ok(Submodule {
+            syntax: self.syntax(start),
+            visibility,
+            name,
+            module,
+        })
     }
 
     fn parse_macro_declaration(

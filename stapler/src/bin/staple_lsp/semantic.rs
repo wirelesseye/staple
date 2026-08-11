@@ -101,6 +101,7 @@ impl<'a> Classifier<'a> {
                 | TokenKind::Def
                 | TokenKind::Extern
                 | TokenKind::Type
+                | TokenKind::Mod
                 | TokenKind::Macro
                 | TokenKind::Trait
                 | TokenKind::Impl
@@ -213,6 +214,16 @@ impl<'a> Classifier<'a> {
                     }
                     _ => {}
                 }
+            }
+            Item::Submodule(value) => {
+                self.mark_first(
+                    &value.syntax,
+                    &value.name,
+                    NAMESPACE,
+                    DECLARATION | DEFINITION | READONLY,
+                    1,
+                );
+                self.module(&value.module, resolved);
             }
             Item::ExternBlock(value) => {
                 for binding in &value.bindings {
@@ -818,6 +829,7 @@ mod tests {
             "trait Show = T => { show: T -> String }\n",
             "macro identity = value => quote { $value }\n",
             "def project: T => T -> T = value => (field: value).field\n",
+            "mod child { def nested = () => 1 }\n",
         );
         let module = parse(source).unwrap();
         let labels = labels(source, &tokens(source, Some(&module), None));
@@ -830,6 +842,8 @@ mod tests {
             ("T", TYPE_PARAMETER),
             ("value", PARAMETER),
             ("field", PROPERTY),
+            ("child", NAMESPACE),
+            ("nested", FUNCTION),
         ] {
             assert!(
                 labels.contains(&expected),

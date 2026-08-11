@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::parser::parse_with_syntax_ids;
-use crate::{Item, Module, SourceLocation, SyntaxId, UseDeclaration};
+use crate::{Item, Module, SourceLocation, Span, SyntaxId, UseDeclaration, Visibility};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(pub usize);
@@ -14,6 +14,10 @@ pub struct SourceModule {
     pub id: ModuleId,
     pub path: PathBuf,
     pub syntax: Module,
+    pub parent: Option<ModuleId>,
+    pub name: Option<String>,
+    pub visibility: Visibility,
+    pub qualified_name: String,
 }
 
 /// A structured failure produced while loading an editor-owned source file.
@@ -78,12 +82,14 @@ pub struct Program {
     standard_library_cinterop: Option<ModuleId>,
     modules: Vec<SourceModule>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
+    child_modules: HashMap<SyntaxId, ModuleId>,
+    children: Vec<HashMap<String, ModuleId>>,
     initialization_order: Vec<ModuleId>,
 }
 
 impl Program {
     pub(crate) fn single(module: Module) -> Self {
-        Self {
+        let mut program = Self {
             entry: ModuleId(0),
             standard_library_core: None,
             standard_library_cinterop: None,
@@ -91,9 +97,104 @@ impl Program {
                 id: ModuleId(0),
                 path: PathBuf::from("<memory>.sta"),
                 syntax: module,
+                parent: None,
+                name: None,
+                visibility: Visibility::Private,
+                qualified_name: "<memory>".to_owned(),
             }],
             imported_modules: HashMap::new(),
+            child_modules: HashMap::new(),
+            children: vec![HashMap::new()],
             initialization_order: vec![ModuleId(0)],
+        };
+        program.collect_single_submodules(ModuleId(0));
+        program.resolve_single_inline_imports();
+        program.initialization_order =
+            initialization_order(&program.modules, &program.imported_modules);
+        program
+    }
+
+    fn collect_single_submodules(&mut self, parent: ModuleId) {
+        let declarations = self.modules[parent.0]
+            .syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Submodule(module) => Some(module.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for declaration in declarations {
+            let id = ModuleId(self.modules.len());
+            let qualified_name = format!(
+                "{}.{}",
+                self.modules[parent.0].qualified_name, declaration.name
+            );
+            self.modules.push(SourceModule {
+                id,
+                path: self.modules[parent.0].path.clone(),
+                syntax: declaration.module,
+                parent: Some(parent),
+                name: Some(declaration.name.clone()),
+                visibility: declaration.visibility,
+                qualified_name,
+            });
+            self.children.push(HashMap::new());
+            self.children[parent.0].insert(declaration.name, id);
+            self.child_modules.insert(declaration.syntax.id, id);
+            self.collect_single_submodules(id);
+        }
+    }
+
+    fn resolve_single_inline_imports(&mut self) {
+        let uses = self
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module
+                    .syntax
+                    .items
+                    .iter()
+                    .filter_map(move |item| match item {
+                        Item::UseDeclaration(declaration) => Some((module.id, declaration.clone())),
+                        _ => None,
+                    })
+            })
+            .collect::<Vec<_>>();
+        for (source, declaration) in uses {
+            let mut target = source;
+            let mut index = 0;
+            if declaration.path.first().is_some_and(|part| part == "super") {
+                while declaration
+                    .path
+                    .get(index)
+                    .is_some_and(|part| part == "super")
+                {
+                    let Some(parent) = self.parent_module(target) else {
+                        break;
+                    };
+                    target = parent;
+                    index += 1;
+                }
+            } else if let Some(first) = declaration.path.first()
+                && let Some(child) = self.child_named(source, first)
+            {
+                target = child;
+                index = 1;
+            } else {
+                continue;
+            }
+            let mut valid = index > 0;
+            for part in &declaration.path[index..] {
+                let Some(child) = self.child_named(target, part) else {
+                    valid = false;
+                    break;
+                };
+                target = child;
+            }
+            if valid {
+                self.imported_modules.insert(declaration.syntax.id, target);
+            }
         }
     }
 
@@ -121,6 +222,18 @@ impl Program {
         self.imported_modules.get(&use_syntax).copied()
     }
 
+    pub fn child_module(&self, submodule_syntax: SyntaxId) -> Option<ModuleId> {
+        self.child_modules.get(&submodule_syntax).copied()
+    }
+
+    pub fn child_named(&self, module: ModuleId, name: &str) -> Option<ModuleId> {
+        self.children[module.0].get(name).copied()
+    }
+
+    pub fn parent_module(&self, module: ModuleId) -> Option<ModuleId> {
+        self.modules[module.0].parent
+    }
+
     pub fn initialization_order(&self) -> &[ModuleId] {
         &self.initialization_order
     }
@@ -135,6 +248,9 @@ pub struct ProgramLoader {
     modules: Vec<SourceModule>,
     paths: HashMap<PathBuf, ModuleId>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
+    child_modules: HashMap<SyntaxId, ModuleId>,
+    children: Vec<HashMap<String, ModuleId>>,
+    loaded_imports: HashSet<ModuleId>,
     next_syntax_id: usize,
     module_root: Option<PathBuf>,
     standard_library_root: Option<PathBuf>,
@@ -245,11 +361,66 @@ impl ProgramLoader {
         })?;
         let id = ModuleId(self.modules.len());
         self.paths.insert(path.clone(), id);
-        self.modules.push(SourceModule { id, path, syntax });
+        let qualified_name = path.display().to_string();
+        self.modules.push(SourceModule {
+            id,
+            path: path.clone(),
+            syntax,
+            parent: None,
+            name: None,
+            visibility: Visibility::Private,
+            qualified_name: qualified_name.clone(),
+        });
+        self.children.push(HashMap::new());
+        self.insert_submodules(id, path, qualified_name)?;
         Ok(id)
     }
 
+    fn insert_submodules(
+        &mut self,
+        parent: ModuleId,
+        path: PathBuf,
+        parent_name: String,
+    ) -> Result<(), LoadDiagnostic> {
+        let declarations = self.modules[parent.0]
+            .syntax
+            .items
+            .iter()
+            .filter_map(|item| match item {
+                Item::Submodule(module) => Some(module.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for declaration in declarations {
+            if self.children[parent.0].contains_key(&declaration.name) {
+                return Err(load_diagnostic_at(
+                    &declaration.syntax.span,
+                    format!("duplicate submodule definition of `{}`", declaration.name),
+                ));
+            }
+            let id = ModuleId(self.modules.len());
+            let qualified_name = format!("{parent_name}.{}", declaration.name);
+            self.modules.push(SourceModule {
+                id,
+                path: path.clone(),
+                syntax: declaration.module,
+                parent: Some(parent),
+                name: Some(declaration.name.clone()),
+                visibility: declaration.visibility,
+                qualified_name: qualified_name.clone(),
+            });
+            self.children.push(HashMap::new());
+            self.children[parent.0].insert(declaration.name, id);
+            self.child_modules.insert(declaration.syntax.id, id);
+            self.insert_submodules(id, path.clone(), qualified_name)?;
+        }
+        Ok(())
+    }
+
     fn load_imports(&mut self, module: ModuleId, root: &Path) -> Result<(), LoadDiagnostic> {
+        if !self.loaded_imports.insert(module) {
+            return Ok(());
+        }
         let uses = self.modules[module.0]
             .syntax
             .items
@@ -260,37 +431,91 @@ impl ProgramLoader {
             })
             .collect::<Vec<_>>();
         for declaration in uses {
-            let import_root = if declaration.path.first().is_some_and(|part| part == "std") {
-                self.resolve_standard_library_root()?
-            } else {
-                root.to_owned()
-            };
-            let path = use_path(&import_root, &declaration);
-            let path = canonical_file(&path).map_err(|message| {
-                let (source, range, location) = match &declaration.syntax.span {
-                    crate::Span::User {
-                        source,
-                        range,
-                        location,
-                    } => (
-                        source.as_deref().map(PathBuf::from),
-                        Some(range.clone()),
-                        *location,
-                    ),
-                    crate::Span::Compiler => (None, None, None),
-                };
-                LoadDiagnostic {
-                    source,
-                    range,
-                    location,
-                    message,
-                }
-            })?;
-            let imported = self.load_file(&path)?;
+            let imported = self.resolve_import(module, &declaration, root)?;
             self.imported_modules
                 .insert(declaration.syntax.id, imported);
         }
+        let children = self.children[module.0]
+            .values()
+            .copied()
+            .collect::<Vec<_>>();
+        for child in children {
+            self.load_imports(child, root)?;
+        }
         Ok(())
+    }
+
+    fn resolve_import(
+        &mut self,
+        module: ModuleId,
+        declaration: &UseDeclaration,
+        root: &Path,
+    ) -> Result<ModuleId, LoadDiagnostic> {
+        let parts = &declaration.path;
+        if parts.first().is_some_and(|part| part == "super") {
+            let mut target = module;
+            let mut index = 0;
+            while parts.get(index).is_some_and(|part| part == "super") {
+                target = self.modules[target.0].parent.ok_or_else(|| {
+                    load_diagnostic_at(&declaration.syntax.span, "`super` has no parent module")
+                })?;
+                index += 1;
+            }
+            return self.traverse_children(target, &parts[index..], true, declaration);
+        }
+
+        if let Some(first) = parts.first()
+            && let Some(child) = self.children[module.0].get(first).copied()
+        {
+            return self.traverse_children(child, &parts[1..], true, declaration);
+        }
+
+        let import_root = if parts.first().is_some_and(|part| part == "std") {
+            self.resolve_standard_library_root()?
+        } else {
+            root.to_owned()
+        };
+        for prefix_len in (1..=parts.len()).rev() {
+            let mut path = import_root.clone();
+            for component in &parts[..prefix_len] {
+                path.push(component);
+            }
+            path.set_extension("sta");
+            let Ok(path) = std::fs::canonicalize(&path) else {
+                continue;
+            };
+            let file = self.load_file(&path)?;
+            return self.traverse_children(file, &parts[prefix_len..], false, declaration);
+        }
+        Err(load_diagnostic_at(
+            &declaration.syntax.span,
+            format!("could not resolve module `{}`", parts.join(".")),
+        ))
+    }
+
+    fn traverse_children(
+        &self,
+        mut module: ModuleId,
+        parts: &[String],
+        allow_private: bool,
+        declaration: &UseDeclaration,
+    ) -> Result<ModuleId, LoadDiagnostic> {
+        for part in parts {
+            let child = self.children[module.0].get(part).copied().ok_or_else(|| {
+                load_diagnostic_at(
+                    &declaration.syntax.span,
+                    format!("module has no submodule named `{part}`"),
+                )
+            })?;
+            if !allow_private && self.modules[child.0].visibility != Visibility::Public {
+                return Err(load_diagnostic_at(
+                    &declaration.syntax.span,
+                    format!("submodule `{part}` is private"),
+                ));
+            }
+            module = child;
+        }
+        Ok(module)
     }
 
     fn load_standard_library(&mut self) -> Result<(), LoadDiagnostic> {
@@ -362,6 +587,8 @@ impl ProgramLoader {
             standard_library_cinterop: self.standard_library_cinterop,
             modules: self.modules,
             imported_modules: self.imported_modules,
+            child_modules: self.child_modules,
+            children: self.children,
             initialization_order,
         }
     }
@@ -394,13 +621,25 @@ fn canonical_file(path: &Path) -> Result<PathBuf, String> {
         .map_err(|error| format!("could not resolve module `{}`: {error}", path.display()))
 }
 
-fn use_path(root: &Path, declaration: &UseDeclaration) -> PathBuf {
-    let mut path = root.to_owned();
-    for component in &declaration.path {
-        path.push(component);
+fn load_diagnostic_at(span: &Span, message: impl Into<String>) -> LoadDiagnostic {
+    let (source, range, location) = match span {
+        Span::User {
+            source,
+            range,
+            location,
+        } => (
+            source.as_deref().map(PathBuf::from),
+            Some(range.clone()),
+            *location,
+        ),
+        Span::Compiler => (None, None, None),
+    };
+    LoadDiagnostic {
+        source,
+        range,
+        location,
+        message: message.into(),
     }
-    path.set_extension("sta");
-    path
 }
 
 fn initialization_order(
@@ -464,7 +703,16 @@ fn initialization_order(
             let component = components.len();
             let mut members = Vec::new();
             collect(node, &reverse, component, &mut component_of, &mut members);
-            members.sort_by(|left, right| modules[left.0].path.cmp(&modules[right.0].path));
+            members.sort_by(|left, right| {
+                modules[left.0]
+                    .path
+                    .cmp(&modules[right.0].path)
+                    .then_with(|| {
+                        modules[left.0]
+                            .qualified_name
+                            .cmp(&modules[right.0].qualified_name)
+                    })
+            });
             components.push(members);
         }
     }

@@ -284,6 +284,24 @@ impl MacroExpander {
             }
         }
 
+        let mut all_macros = HashMap::<(ModuleId, String), Vec<MacroKey>>::new();
+        for definition in definitions.values() {
+            all_macros
+                .entry((definition.key.module, definition.key.name.clone()))
+                .or_default()
+                .push(definition.key.clone());
+        }
+        let all_helpers = program
+            .modules()
+            .iter()
+            .flat_map(|module| {
+                scopes[module.id.0]
+                    .helpers
+                    .iter()
+                    .map(move |(name, helper)| ((module.id, name.clone()), helper.clone()))
+            })
+            .collect::<HashMap<_, _>>();
+
         for source_module in program.modules() {
             if let Some(core) = core
                 && source_module.id != core
@@ -307,11 +325,27 @@ impl MacroExpander {
                 }
             }
             for item in &source_module.syntax.items {
+                if let Item::Submodule(submodule) = item
+                    && let Some(child) = program.child_module(submodule.syntax.id)
+                {
+                    scopes[source_module.id.0]
+                        .namespaces
+                        .insert(submodule.name.clone(), child);
+                }
+            }
+            for item in &source_module.syntax.items {
                 let Item::UseDeclaration(use_) = item else {
                     continue;
                 };
                 let Some(imported) = program.imported_module(use_.syntax.id) else {
                     continue;
+                };
+                let (macros, helpers) = if use_.visibility == Visibility::Private
+                    && macro_is_ancestor(program, imported, source_module.id)
+                {
+                    (&all_macros, &all_helpers)
+                } else {
+                    (&public_macros, &public_helpers)
                 };
                 match &use_.kind {
                     UseKind::Namespace => {
@@ -322,16 +356,15 @@ impl MacroExpander {
                         }
                     }
                     UseKind::Glob => {
-                        for ((_, name), keys) in public_macros
-                            .iter()
-                            .filter(|((module, _), _)| *module == imported)
+                        for ((_, name), keys) in
+                            macros.iter().filter(|((module, _), _)| *module == imported)
                         {
                             scopes[source_module.id.0]
                                 .macros
                                 .entry(name.clone())
                                 .or_insert_with(|| keys.clone());
                         }
-                        for ((module, name), binding) in &public_helpers {
+                        for ((module, name), binding) in helpers {
                             if *module == imported {
                                 scopes[source_module.id.0]
                                     .helpers
@@ -347,8 +380,8 @@ impl MacroExpander {
                                 imported,
                                 name,
                                 name,
-                                &public_macros,
-                                &public_helpers,
+                                macros,
+                                helpers,
                             );
                         }
                     }
@@ -357,8 +390,8 @@ impl MacroExpander {
                         imported,
                         item,
                         alias,
-                        &public_macros,
-                        &public_helpers,
+                        macros,
+                        helpers,
                     ),
                 }
             }
@@ -539,6 +572,7 @@ impl MacroExpander {
                 }
             }
             Item::MacroDeclaration(_)
+            | Item::Submodule(_)
             | Item::UseDeclaration(_)
             | Item::ExternBlock(_)
             | Item::TypeDeclaration(_) => {}
@@ -1394,6 +1428,16 @@ impl MacroExpander {
             | Expression::Float(_) => {}
         }
     }
+}
+
+fn macro_is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId) -> bool {
+    while let Some(parent) = program.parent_module(module) {
+        if parent == ancestor {
+            return true;
+        }
+        module = parent;
+    }
+    false
 }
 
 fn expression_arity(expression: &Expression) -> usize {

@@ -267,6 +267,53 @@ pub use path.to.another_module *
 Re-exports may be chained through multiple modules. Importing two items under
 the same name, or colliding with a local declaration, is an error.
 
+Modules may also be declared inline. An inline submodule has its own scope and
+does not inherit names from its parent; parent items must be imported through
+the relative `super` module:
+
+```staple
+let offset = 1
+
+mod arithmetic {
+    use super offset
+    pub def increment = value => value + offset
+}
+```
+
+Inline submodules may be nested to any depth. Each leading `super` moves up one
+level, so `use super.super item` imports `item` from the grandparent. Using
+`super` from a file module is an error. A parent can always use its direct child
+as a namespace, but inline submodules are private outside their parent unless
+declared with `pub mod`:
+
+```staple
+pub mod api {
+    pub type alias Number = I32
+    pub let answer: Number = 42
+}
+```
+
+An external import resolves the longest existing `.sta` file prefix and then
+traverses public inline submodules. Thus `use library.api answer` first prefers
+`library/api.sta`; if that file does not exist, it loads `library.sta` and looks
+for a public `api` submodule.
+
+A parent can re-export public items from a child, including a private child:
+
+```staple
+mod implementation {
+    pub def format = value => value
+    pub type alias Number = I32
+}
+
+pub use implementation format
+pub use implementation *
+```
+
+Selected, renamed, glob, and chained re-exports preserve values, types,
+constructors, traits, macros, and operator fixities. A public `use` cannot
+re-export a private item.
+
 Top-level declarations are private by default. `pub` exports a binding or type:
 
 ```staple
@@ -278,8 +325,10 @@ pub type alias Number = I32
 
 Every reachable module's top-level statements execute exactly once. Dependencies
 are initialized before modules which use them. Mutually recursive groups are
-initialized in canonical file-path order, and statements within one module keep
-source order. Module globals begin in the `Declared` state, enter `Initializing`
+initialized by canonical file path and then logical submodule path, and
+statements within one module keep source order. Declaring an inline submodule
+makes it reachable, so its top-level statements also execute exactly once.
+Module globals begin in the `Declared` state, enter `Initializing`
 while their initializer is evaluated, and become `Initialized(value)` only after
 that value has been stored. Reading a global before it is `Initialized` is an
 initialization error; globals never expose a default representation.

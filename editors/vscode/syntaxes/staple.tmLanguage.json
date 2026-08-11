@@ -126,7 +126,7 @@
         },
         {
           "name": "keyword.declaration.staple",
-          "match": "\\b(?:def|extern|impl|let|macro|trait|type)\\b"
+          "match": "\\b(?:def|extern|impl|let|macro|mod|trait|type)\\b"
         },
         {
           "name": "storage.modifier.staple",

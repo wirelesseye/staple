@@ -1264,6 +1264,7 @@ impl TypeChecker {
                         }
                     }
                     Item::UseDeclaration(_)
+                    | Item::Submodule(_)
                     | Item::TypeDeclaration(_)
                     | Item::MacroDeclaration(_)
                     | Item::TraitDeclaration(_)
@@ -1811,6 +1812,7 @@ impl TypeChecker {
                 self.check_statement(module, statement);
             }
             Item::UseDeclaration(_)
+            | Item::Submodule(_)
             | Item::TypeDeclaration(_)
             | Item::MacroDeclaration(_)
             | Item::TraitDeclaration(_)

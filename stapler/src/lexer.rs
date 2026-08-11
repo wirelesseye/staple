@@ -73,6 +73,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
                 "def" => TokenKind::Def,
                 "extern" => TokenKind::Extern,
                 "type" => TokenKind::Type,
+                "mod" => TokenKind::Mod,
                 "macro" => TokenKind::Macro,
                 "trait" => TokenKind::Trait,
                 "impl" => TokenKind::Impl,

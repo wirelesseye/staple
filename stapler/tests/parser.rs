@@ -287,6 +287,29 @@ fn parses_use_declarations_and_public_items_losslessly() {
 }
 
 #[test]
+fn parses_recursive_inline_submodules_losslessly() {
+    let source = concat!(
+        "pub mod outer {\n",
+        "    use super parent\n",
+        "    mod inner { pub def value = 42 }\n",
+        "}\n",
+    );
+    let root = parse(source).expect("submodules should parse");
+    assert_eq!(root.text(), source);
+    let Item::Submodule(outer) = &root.items[0] else {
+        panic!("expected outer submodule");
+    };
+    assert_eq!(outer.name, "outer");
+    assert_eq!(outer.visibility, Visibility::Public);
+    assert!(matches!(outer.module.items[0], Item::UseDeclaration(_)));
+    let Item::Submodule(inner) = &outer.module.items[1] else {
+        panic!("expected nested submodule");
+    };
+    assert_eq!(inner.name, "inner");
+    assert_eq!(inner.visibility, Visibility::Private);
+}
+
+#[test]
 fn parses_namespace_qualified_types() {
     let root = parse("let value: types.Number = 1\n").expect("qualified type should parse");
     let Statement::Binding(binding) = statement(&root.items[0]) else {
