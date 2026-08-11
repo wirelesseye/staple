@@ -223,7 +223,7 @@ impl Collector<'_> {
                     let value_type = self
                         .typed
                         .type_of_expression(member.value.syntax().id)
-                        .map(ToString::to_string)
+                        .map(|value_type| self.display_type(value_type))
                         .or_else(|| self.implementation_member_type(implementation, member));
                     if let Some(value_type) = value_type {
                         self.named(
@@ -372,7 +372,26 @@ impl Collector<'_> {
             .type_of_function(*function)
             .cloned()
             .map(CheckedType::Function)
-            .map(|value_type| value_type.to_string())
+            .map(|value_type| self.display_type(&value_type))
+    }
+
+    fn display_type(&self, value_type: &CheckedType) -> String {
+        let resolved = self.typed.resolved();
+        let mut names = resolved
+            .type_declarations()
+            .iter()
+            .filter_map(|(id, declaration)| {
+                let internal = resolved.type_name(*id)?;
+                (internal != declaration.name).then_some((internal, declaration.name.as_str()))
+            })
+            .collect::<Vec<_>>();
+        names.sort_unstable_by_key(|(internal, _)| std::cmp::Reverse(internal.len()));
+
+        let mut displayed = value_type.to_string();
+        for (internal, source) in names {
+            displayed = displayed.replace(internal, source);
+        }
+        displayed
     }
 
     fn binding(&mut self, binding: &Binding) {
@@ -386,7 +405,7 @@ impl Collector<'_> {
                     .as_ref()
                     .and_then(|value| self.typed.type_of_expression(value.syntax().id))
             })
-            .map(ToString::to_string);
+            .map(|value_type| self.display_type(value_type));
         if let Some(value_type) = value_type {
             let prefix = match binding.kind {
                 BindingKind::Let => "let",
@@ -414,7 +433,7 @@ impl Collector<'_> {
 
     fn expression(&mut self, expression: &Expression) {
         if let Some(value_type) = self.typed.type_of_expression(expression.syntax().id) {
-            let value_type = value_type.to_string();
+            let value_type = self.display_type(value_type);
             let signature = self
                 .typed
                 .symbol_for(expression.syntax().id)
@@ -464,7 +483,7 @@ impl Collector<'_> {
                         && let Some(value_type) =
                             self.typed.type_of_expression(element.value.syntax().id)
                     {
-                        self.named(&element.syntax, name, value_type.to_string());
+                        self.named(&element.syntax, name, self.display_type(value_type));
                     }
                 }
             }
@@ -494,9 +513,9 @@ impl Collector<'_> {
 
     fn pattern(&mut self, pattern: &Pattern) {
         if let Some(value_type) = self.typed.type_of_pattern(pattern.syntax().id) {
-            self.syntax(pattern.syntax(), value_type.to_string());
+            let value_type = self.display_type(value_type);
+            self.syntax(pattern.syntax(), value_type.clone());
             if let Pattern::Binding(binding) = pattern {
-                let value_type = value_type.to_string();
                 let signature = self
                     .typed
                     .symbol_for(binding.syntax.id)
@@ -713,6 +732,51 @@ mod tests {
             &source[entry.range.clone()] == "dependency.imported_value"
                 && entry.signature == "let imported_value: I32"
         }));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn inferred_imported_types_do_not_expose_internal_module_ids() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-hover-imported-type-name-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("geometry.sta"),
+            concat!(
+                "pub(repr) type Point = (x: I32, y: I32)\n",
+                "pub def origin = () => Point (x: 0, y: 0)\n",
+            ),
+        )
+        .unwrap();
+        let source = concat!(
+            "use geometry (Point, origin)\n",
+            "let start: Point = origin ()\n",
+            "start\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        let start_entries = entries
+            .iter()
+            .filter(|entry| &source[entry.range.clone()] == "start")
+            .collect::<Vec<_>>();
+
+        assert_eq!(start_entries.len(), 2, "entries: {entries:?}");
+        assert!(
+            start_entries
+                .iter()
+                .all(|entry| entry.signature == "let start: Point"),
+            "entries: {entries:?}"
+        );
 
         std::fs::remove_dir_all(root).unwrap();
     }
