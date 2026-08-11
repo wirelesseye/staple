@@ -11,6 +11,35 @@ fn statement(item: &Item) -> &Statement {
 }
 
 #[test]
+fn parses_float_literals_losslessly_without_stealing_access_dots() {
+    let source = "1.0\n1.\n.5\n1e3\n1.5e-2\n1.e2\n1.field\n(1, 2).0\n";
+    let root = parse(source).expect("float literals should parse");
+    assert_eq!(root.text(), source);
+    for item in &root.items[..6] {
+        assert!(matches!(
+            statement(item),
+            Statement::Expression(Expression::Float(_))
+        ));
+    }
+    assert!(matches!(
+        statement(&root.items[6]),
+        Statement::Expression(Expression::Access(access))
+            if matches!(access.value.as_ref(), Expression::Integer(_))
+                && access.accessor == Accessor::Name("field".into())
+    ));
+    assert!(matches!(
+        statement(&root.items[7]),
+        Statement::Expression(Expression::Access(access))
+            if access.accessor == Accessor::Index("0".into())
+    ));
+    assert_eq!(
+        stapler::lex("1e+")[0].kind,
+        TokenKind::Float,
+        "an incomplete exponent should remain one diagnostic token"
+    );
+}
+
+#[test]
 fn parses_match_expressions_and_wildcards_losslessly() {
     let source = concat!(
         "def choose = result: Ok I32 | IOError => match result {\n",

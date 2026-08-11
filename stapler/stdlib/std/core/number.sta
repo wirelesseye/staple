@@ -43,64 +43,60 @@ extern "staple-intrinsic" {
     let __usize_divide: (USize, USize) -> USize
     let __i8_equal: (I8, I8) -> Bool
     let __i8_not_equal: (I8, I8) -> Bool
-    let __i8_less_than: (I8, I8) -> Bool
-    let __i8_less_than_or_equal: (I8, I8) -> Bool
-    let __i8_greater_than: (I8, I8) -> Bool
-    let __i8_greater_than_or_equal: (I8, I8) -> Bool
+    let __i8_lt: (I8, I8) -> Bool
+    let __i8_gt: (I8, I8) -> Bool
     let __i16_equal: (I16, I16) -> Bool
     let __i16_not_equal: (I16, I16) -> Bool
-    let __i16_less_than: (I16, I16) -> Bool
-    let __i16_less_than_or_equal: (I16, I16) -> Bool
-    let __i16_greater_than: (I16, I16) -> Bool
-    let __i16_greater_than_or_equal: (I16, I16) -> Bool
+    let __i16_lt: (I16, I16) -> Bool
+    let __i16_gt: (I16, I16) -> Bool
     let __i32_equal: (I32, I32) -> Bool
     let __i32_not_equal: (I32, I32) -> Bool
-    let __i32_less_than: (I32, I32) -> Bool
-    let __i32_less_than_or_equal: (I32, I32) -> Bool
-    let __i32_greater_than: (I32, I32) -> Bool
-    let __i32_greater_than_or_equal: (I32, I32) -> Bool
+    let __i32_lt: (I32, I32) -> Bool
+    let __i32_gt: (I32, I32) -> Bool
     let __i64_equal: (I64, I64) -> Bool
     let __i64_not_equal: (I64, I64) -> Bool
-    let __i64_less_than: (I64, I64) -> Bool
-    let __i64_less_than_or_equal: (I64, I64) -> Bool
-    let __i64_greater_than: (I64, I64) -> Bool
-    let __i64_greater_than_or_equal: (I64, I64) -> Bool
+    let __i64_lt: (I64, I64) -> Bool
+    let __i64_gt: (I64, I64) -> Bool
     let __u8_equal: (U8, U8) -> Bool
     let __u8_not_equal: (U8, U8) -> Bool
-    let __u8_less_than: (U8, U8) -> Bool
-    let __u8_less_than_or_equal: (U8, U8) -> Bool
-    let __u8_greater_than: (U8, U8) -> Bool
-    let __u8_greater_than_or_equal: (U8, U8) -> Bool
+    let __u8_lt: (U8, U8) -> Bool
+    let __u8_gt: (U8, U8) -> Bool
     let __u16_equal: (U16, U16) -> Bool
     let __u16_not_equal: (U16, U16) -> Bool
-    let __u16_less_than: (U16, U16) -> Bool
-    let __u16_less_than_or_equal: (U16, U16) -> Bool
-    let __u16_greater_than: (U16, U16) -> Bool
-    let __u16_greater_than_or_equal: (U16, U16) -> Bool
+    let __u16_lt: (U16, U16) -> Bool
+    let __u16_gt: (U16, U16) -> Bool
     let __u32_equal: (U32, U32) -> Bool
     let __u32_not_equal: (U32, U32) -> Bool
-    let __u32_less_than: (U32, U32) -> Bool
-    let __u32_less_than_or_equal: (U32, U32) -> Bool
-    let __u32_greater_than: (U32, U32) -> Bool
-    let __u32_greater_than_or_equal: (U32, U32) -> Bool
+    let __u32_lt: (U32, U32) -> Bool
+    let __u32_gt: (U32, U32) -> Bool
     let __u64_equal: (U64, U64) -> Bool
     let __u64_not_equal: (U64, U64) -> Bool
-    let __u64_less_than: (U64, U64) -> Bool
-    let __u64_less_than_or_equal: (U64, U64) -> Bool
-    let __u64_greater_than: (U64, U64) -> Bool
-    let __u64_greater_than_or_equal: (U64, U64) -> Bool
+    let __u64_lt: (U64, U64) -> Bool
+    let __u64_gt: (U64, U64) -> Bool
     let __isize_equal: (ISize, ISize) -> Bool
     let __isize_not_equal: (ISize, ISize) -> Bool
-    let __isize_less_than: (ISize, ISize) -> Bool
-    let __isize_less_than_or_equal: (ISize, ISize) -> Bool
-    let __isize_greater_than: (ISize, ISize) -> Bool
-    let __isize_greater_than_or_equal: (ISize, ISize) -> Bool
+    let __isize_lt: (ISize, ISize) -> Bool
+    let __isize_gt: (ISize, ISize) -> Bool
     let __usize_equal: (USize, USize) -> Bool
     let __usize_not_equal: (USize, USize) -> Bool
-    let __usize_less_than: (USize, USize) -> Bool
-    let __usize_less_than_or_equal: (USize, USize) -> Bool
-    let __usize_greater_than: (USize, USize) -> Bool
-    let __usize_greater_than_or_equal: (USize, USize) -> Bool
+    let __usize_lt: (USize, USize) -> Bool
+    let __usize_gt: (USize, USize) -> Bool
+    let __f32_add: (F32, F32) -> F32
+    let __f32_subtract: (F32, F32) -> F32
+    let __f32_multiply: (F32, F32) -> F32
+    let __f32_divide: (F32, F32) -> F32
+    let __f32_equal: (F32, F32) -> Bool
+    let __f32_not_equal: (F32, F32) -> Bool
+    let __f32_lt: (F32, F32) -> Bool
+    let __f32_gt: (F32, F32) -> Bool
+    let __f64_add: (F64, F64) -> F64
+    let __f64_subtract: (F64, F64) -> F64
+    let __f64_multiply: (F64, F64) -> F64
+    let __f64_divide: (F64, F64) -> F64
+    let __f64_equal: (F64, F64) -> Bool
+    let __f64_not_equal: (F64, F64) -> Bool
+    let __f64_lt: (F64, F64) -> Bool
+    let __f64_gt: (F64, F64) -> Bool
 }
 
 impl Add I8 {
@@ -268,11 +264,24 @@ impl Eq I8 {
     def not_equal = left => right => __i8_not_equal (left, right)
 }
 
-impl Compare I8 {
-    def less_than = left => right => __i8_less_than (left, right)
-    def less_than_or_equal = left => right => __i8_less_than_or_equal (left, right)
-    def greater_than = left => right => __i8_greater_than (left, right)
-    def greater_than_or_equal = left => right => __i8_greater_than_or_equal (left, right)
+impl PartialOrd I8 {
+    def partial_cmp = left => right => match (__i8_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__i8_gt (left, right)) {
+        True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord I8 {
+    def cmp = left => right => match (__i8_lt (left, right)) {
+        True() => Less,
+        False() => match (__i8_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
 }
 
 impl Eq I16 {
@@ -280,11 +289,24 @@ impl Eq I16 {
     def not_equal = left => right => __i16_not_equal (left, right)
 }
 
-impl Compare I16 {
-    def less_than = left => right => __i16_less_than (left, right)
-    def less_than_or_equal = left => right => __i16_less_than_or_equal (left, right)
-    def greater_than = left => right => __i16_greater_than (left, right)
-    def greater_than_or_equal = left => right => __i16_greater_than_or_equal (left, right)
+impl PartialOrd I16 {
+    def partial_cmp = left => right => match (__i16_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__i16_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord I16 {
+    def cmp = left => right => match (__i16_lt (left, right)) {
+        True() => Less,
+        False() => match (__i16_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
 }
 
 impl Eq I32 {
@@ -292,11 +314,24 @@ impl Eq I32 {
     def not_equal = left => right => __i32_not_equal (left, right)
 }
 
-impl Compare I32 {
-    def less_than = left => right => __i32_less_than (left, right)
-    def less_than_or_equal = left => right => __i32_less_than_or_equal (left, right)
-    def greater_than = left => right => __i32_greater_than (left, right)
-    def greater_than_or_equal = left => right => __i32_greater_than_or_equal (left, right)
+impl PartialOrd I32 {
+    def partial_cmp = left => right => match (__i32_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__i32_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord I32 {
+    def cmp = left => right => match (__i32_lt (left, right)) {
+        True() => Less,
+        False() => match (__i32_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
 }
 
 impl Eq I64 {
@@ -304,11 +339,24 @@ impl Eq I64 {
     def not_equal = left => right => __i64_not_equal (left, right)
 }
 
-impl Compare I64 {
-    def less_than = left => right => __i64_less_than (left, right)
-    def less_than_or_equal = left => right => __i64_less_than_or_equal (left, right)
-    def greater_than = left => right => __i64_greater_than (left, right)
-    def greater_than_or_equal = left => right => __i64_greater_than_or_equal (left, right)
+impl PartialOrd I64 {
+    def partial_cmp = left => right => match (__i64_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__i64_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord I64 {
+    def cmp = left => right => match (__i64_lt (left, right)) {
+        True() => Less,
+        False() => match (__i64_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
 }
 
 impl Eq U8 {
@@ -316,11 +364,24 @@ impl Eq U8 {
     def not_equal = left => right => __u8_not_equal (left, right)
 }
 
-impl Compare U8 {
-    def less_than = left => right => __u8_less_than (left, right)
-    def less_than_or_equal = left => right => __u8_less_than_or_equal (left, right)
-    def greater_than = left => right => __u8_greater_than (left, right)
-    def greater_than_or_equal = left => right => __u8_greater_than_or_equal (left, right)
+impl PartialOrd U8 {
+    def partial_cmp = left => right => match (__u8_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__u8_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord U8 {
+    def cmp = left => right => match (__u8_lt (left, right)) {
+        True() => Less,
+        False() => match (__u8_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
 }
 
 impl Eq U16 {
@@ -328,11 +389,24 @@ impl Eq U16 {
     def not_equal = left => right => __u16_not_equal (left, right)
 }
 
-impl Compare U16 {
-    def less_than = left => right => __u16_less_than (left, right)
-    def less_than_or_equal = left => right => __u16_less_than_or_equal (left, right)
-    def greater_than = left => right => __u16_greater_than (left, right)
-    def greater_than_or_equal = left => right => __u16_greater_than_or_equal (left, right)
+impl PartialOrd U16 {
+    def partial_cmp = left => right => match (__u16_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__u16_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord U16 {
+    def cmp = left => right => match (__u16_lt (left, right)) {
+        True() => Less,
+        False() => match (__u16_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
 }
 
 impl Eq U32 {
@@ -340,11 +414,24 @@ impl Eq U32 {
     def not_equal = left => right => __u32_not_equal (left, right)
 }
 
-impl Compare U32 {
-    def less_than = left => right => __u32_less_than (left, right)
-    def less_than_or_equal = left => right => __u32_less_than_or_equal (left, right)
-    def greater_than = left => right => __u32_greater_than (left, right)
-    def greater_than_or_equal = left => right => __u32_greater_than_or_equal (left, right)
+impl PartialOrd U32 {
+    def partial_cmp = left => right => match (__u32_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__u32_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord U32 {
+    def cmp = left => right => match (__u32_lt (left, right)) {
+        True() => Less,
+        False() => match (__u32_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
 }
 
 impl Eq U64 {
@@ -352,11 +439,24 @@ impl Eq U64 {
     def not_equal = left => right => __u64_not_equal (left, right)
 }
 
-impl Compare U64 {
-    def less_than = left => right => __u64_less_than (left, right)
-    def less_than_or_equal = left => right => __u64_less_than_or_equal (left, right)
-    def greater_than = left => right => __u64_greater_than (left, right)
-    def greater_than_or_equal = left => right => __u64_greater_than_or_equal (left, right)
+impl PartialOrd U64 {
+    def partial_cmp = left => right => match (__u64_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__u64_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord U64 {
+    def cmp = left => right => match (__u64_lt (left, right)) {
+        True() => Less,
+        False() => match (__u64_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
 }
 
 impl Eq ISize {
@@ -364,11 +464,24 @@ impl Eq ISize {
     def not_equal = left => right => __isize_not_equal (left, right)
 }
 
-impl Compare ISize {
-    def less_than = left => right => __isize_less_than (left, right)
-    def less_than_or_equal = left => right => __isize_less_than_or_equal (left, right)
-    def greater_than = left => right => __isize_greater_than (left, right)
-    def greater_than_or_equal = left => right => __isize_greater_than_or_equal (left, right)
+impl PartialOrd ISize {
+    def partial_cmp = left => right => match (__isize_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__isize_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord ISize {
+    def cmp = left => right => match (__isize_lt (left, right)) {
+        True() => Less,
+        False() => match (__isize_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
 }
 
 impl Eq USize {
@@ -376,11 +489,92 @@ impl Eq USize {
     def not_equal = left => right => __usize_not_equal (left, right)
 }
 
-impl Compare USize {
-    def less_than = left => right => __usize_less_than (left, right)
-    def less_than_or_equal = left => right => __usize_less_than_or_equal (left, right)
-    def greater_than = left => right => __usize_greater_than (left, right)
-    def greater_than_or_equal = left => right => __usize_greater_than_or_equal (left, right)
+impl PartialOrd USize {
+    def partial_cmp = left => right => match (__usize_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__usize_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => Some (Equal satisfies Ordering),
+        },
+    }
+}
+
+impl Ord USize {
+    def cmp = left => right => match (__usize_lt (left, right)) {
+        True() => Less,
+        False() => match (__usize_gt (left, right)) {
+            True() => Greater,
+            False() => Equal,
+        },
+    }
+}
+
+impl Add F32 {
+    def add = left => right => __f32_add (left, right)
+}
+
+impl Subtract F32 {
+    def subtract = left => right => __f32_subtract (left, right)
+}
+
+impl Multiply F32 {
+    def multiply = left => right => __f32_multiply (left, right)
+}
+
+impl Divide F32 {
+    def divide = left => right => __f32_divide (left, right)
+}
+
+impl Eq F32 {
+    def equal = left => right => __f32_equal (left, right)
+    def not_equal = left => right => __f32_not_equal (left, right)
+}
+
+impl PartialOrd F32 {
+    def partial_cmp = left => right => match (__f32_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__f32_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => match (__f32_equal (left, right)) {
+                True() => Some (Equal satisfies Ordering),
+                False() => None,
+            },
+        },
+    }
+}
+
+impl Add F64 {
+    def add = left => right => __f64_add (left, right)
+}
+
+impl Subtract F64 {
+    def subtract = left => right => __f64_subtract (left, right)
+}
+
+impl Multiply F64 {
+    def multiply = left => right => __f64_multiply (left, right)
+}
+
+impl Divide F64 {
+    def divide = left => right => __f64_divide (left, right)
+}
+
+impl Eq F64 {
+    def equal = left => right => __f64_equal (left, right)
+    def not_equal = left => right => __f64_not_equal (left, right)
+}
+
+impl PartialOrd F64 {
+    def partial_cmp = left => right => match (__f64_lt (left, right)) {
+        True() => Some (Less satisfies Ordering),
+        False() => match (__f64_gt (left, right)) {
+            True() => Some (Greater satisfies Ordering),
+            False() => match (__f64_equal (left, right)) {
+                True() => Some (Equal satisfies Ordering),
+                False() => None,
+            },
+        },
+    }
 }
 
 pub def infixl 6 + : T => Copy T => Add T => T -> T -> T = left => right => Add.add left right
@@ -389,7 +583,7 @@ pub def infixl 7 * : T => Copy T => Multiply T => T -> T -> T = left => right =>
 pub def infixl 7 / : T => Copy T => Divide T => T -> T -> T = left => right => Divide.divide left right
 pub def infix 4 == : T => Copy T => Eq T => T -> T -> Bool = left => right => Eq.equal left right
 pub def infix 4 != : T => Copy T => Eq T => T -> T -> Bool = left => right => Eq.not_equal left right
-pub def infix 4 < : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.less_than left right
-pub def infix 4 <= : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.less_than_or_equal left right
-pub def infix 4 > : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.greater_than left right
-pub def infix 4 >= : T => Copy T => Compare T => T -> T -> Bool = left => right => Compare.greater_than_or_equal left right
+pub def infix 4 < : T => Copy T => PartialOrd T => T -> T -> Bool = left => right => PartialOrd.lt left right
+pub def infix 4 <= : T => Copy T => PartialOrd T => T -> T -> Bool = left => right => PartialOrd.le left right
+pub def infix 4 > : T => Copy T => PartialOrd T => T -> T -> Bool = left => right => PartialOrd.gt left right
+pub def infix 4 >= : T => Copy T => PartialOrd T => T -> T -> Bool = left => right => PartialOrd.ge left right

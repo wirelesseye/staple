@@ -88,7 +88,7 @@ impl<'a> Classifier<'a> {
             let kind = match token.kind {
                 TokenKind::LineComment => Some(COMMENT),
                 TokenKind::String => Some(STRING),
-                TokenKind::Integer => Some(NUMBER),
+                TokenKind::Integer | TokenKind::Float => Some(NUMBER),
                 TokenKind::Use
                 | TokenKind::As
                 | TokenKind::Pub
@@ -454,7 +454,10 @@ impl<'a> Classifier<'a> {
                     2,
                 );
             }
-            Expression::String(_) | Expression::CString(_) | Expression::Integer(_) => {}
+            Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
         }
     }
 

@@ -392,13 +392,21 @@ Inferred placeholders may appear wherever a type is expected.
 staple is expression-oriented. Function values, function applications, products,
 and blocks are all expressions.
 
-The syntax currently recognized for literal values includes strings and
-integers:
+The syntax currently recognized for literal values includes strings, integers,
+and decimal floating-point numbers:
 
 ```staple
 "hello"
 42
+1.0
+.5
+1e3
 ```
+
+Float literals accept decimal points and scientific notation. They use an
+expected `F32` or `F64` type when available and otherwise default to `F64`.
+`1.` is a float literal, while `1.field` remains member access. Integer literals
+remain integer values; Staple does not implicitly convert between numeric types.
 
 String literals use double quotes and produce owned UTF-8 `String` values. A
 backslash protects the following quote from ending the string. Supported
@@ -730,8 +738,16 @@ trait Convert = (From, To) => {
     convert: From -> To
 }
 
-trait Ord = T => Eq T => {
-    compare: T -> T -> I32
+trait PartialOrd = T => Copy T => {
+    partial_cmp: T -> T -> Option Ordering
+    lt: T -> T -> Bool = left => right => match (partial_cmp left right) {
+        Some Less() => True,
+        _ => False,
+    }
+}
+
+trait Ord = T => Eq T => PartialOrd T => {
+    cmp: T -> T -> Ordering
 }
 
 trait Increment = T => {
@@ -997,15 +1013,19 @@ U32
 U64
 ISize
 USize
+F32
+F64
 Bool
 String
 Ref T
 CString
 CChar
 CPointer CChar
+Ordering
+Option T
 ```
 
-The integer types, `Bool`, `String`, arithmetic and comparison traits, and their functions
+The numeric types, `Bool`, `String`, arithmetic and ordering traits, and their functions
 from `std.core` are imported implicitly into every source module. These are
 ordinary type names rather than keywords, so a local declaration or explicit
 import can shadow a prelude name. Integer literals use an expected integer type
@@ -1162,11 +1182,17 @@ The fixed-width standard-library integers are `I8`, `I16`, `I32`, `I64`, `U8`,
 Arithmetic is homogeneous: both operands and the result have the same type.
 Signed integer division uses signed semantics, while unsigned integer division
 uses unsigned semantics. All integer types implement `Eq` for `==` and `!=`, and
-`Compare` for `<`, `<=`, `>`, and `>=`. These operators compare homogeneous
-operands and return `Bool`. Ordering comparisons use signed semantics for signed
-types and unsigned semantics for unsigned types. `Compare T` requires `Eq T`.
-Staple does not currently provide implicit numeric conversions or floating-point
-types.
+`PartialOrd` and `Ord` for ordering. `PartialOrd.partial_cmp` returns
+`Option Ordering`; its default `lt`, `le`, `gt`, and `ge` methods back `<`, `<=`,
+`>`, and `>=`. `Ord.cmp` returns `Less`, `Equal`, or `Greater` and requires both
+`Eq` and `PartialOrd`. Integer ordering uses signed semantics for signed types
+and unsigned semantics for unsigned types.
+
+`F32` and `F64` use IEEE-754 single and double precision. Both implement the
+arithmetic traits, `Eq`, and `PartialOrd`, but not `Ord`. A comparison involving
+NaN makes `partial_cmp` return `None`; ordered boolean comparisons are false,
+`==` is false, and `!=` is true. Float division by zero follows IEEE behavior.
+Staple does not provide implicit numeric conversions.
 
 ### Type declarations
 

@@ -42,6 +42,7 @@ pub enum TokenKind {
     Identifier,
     String,
     Integer,
+    Float,
     Whitespace,
     Newline,
     LineComment,

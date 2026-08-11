@@ -1113,7 +1113,7 @@ fn compares_all_standard_library_integer_types() {
         "let greater: Bool = 2 > 1\n",
         "let greater_equal: Bool = 2 >= 1\n",
         "def same: T => Copy T => Eq T => T -> T -> Bool = left => right => left == right\n",
-        "def before: T => Copy T => Compare T => T -> T -> Bool = left => right => left < right\n",
+        "def before: T => PartialOrd T => T -> T -> Bool = left => right => left < right\n",
         "let generic_equal: Bool = same 1 1\n",
         "let generic_order: Bool = before 1 2\n",
         "def i8 = (x: I8, y: I8) => x < y\n",
@@ -1132,11 +1132,112 @@ fn compares_all_standard_library_integer_types() {
         .expect("integer comparisons should compile");
 
     for predicate in [
-        "icmp eq", "icmp ne", "icmp slt", "icmp sle", "icmp sgt", "icmp sge", "icmp ult",
+        "icmp eq", "icmp ne", "icmp slt", "icmp sgt", "icmp ult", "icmp ugt",
     ] {
         assert!(llvm.contains(predicate), "missing `{predicate}` in LLVM");
     }
     assert!(llvm.contains("bool.tag"));
+}
+
+#[test]
+fn supports_contextual_float_literals_arithmetic_and_partial_ordering() {
+    let module = type_check(concat!(
+        "extern \"c\" { let scale_float: F64 -> F64 }\n",
+        "def single = () => { let a: F32 = 1.5; let b: F32 = .5; (a + b) * b - a / b; } satisfies F32\n",
+        "def double = () => { let a: F64 = 1e3; let b: F64 = 2.; (a + b) / b; } satisfies F64\n",
+        "def defaulted = () => 1.25\n",
+        "let less: Bool = 1.0 < 2.0\n",
+        "let equal: Bool = 2.0 == 2.0\n",
+        "let scaled: F64 = scale_float 2.0\n",
+        "let unordered: Option Ordering = PartialOrd.partial_cmp (0.0 / 0.0) 1.0\n",
+        "let ordered_less: Ordering = Ord.cmp 1 2\n",
+        "let ordered_equal: Ordering = Ord.cmp 2 2\n",
+        "let ordered_greater: Ordering = Ord.cmp 3 2\n",
+        "single ()\n",
+    ));
+    let defaulted = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "defaulted")
+        .unwrap();
+    assert_eq!(
+        *module.type_of_function(defaulted.id).unwrap().result,
+        CheckedType::F64
+    );
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("float operations should compile");
+    for instruction in [
+        "fadd float",
+        "fmul float",
+        "fsub float",
+        "fdiv float",
+        "fadd double",
+        "fdiv double",
+        "fcmp olt",
+        "fcmp oeq",
+        "fcmp une",
+    ] {
+        assert!(
+            llvm.contains(instruction),
+            "missing `{instruction}` in LLVM"
+        );
+    }
+    assert!(llvm.contains("declare double @scale_float(double)"));
+}
+
+#[test]
+fn rejects_invalid_float_contexts_and_float_ord() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let value: F32 = 1e100\n"))
+        .expect_err("overflowing F32 literal should fail");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("does not fit in `F32`"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let value: F32 = 1\n"))
+        .expect_err("integer literals should not become floats");
+    assert!(!diagnostics.is_empty());
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let value = 1e+\n"))
+        .expect_err("an incomplete exponent should fail type checking");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("float literal"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def compare: T => Ord T => T -> T -> Ordering = left => right => Ord.cmp left right\nlet invalid = compare 1.0 2.0\n"))
+        .expect_err("floats should not implement Ord");
+    assert!(!diagnostics.is_empty());
+}
+
+#[test]
+fn requires_only_the_core_ordering_methods() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("impl PartialOrd String {}\n"))
+        .expect_err("partial_cmp is required");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("missing member `partial_cmp`"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("impl Ord String {}\n"))
+        .expect_err("cmp is required");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("missing member `cmp`"))
+    );
 }
 
 #[test]

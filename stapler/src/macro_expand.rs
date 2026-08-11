@@ -1025,6 +1025,13 @@ impl MacroExpander {
             Expression::Integer(integer) => {
                 integer.literal.parse::<i128>().ok().map(Value::Integer)
             }
+            Expression::Float(float) => {
+                self.diagnostics.push(Diagnostic::new(
+                    float.syntax.span.clone(),
+                    "float literals are not supported in compile-time evaluation",
+                ));
+                None
+            }
             Expression::Product(product) => {
                 let mut values = Vec::new();
                 for element in &product.elements {
@@ -1383,7 +1390,8 @@ impl MacroExpander {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
-            | Expression::Integer(_) => {}
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
         }
     }
 }
@@ -1634,7 +1642,8 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         | Expression::Product(_)
         | Expression::String(_)
         | Expression::CString(_)
-        | Expression::Integer(_) => true,
+        | Expression::Integer(_)
+        | Expression::Float(_) => true,
     }
 }
 
@@ -1809,7 +1818,8 @@ fn substitute_splices(
         | Expression::Name(_)
         | Expression::String(_)
         | Expression::CString(_)
-        | Expression::Integer(_) => {}
+        | Expression::Integer(_)
+        | Expression::Float(_) => {}
     }
     Some(result)
 }
@@ -1929,7 +1939,8 @@ fn alpha_rename_expression(
         | Expression::Splice(_)
         | Expression::String(_)
         | Expression::CString(_)
-        | Expression::Integer(_) => {}
+        | Expression::Integer(_)
+        | Expression::Float(_) => {}
     }
 }
 
@@ -1991,6 +2002,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::String(value) => &mut value.syntax,
         Expression::CString(value) => &mut value.syntax,
         Expression::Integer(value) => &mut value.syntax,
+        Expression::Float(value) => &mut value.syntax,
     }
 }
 

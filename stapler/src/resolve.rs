@@ -48,11 +48,36 @@ pub struct ResolvedTraitImplementation {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinType {
     Integer(IntegerType),
+    Float(FloatType),
     String,
     Ref,
     CChar,
     CString,
     CPointer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FloatType {
+    F32,
+    F64,
+}
+
+impl FloatType {
+    pub const ALL: [Self; 2] = [Self::F32, Self::F64];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::F32 => "F32",
+            Self::F64 => "F64",
+        }
+    }
+
+    pub fn intrinsic_name(self) -> &'static str {
+        match self {
+            Self::F32 => "f32",
+            Self::F64 => "f64",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -162,6 +187,14 @@ pub enum IntrinsicFunction {
     },
     IntegerCompare {
         integer: IntegerType,
+        operation: IntegerCompareOperation,
+    },
+    FloatBinary {
+        float: FloatType,
+        operation: IntegerBinaryOperation,
+    },
+    FloatCompare {
+        float: FloatType,
         operation: IntegerCompareOperation,
     },
     StringFromCString,
@@ -628,6 +661,9 @@ impl NameResolver {
                 BuiltinType::Integer(integer),
             );
         }
+        for float in FloatType::ALL {
+            self.register_builtin_type(core, "std.core", float.name(), BuiltinType::Float(float));
+        }
         self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
 
@@ -654,20 +690,36 @@ impl NameResolver {
             for (suffix, operation) in [
                 ("equal", IntegerCompareOperation::Equal),
                 ("not_equal", IntegerCompareOperation::NotEqual),
-                ("less_than", IntegerCompareOperation::LessThan),
-                (
-                    "less_than_or_equal",
-                    IntegerCompareOperation::LessThanOrEqual,
-                ),
-                ("greater_than", IntegerCompareOperation::GreaterThan),
-                (
-                    "greater_than_or_equal",
-                    IntegerCompareOperation::GreaterThanOrEqual,
-                ),
+                ("lt", IntegerCompareOperation::LessThan),
+                ("gt", IntegerCompareOperation::GreaterThan),
             ] {
                 expected.push((
                     format!("__{}_{}", integer.intrinsic_name(), suffix),
                     IntrinsicFunction::IntegerCompare { integer, operation },
+                ));
+            }
+        }
+        for float in FloatType::ALL {
+            for (suffix, operation) in [
+                ("add", IntegerBinaryOperation::Add),
+                ("subtract", IntegerBinaryOperation::Subtract),
+                ("multiply", IntegerBinaryOperation::Multiply),
+                ("divide", IntegerBinaryOperation::Divide),
+            ] {
+                expected.push((
+                    format!("__{}_{}", float.intrinsic_name(), suffix),
+                    IntrinsicFunction::FloatBinary { float, operation },
+                ));
+            }
+            for (suffix, operation) in [
+                ("equal", IntegerCompareOperation::Equal),
+                ("not_equal", IntegerCompareOperation::NotEqual),
+                ("lt", IntegerCompareOperation::LessThan),
+                ("gt", IntegerCompareOperation::GreaterThan),
+            ] {
+                expected.push((
+                    format!("__{}_{}", float.intrinsic_name(), suffix),
+                    IntrinsicFunction::FloatCompare { float, operation },
                 ));
             }
         }
@@ -2053,7 +2105,10 @@ impl NameResolver {
                 splice.syntax.span.clone(),
                 "splices are only available during macro expansion",
             )),
-            Expression::String(_) | Expression::CString(_) | Expression::Integer(_) => {}
+            Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
         }
     }
 
@@ -2788,7 +2843,8 @@ impl<'a> InitializationAnalyzer<'a> {
             | Expression::Splice(_)
             | Expression::String(_)
             | Expression::CString(_)
-            | Expression::Integer(_) => {}
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
         }
     }
 

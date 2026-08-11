@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{
-    Accessor, Binding, BuiltinType, Diagnostic, Expression, FunctionId, IntegerType, Item, Module,
-    ModuleId, Pattern, PatternBindingKind, ProductType, ResolvedFunction, ResolvedModule, Span,
-    Statement, SymbolId, SyntaxId, TraitId, TraitMethodId, Type, TypeDeclaration,
-    TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
+    Accessor, Binding, BuiltinType, Diagnostic, Expression, FloatType, FunctionId, IntegerType,
+    Item, Module, ModuleId, Pattern, PatternBindingKind, ProductType, ResolvedFunction,
+    ResolvedModule, Span, Statement, SymbolId, SyntaxId, TraitId, TraitMethodId, Type,
+    TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
 };
 
 const MAX_PRODUCT_ARITY: usize = 65_535;
@@ -101,6 +101,8 @@ pub enum CheckedType {
     U64,
     ISize,
     USize,
+    F32,
+    F64,
     String,
     StringLiteralSet(Vec<String>),
     Ref(Box<CheckedType>),
@@ -176,6 +178,21 @@ pub struct CheckedFunctionType {
 }
 
 impl CheckedType {
+    pub fn float(float: FloatType) -> Self {
+        match float {
+            FloatType::F32 => Self::F32,
+            FloatType::F64 => Self::F64,
+        }
+    }
+
+    pub fn float_type(&self) -> Option<FloatType> {
+        match self {
+            Self::F32 => Some(FloatType::F32),
+            Self::F64 => Some(FloatType::F64),
+            _ => None,
+        }
+    }
+
     pub fn integer(integer: IntegerType) -> Self {
         match integer {
             IntegerType::I8 => Self::I8,
@@ -242,6 +259,8 @@ impl CheckedType {
             | Self::U64
             | Self::ISize
             | Self::USize
+            | Self::F32
+            | Self::F64
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
@@ -279,6 +298,8 @@ impl CheckedType {
             | Self::U64
             | Self::ISize
             | Self::USize
+            | Self::F32
+            | Self::F64
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
@@ -303,6 +324,8 @@ impl fmt::Display for CheckedType {
             Self::U64 => formatter.write_str("U64"),
             Self::ISize => formatter.write_str("ISize"),
             Self::USize => formatter.write_str("USize"),
+            Self::F32 => formatter.write_str("F32"),
+            Self::F64 => formatter.write_str("F64"),
             Self::String => formatter.write_str("String"),
             Self::StringLiteralSet(values) => {
                 for (index, value) in values.iter().enumerate() {
@@ -1303,6 +1326,40 @@ impl TypeChecker {
                                     name: None,
                                     value_type: integer,
                                 },
+                            ],
+                            variadic: false,
+                        })),
+                        result: Box::new(result),
+                    })
+                }
+                crate::IntrinsicFunction::FloatBinary { float, .. } => {
+                    let float = CheckedType::float(*float);
+                    CheckedType::Function(CheckedFunctionType {
+                        parameter: Box::new(CheckedType::Product(CheckedProductType {
+                            elements: vec![
+                                CheckedTypeElement { name: None, value_type: float.clone() },
+                                CheckedTypeElement { name: None, value_type: float.clone() },
+                            ],
+                            variadic: false,
+                        })),
+                        result: Box::new(float),
+                    })
+                }
+                crate::IntrinsicFunction::FloatCompare { float, .. } => {
+                    let float = CheckedType::float(*float);
+                    let result = self.symbol_types.get(symbol).and_then(|value| match value {
+                        CheckedType::Function(function) => Some(function.result.as_ref().clone()),
+                        _ => None,
+                    }).filter(|value| matches!(value,
+                        CheckedType::Sum(sum) if sum.alternatives.len() == 2
+                            && matches!(&sum.alternatives[0], CheckedType::Distinct { name, .. } if name.ends_with("True"))
+                            && matches!(&sum.alternatives[1], CheckedType::Distinct { name, .. } if name.ends_with("False"))
+                    )).unwrap_or(CheckedType::Error);
+                    CheckedType::Function(CheckedFunctionType {
+                        parameter: Box::new(CheckedType::Product(CheckedProductType {
+                            elements: vec![
+                                CheckedTypeElement { name: None, value_type: float.clone() },
+                                CheckedTypeElement { name: None, value_type: float },
                             ],
                             variadic: false,
                         })),
@@ -2610,6 +2667,26 @@ impl TypeChecker {
                     ));
                 }
                 CheckedType::integer(integer_type)
+            }
+            Expression::Float(float) => {
+                let float_type = expected
+                    .and_then(CheckedType::float_type)
+                    .unwrap_or(FloatType::F64);
+                let valid = match float_type {
+                    FloatType::F32 => float.literal.parse::<f32>().is_ok_and(f32::is_finite),
+                    FloatType::F64 => float.literal.parse::<f64>().is_ok_and(f64::is_finite),
+                };
+                if !valid {
+                    self.diagnostics.push(Diagnostic::new(
+                        float.syntax.span.clone(),
+                        format!(
+                            "float literal `{}` does not fit in `{}`",
+                            float.literal,
+                            float_type.name()
+                        ),
+                    ));
+                }
+                CheckedType::float(float_type)
             }
         };
         self.finish_expression_type(expression, natural_type, expected)
@@ -4138,6 +4215,7 @@ impl TypeChecker {
         if let Some(builtin) = module.builtin_type(id) {
             return match builtin {
                 BuiltinType::Integer(integer) => CheckedType::integer(integer),
+                BuiltinType::Float(float) => CheckedType::float(float),
                 BuiltinType::String => CheckedType::String,
                 BuiltinType::Ref => CheckedType::TypeConstructor {
                     id,
@@ -4254,6 +4332,11 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         (actual, expected)
             if actual.integer_type().is_some()
                 && actual.integer_type() == expected.integer_type() =>
+        {
+            Some(actual)
+        }
+        (actual, expected)
+            if actual.float_type().is_some() && actual.float_type() == expected.float_type() =>
         {
             Some(actual)
         }
@@ -4991,6 +5074,8 @@ fn is_copy_type(
         | CheckedType::U64
         | CheckedType::ISize
         | CheckedType::USize
+        | CheckedType::F32
+        | CheckedType::F64
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
         | CheckedType::CChar

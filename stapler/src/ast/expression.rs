@@ -18,6 +18,7 @@ pub enum Expression {
     String(StringExpression),
     CString(CStringExpression),
     Integer(IntegerExpression),
+    Float(FloatExpression),
 }
 
 impl Expression {
@@ -39,6 +40,7 @@ impl Expression {
             Self::String(expression) => &expression.syntax,
             Self::CString(expression) => &expression.syntax,
             Self::Integer(expression) => &expression.syntax,
+            Self::Float(expression) => &expression.syntax,
         }
     }
 }
@@ -182,6 +184,13 @@ pub struct CStringExpression {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IntegerExpression {
+    pub syntax: Syntax,
+    /// The literal exactly as written.
+    pub literal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FloatExpression {
     pub syntax: Syntax,
     /// The literal exactly as written.
     pub literal: String,

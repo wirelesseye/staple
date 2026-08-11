@@ -8,6 +8,17 @@ pub type U32 = opaque
 pub type U64 = opaque
 pub type ISize = opaque
 pub type USize = opaque
+pub type F32 = opaque
+pub type F64 = opaque
+
+pub type None
+pub(repr) type Some = T => T
+pub type alias Option = T => None | Some T
+
+pub type Less
+pub type Equal
+pub type Greater
+pub type alias Ordering = Less | Equal | Greater
 
 pub trait Add = T => {
     add: T -> T -> T
@@ -25,9 +36,28 @@ pub trait Divide = T => {
     divide: T -> T -> T
 }
 
-pub trait Compare = T => Eq T => {
-    less_than: T -> T -> Bool
-    less_than_or_equal: T -> T -> Bool
-    greater_than: T -> T -> Bool
-    greater_than_or_equal: T -> T -> Bool
+pub trait PartialOrd = T => Copy T => {
+    partial_cmp: T -> T -> Option Ordering
+    lt: T -> T -> Bool = left => right => match (partial_cmp left right) {
+        Some Less() => True,
+        _ => False,
+    }
+    le: T -> T -> Bool = left => right => match (partial_cmp left right) {
+        Some Less() => True,
+        Some Equal() => True,
+        _ => False,
+    }
+    gt: T -> T -> Bool = left => right => match (partial_cmp left right) {
+        Some Greater() => True,
+        _ => False,
+    }
+    ge: T -> T -> Bool = left => right => match (partial_cmp left right) {
+        Some Greater() => True,
+        Some Equal() => True,
+        _ => False,
+    }
+}
+
+pub trait Ord = T => Eq T => PartialOrd T => {
+    cmp: T -> T -> Ordering
 }

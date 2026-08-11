@@ -785,4 +785,47 @@ mod tests {
         let _ = std::fs::remove_file(output);
         assert!(status.success(), "loop executable returned {status}");
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn runs_float_arithmetic_and_partial_ordering() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-float-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-float-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "def score_bool: Bool -> I32 = value => match value { True() => 1, False() => 0, }\n",
+                "let nan = 0.0 / 0.0\n",
+                "let partial_score = match (PartialOrd.partial_cmp nan 1.0) { None() => 0, Some _ => 1, }\n",
+                "let less_score = match (Ord.cmp 1 2) { Less() => 0, _ => 1, }\n",
+                "let equal_score = match (Ord.cmp 2 2) { Equal() => 0, _ => 1, }\n",
+                "let greater_score = match (Ord.cmp 3 2) { Greater() => 0, _ => 1, }\n",
+                "let single: F32 = (1.5 satisfies F32) + (.5 satisfies F32)\n",
+                "exit (partial_score + less_score + equal_score + greater_score + score_bool (nan < 1.0) + score_bool (nan == nan) + (score_bool (nan != nan) - 1) + (score_bool (single == (2.0 satisfies F32)) - 1))\n",
+            ),
+        )
+        .expect("temporary float source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("float executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("float executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "float executable returned {status}");
+    }
 }

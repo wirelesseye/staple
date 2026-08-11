@@ -28,6 +28,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
         let identifier = |text: &str, at: usize| {
             lex_identifier(text, at).map(|end| (TokenKind::Identifier, end))
         };
+        let float = |text: &str, at: usize| lex_float(text, at).map(|end| (TokenKind::Float, end));
         let integer = take_while1(|c| c.is_ascii_digit()).map(|_| TokenKind::Integer);
         let operator =
             |text: &str, at: usize| lex_operator(text, at).map(|end| (TokenKind::Operator, end));
@@ -39,6 +40,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
             .or(tag("=>").map(|_| TokenKind::FatArrow))
             .or(tag("->").map(|_| TokenKind::Arrow))
             .or(tag("...").map(|_| TokenKind::Ellipsis))
+            .or(float)
             .or(identifier)
             .or(integer)
             .or(operator)
@@ -105,6 +107,84 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
         offset = end;
     }
     tokens
+}
+
+fn lex_float(source: &str, offset: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut end = offset;
+    let mut has_dot = false;
+
+    if bytes.get(end) == Some(&b'.') {
+        if source[..offset]
+            .chars()
+            .next_back()
+            .is_some_and(|character| {
+                character == '_'
+                    || character.is_alphanumeric()
+                    || matches!(character, ')' | ']' | '}')
+            })
+        {
+            return None;
+        }
+        if !bytes.get(end + 1).is_some_and(u8::is_ascii_digit) {
+            return None;
+        }
+        has_dot = true;
+        end += 1;
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+    } else if bytes.get(end).is_some_and(u8::is_ascii_digit) {
+        while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+            end += 1;
+        }
+        let exponent_after_dot = matches!(bytes.get(end + 1), Some(b'e' | b'E')) && {
+            let mut exponent_digit = end + 2;
+            if matches!(bytes.get(exponent_digit), Some(b'+' | b'-')) {
+                exponent_digit += 1;
+            }
+            bytes.get(exponent_digit).is_some_and(u8::is_ascii_digit)
+        };
+        if bytes.get(end) == Some(&b'.')
+            && bytes.get(end + 1) != Some(&b'.')
+            && (exponent_after_dot
+                || !source[end + 1..]
+                    .chars()
+                    .next()
+                    .is_some_and(|character| character == '_' || character.is_alphabetic()))
+        {
+            has_dot = true;
+            end += 1;
+            while bytes.get(end).is_some_and(u8::is_ascii_digit) {
+                end += 1;
+            }
+        }
+    } else {
+        return None;
+    }
+
+    let mut has_exponent = false;
+    if matches!(bytes.get(end), Some(b'e' | b'E')) {
+        let exponent = end;
+        let mut exponent_end = end + 1;
+        if matches!(bytes.get(exponent_end), Some(b'+' | b'-')) {
+            exponent_end += 1;
+        }
+        let digits = exponent_end;
+        while bytes.get(exponent_end).is_some_and(u8::is_ascii_digit) {
+            exponent_end += 1;
+        }
+        let next_is_identifier = source[exponent_end..]
+            .chars()
+            .next()
+            .is_some_and(|character| character == '_' || character.is_alphabetic());
+        if exponent_end > digits || !next_is_identifier {
+            has_exponent = true;
+            end = exponent_end.max(exponent + 1);
+        }
+    }
+
+    (has_dot || has_exponent).then_some(end)
 }
 
 fn lex_string(source: &str, offset: usize) -> Option<usize> {

@@ -153,7 +153,8 @@ impl Collector<'_> {
             | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
-            | Expression::Integer(_) => {}
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
         }
     }
 

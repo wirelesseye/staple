@@ -20,9 +20,9 @@ use crate::typecheck::{
 };
 use crate::{
     CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic, Expression,
-    FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction,
-    Item, ModuleId, Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, Span,
-    Statement, SymbolId, TypeParameterId, TypedModule,
+    FloatType, FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType,
+    IntrinsicFunction, Item, ModuleId, Pattern, PatternBindingKind, ProductExpression,
+    ResolvedFunction, Span, Statement, SymbolId, TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -2467,6 +2467,30 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(llvm_type.const_int(value, false).as_any_value_enum())
             }
+            Expression::Float(float) => {
+                let float_type = self
+                    .typed_module
+                    .type_of_expression(float.syntax.id)
+                    .and_then(CheckedType::float_type)
+                    .unwrap_or(FloatType::F64);
+                let value = match float_type {
+                    FloatType::F32 => float.literal.parse::<f32>().map(f64::from),
+                    FloatType::F64 => float.literal.parse::<f64>(),
+                }
+                .map_err(|_| Diagnostic::new(float.syntax.span.clone(), "invalid float literal"))?;
+                if !value.is_finite() {
+                    return Err(Diagnostic::new(
+                        float.syntax.span.clone(),
+                        format!(
+                            "float literal `{}` does not fit in `{}`",
+                            float.literal,
+                            float_type.name()
+                        ),
+                    ));
+                }
+                let llvm_type = self.compile_float_type(float_type);
+                Ok(llvm_type.const_float(value).as_any_value_enum())
+            }
         }
     }
 
@@ -4245,6 +4269,72 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if environment.did_return {
             return Ok(self.unit_value());
         }
+        if let IntrinsicFunction::FloatBinary { float, operation } = intrinsic {
+            let [
+                inkwell::values::BasicMetadataValueEnum::FloatValue(left),
+                inkwell::values::BasicMetadataValueEnum::FloatValue(right),
+            ] = arguments.as_slice()
+            else {
+                return Err(Diagnostic::new(
+                    call.argument.syntax().span.clone(),
+                    "float arithmetic intrinsic operands must be floats",
+                ));
+            };
+            let name = format!(
+                "{}.{}",
+                float.intrinsic_name(),
+                match operation {
+                    IntegerBinaryOperation::Add => "add",
+                    IntegerBinaryOperation::Subtract => "subtract",
+                    IntegerBinaryOperation::Multiply => "multiply",
+                    IntegerBinaryOperation::Divide => "divide",
+                }
+            );
+            let value = match operation {
+                IntegerBinaryOperation::Add => self.builder.build_float_add(*left, *right, &name),
+                IntegerBinaryOperation::Subtract => {
+                    self.builder.build_float_sub(*left, *right, &name)
+                }
+                IntegerBinaryOperation::Multiply => {
+                    self.builder.build_float_mul(*left, *right, &name)
+                }
+                IntegerBinaryOperation::Divide => {
+                    self.builder.build_float_div(*left, *right, &name)
+                }
+            }
+            .map_err(compiler_diagnostic)?;
+            return Ok(value.as_any_value_enum());
+        }
+        if let IntrinsicFunction::FloatCompare { float, operation } = intrinsic {
+            let [
+                inkwell::values::BasicMetadataValueEnum::FloatValue(left),
+                inkwell::values::BasicMetadataValueEnum::FloatValue(right),
+            ] = arguments.as_slice()
+            else {
+                return Err(Diagnostic::new(
+                    call.argument.syntax().span.clone(),
+                    "float comparison intrinsic operands must be floats",
+                ));
+            };
+            let predicate = match operation {
+                IntegerCompareOperation::Equal => inkwell::FloatPredicate::OEQ,
+                IntegerCompareOperation::NotEqual => inkwell::FloatPredicate::UNE,
+                IntegerCompareOperation::LessThan => inkwell::FloatPredicate::OLT,
+                IntegerCompareOperation::LessThanOrEqual => inkwell::FloatPredicate::OLE,
+                IntegerCompareOperation::GreaterThan => inkwell::FloatPredicate::OGT,
+                IntegerCompareOperation::GreaterThanOrEqual => inkwell::FloatPredicate::OGE,
+            };
+            let condition = self
+                .builder
+                .build_float_compare(
+                    predicate,
+                    *left,
+                    *right,
+                    &format!("{}.compare", float.intrinsic_name()),
+                )
+                .map_err(compiler_diagnostic)?;
+            return self.compile_bool(condition, call.syntax.id, call.syntax.span.clone());
+        }
         let [
             inkwell::values::BasicMetadataValueEnum::IntValue(left),
             inkwell::values::BasicMetadataValueEnum::IntValue(right),
@@ -4328,6 +4418,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             IntrinsicFunction::StringFromCString
             | IntrinsicFunction::StringToCString
+            | IntrinsicFunction::FloatBinary { .. }
+            | IntrinsicFunction::FloatCompare { .. }
             | IntrinsicFunction::ErasedProductLength
             | IntrinsicFunction::RefReplace
             | IntrinsicFunction::Drop => {
@@ -5422,6 +5514,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             CheckedType::U64 => Ok(self.compile_integer_type(IntegerType::U64).into()),
             CheckedType::ISize => Ok(self.compile_integer_type(IntegerType::ISize).into()),
             CheckedType::USize => Ok(self.compile_integer_type(IntegerType::USize).into()),
+            CheckedType::F32 => Ok(self.compile_float_type(FloatType::F32).into()),
+            CheckedType::F64 => Ok(self.compile_float_type(FloatType::F64).into()),
             CheckedType::Distinct { representation, .. } => self.compile_type(representation),
         }
     }
@@ -5433,6 +5527,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             IntegerType::I32 | IntegerType::U32 => self.context.i32_type(),
             IntegerType::I64 | IntegerType::U64 => self.context.i64_type(),
             IntegerType::ISize | IntegerType::USize => self.size_type,
+        }
+    }
+
+    fn compile_float_type(&self, float: FloatType) -> inkwell::types::FloatType<'context> {
+        match float {
+            FloatType::F32 => self.context.f32_type(),
+            FloatType::F64 => self.context.f64_type(),
         }
     }
 

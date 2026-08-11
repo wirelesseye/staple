@@ -1267,6 +1267,14 @@ impl Grammar {
                     literal,
                 }))
             }
+            Some(TokenKind::Float) => {
+                let start = self.position;
+                let literal = self.bump_token().expect("peeked float").text;
+                Ok(Expression::Float(FloatExpression {
+                    syntax: self.syntax(start),
+                    literal,
+                }))
+            }
             Some(TokenKind::Dollar) if self.quote_depth > 0 => {
                 let start = self.position;
                 self.expect(TokenKind::Dollar, "expected `$`")?;
@@ -1440,6 +1448,7 @@ impl Grammar {
                     | TokenKind::Dollar
                     | TokenKind::String
                     | TokenKind::Integer
+                    | TokenKind::Float
             )
         )
     }
