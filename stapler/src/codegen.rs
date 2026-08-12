@@ -20,10 +20,11 @@ use crate::typecheck::{
     substitute_type,
 };
 use crate::{
-    CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic, Expression,
-    FloatType, FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType,
-    IntrinsicFunction, Item, ModuleId, Pattern, PatternBindingKind, ProductExpression,
-    ResolvedFunction, Span, Statement, SymbolId, TypeParameterId, TypedModule,
+    CallExpression, CheckedEffect, CheckedFunctionType, CheckedProductType, CheckedType,
+    Diagnostic, EffectOperationId, Expression, FloatType, FunctionId, HandlerClause,
+    IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction, Item,
+    ModuleId, Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, Span, Statement,
+    SymbolId, TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -81,6 +82,8 @@ struct FunctionEnvironment<'context> {
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
     did_return: bool,
+    effect_clause: bool,
+    handler_parents: Vec<inkwell::values::PointerValue<'context>>,
     loops: Vec<LoopCodegenContext<'context>>,
 }
 
@@ -203,6 +206,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.llvm_module
             .set_data_layout(&target_machine.get_target_data().get_data_layout());
         self.install_gc_runtime()?;
+        self.install_effect_runtime();
         self.declare_external_functions()?;
         self.declare_functions()?;
         self.declare_top_level_storage()?;
@@ -225,6 +229,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Diagnostic::new(Span::Compiler, format!("invalid LLVM module: {message}"))
         })?;
         Ok(self.llvm_module)
+    }
+
+    fn install_effect_runtime(&self) {
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let top = self
+            .llvm_module
+            .add_global(pointer, None, "__staple_effect_handler_top");
+        top.set_initializer(&pointer.const_null());
+        top.set_linkage(inkwell::module::Linkage::Internal);
     }
 
     fn install_gc_runtime(&self) -> CodeGenerationResult<()> {
@@ -1607,6 +1620,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     )
                 })?;
                 self.drop_all_owned(environment, statement.syntax.span.clone())?;
+                if let Some(parent) = environment.handler_parents.first().copied() {
+                    let top = self
+                        .llvm_module
+                        .get_global("__staple_effect_handler_top")
+                        .expect("effect handler runtime");
+                    self.builder
+                        .build_store(top.as_pointer_value(), parent)
+                        .map_err(compiler_diagnostic)?;
+                }
                 self.builder
                     .build_return(Some(&value))
                     .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
@@ -2136,6 +2158,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 )
                 .map(|closure| closure.as_any_value_enum());
         }
+        if let Some(dispatch) = self
+            .typed_module
+            .effect_dispatch_for(expression.syntax().id)
+            .cloned()
+        {
+            return self.compile_effect_operation_value(expression, dispatch);
+        }
         match expression {
             Expression::Function(function) => {
                 let id = self
@@ -2177,6 +2206,32 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Expression::Match(match_) => self.compile_match_expression(environment, match_),
             Expression::Loop(loop_) => self.compile_loop_expression(environment, loop_),
+            Expression::Handler(handler) => self.compile_handler_value(environment, handler),
+            Expression::Handle(handle) => self.compile_handle_expression(environment, handle),
+            Expression::Resume(resume) => {
+                if !environment.effect_clause {
+                    return Err(Diagnostic::new(
+                        resume.syntax.span.clone(),
+                        "resume has no active effect clause",
+                    ));
+                }
+                let value = self.compile_expression(environment, &resume.value)?;
+                if environment.did_return {
+                    return Ok(value);
+                }
+                let value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        resume.syntax.span.clone(),
+                        "resume value is not first-class",
+                    )
+                })?;
+                self.drop_all_owned(environment, resume.syntax.span.clone())?;
+                self.builder
+                    .build_return(Some(&value))
+                    .map_err(compiler_diagnostic)?;
+                environment.did_return = true;
+                Ok(value.as_any_value_enum())
+            }
             Expression::Block(block) => {
                 let owned_before = environment.owned_order.len();
                 self.predeclare_checked_bindings(environment, &block.statements)?;
@@ -4167,6 +4222,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         if let Some(dispatch) = self
             .typed_module
+            .effect_dispatch_for(call.callee.syntax().id)
+            .cloned()
+        {
+            return self.compile_effect_operation_call(environment, call, dispatch);
+        }
+        if let Some(dispatch) = self
+            .typed_module
             .trait_dispatch_for(call.callee.syntax().id)
             .cloned()
         {
@@ -4387,6 +4449,791 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "closure.call",
             )
             .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        Ok(call_site
+            .try_as_basic_value()
+            .unwrap_basic()
+            .as_any_value_enum())
+    }
+
+    fn effect_descriptor(&self, effect: &CheckedEffect) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        format!("{}:{:?}", effect.id.0, effect.arguments).hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn compile_effect_operation_value(
+        &mut self,
+        expression: &Expression,
+        dispatch: crate::CheckedEffectDispatch,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let function_type =
+            self.concrete_effect_operation_type(dispatch.operation, &dispatch.effect)?;
+        let name = format!(
+            "__staple_effect_operation_{}_{}_{:016x}",
+            expression.syntax().id.0,
+            dispatch.operation.0,
+            self.effect_descriptor(&dispatch.effect),
+        );
+        let function = if let Some(function) = self.llvm_module.get_function(&name) {
+            function
+        } else {
+            let function = self.llvm_module.add_function(
+                &name,
+                self.compile_closure_function_type(&function_type)?,
+                Some(inkwell::module::Linkage::Internal),
+            );
+            let previous_block = self.builder.get_insert_block();
+            let entry = self.context.append_basic_block(function, "entry");
+            self.builder.position_at_end(entry);
+            let arguments = function
+                .get_params()
+                .into_iter()
+                .skip(1)
+                .map(Into::into)
+                .collect();
+            let result = self.compile_effect_operation_dispatch(
+                &function_type,
+                dispatch.operation,
+                &dispatch.effect,
+                arguments,
+                expression.syntax().span.clone(),
+            )?;
+            let result = value_as_basic(result).ok_or_else(|| {
+                Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    "effect operation result is not first-class",
+                )
+            })?;
+            self.builder
+                .build_return(Some(&result))
+                .map_err(compiler_diagnostic)?;
+            if let Some(block) = previous_block {
+                self.builder.position_at_end(block);
+            }
+            function
+        };
+        let environment = self.context.ptr_type(AddressSpace::default()).const_null();
+        self.build_closure_value(function, environment)
+            .map(|value| value.as_any_value_enum())
+    }
+
+    fn compile_handle_expression(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        handle: &crate::HandleExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let effect = self
+            .typed_module
+            .handled_effect_for(handle.syntax.id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(handle.syntax.span.clone(), "unchecked effect handler")
+            })?;
+        let clauses = match &handle.handler {
+            crate::HandleKind::Manual(clauses) => clauses.clone(),
+            crate::HandleKind::Value(_) => Vec::new(),
+        };
+        let declaration = self.typed_module.resolved().effects()[&effect.id].clone();
+        let frame_type = self.effect_frame_type(&effect)?;
+        let frame = self
+            .builder
+            .build_alloca(frame_type, "effect.frame")
+            .map_err(compiler_diagnostic)?;
+        if let crate::HandleKind::Value(handler) = &handle.handler {
+            let template = self.compile_expression(environment, handler)?;
+            let template = value_as_basic(template)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        handler.syntax().span.clone(),
+                        "handler value is not first-class",
+                    )
+                })?
+                .into_pointer_value();
+            let value = self
+                .builder
+                .build_load(frame_type, template, "handler.template")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_store(frame, value)
+                .map_err(compiler_diagnostic)?;
+        }
+        let handle_type = self
+            .typed_module
+            .type_of_expression(handle.syntax.id)
+            .cloned()
+            .map(|ty| substitute_type(ty, &self.active_type_substitutions))
+            .ok_or_else(|| {
+                Diagnostic::new(handle.syntax.span.clone(), "unchecked handle result")
+            })?;
+        let result_type = self.compile_type(&handle_type)?;
+        let result_slot = self
+            .builder
+            .build_alloca(result_type, "effect.result")
+            .map_err(compiler_diagnostic)?;
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let jump_buffer_type = pointer_type.array_type(64);
+        let jump_buffer = self
+            .builder
+            .build_alloca(jump_buffer_type, "effect.jump_buffer")
+            .map_err(compiler_diagnostic)?;
+        let top = self
+            .llvm_module
+            .get_global("__staple_effect_handler_top")
+            .expect("effect handler runtime");
+        let parent = self
+            .builder
+            .build_load(pointer_type, top.as_pointer_value(), "effect.parent")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let parent_slot = self
+            .builder
+            .build_struct_gep(frame_type, frame, 0, "effect.frame.parent")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(parent_slot, parent)
+            .map_err(compiler_diagnostic)?;
+        let descriptor_slot = self
+            .builder
+            .build_struct_gep(frame_type, frame, 1, "effect.frame.descriptor")
+            .map_err(compiler_diagnostic)?;
+        if !matches!(handle.handler, crate::HandleKind::Value(_)) {
+            self.builder
+                .build_store(
+                    descriptor_slot,
+                    self.context
+                        .i64_type()
+                        .const_int(self.effect_descriptor(&effect), false),
+                )
+                .map_err(compiler_diagnostic)?;
+        }
+
+        for (index, operation) in declaration.operations.iter().copied().enumerate() {
+            if matches!(handle.handler, crate::HandleKind::Value(_)) {
+                break;
+            }
+            let clause = clauses
+                .iter()
+                .find(|clause| {
+                    self.typed_module
+                        .resolved()
+                        .effect_operations_for_expression(clause.syntax.id)
+                        .first()
+                        .copied()
+                        == Some(operation)
+                })
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        handle.syntax.span.clone(),
+                        "effect handler is missing an operation",
+                    )
+                })?;
+            let closure = self.compile_effect_clause_closure(
+                environment,
+                handle.syntax.id,
+                clause,
+                operation,
+                &effect,
+                Some(jump_buffer),
+                Some(result_slot),
+            )?;
+            let slot = self
+                .builder
+                .build_struct_gep(
+                    frame_type,
+                    frame,
+                    (index + 2) as u32,
+                    "effect.frame.operation",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_store(slot, closure)
+                .map_err(compiler_diagnostic)?;
+        }
+        self.builder
+            .build_store(top.as_pointer_value(), frame)
+            .map_err(compiler_diagnostic)?;
+        let setjmp = self.llvm_module.get_function("_setjmp").unwrap_or_else(|| {
+            self.llvm_module.add_function(
+                "_setjmp",
+                self.context
+                    .i32_type()
+                    .fn_type(&[pointer_type.into()], false),
+                None,
+            )
+        });
+        let jumped = self
+            .builder
+            .build_direct_call(setjmp, &[jump_buffer.into()], "effect.setjmp")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let current = self.builder.get_insert_block().expect("handle block");
+        let function = current.get_parent().expect("handle function");
+        let body_block = self.context.append_basic_block(function, "effect.body");
+        let abort_block = self.context.append_basic_block(function, "effect.abort");
+        let merge_block = self.context.append_basic_block(function, "effect.done");
+        let is_abort = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                jumped,
+                self.context.i32_type().const_zero(),
+                "effect.aborted",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(is_abort, abort_block, body_block)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(body_block);
+        environment.handler_parents.push(parent);
+        let result = self.compile_expression(environment, &handle.body)?;
+        environment.handler_parents.pop();
+        if environment.did_return {
+            return Ok(result);
+        }
+        let result = value_as_basic(result).ok_or_else(|| {
+            Diagnostic::new(
+                handle.syntax.span.clone(),
+                "handle result is not first-class",
+            )
+        })?;
+        self.builder
+            .build_store(result_slot, result)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(abort_block);
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(merge_block);
+        self.builder
+            .build_store(top.as_pointer_value(), parent)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_load(result_type, result_slot, "effect.result")
+            .map(|value| value.as_any_value_enum())
+            .map_err(compiler_diagnostic)
+    }
+
+    fn compile_handler_value(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        handler: &crate::HandlerExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let Some(CheckedType::Handler(handler_type)) = self
+            .typed_module
+            .type_of_expression(handler.syntax.id)
+            .cloned()
+            .map(|ty| substitute_type(ty, &self.active_type_substitutions))
+        else {
+            return Err(Diagnostic::new(
+                handler.syntax.span.clone(),
+                "unchecked handler value",
+            ));
+        };
+        let effect = handler_type.effect;
+        let declaration = self.typed_module.resolved().effects()[&effect.id].clone();
+        let template_type = self.effect_frame_type(&effect)?;
+        let template = self.build_gc_allocation(
+            self.size_type
+                .const_int(self.target_data.get_store_size(&template_type), false),
+            "handler.template",
+            handler.syntax.span.clone(),
+        )?;
+        let parent = self
+            .builder
+            .build_struct_gep(template_type, template, 0, "handler.template.parent")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(
+                parent,
+                self.context.ptr_type(AddressSpace::default()).const_null(),
+            )
+            .map_err(compiler_diagnostic)?;
+        let descriptor = self
+            .builder
+            .build_struct_gep(template_type, template, 1, "handler.template.descriptor")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(
+                descriptor,
+                self.context
+                    .i64_type()
+                    .const_int(self.effect_descriptor(&effect), false),
+            )
+            .map_err(compiler_diagnostic)?;
+        for (index, operation) in declaration.operations.iter().copied().enumerate() {
+            let clause = handler
+                .clauses
+                .iter()
+                .find(|clause| {
+                    self.typed_module
+                        .resolved()
+                        .effect_operations_for_expression(clause.syntax.id)
+                        .first()
+                        .copied()
+                        == Some(operation)
+                })
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        handler.syntax.span.clone(),
+                        "handler value is missing an operation",
+                    )
+                })?;
+            let closure = self.compile_effect_clause_closure(
+                environment,
+                handler.syntax.id,
+                clause,
+                operation,
+                &effect,
+                None,
+                None,
+            )?;
+            let slot = self
+                .builder
+                .build_struct_gep(
+                    template_type,
+                    template,
+                    (index + 2) as u32,
+                    "handler.template.operation",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_store(slot, closure)
+                .map_err(compiler_diagnostic)?;
+        }
+        Ok(template.as_any_value_enum())
+    }
+
+    fn compile_effect_clause_closure(
+        &mut self,
+        outer: &FunctionEnvironment<'context>,
+        handle_syntax: crate::SyntaxId,
+        clause: &HandlerClause,
+        operation: EffectOperationId,
+        effect: &CheckedEffect,
+        jump_buffer: Option<inkwell::values::PointerValue<'context>>,
+        result_slot: Option<inkwell::values::PointerValue<'context>>,
+    ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
+        let function_type = self.concrete_effect_operation_type(operation, effect)?;
+        let llvm_type = self.compile_closure_function_type(&function_type)?;
+        let function = self.llvm_module.add_function(
+            &format!(
+                "__staple_effect_clause_{}_{}_{:016x}",
+                handle_syntax.0,
+                operation.0,
+                self.effect_descriptor(effect),
+            ),
+            llvm_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+
+        let mut captures = outer
+            .locals
+            .keys()
+            .copied()
+            .map(|symbol| (symbol, false))
+            .chain(
+                outer
+                    .binding_cells
+                    .keys()
+                    .copied()
+                    .map(|symbol| (symbol, true)),
+            )
+            .collect::<Vec<_>>();
+        captures.sort_by_key(|(symbol, cell)| (symbol.0, *cell));
+        captures.dedup_by_key(|(symbol, _)| *symbol);
+        let mut capture_types = captures
+            .iter()
+            .map(|(symbol, cell)| {
+                if *cell {
+                    Ok(self.context.ptr_type(AddressSpace::default()).into())
+                } else {
+                    self.typed_module
+                        .type_of_symbol(*symbol)
+                        .cloned()
+                        .map(|ty| substitute_type(ty, &self.active_type_substitutions))
+                        .ok_or_else(|| {
+                            Diagnostic::new(clause.syntax.span.clone(), "unchecked handler capture")
+                        })
+                        .and_then(|ty| self.compile_type(&ty))
+                }
+            })
+            .collect::<CodeGenerationResult<Vec<BasicTypeEnum<'context>>>>()?;
+        if jump_buffer.is_some() {
+            capture_types.push(self.context.ptr_type(AddressSpace::default()).into());
+            capture_types.push(self.context.ptr_type(AddressSpace::default()).into());
+        }
+        let capture_type = self.context.struct_type(&capture_types, false);
+        let capture_pointer = self.build_gc_allocation(
+            self.size_type
+                .const_int(self.target_data.get_store_size(&capture_type), false),
+            "effect.clause.environment",
+            clause.syntax.span.clone(),
+        )?;
+        let mut capture_value = capture_type.const_zero();
+        for (index, (symbol, cell)) in captures.iter().copied().enumerate() {
+            let value = if cell {
+                outer.binding_cells[&symbol].into()
+            } else {
+                value_as_basic(outer.locals[&symbol]).ok_or_else(|| {
+                    Diagnostic::new(
+                        clause.syntax.span.clone(),
+                        "handler capture is not first-class",
+                    )
+                })?
+            };
+            capture_value = self
+                .builder
+                .build_insert_value(capture_value, value, index as u32, "effect.capture")
+                .map_err(compiler_diagnostic)?
+                .into_struct_value();
+        }
+        if let (Some(jump_buffer), Some(result_slot)) = (jump_buffer, result_slot) {
+            capture_value = self
+                .builder
+                .build_insert_value(
+                    capture_value,
+                    jump_buffer,
+                    captures.len() as u32,
+                    "effect.jump_buffer",
+                )
+                .map_err(compiler_diagnostic)?
+                .into_struct_value();
+            capture_value = self
+                .builder
+                .build_insert_value(
+                    capture_value,
+                    result_slot,
+                    captures.len() as u32 + 1,
+                    "effect.result_slot",
+                )
+                .map_err(compiler_diagnostic)?
+                .into_struct_value();
+        }
+        self.builder
+            .build_store(capture_pointer, capture_value)
+            .map_err(compiler_diagnostic)?;
+
+        let previous_block = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        let environment_pointer = function
+            .get_first_param()
+            .expect("clause environment")
+            .into_pointer_value();
+        let loaded = self
+            .builder
+            .build_load(capture_type, environment_pointer, "effect.captures")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        let mut environment = FunctionEnvironment {
+            closure_environment: Some(environment_pointer),
+            effect_clause: true,
+            ..FunctionEnvironment::default()
+        };
+        for (index, (symbol, cell)) in captures.iter().copied().enumerate() {
+            let value = self
+                .builder
+                .build_extract_value(loaded, index as u32, "effect.capture")
+                .map_err(compiler_diagnostic)?;
+            if cell {
+                environment
+                    .binding_cells
+                    .insert(symbol, value.into_pointer_value());
+            } else {
+                environment.locals.insert(symbol, value.as_any_value_enum());
+            }
+        }
+        let callback_jump_buffer = if jump_buffer.is_some() {
+            Some(
+                self.builder
+                    .build_extract_value(loaded, captures.len() as u32, "effect.jump_buffer")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value(),
+            )
+        } else {
+            None
+        };
+        let callback_result_slot = if result_slot.is_some() {
+            Some(
+                self.builder
+                    .build_extract_value(loaded, captures.len() as u32 + 1, "effect.result_slot")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value(),
+            )
+        } else {
+            None
+        };
+        let parameters = function.get_params();
+        let argument = self.build_product_value(&parameters[1..], clause.syntax.span.clone())?;
+        self.bind_pattern_value(&mut environment, &clause.pattern, argument)?;
+        let value = self.compile_expression(&mut environment, &clause.body)?;
+        if !environment.did_return {
+            let (Some(callback_jump_buffer), Some(callback_result_slot)) =
+                (callback_jump_buffer, callback_result_slot)
+            else {
+                return Err(Diagnostic::new(
+                    clause.syntax.span.clone(),
+                    "a reusable handler clause must resume or diverge",
+                ));
+            };
+            let value = value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(
+                    clause.syntax.span.clone(),
+                    "handler result is not first-class",
+                )
+            })?;
+            self.drop_all_owned(&mut environment, clause.syntax.span.clone())?;
+            self.builder
+                .build_store(callback_result_slot, value)
+                .map_err(compiler_diagnostic)?;
+            let longjmp = self
+                .llvm_module
+                .get_function("_longjmp")
+                .unwrap_or_else(|| {
+                    self.llvm_module.add_function(
+                        "_longjmp",
+                        self.context.void_type().fn_type(
+                            &[
+                                self.context.ptr_type(AddressSpace::default()).into(),
+                                self.context.i32_type().into(),
+                            ],
+                            false,
+                        ),
+                        None,
+                    )
+                });
+            self.builder
+                .build_direct_call(
+                    longjmp,
+                    &[
+                        callback_jump_buffer.into(),
+                        self.context.i32_type().const_int(1, false).into(),
+                    ],
+                    "",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_unreachable()
+                .map_err(compiler_diagnostic)?;
+        }
+        if let Some(block) = previous_block {
+            self.builder.position_at_end(block);
+        }
+        self.build_closure_value(function, capture_pointer)
+    }
+
+    fn effect_frame_type(
+        &self,
+        effect: &CheckedEffect,
+    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
+        let declaration = self
+            .typed_module
+            .resolved()
+            .effects()
+            .get(&effect.id)
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "unknown effect"))?;
+        let pointer = self.context.ptr_type(AddressSpace::default());
+        let mut fields: Vec<BasicTypeEnum<'context>> =
+            vec![pointer.into(), self.context.i64_type().into()];
+        fields.extend(
+            (0..declaration.operations.len())
+                .map(|_| BasicTypeEnum::StructType(self.closure_type())),
+        );
+        Ok(self.context.struct_type(&fields, false))
+    }
+
+    fn concrete_effect_operation_type(
+        &self,
+        operation: EffectOperationId,
+        effect: &CheckedEffect,
+    ) -> CodeGenerationResult<CheckedFunctionType> {
+        let declaration = self
+            .typed_module
+            .resolved()
+            .effects()
+            .get(&effect.id)
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "unknown effect"))?;
+        let substitutions = declaration
+            .parameters
+            .iter()
+            .copied()
+            .zip(effect.arguments.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        let template = self
+            .typed_module
+            .effect_operation_type(operation)
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked effect operation"))?;
+        let CheckedType::Function(function) =
+            substitute_type(CheckedType::Function(template.clone()), &substitutions)
+        else {
+            unreachable!();
+        };
+        Ok(function)
+    }
+
+    fn compile_effect_operation_call(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+        dispatch: crate::CheckedEffectDispatch,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let function_type =
+            self.concrete_effect_operation_type(dispatch.operation, &dispatch.effect)?;
+        let expected_count = self
+            .compile_parameter_types(&function_type.parameter)?
+            .len();
+        let arguments =
+            self.compile_arguments(environment, &call.argument, expected_count, false)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
+
+        self.compile_effect_operation_dispatch(
+            &function_type,
+            dispatch.operation,
+            &dispatch.effect,
+            arguments,
+            call.syntax.span.clone(),
+        )
+    }
+
+    fn compile_effect_operation_dispatch(
+        &mut self,
+        function_type: &CheckedFunctionType,
+        operation: EffectOperationId,
+        effect: &CheckedEffect,
+        mut arguments: Vec<inkwell::values::BasicMetadataValueEnum<'context>>,
+        span: Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let declaration = &self.typed_module.resolved().effects()[&effect.id];
+        let operation_index = declaration
+            .operations
+            .iter()
+            .position(|candidate| *candidate == operation)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "operation is not part of its effect"))?;
+        let top = self
+            .llvm_module
+            .get_global("__staple_effect_handler_top")
+            .expect("effect handler runtime");
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let initial = self
+            .builder
+            .build_load(pointer_type, top.as_pointer_value(), "handler.top")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let origin = self.builder.get_insert_block().expect("effect call block");
+        let function = origin.get_parent().expect("effect call function");
+        let search = self.context.append_basic_block(function, "effect.search");
+        let next = self.context.append_basic_block(function, "effect.next");
+        let matched = self.context.append_basic_block(function, "effect.matched");
+        self.builder
+            .build_unconditional_branch(search)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(search);
+        let current_phi = self
+            .builder
+            .build_phi(pointer_type, "handler.current")
+            .map_err(compiler_diagnostic)?;
+        current_phi.add_incoming(&[(&initial, origin)]);
+        let current = current_phi.as_basic_value().into_pointer_value();
+        let missing = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                self.builder
+                    .build_ptr_to_int(current, self.size_type, "handler.address")
+                    .map_err(compiler_diagnostic)?,
+                self.size_type.const_zero(),
+                "handler.missing",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(missing, span.clone())?;
+        let header_type = self.context.struct_type(
+            &[pointer_type.into(), self.context.i64_type().into()],
+            false,
+        );
+        let header = self
+            .builder
+            .build_load(header_type, current, "handler.header")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        let parent = self
+            .builder
+            .build_extract_value(header, 0, "handler.parent")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let descriptor = self
+            .builder
+            .build_extract_value(header, 1, "handler.effect")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let is_match = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                descriptor,
+                self.context
+                    .i64_type()
+                    .const_int(self.effect_descriptor(effect), false),
+                "handler.matches",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(is_match, matched, next)
+            .map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(next);
+        self.builder
+            .build_unconditional_branch(search)
+            .map_err(compiler_diagnostic)?;
+        current_phi.add_incoming(&[(&parent, next)]);
+
+        self.builder.position_at_end(matched);
+        let frame_type = self.effect_frame_type(effect)?;
+        let closure_pointer = self
+            .builder
+            .build_struct_gep(
+                frame_type,
+                current,
+                (operation_index + 2) as u32,
+                "handler.operation",
+            )
+            .map_err(compiler_diagnostic)?;
+        let closure = self
+            .builder
+            .build_load(self.closure_type(), closure_pointer, "handler.clause")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        let code = self
+            .builder
+            .build_extract_value(closure, 0, "handler.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let clause_environment = self
+            .builder
+            .build_extract_value(closure, 1, "handler.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        self.builder
+            .build_store(top.as_pointer_value(), parent)
+            .map_err(compiler_diagnostic)?;
+        arguments.insert(0, clause_environment.into());
+        let call_site = self
+            .builder
+            .build_indirect_call(
+                self.compile_closure_function_type(&function_type)?,
+                code,
+                &arguments,
+                "effect.operation",
+            )
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        self.builder
+            .build_store(top.as_pointer_value(), current)
+            .map_err(compiler_diagnostic)?;
         Ok(call_site
             .try_as_basic_value()
             .unwrap_basic()
@@ -5702,6 +6549,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             CheckedType::Function(_) => Ok(self.closure_type().into()),
+            CheckedType::Handler(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::Product(product) => self.compile_product_type(product).map(Into::into),
             CheckedType::Sum(sum) => self.compile_sum_type(sum).map(Into::into),
             CheckedType::I8 => Ok(self.compile_integer_type(IntegerType::I8).into()),

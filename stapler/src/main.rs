@@ -407,6 +407,66 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_deep_algebraic_effect_handlers() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-effects-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-effects-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "effect State = S => { get: () -> S; set: S -> () }\n",
+                "def increment: () ->{State I32} I32 = () => {\n",
+                "  let getter: () ->{State I32} I32 = State.get\n",
+                "  let value = getter ()\n",
+                "  State.set (value + 1)\n",
+                "  value\n",
+                "}\n",
+                "let result = handle increment () {\n",
+                "  State.get () => resume 10\n",
+                "  State.set value => resume ()\n",
+                "}\n",
+                "effect Stop = { stop: () -> I32 }\n",
+                "def interrupted: () ->{Stop} I32 = () => Stop.stop () + 1\n",
+                "let aborted = handle interrupted () { Stop.stop () => 41 }\n",
+                "effect Ask = { ask: () -> I32 }\n",
+                "def ask_once: () ->{Ask} I32 = () => Ask.ask ()\n",
+                "def make_answer: I32 -> Handler Ask {} = answer => handler Ask { ask () => resume answer }\n",
+                "def use_ask: Handler Ask {} -> I32 = value => handle ask_once () with value\n",
+                "let Forty = make_answer 40\n",
+                "let named = use_ask Forty\n",
+                "let named_again = handle ask_once () with Forty\n",
+                "let routed = handle (handle ask_once () { Ask.ask () => Ask.ask () }) {\n",
+                "  Ask.ask () => resume 20\n",
+                "}\n",
+                "exit ((result - 10) + (aborted - 41) + (named - 40) + (named_again - 40) + (routed - 20))\n",
+            ),
+        )
+        .expect("temporary effect source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("effect executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("effect executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "effect executable returned {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_refs_across_automatic_collection() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

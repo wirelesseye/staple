@@ -23,6 +23,12 @@ pub struct CheckedTraitDispatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedEffectDispatch {
+    pub operation: crate::EffectOperationId,
+    pub effect: CheckedEffect,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedCoercion {
     pub source: CheckedType,
     pub target: CheckedType,
@@ -80,6 +86,12 @@ struct LoopCheckContext {
 }
 
 #[derive(Debug, Clone)]
+struct ResumeCheckContext {
+    input: CheckedType,
+    output: CheckedType,
+}
+
+#[derive(Debug, Clone)]
 struct CheckedTraitImplementation {
     span: Span,
     trait_id: TraitId,
@@ -130,6 +142,7 @@ pub enum CheckedType {
     Product(CheckedProductType),
     Sum(CheckedSumType),
     Function(CheckedFunctionType),
+    Handler(CheckedHandlerType),
     Distinct {
         id: TypeId,
         name: String,
@@ -174,7 +187,83 @@ pub struct CheckedSumType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedFunctionType {
     pub parameter: Box<CheckedType>,
+    pub effects: CheckedEffectSet,
     pub result: Box<CheckedType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedEffect {
+    pub id: crate::EffectId,
+    pub name: String,
+    pub arguments: Vec<CheckedType>,
+}
+
+impl fmt::Display for CheckedEffect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.name)?;
+        for argument in &self.arguments {
+            format_type_argument(formatter, argument)?;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedHandlerType {
+    pub effect: CheckedEffect,
+    pub effects: CheckedEffectSet,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct CheckedEffectSet {
+    pub effects: Vec<CheckedEffect>,
+}
+
+impl CheckedEffectSet {
+    pub fn canonical(mut effects: Vec<CheckedEffect>) -> Self {
+        effects.sort_by(|left, right| {
+            (left.id.0, format!("{:?}", left.arguments))
+                .cmp(&(right.id.0, format!("{:?}", right.arguments)))
+        });
+        effects.dedup();
+        Self { effects }
+    }
+
+    pub fn union(&self, other: &Self) -> Self {
+        Self::canonical(self.effects.iter().chain(&other.effects).cloned().collect())
+    }
+
+    pub fn without(&self, handled: &CheckedEffect) -> Self {
+        Self::canonical(
+            self.effects
+                .iter()
+                .filter(|effect| *effect != handled)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    pub fn is_subset_of(&self, other: &Self) -> bool {
+        self.effects
+            .iter()
+            .all(|effect| other.effects.contains(effect))
+    }
+}
+
+impl fmt::Display for CheckedEffectSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("{")?;
+        for (index, effect) in self.effects.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(", ")?;
+            }
+            formatter.write_str(&effect.name)?;
+            for argument in &effect.arguments {
+                format_type_argument(formatter, argument)?;
+            }
+        }
+        formatter.write_str("}")
+    }
 }
 
 impl CheckedType {
@@ -246,7 +335,27 @@ impl CheckedType {
                 .all(|element| element.value_type.is_fully_known()),
             Self::Sum(sum) => sum.alternatives.iter().all(CheckedType::is_fully_known),
             Self::Function(function) => {
-                function.parameter.is_fully_known() && function.result.is_fully_known()
+                function.parameter.is_fully_known()
+                    && function
+                        .effects
+                        .effects
+                        .iter()
+                        .flat_map(|effect| &effect.arguments)
+                        .all(CheckedType::is_fully_known)
+                    && function.result.is_fully_known()
+            }
+            Self::Handler(handler) => {
+                handler
+                    .effect
+                    .arguments
+                    .iter()
+                    .all(CheckedType::is_fully_known)
+                    && handler
+                        .effects
+                        .effects
+                        .iter()
+                        .flat_map(|effect| &effect.arguments)
+                        .all(CheckedType::is_fully_known)
             }
             Self::Distinct { representation, .. } => representation.is_fully_known(),
             Self::I32
@@ -288,6 +397,7 @@ impl CheckedType {
             Self::Ref(_)
             | Self::CPointer { .. }
             | Self::Function(_)
+            | Self::Handler(_)
             | Self::I32
             | Self::I8
             | Self::I16
@@ -389,7 +499,18 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::Function(function) => {
-                write!(formatter, "{} -> {}", function.parameter, function.result)
+                if function.effects.effects.is_empty() {
+                    write!(formatter, "{} -> {}", function.parameter, function.result)
+                } else {
+                    write!(
+                        formatter,
+                        "{} ->{} {}",
+                        function.parameter, function.effects, function.result
+                    )
+                }
+            }
+            Self::Handler(handler) => {
+                write!(formatter, "Handler {} {}", handler.effect, handler.effects)
             }
             Self::Distinct {
                 name, arguments, ..
@@ -427,12 +548,16 @@ fn format_type_application(
 pub struct TypedModule {
     resolved: ResolvedModule,
     expression_types: HashMap<SyntaxId, CheckedType>,
+    expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
+    effect_operation_types: HashMap<crate::EffectOperationId, CheckedFunctionType>,
+    effect_dispatches: HashMap<SyntaxId, CheckedEffectDispatch>,
+    checked_handles: HashMap<SyntaxId, CheckedEffect>,
     trait_implementations: Vec<CheckedTraitImplementation>,
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
     propagations: HashMap<SyntaxId, CheckedPropagation>,
@@ -470,6 +595,9 @@ impl TypedModule {
 
     pub fn type_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.expression_types.get(&syntax_id)
+    }
+    pub fn effects_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedEffectSet> {
+        self.expression_effects.get(&syntax_id)
     }
 
     pub fn coercion_for(&self, syntax_id: SyntaxId) -> Option<&CheckedCoercion> {
@@ -593,6 +721,19 @@ impl TypedModule {
         self.trait_dispatches.get(&syntax)
     }
 
+    pub fn effect_operation_type(
+        &self,
+        operation: crate::EffectOperationId,
+    ) -> Option<&CheckedFunctionType> {
+        self.effect_operation_types.get(&operation)
+    }
+    pub fn effect_dispatch_for(&self, syntax: SyntaxId) -> Option<&CheckedEffectDispatch> {
+        self.effect_dispatches.get(&syntax)
+    }
+    pub fn handled_effect_for(&self, syntax: SyntaxId) -> Option<&CheckedEffect> {
+        self.checked_handles.get(&syntax)
+    }
+
     pub(crate) fn trait_impl_method(
         &self,
         trait_id: TraitId,
@@ -641,6 +782,7 @@ impl TypedModule {
 #[derive(Default)]
 pub struct TypeChecker {
     expression_types: HashMap<SyntaxId, CheckedType>,
+    expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
@@ -649,6 +791,9 @@ pub struct TypeChecker {
     trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
     default_function_traits: HashMap<FunctionId, TraitId>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
+    effect_operation_types: HashMap<crate::EffectOperationId, CheckedFunctionType>,
+    effect_dispatches: HashMap<SyntaxId, CheckedEffectDispatch>,
+    checked_handles: HashMap<SyntaxId, CheckedEffect>,
     trait_implementations: Vec<CheckedTraitImplementation>,
     impl_function_types: HashMap<FunctionId, CheckedFunctionType>,
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
@@ -664,6 +809,7 @@ pub struct TypeChecker {
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
+    active_function_effects: Vec<CheckedEffectSet>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     top_level_bindings: HashMap<SymbolId, Binding>,
     checking_bindings: HashSet<SymbolId>,
@@ -677,6 +823,7 @@ pub struct TypeChecker {
     return_contributions: Vec<Vec<ReturnContribution>>,
     pending_propagations: Vec<Vec<(SyntaxId, CheckedType, usize, Span)>>,
     loop_contexts: Vec<LoopCheckContext>,
+    resume_contexts: Vec<ResumeCheckContext>,
     did_return: bool,
     return_reachable: bool,
     diagnostics: Vec<Diagnostic>,
@@ -696,6 +843,7 @@ impl TypeChecker {
         self.collect_type_declarations(&module);
         self.collect_string_representation(&module);
         self.collect_traits(&module);
+        self.collect_effects(&module);
         self.collect_trait_implementations(&module);
         self.validate_trait_implementation_prerequisites(&module);
         self.seed_constructors(&module);
@@ -719,6 +867,7 @@ impl TypeChecker {
         for function_id in function_ids {
             self.ensure_function_checked(&module, function_id);
         }
+        self.infer_effects(&module);
 
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
@@ -727,12 +876,16 @@ impl TypeChecker {
         let typed = TypedModule {
             resolved: module,
             expression_types: self.expression_types,
+            expression_effects: self.expression_effects,
             symbol_types: self.symbol_types,
             function_types: self.function_types,
             function_bounds: self.function_bounds,
             trait_method_types: self.trait_method_types,
             trait_parameter_arguments: self.trait_parameter_arguments,
             trait_dispatches: self.trait_dispatches,
+            effect_operation_types: self.effect_operation_types,
+            effect_dispatches: self.effect_dispatches,
+            checked_handles: self.checked_handles,
             trait_implementations: self.trait_implementations,
             expression_coercions: self.expression_coercions,
             propagations: self.propagations,
@@ -756,6 +909,43 @@ impl TypeChecker {
 
     fn collect_type_declarations(&mut self, module: &ResolvedModule) {
         self.type_declarations = module.type_declarations().clone();
+    }
+
+    fn collect_effects(&mut self, module: &ResolvedModule) {
+        for effect in module.effects().values() {
+            let parameters = effect
+                .declaration
+                .type_parameters
+                .iter()
+                .map(|parameter| self.checked_type_parameter_pattern(module, parameter))
+                .collect::<Vec<_>>();
+            let owning_effect = CheckedEffect {
+                id: effect.id,
+                name: effect.declaration.name.clone(),
+                arguments: parameters,
+            };
+            for operation_id in &effect.operations {
+                let operation = module
+                    .effect_operation(*operation_id)
+                    .expect("resolved effect operation");
+                let checked = self.resolve_source_type(module, &operation.annotation);
+                let CheckedType::Function(mut function) = checked else {
+                    self.diagnostics.push(Diagnostic::new(
+                        operation.annotation.syntax().span.clone(),
+                        "effect operations must have function types",
+                    ));
+                    continue;
+                };
+                if !function.effects.effects.is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        operation.annotation.syntax().span.clone(),
+                        "an effect operation signature cannot declare additional effects",
+                    ));
+                }
+                function.effects = CheckedEffectSet::canonical(vec![owning_effect.clone()]);
+                self.effect_operation_types.insert(*operation_id, function);
+            }
+        }
     }
 
     fn collect_string_representation(&mut self, module: &ResolvedModule) {
@@ -1196,6 +1386,7 @@ impl TypeChecker {
                 *symbol,
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
+                    effects: CheckedEffectSet::default(),
                     result: Box::new(result),
                 }),
             );
@@ -1274,7 +1465,8 @@ impl TypeChecker {
                     | Item::TypeDeclaration(_)
                     | Item::MacroDeclaration(_)
                     | Item::TraitDeclaration(_)
-                    | Item::TraitImplementation(_) => {}
+                    | Item::TraitImplementation(_)
+                    | Item::EffectDeclaration(_) => {}
                 }
             }
         }
@@ -1309,6 +1501,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(integer),
                     })
                 }
@@ -1336,6 +1529,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
                 }
@@ -1349,6 +1543,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(float),
                     })
                 }
@@ -1370,18 +1565,21 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
                 }
                 crate::IntrinsicFunction::StringFromCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::CString),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
                 }
                 crate::IntrinsicFunction::StringToCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::String),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::CString),
                     })
                 }
@@ -1495,6 +1693,7 @@ impl TypeChecker {
             }
             let mut function_type = CheckedFunctionType {
                 parameter: Box::new(parameter),
+                effects: CheckedEffectSet::default(),
                 result: Box::new(result),
             };
 
@@ -1548,6 +1747,9 @@ impl TypeChecker {
                 .cloned()
                 .unwrap_or_default(),
         );
+        self.active_function_effects
+            .push(function_type.effects.clone());
+        let outer_resume_contexts = std::mem::take(&mut self.resume_contexts);
         self.bind_pattern_types(module, &function.pattern, &function_type.parameter);
         let outer_did_return = self.did_return;
         let outer_return_reachable = self.return_reachable;
@@ -1613,6 +1815,7 @@ impl TypeChecker {
         self.return_reachable = outer_return_reachable;
         let checked_function_type = CheckedFunctionType {
             parameter: function_type.parameter,
+            effects: function_type.effects,
             result: Box::new(result_type),
         };
         self.function_types
@@ -1626,6 +1829,8 @@ impl TypeChecker {
         self.checking_functions.remove(&function_id);
         self.checked_functions.insert(function_id);
         self.active_function_bounds.pop();
+        self.active_function_effects.pop();
+        self.resume_contexts = outer_resume_contexts;
     }
 
     fn join_return_contributions(
@@ -1801,6 +2006,13 @@ impl TypeChecker {
                                 "external binding types cannot contain sums",
                             ));
                         }
+                        if matches!(&external_type, Some(CheckedType::Function(function)) if !function.effects.effects.is_empty())
+                        {
+                            self.diagnostics.push(Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                "external functions cannot declare Staple effects",
+                            ));
+                        }
                         if external_type
                             .as_ref()
                             .is_some_and(checked_type_contains_erased_product)
@@ -1835,7 +2047,8 @@ impl TypeChecker {
             | Item::TypeDeclaration(_)
             | Item::MacroDeclaration(_)
             | Item::TraitDeclaration(_)
-            | Item::TraitImplementation(_) => {}
+            | Item::TraitImplementation(_)
+            | Item::EffectDeclaration(_) => {}
         }
     }
 
@@ -2163,6 +2376,18 @@ impl TypeChecker {
         expression: &Expression,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        let effect_operations = module.effect_operations_for_expression(expression.syntax().id);
+        if !effect_operations.is_empty() && !matches!(expression, Expression::Call(_)) {
+            let value_type = self.resolve_effect_operation_use(
+                module,
+                expression.syntax().id,
+                effect_operations,
+                None,
+                expected,
+                expression.syntax().span.clone(),
+            );
+            return self.finish_expression_type(expression, value_type, expected);
+        }
         let trait_methods = module.trait_methods_for_expression(expression.syntax().id);
         if !trait_methods.is_empty() && !matches!(expression, Expression::Call(_)) {
             let value_type = self.resolve_trait_method_use(
@@ -2203,6 +2428,73 @@ impl TypeChecker {
             }
             Expression::Match(match_) => self.check_match_expression(module, match_, expected),
             Expression::Loop(loop_) => self.check_loop_expression(module, loop_, expected),
+            Expression::Handler(handler) => {
+                let effect = self.resolve_effect_application(module, &handler.effect);
+                let expected_handler = match expected {
+                    Some(CheckedType::Handler(handler)) => Some(handler.clone()),
+                    _ => None,
+                };
+                let Some(effect) = effect else {
+                    return CheckedType::Error;
+                };
+                if let Some(expected) = &expected_handler
+                    && expected.effect != effect
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        handler.syntax.span.clone(),
+                        format!(
+                            "handler targets `{}`, but `{}` was expected",
+                            effect, expected.effect
+                        ),
+                    ));
+                }
+                self.check_handler_clauses(
+                    module,
+                    &handler.clauses,
+                    &effect,
+                    &CheckedType::Inferred,
+                );
+                for clause in &handler.clauses {
+                    if !handler_clause_guarantees_resume(&clause.body) {
+                        self.diagnostics.push(Diagnostic::new(
+                            clause.body.syntax().span.clone(),
+                            "a reusable handler clause must resume or diverge on every reachable path",
+                        ));
+                    }
+                }
+                let effects =
+                    handler
+                        .clauses
+                        .iter()
+                        .fold(CheckedEffectSet::default(), |effects, clause| {
+                            effects.union(&self.expression_effects_now(module, &clause.body))
+                        });
+                if let Some(expected) = &expected_handler
+                    && !effects.is_subset_of(&expected.effects)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        handler.syntax.span.clone(),
+                        format!(
+                            "handler clauses perform effects {effects}, which are not contained in the declared effect set {}",
+                            expected.effects
+                        ),
+                    ));
+                }
+                CheckedType::Handler(CheckedHandlerType { effect, effects })
+            }
+            Expression::Handle(handle) => self.check_handle_expression(module, handle, expected),
+            Expression::Resume(resume) => {
+                let Some(context) = self.resume_contexts.last().cloned() else {
+                    self.diagnostics.push(Diagnostic::new(
+                        resume.syntax.span.clone(),
+                        "`resume` is only allowed inside an effect handler clause",
+                    ));
+                    self.check_expression(module, &resume.value);
+                    return CheckedType::Error;
+                };
+                self.check_expression_expected(module, &resume.value, Some(&context.input));
+                context.output
+            }
             Expression::Block(block) => {
                 let mut result = CheckedType::empty_product();
                 let mut block_returned = false;
@@ -2311,6 +2603,34 @@ impl TypeChecker {
                     }
                     CheckedType::CString
                 } else {
+                    let effect_operations =
+                        module.effect_operations_for_expression(call.callee.syntax().id);
+                    if !effect_operations.is_empty() {
+                        let argument_type = self.check_expression(module, &call.argument);
+                        let callee_type = self.resolve_effect_operation_use(
+                            module,
+                            call.callee.syntax().id,
+                            effect_operations,
+                            Some(&argument_type),
+                            expected,
+                            call.callee.syntax().span.clone(),
+                        );
+                        self.expression_types
+                            .insert(call.callee.syntax().id, callee_type.clone());
+                        let result = match callee_type {
+                            CheckedType::Function(function) => {
+                                self.check_call_argument(
+                                    call.argument.syntax().id,
+                                    argument_type,
+                                    &function.parameter,
+                                    call.argument.syntax().span.clone(),
+                                );
+                                *function.result
+                            }
+                            _ => CheckedType::Error,
+                        };
+                        return self.finish_expression_type(expression, result, expected);
+                    }
                     let trait_methods =
                         module.trait_methods_for_expression(call.callee.syntax().id);
                     if !trait_methods.is_empty() {
@@ -2368,6 +2688,7 @@ impl TypeChecker {
                     {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
                             parameter: Box::new(argument_type.clone()),
+                            effects: CheckedEffectSet::default(),
                             result: Box::new(expected_result.clone()),
                         });
                         raw_callee_type = self.check_expression_expected(
@@ -2728,6 +3049,633 @@ impl TypeChecker {
             }
         };
         self.finish_expression_type(expression, natural_type, expected)
+    }
+
+    fn resolve_effect_operation_use(
+        &mut self,
+        _module: &ResolvedModule,
+        syntax: SyntaxId,
+        operations: &[crate::EffectOperationId],
+        argument: Option<&CheckedType>,
+        expected: Option<&CheckedType>,
+        span: Span,
+    ) -> CheckedType {
+        let [operation] = operations else {
+            self.diagnostics
+                .push(Diagnostic::new(span, "ambiguous effect operation"));
+            return CheckedType::Error;
+        };
+        let Some(mut template) = self.effect_operation_types.get(operation).cloned() else {
+            return CheckedType::Error;
+        };
+        if let Some(owner) = template.effects.effects.first().map(|effect| effect.id)
+            && let Some(concrete) = self
+                .active_function_effects
+                .iter()
+                .rev()
+                .flat_map(|effects| effects.effects.iter())
+                .find(|effect| effect.id == owner)
+            && let Some(instantiated) =
+                self.concrete_effect_operation_type(_module, *operation, concrete)
+        {
+            template = instantiated;
+        }
+        let instantiated = self.instantiate_function_use(
+            CheckedType::Function(template),
+            argument,
+            expected,
+            span,
+        );
+        if let CheckedType::Function(function) = &instantiated
+            && let [effect] = function.effects.effects.as_slice()
+        {
+            self.effect_dispatches.insert(
+                syntax,
+                CheckedEffectDispatch {
+                    operation: *operation,
+                    effect: effect.clone(),
+                },
+            );
+        }
+        instantiated
+    }
+
+    fn check_handle_expression(
+        &mut self,
+        module: &ResolvedModule,
+        handle: &crate::HandleExpression,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        // A first-class handler operand is evaluated before its dynamic frame is
+        // installed and before the handled computation begins.
+        let value_handler = if let crate::HandleKind::Value(value) = &handle.handler {
+            match self.check_expression_expected(module, value, None) {
+                CheckedType::Handler(handler) => Some(handler),
+                CheckedType::Error => None,
+                other => {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.syntax().span.clone(),
+                        format!("`with` requires a handler value, found `{other}`"),
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let result = self.check_expression_expected(module, &handle.body, expected);
+        let effect = match &handle.handler {
+            crate::HandleKind::Value(_) => value_handler.map(|handler| handler.effect),
+            crate::HandleKind::Manual(clauses) => {
+                let mut owner = None;
+                for clause in clauses {
+                    let Some(operation) = module
+                        .effect_operations_for_expression(clause.syntax.id)
+                        .first()
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    let Some(candidate) = module.effect_for_operation(operation) else {
+                        continue;
+                    };
+                    if owner
+                        .replace(candidate)
+                        .is_some_and(|previous| previous != candidate)
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            clause.syntax.span.clone(),
+                            "a manual handler may handle operations from only one effect",
+                        ));
+                    }
+                }
+                owner.and_then(|owner| {
+                    let body_effects = self.expression_effects_now(module, &handle.body);
+                    let matches = body_effects.effects.into_iter().filter(|effect| effect.id == owner).collect::<Vec<_>>();
+                    match matches.as_slice() {
+                        [effect] => Some(effect.clone()),
+                        [] if module.effects()[&owner].parameters.is_empty() => Some(CheckedEffect {
+                            id: owner,
+                            name: module.effects()[&owner].declaration.name.clone(),
+                            arguments: Vec::new(),
+                        }),
+                        [] => {
+                            self.diagnostics.push(Diagnostic::new(
+                                handle.syntax.span.clone(),
+                                "could not infer the concrete handled effect from the computation",
+                            ));
+                            None
+                        }
+                        _ => {
+                            self.diagnostics.push(Diagnostic::new(
+                                handle.syntax.span.clone(),
+                                "the computation performs multiple applications of the handled effect",
+                            ));
+                            None
+                        }
+                    }
+                })
+            }
+        };
+        if let Some(effect) = effect {
+            if let crate::HandleKind::Manual(clauses) = &handle.handler {
+                self.check_handler_clauses(module, clauses, &effect, &result);
+            }
+            self.checked_handles.insert(handle.syntax.id, effect);
+        }
+        result
+    }
+
+    fn concrete_effect_operation_type(
+        &self,
+        module: &ResolvedModule,
+        operation: crate::EffectOperationId,
+        effect: &CheckedEffect,
+    ) -> Option<CheckedFunctionType> {
+        let declaration = &module.effects()[&effect.id];
+        let substitutions = declaration
+            .parameters
+            .iter()
+            .copied()
+            .zip(effect.arguments.iter().cloned())
+            .collect::<HashMap<_, _>>();
+        let checked = substitute_type(
+            CheckedType::Function(self.effect_operation_types.get(&operation)?.clone()),
+            &substitutions,
+        );
+        let CheckedType::Function(function) = checked else {
+            return None;
+        };
+        Some(function)
+    }
+
+    fn check_handler_clauses(
+        &mut self,
+        module: &ResolvedModule,
+        clauses: &[crate::HandlerClause],
+        effect: &CheckedEffect,
+        output: &CheckedType,
+    ) {
+        let declaration = &module.effects()[&effect.id];
+        let required = declaration
+            .operations
+            .iter()
+            .copied()
+            .collect::<HashSet<_>>();
+        let mut seen = HashSet::new();
+        for clause in clauses {
+            let Some(operation) = module
+                .effect_operations_for_expression(clause.syntax.id)
+                .first()
+                .copied()
+            else {
+                continue;
+            };
+            if module.effect_for_operation(operation) != Some(effect.id) {
+                self.diagnostics.push(Diagnostic::new(
+                    clause.syntax.span.clone(),
+                    format!(
+                        "operation `{}` does not belong to effect `{}`",
+                        clause.operation, effect.name
+                    ),
+                ));
+                continue;
+            }
+            if !seen.insert(operation) {
+                self.diagnostics.push(Diagnostic::new(
+                    clause.syntax.span.clone(),
+                    format!("duplicate handler clause for `{}`", clause.operation),
+                ));
+                continue;
+            }
+            let Some(function) = self.concrete_effect_operation_type(module, operation, effect)
+            else {
+                continue;
+            };
+            self.bind_pattern_types(module, &clause.pattern, &function.parameter);
+            self.resume_contexts.push(ResumeCheckContext {
+                input: (*function.result).clone(),
+                output: output.clone(),
+            });
+            let expected = (!matches!(output, CheckedType::Inferred)).then_some(output);
+            self.check_expression_expected(module, &clause.body, expected);
+            self.resume_contexts.pop();
+        }
+        for missing in required.difference(&seen) {
+            let operation = module.effect_operation(*missing).expect("effect operation");
+            self.diagnostics.push(Diagnostic::new(
+                declaration.declaration.syntax.span.clone(),
+                format!("handler is missing operation `{}`", operation.name),
+            ));
+        }
+    }
+
+    fn expression_effects_now(
+        &self,
+        module: &ResolvedModule,
+        expression: &Expression,
+    ) -> CheckedEffectSet {
+        self.expression_effects_with_resume(module, expression, None)
+    }
+
+    fn expression_effects_with_resume(
+        &self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        resume: Option<&CheckedEffectSet>,
+    ) -> CheckedEffectSet {
+        let union = |values: Vec<CheckedEffectSet>| {
+            values
+                .into_iter()
+                .fold(CheckedEffectSet::default(), |effects, value| {
+                    effects.union(&value)
+                })
+        };
+        match expression {
+            Expression::Function(_) => CheckedEffectSet::default(),
+            Expression::Satisfies(value) => {
+                self.expression_effects_with_resume(module, &value.value, resume)
+            }
+            Expression::Match(value) => union(
+                std::iter::once(self.expression_effects_with_resume(
+                    module,
+                    &value.subject,
+                    resume,
+                ))
+                .chain(
+                    value
+                        .arms
+                        .iter()
+                        .map(|arm| self.expression_effects_with_resume(module, &arm.body, resume)),
+                )
+                .collect(),
+            ),
+            Expression::Loop(value) => self.block_effects_with_resume(module, &value.body, resume),
+            Expression::Handler(_) => CheckedEffectSet::default(),
+            Expression::Handle(value) => {
+                let body = self.expression_effects_with_resume(module, &value.body, resume);
+                let residual = self
+                    .checked_handles
+                    .get(&value.syntax.id)
+                    .map_or(body.clone(), |handled| body.without(handled));
+                let clauses = match &value.handler {
+                    crate::HandleKind::Manual(clauses) => union(
+                        clauses
+                            .iter()
+                            .map(|clause| {
+                                self.expression_effects_with_resume(
+                                    module,
+                                    &clause.body,
+                                    Some(&residual),
+                                )
+                            })
+                            .collect(),
+                    ),
+                    crate::HandleKind::Value(handler) => {
+                        let evaluation =
+                            self.expression_effects_with_resume(module, handler, resume);
+                        let clauses = self
+                            .expression_types
+                            .get(&handler.syntax().id)
+                            .and_then(|ty| match ty {
+                                CheckedType::Handler(handler) => Some(handler.effects.clone()),
+                                _ => None,
+                            })
+                            .unwrap_or_default();
+                        evaluation.union(&clauses)
+                    }
+                };
+                residual.union(&clauses)
+            }
+            Expression::Resume(value) => self
+                .expression_effects_with_resume(module, &value.value, resume)
+                .union(resume.unwrap_or(&CheckedEffectSet::default())),
+            Expression::Block(value) => self.block_effects_with_resume(module, value, resume),
+            Expression::Product(value) => union(
+                value
+                    .elements
+                    .iter()
+                    .map(|element| {
+                        self.expression_effects_with_resume(module, &element.value, resume)
+                    })
+                    .collect(),
+            ),
+            Expression::Call(value) => {
+                let children = self
+                    .expression_effects_with_resume(module, &value.callee, resume)
+                    .union(&self.expression_effects_with_resume(module, &value.argument, resume));
+                let called = self
+                    .function_origin(module, &value.callee)
+                    .and_then(|function| {
+                        self.function_types
+                            .get(&function)
+                            .map(|function| function.effects.clone())
+                    })
+                    .or_else(|| {
+                        self.expression_types
+                            .get(&value.callee.syntax().id)
+                            .and_then(|ty| match ty {
+                                CheckedType::Function(function) => Some(function.effects.clone()),
+                                _ => None,
+                            })
+                    })
+                    .unwrap_or_default();
+                children.union(&called)
+            }
+            Expression::Access(value) => {
+                self.expression_effects_with_resume(module, &value.value, resume)
+            }
+            Expression::Index(value) => self
+                .expression_effects_with_resume(module, &value.value, resume)
+                .union(&self.expression_effects_with_resume(module, &value.index, resume)),
+            Expression::Infix(value) => module.lowered_infix(value.syntax.id).map_or_else(
+                || {
+                    union(
+                        value
+                            .operands
+                            .iter()
+                            .map(|operand| {
+                                self.expression_effects_with_resume(module, operand, resume)
+                            })
+                            .collect(),
+                    )
+                },
+                |lowered| self.expression_effects_with_resume(module, lowered, resume),
+            ),
+            Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_)
+            | Expression::Name(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => CheckedEffectSet::default(),
+        }
+    }
+
+    fn block_effects_with_resume(
+        &self,
+        module: &ResolvedModule,
+        block: &crate::BlockExpression,
+        resume: Option<&CheckedEffectSet>,
+    ) -> CheckedEffectSet {
+        block
+            .statements
+            .iter()
+            .fold(CheckedEffectSet::default(), |effects, statement| {
+                effects.union(&match statement {
+                    Statement::Binding(value) => value
+                        .value
+                        .as_ref()
+                        .map(|value| self.expression_effects_with_resume(module, value, resume))
+                        .unwrap_or_default(),
+                    Statement::PatternBinding(value) => {
+                        self.expression_effects_with_resume(module, &value.value, resume)
+                    }
+                    Statement::Assignment(value) => self
+                        .expression_effects_with_resume(module, &value.target, resume)
+                        .union(&self.expression_effects_with_resume(module, &value.value, resume)),
+                    Statement::Return(value) => {
+                        self.expression_effects_with_resume(module, &value.value, resume)
+                    }
+                    Statement::Break(value) => value
+                        .value
+                        .as_ref()
+                        .map(|value| self.expression_effects_with_resume(module, value, resume))
+                        .unwrap_or_default(),
+                    Statement::Continue(_) => CheckedEffectSet::default(),
+                    Statement::Expression(value) => {
+                        self.expression_effects_with_resume(module, value, resume)
+                    }
+                })
+            })
+    }
+
+    fn infer_effects(&mut self, module: &ResolvedModule) {
+        let declared = module
+            .functions()
+            .iter()
+            .filter_map(|function| {
+                function.binding_annotation.as_ref().and_then(|annotation| {
+                    matches!(annotation, Type::Function(_)).then(|| {
+                        (
+                            function.id,
+                            self.function_types[&function.id].effects.clone(),
+                        )
+                    })
+                })
+            })
+            .collect::<HashMap<_, _>>();
+
+        for _ in 0..=module.functions().len() {
+            let mut updates = Vec::new();
+            for function in module.functions() {
+                if declared.contains_key(&function.id) {
+                    continue;
+                }
+                let inferred = self.expression_effects_now(module, &function.body);
+                if self.function_types[&function.id].effects != inferred {
+                    updates.push((function.id, function.binding_syntax, inferred));
+                }
+            }
+            if updates.is_empty() {
+                break;
+            }
+            for (function, binding, effects) in updates {
+                self.function_types
+                    .get_mut(&function)
+                    .expect("function type")
+                    .effects = effects.clone();
+                if let Some(syntax) = binding
+                    && let Some(symbol) = module.symbol_for(syntax)
+                    && let Some(CheckedType::Function(function_type)) =
+                        self.symbol_types.get_mut(&symbol)
+                {
+                    function_type.effects = effects;
+                }
+            }
+        }
+
+        for function in module.functions() {
+            let actual = self.expression_effects_now(module, &function.body);
+            if let Some(allowed) = declared.get(&function.id)
+                && !actual.is_subset_of(allowed)
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    function.body.syntax().span.clone(),
+                    format!("function body performs effects {actual}, which are not contained in its declared effect set {allowed}"),
+                ));
+            }
+            self.record_expression_effects(module, &function.body, None);
+        }
+
+        for source_module in module.program().modules() {
+            for item in &source_module.syntax.items {
+                let Item::Statement(statement) = item else {
+                    continue;
+                };
+                let (syntax, effects) = match statement.as_ref() {
+                    Statement::Binding(binding) => binding
+                        .value
+                        .as_ref()
+                        .map(|value| (value.syntax(), self.expression_effects_now(module, value))),
+                    Statement::PatternBinding(binding) => Some((
+                        binding.value.syntax(),
+                        self.expression_effects_now(module, &binding.value),
+                    )),
+                    Statement::Assignment(value) => Some((
+                        &value.syntax,
+                        self.expression_effects_now(module, &value.target)
+                            .union(&self.expression_effects_now(module, &value.value)),
+                    )),
+                    Statement::Return(value) => Some((
+                        &value.syntax,
+                        self.expression_effects_now(module, &value.value),
+                    )),
+                    Statement::Break(value) => value.value.as_ref().map(|expression| {
+                        (
+                            &value.syntax,
+                            self.expression_effects_now(module, expression),
+                        )
+                    }),
+                    Statement::Continue(_) => None,
+                    Statement::Expression(value) => {
+                        Some((value.syntax(), self.expression_effects_now(module, value)))
+                    }
+                }
+                .unwrap_or((&source_module.syntax.syntax, CheckedEffectSet::default()));
+                if !effects.effects.is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        syntax.span.clone(),
+                        format!("top-level initialization has unhandled effects {effects}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn record_expression_effects(
+        &mut self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        resume: Option<&CheckedEffectSet>,
+    ) {
+        let effects = self.expression_effects_with_resume(module, expression, resume);
+        self.expression_effects
+            .insert(expression.syntax().id, effects.clone());
+        match expression {
+            Expression::Function(_) => {}
+            Expression::Satisfies(value) => {
+                self.record_expression_effects(module, &value.value, resume)
+            }
+            Expression::Match(value) => {
+                self.record_expression_effects(module, &value.subject, resume);
+                for arm in &value.arms {
+                    self.record_expression_effects(module, &arm.body, resume);
+                }
+            }
+            Expression::Loop(value) => {
+                for statement in &value.body.statements {
+                    self.record_statement_effects(module, statement, resume);
+                }
+            }
+            Expression::Handler(value) => {
+                for clause in &value.clauses {
+                    self.record_expression_effects(module, &clause.body, None);
+                }
+            }
+            Expression::Handle(value) => {
+                self.record_expression_effects(module, &value.body, resume);
+                let residual =
+                    self.checked_handles
+                        .get(&value.syntax.id)
+                        .map_or(effects, |handled| {
+                            self.expression_effects_now(module, &value.body)
+                                .without(handled)
+                        });
+                match &value.handler {
+                    crate::HandleKind::Manual(clauses) => {
+                        for clause in clauses {
+                            self.record_expression_effects(module, &clause.body, Some(&residual));
+                        }
+                    }
+                    crate::HandleKind::Value(handler) => {
+                        self.record_expression_effects(module, handler, resume);
+                    }
+                }
+            }
+            Expression::Resume(value) => {
+                self.record_expression_effects(module, &value.value, resume)
+            }
+            Expression::Block(value) => {
+                for statement in &value.statements {
+                    self.record_statement_effects(module, statement, resume);
+                }
+            }
+            Expression::Product(value) => {
+                for element in &value.elements {
+                    self.record_expression_effects(module, &element.value, resume);
+                }
+            }
+            Expression::Call(value) => {
+                self.record_expression_effects(module, &value.callee, resume);
+                self.record_expression_effects(module, &value.argument, resume);
+            }
+            Expression::Access(value) => {
+                self.record_expression_effects(module, &value.value, resume)
+            }
+            Expression::Index(value) => {
+                self.record_expression_effects(module, &value.value, resume);
+                self.record_expression_effects(module, &value.index, resume);
+            }
+            Expression::Infix(value) => {
+                for operand in &value.operands {
+                    self.record_expression_effects(module, operand, resume);
+                }
+            }
+            Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_)
+            | Expression::Name(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
+        }
+    }
+
+    fn record_statement_effects(
+        &mut self,
+        module: &ResolvedModule,
+        statement: &Statement,
+        resume: Option<&CheckedEffectSet>,
+    ) {
+        match statement {
+            Statement::Binding(value) => {
+                if let Some(value) = &value.value {
+                    self.record_expression_effects(module, value, resume);
+                }
+            }
+            Statement::PatternBinding(value) => {
+                self.record_expression_effects(module, &value.value, resume)
+            }
+            Statement::Assignment(value) => {
+                self.record_expression_effects(module, &value.target, resume);
+                self.record_expression_effects(module, &value.value, resume);
+            }
+            Statement::Return(value) => {
+                self.record_expression_effects(module, &value.value, resume)
+            }
+            Statement::Break(value) => {
+                if let Some(value) = &value.value {
+                    self.record_expression_effects(module, value, resume);
+                }
+            }
+            Statement::Continue(_) => {}
+            Statement::Expression(value) => self.record_expression_effects(module, value, resume),
+        }
     }
 
     fn check_match_expression(
@@ -3946,6 +4894,76 @@ impl TypeChecker {
         self.resolve_source_type_inner(module, source_type)
     }
 
+    fn resolve_effect_set(
+        &mut self,
+        module: &ResolvedModule,
+        source: &crate::EffectSet,
+    ) -> CheckedEffectSet {
+        let mut effects = Vec::new();
+        for source_effect in &source.effects {
+            if let Some(effect) = self.resolve_effect_application(module, source_effect) {
+                effects.push(effect);
+            }
+        }
+        CheckedEffectSet::canonical(effects)
+    }
+
+    fn resolve_effect_application(
+        &mut self,
+        module: &ResolvedModule,
+        source: &Type,
+    ) -> Option<CheckedEffect> {
+        fn ungroup(ty: &Type) -> &Type {
+            match ty {
+                Type::Product(product)
+                    if !product.variadic
+                        && product.elements.len() == 1
+                        && product.elements[0].name.is_none()
+                        && !product.elements[0].spread =>
+                {
+                    ungroup(&product.elements[0].ty)
+                }
+                _ => ty,
+            }
+        }
+        fn arguments<'a>(ty: &'a Type, output: &mut Vec<&'a Type>) {
+            if let Type::Application(application) = ungroup(ty) {
+                arguments(&application.callee, output);
+                output.push(&application.argument);
+            }
+        }
+        let id = module.effect_for(source.syntax().id)?;
+        let declaration = &module.effects()[&id];
+        let mut source_arguments = Vec::new();
+        arguments(source, &mut source_arguments);
+        let checked_arguments = source_arguments
+            .into_iter()
+            .map(|argument| self.resolve_source_type_inner(module, argument))
+            .collect::<Vec<_>>();
+        if checked_arguments.len() != declaration.parameters.len() {
+            self.diagnostics.push(Diagnostic::new(
+                source.syntax().span.clone(),
+                format!(
+                    "effect `{}` expects {} type argument{}, but {} supplied",
+                    declaration.declaration.name,
+                    declaration.parameters.len(),
+                    if declaration.parameters.len() == 1 {
+                        ""
+                    } else {
+                        "s"
+                    },
+                    checked_arguments.len()
+                ),
+            ));
+            return None;
+        }
+        Some(CheckedEffect {
+            id,
+            name: declaration.declaration.name.clone(),
+            arguments: checked_arguments,
+        })
+    }
+
     fn resolve_source_type_inner(
         &mut self,
         module: &ResolvedModule,
@@ -4009,7 +5027,17 @@ impl TypeChecker {
                 }
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
+                    effects: self.resolve_effect_set(module, &function.effects),
                     result: Box::new(result),
+                })
+            }
+            Type::Handler(handler) => {
+                let Some(effect) = self.resolve_effect_application(module, &handler.effect) else {
+                    return CheckedType::Error;
+                };
+                CheckedType::Handler(CheckedHandlerType {
+                    effect,
+                    effects: self.resolve_effect_set(module, &handler.effects),
                 })
             }
             Type::Application(application) => {
@@ -4616,9 +5644,32 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             Some(normalize_product_type(elements, actual.variadic))
         }
         (CheckedType::Function(actual), CheckedType::Function(expected)) => {
+            let effects = if actual.effects.is_subset_of(&expected.effects) {
+                expected.effects.clone()
+            } else if expected.effects.is_subset_of(&actual.effects) {
+                actual.effects.clone()
+            } else {
+                return None;
+            };
             Some(CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(merge_types(*actual.parameter, *expected.parameter)?),
+                effects,
                 result: Box::new(merge_types(*actual.result, *expected.result)?),
+            }))
+        }
+        (CheckedType::Handler(actual), CheckedType::Handler(expected))
+            if actual.effect == expected.effect =>
+        {
+            let effects = if actual.effects.is_subset_of(&expected.effects) {
+                expected.effects
+            } else if expected.effects.is_subset_of(&actual.effects) {
+                actual.effects
+            } else {
+                return None;
+            };
+            Some(CheckedType::Handler(CheckedHandlerType {
+                effect: actual.effect,
+                effects,
             }))
         }
         (CheckedType::Sum(actual), CheckedType::Sum(expected))
@@ -4696,6 +5747,67 @@ fn literal_is_admitted(value_type: &CheckedType, value: &str) -> bool {
             .any(|alternative| literal_is_admitted(alternative, value)),
         _ => false,
     }
+}
+
+fn handler_clause_guarantees_resume(expression: &Expression) -> bool {
+    match expression {
+        Expression::Resume(_) => true,
+        Expression::Loop(loop_) => !loop_body_can_break(&loop_.body, 0),
+        Expression::Block(block) => {
+            block
+                .statements
+                .last()
+                .is_some_and(|statement| match statement {
+                    Statement::Expression(expression) => {
+                        handler_clause_guarantees_resume(expression)
+                    }
+                    _ => false,
+                })
+        }
+        Expression::Match(match_) => {
+            !match_.arms.is_empty()
+                && match_
+                    .arms
+                    .iter()
+                    .all(|arm| handler_clause_guarantees_resume(&arm.body))
+        }
+        Expression::Satisfies(value) => handler_clause_guarantees_resume(&value.value),
+        _ => false,
+    }
+}
+
+fn loop_body_can_break(block: &crate::BlockExpression, nested_loops: usize) -> bool {
+    fn expression_can_break(expression: &Expression, nested_loops: usize) -> bool {
+        match expression {
+            Expression::Block(block) => loop_body_can_break(block, nested_loops),
+            Expression::Match(match_) => {
+                expression_can_break(&match_.subject, nested_loops)
+                    || match_
+                        .arms
+                        .iter()
+                        .any(|arm| expression_can_break(&arm.body, nested_loops))
+            }
+            Expression::Loop(loop_) => loop_body_can_break(&loop_.body, nested_loops + 1),
+            Expression::Satisfies(value) => expression_can_break(&value.value, nested_loops),
+            _ => false,
+        }
+    }
+
+    block.statements.iter().any(|statement| match statement {
+        Statement::Break(_) => nested_loops == 0,
+        Statement::Binding(binding) => binding
+            .value
+            .as_ref()
+            .is_some_and(|value| expression_can_break(value, nested_loops)),
+        Statement::PatternBinding(binding) => expression_can_break(&binding.value, nested_loops),
+        Statement::Assignment(assignment) => {
+            expression_can_break(&assignment.target, nested_loops)
+                || expression_can_break(&assignment.value, nested_loops)
+        }
+        Statement::Return(statement) => expression_can_break(&statement.value, nested_loops),
+        Statement::Expression(expression) => expression_can_break(expression, nested_loops),
+        Statement::Continue(_) => false,
+    })
 }
 
 fn coverage_pattern_matches_literal(pattern: CoveragePattern<'_>, literal: &str) -> bool {
@@ -4793,7 +5905,51 @@ pub(crate) fn substitute_type(
         }),
         CheckedType::Function(function) => CheckedType::Function(CheckedFunctionType {
             parameter: Box::new(substitute_type(*function.parameter, substitutions)),
+            effects: CheckedEffectSet::canonical(
+                function
+                    .effects
+                    .effects
+                    .into_iter()
+                    .map(|effect| CheckedEffect {
+                        id: effect.id,
+                        name: effect.name,
+                        arguments: effect
+                            .arguments
+                            .into_iter()
+                            .map(|argument| substitute_type(argument, substitutions))
+                            .collect(),
+                    })
+                    .collect(),
+            ),
             result: Box::new(substitute_type(*function.result, substitutions)),
+        }),
+        CheckedType::Handler(handler) => CheckedType::Handler(CheckedHandlerType {
+            effect: CheckedEffect {
+                id: handler.effect.id,
+                name: handler.effect.name,
+                arguments: handler
+                    .effect
+                    .arguments
+                    .into_iter()
+                    .map(|argument| substitute_type(argument, substitutions))
+                    .collect(),
+            },
+            effects: CheckedEffectSet::canonical(
+                handler
+                    .effects
+                    .effects
+                    .into_iter()
+                    .map(|effect| CheckedEffect {
+                        id: effect.id,
+                        name: effect.name,
+                        arguments: effect
+                            .arguments
+                            .into_iter()
+                            .map(|argument| substitute_type(argument, substitutions))
+                            .collect(),
+                    })
+                    .collect(),
+            ),
         }),
         CheckedType::Sum(sum) => normalize_substituted_sum(
             sum.alternatives
@@ -4876,7 +6032,22 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
             .any(|element| contains_type_parameter(&element.value_type)),
         CheckedType::Function(function) => {
             contains_type_parameter(&function.parameter)
+                || function
+                    .effects
+                    .effects
+                    .iter()
+                    .flat_map(|effect| &effect.arguments)
+                    .any(contains_type_parameter)
                 || contains_type_parameter(&function.result)
+        }
+        CheckedType::Handler(handler) => {
+            handler.effect.arguments.iter().any(contains_type_parameter)
+                || handler
+                    .effects
+                    .effects
+                    .iter()
+                    .flat_map(|effect| &effect.arguments)
+                    .any(contains_type_parameter)
         }
         CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_type_parameter),
         CheckedType::Distinct {
@@ -4909,8 +6080,27 @@ fn contains_inferred_type(value_type: &CheckedType) -> bool {
             .iter()
             .any(|element| contains_inferred_type(&element.value_type)),
         CheckedType::Function(function) => {
-            contains_inferred_type(&function.parameter) || contains_inferred_type(&function.result)
+            contains_inferred_type(&function.parameter)
+                || function
+                    .effects
+                    .effects
+                    .iter()
+                    .flat_map(|effect| &effect.arguments)
+                    .any(contains_inferred_type)
+                || contains_inferred_type(&function.result)
         }
+        CheckedType::Handler(handler) => handler
+            .effect
+            .arguments
+            .iter()
+            .chain(
+                handler
+                    .effects
+                    .effects
+                    .iter()
+                    .flat_map(|effect| &effect.arguments),
+            )
+            .any(contains_inferred_type),
         CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_inferred_type),
         CheckedType::Distinct {
             arguments,
@@ -4942,7 +6132,26 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
             }
             CheckedType::Function(function) => {
                 collect(&function.parameter, ids);
+                for argument in function
+                    .effects
+                    .effects
+                    .iter()
+                    .flat_map(|effect| &effect.arguments)
+                {
+                    collect(argument, ids);
+                }
                 collect(&function.result, ids);
+            }
+            CheckedType::Handler(handler) => {
+                for argument in handler.effect.arguments.iter().chain(
+                    handler
+                        .effects
+                        .effects
+                        .iter()
+                        .flat_map(|effect| &effect.arguments),
+                ) {
+                    collect(argument, ids);
+                }
             }
             CheckedType::Sum(sum) => {
                 for alternative in &sum.alternatives {
@@ -4996,7 +6205,26 @@ fn sized_type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId
             }
             CheckedType::Function(function) => {
                 collect(&function.parameter, ids);
+                for argument in function
+                    .effects
+                    .effects
+                    .iter()
+                    .flat_map(|effect| &effect.arguments)
+                {
+                    collect(argument, ids);
+                }
                 collect(&function.result, ids);
+            }
+            CheckedType::Handler(handler) => {
+                for argument in handler.effect.arguments.iter().chain(
+                    handler
+                        .effects
+                        .effects
+                        .iter()
+                        .flat_map(|effect| &effect.arguments),
+                ) {
+                    collect(argument, ids);
+                }
             }
             CheckedType::Sum(sum) => {
                 for alternative in &sum.alternatives {
@@ -5107,8 +6335,53 @@ pub(crate) fn infer_type_parameters(
             let CheckedType::Function(actual) = actual else {
                 return false;
             };
-            infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
+            template.effects.effects.len() == actual.effects.effects.len()
+                && template
+                    .effects
+                    .effects
+                    .iter()
+                    .zip(&actual.effects.effects)
+                    .all(|(template, actual)| {
+                        template.id == actual.id
+                            && template.arguments.len() == actual.arguments.len()
+                            && template.arguments.iter().zip(&actual.arguments).all(
+                                |(template, actual)| {
+                                    infer_type_parameters(template, actual, substitutions)
+                                },
+                            )
+                    })
+                && infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
                 && infer_type_parameters(&template.result, &actual.result, substitutions)
+        }
+        CheckedType::Handler(template) => {
+            let CheckedType::Handler(actual) = actual else {
+                return false;
+            };
+            template.effect.id == actual.effect.id
+                && template.effect.arguments.len() == actual.effect.arguments.len()
+                && template
+                    .effect
+                    .arguments
+                    .iter()
+                    .zip(&actual.effect.arguments)
+                    .all(|(template, actual)| {
+                        infer_type_parameters(template, actual, substitutions)
+                    })
+                && template.effects.effects.len() == actual.effects.effects.len()
+                && template
+                    .effects
+                    .effects
+                    .iter()
+                    .zip(&actual.effects.effects)
+                    .all(|(template, actual)| {
+                        template.id == actual.id
+                            && template.arguments.len() == actual.arguments.len()
+                            && template.arguments.iter().zip(&actual.arguments).all(
+                                |(template, actual)| {
+                                    infer_type_parameters(template, actual, substitutions)
+                                },
+                            )
+                    })
         }
         CheckedType::Sum(template) => {
             let CheckedType::Sum(actual) = actual else {
@@ -5203,6 +6476,18 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
             checked_type_contains_sum(&function.parameter)
                 || checked_type_contains_sum(&function.result)
         }
+        CheckedType::Handler(handler) => handler
+            .effect
+            .arguments
+            .iter()
+            .chain(
+                handler
+                    .effects
+                    .effects
+                    .iter()
+                    .flat_map(|effect| &effect.arguments),
+            )
+            .any(checked_type_contains_sum),
         CheckedType::CPointer { pointee } => checked_type_contains_sum(pointee),
         CheckedType::Ref(value) => checked_type_contains_sum(value),
         CheckedType::Distinct {
@@ -5238,6 +6523,18 @@ fn checked_type_contains_erased_product(value_type: &CheckedType) -> bool {
             checked_type_contains_erased_product(&function.parameter)
                 || checked_type_contains_erased_product(&function.result)
         }
+        CheckedType::Handler(handler) => handler
+            .effect
+            .arguments
+            .iter()
+            .chain(
+                handler
+                    .effects
+                    .effects
+                    .iter()
+                    .flat_map(|effect| &effect.arguments),
+            )
+            .any(checked_type_contains_erased_product),
         CheckedType::Distinct {
             arguments,
             representation,
@@ -5324,7 +6621,8 @@ fn is_copy_type(
         | CheckedType::CChar
         | CheckedType::CPointer { .. }
         | CheckedType::Ref(_)
-        | CheckedType::Function(_) => true,
+        | CheckedType::Function(_)
+        | CheckedType::Handler(_) => true,
         CheckedType::CString => false,
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
             bounds.iter().any(|bound| {

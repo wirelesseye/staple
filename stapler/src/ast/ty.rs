@@ -8,6 +8,7 @@ pub enum Type {
     Product(ProductType),
     Sum(SumType),
     Function(FunctionType),
+    Handler(HandlerType),
     Application(TypeApplication),
     Repeated(RepeatedType),
     Splice(SpliceExpression),
@@ -22,6 +23,7 @@ impl Type {
             Self::Product(ty) => &ty.syntax,
             Self::Sum(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
+            Self::Handler(ty) => &ty.syntax,
             Self::Application(ty) => &ty.syntax,
             Self::Repeated(ty) => &ty.syntax,
             Self::Splice(ty) => &ty.syntax,
@@ -135,7 +137,34 @@ pub struct RepeatedType {
 pub struct FunctionType {
     pub syntax: Syntax,
     pub parameter: Box<Type>,
+    pub effects: EffectSet,
     pub result: Box<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandlerType {
+    pub syntax: Syntax,
+    pub effect: Box<Type>,
+    pub effects: EffectSet,
+}
+
+/// The concrete, unordered effects attached to one function arrow.
+///
+/// Source order is retained in the lossless AST. Resolution/type checking
+/// canonicalizes the semantic set by effect identity and arguments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectSet {
+    pub syntax: Syntax,
+    pub effects: Vec<Type>,
+}
+
+impl EffectSet {
+    pub fn empty() -> Self {
+        Self {
+            syntax: Syntax::compiler(),
+            effects: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

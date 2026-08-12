@@ -24,6 +24,248 @@ fn type_check(source: &str) -> stapler::TypedModule {
 }
 
 #[test]
+fn type_checks_generic_effect_operations_and_manual_handlers() {
+    let module = type_check(concat!(
+        "effect State = S => { get: () -> S; set: S -> () }\n",
+        "def increment: () ->{State I32} I32 = () => {\n",
+        "  let value = State.get ()\n",
+        "  State.set (value + 1)\n",
+        "  value\n",
+        "}\n",
+        "def result = () => handle increment () {\n",
+        "  State.get () => resume 10\n",
+        "  State.set value => resume ()\n",
+        "}\n",
+    ));
+    let increment = module
+        .functions()
+        .iter()
+        .find(|function| function.name.ends_with("increment"))
+        .unwrap();
+    let effects = &module.type_of_function(increment.id).unwrap().effects;
+    assert_eq!(effects.effects.len(), 1);
+    assert_eq!(effects.effects[0].name, "State");
+    assert_eq!(effects.effects[0].arguments, vec![CheckedType::I32]);
+    CodeGenerator::new(&Context::create())
+        .compile_module(&module)
+        .expect("effect handlers should lower to LLVM");
+}
+
+#[test]
+fn infers_normalizes_and_checks_effect_sets() {
+    let module = type_check(concat!(
+        "effect Console = { print: String -> () }\n",
+        "def inferred = (message: String) => Console.print message\n",
+        "def explicit: String ->{Console, Console} () = message => Console.print message\n",
+    ));
+    for name in ["inferred", "explicit"] {
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name.ends_with(name))
+            .unwrap();
+        let effects = &module.type_of_function(function.id).unwrap().effects;
+        assert_eq!(effects.effects.len(), 1);
+        assert_eq!(effects.effects[0].name, "Console");
+    }
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "effect Console = { print: String -> () }\n",
+            "def invalid: String -> () = message => Console.print message\n",
+        )))
+        .expect_err("a pure annotation must reject inferred effects");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("not contained"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "effect Console = { print: String -> () }\n",
+            "Console.print \"unhandled\"\n",
+        )))
+        .expect_err("top-level effects must be handled");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("top-level initialization"))
+    );
+}
+
+#[test]
+fn type_checks_named_handlers_and_rejects_invalid_one_shot_resumes() {
+    let named = type_check(concat!(
+        "effect Console = { print: String -> () }\n",
+        "def Silent: Handler Console {} = handler Console { print message => resume () }\n",
+        "def program: () ->{Console} () = () => Console.print \"hello\"\n",
+        "def run = () => handle program () with Silent\n",
+    ));
+    CodeGenerator::new(&Context::create())
+        .compile_module(&named)
+        .expect("named effect handlers should lower to LLVM");
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "effect Ping = { ping: () -> () }\n",
+            "def program: () ->{Ping} () = () => Ping.ping ()\n",
+            "def invalid = () => handle program () {\n",
+            "  Ping.ping () => { resume (); resume () }\n",
+            "}\n",
+        )))
+        .expect_err("a resumption is affine");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("more than once"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def invalid = () => resume ()\n"))
+        .expect_err("resume requires a handler clause");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("only allowed inside"))
+    );
+}
+
+#[test]
+fn type_checks_first_class_reusable_handlers_and_generic_targets() {
+    let module = type_check(concat!(
+        "effect State = S => { get: () -> S }\n",
+        "def make: T => () -> Handler (State T) {} = () => handler State T { get () => resume (loop {}) }\n",
+        "def Ten: Handler (State I32) {} = handler State I32 { get () => resume 10 }\n",
+        "def choose: Bool -> Handler (State I32) {} = condition => match condition {\n",
+        "  True => Ten,\n",
+        "  False => make (),\n",
+        "}\n",
+        "def read: () ->{State I32} I32 = () => State.get ()\n",
+        "def apply: Handler (State I32) {} -> I32 = value => handle read () with value\n",
+        "def result = () => apply (choose True)\n",
+    ));
+    CodeGenerator::new(&Context::create())
+        .compile_module(&module)
+        .expect("higher-order and generic handler values should lower to LLVM");
+}
+
+#[test]
+fn rejects_invalid_reusable_handler_values() {
+    type_check(concat!(
+        "effect Ping = { ping: () -> () }\n",
+        "def diverging: Handler Ping {} = handler Ping { ping () => loop {} }\n",
+    ));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "effect Ping = { ping: () -> () }\n",
+            "def abortive: Handler Ping {} = handler Ping { ping () => () }\n",
+        )))
+        .expect_err("a reusable clause may not abort");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("must resume or diverge") })
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "effect Ping = { ping: () -> () }\n",
+            "def run = () => handle () with 1\n",
+        )))
+        .expect_err("the with operand must be a handler value");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("requires a handler value") })
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "effect Ping = { ping: () -> () }\n",
+            "effect Pong = { pong: () -> () }\n",
+            "def wrong: Handler Ping {} = handler Pong { pong () => resume () }\n",
+        )))
+        .expect_err("the annotation and handler target must agree");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("handler targets") })
+    );
+}
+
+#[test]
+fn infers_and_checks_reusable_handler_clause_effects() {
+    let module = type_check(concat!(
+        "effect Ping = { ping: () -> () }\n",
+        "effect Log = { log: () -> () }\n",
+        "def Logging = handler Ping { ping () => { Log.log (); resume () } }\n",
+        "def program: () ->{Ping} () = () => Ping.ping ()\n",
+        "def run = () => handle program () with Logging\n",
+    ));
+    let run = module
+        .functions()
+        .iter()
+        .find(|function| function.name.ends_with("run"))
+        .expect("run function");
+    let effects = &module.type_of_function(run.id).expect("run type").effects;
+    assert_eq!(effects.effects.len(), 1);
+    assert_eq!(effects.effects[0].name, "Log");
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "effect Ping = { ping: () -> () }\n",
+            "effect Log = { log: () -> () }\n",
+            "def invalid: Handler Ping {} = handler Ping { ping () => { Log.log (); resume () } }\n",
+        )))
+        .expect_err("a handler annotation is an upper bound on direct clause effects");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("handler clauses perform effects")
+    }));
+}
+
+#[test]
+fn checks_resumption_ownership_across_branches_and_loops() {
+    let branch = TypeChecker::new()
+        .check(resolve(concat!(
+            "effect Ping = { ping: () -> () }\n",
+            "def program: () ->{Ping} () = () => Ping.ping ()\n",
+            "def invalid = condition: Bool => handle program () {\n",
+            "  Ping.ping () => {\n",
+            "    match condition { True => resume (), False => () }\n",
+            "    resume ()\n",
+            "  }\n",
+            "}\n",
+        )))
+        .expect_err("a maybe-consumed resumption cannot be resumed again");
+    assert!(
+        branch
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("more than once")),
+        "{branch:#?}"
+    );
+
+    let looped = TypeChecker::new()
+        .check(resolve(concat!(
+            "effect Ping = { ping: () -> () }\n",
+            "def program: () ->{Ping} () = () => Ping.ping ()\n",
+            "def invalid = () => handle program () {\n",
+            "  Ping.ping () => loop { resume (); break () }\n",
+            "}\n",
+        )))
+        .expect_err("a loop cannot reuse a consumed resumption");
+    assert!(
+        looped
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("loop back-edge")),
+        "{looped:#?}"
+    );
+}
+
+#[test]
 fn marks_compiler_owned_recursive_constructors() {
     let resolved = resolve("");
     let construction_for = |name: &str| {
@@ -2840,8 +3082,10 @@ fn type_checks_and_generates_curried_functions() {
             module.type_of_function(function.id).expect("checked type"),
             &stapler::CheckedFunctionType {
                 parameter: Box::new(CheckedType::I32),
+                effects: stapler::CheckedEffectSet::default(),
                 result: Box::new(CheckedType::Function(stapler::CheckedFunctionType {
                     parameter: Box::new(CheckedType::I32),
+                    effects: stapler::CheckedEffectSet::default(),
                     result: Box::new(CheckedType::I32),
                 })),
             },

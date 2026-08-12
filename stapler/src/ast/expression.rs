@@ -6,6 +6,9 @@ pub enum Expression {
     Satisfies(Box<SatisfiesExpression>),
     Match(MatchExpression),
     Loop(LoopExpression),
+    Handler(Box<HandlerExpression>),
+    Handle(Box<HandleExpression>),
+    Resume(Box<ResumeExpression>),
     Block(BlockExpression),
     Product(ProductExpression),
     Call(CallExpression),
@@ -30,6 +33,9 @@ impl Expression {
             Self::Satisfies(expression) => &expression.syntax,
             Self::Match(expression) => &expression.syntax,
             Self::Loop(expression) => &expression.syntax,
+            Self::Handler(expression) => &expression.syntax,
+            Self::Handle(expression) => &expression.syntax,
+            Self::Resume(expression) => &expression.syntax,
             Self::Block(expression) => &expression.syntax,
             Self::Product(expression) => &expression.syntax,
             Self::Call(expression) => &expression.syntax,
@@ -62,6 +68,32 @@ pub struct SyntaxArgumentExpression {
 pub struct LoopExpression {
     pub syntax: Syntax,
     pub body: BlockExpression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandleExpression {
+    pub syntax: Syntax,
+    pub body: Box<Expression>,
+    pub handler: HandleKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HandleKind {
+    Manual(Vec<super::HandlerClause>),
+    Value(Box<Expression>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HandlerExpression {
+    pub syntax: Syntax,
+    pub effect: Type,
+    pub clauses: Vec<super::HandlerClause>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumeExpression {
+    pub syntax: Syntax,
+    pub value: Box<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

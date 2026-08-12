@@ -87,6 +87,33 @@ fn imports_standard_io_print_functions() {
 }
 
 #[test]
+fn imports_and_reexports_public_effects_operations_and_handlers() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "console.sta",
+        concat!(
+            "pub effect Console = { print: String -> () }\n",
+            "pub def Silent: Handler Console {} = handler Console { print message => resume () }\n",
+            "pub def program: () ->{Console} () = () => Console.print \"hello\"\n",
+        ),
+    );
+    fixture.write("facade.sta", "pub use console (Console, Silent, program)\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use facade (Console, Silent, program)\n",
+            "handle program () with Silent\n",
+        ),
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("public effects and handlers should survive re-export");
+    assert!(llvm.contains("__staple_effect_clause_"));
+    assert!(llvm.contains("__staple_effect_handler_top"));
+}
+
+#[test]
 fn only_the_declaring_module_can_assign_a_public_mutable_global() {
     let fixture = Fixture::new();
     fixture.write(
