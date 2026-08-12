@@ -10,8 +10,8 @@ unspecified are not yet part of the language design.
 
 staple has two major, long-term goals:
 
-1. Effects and signals are core language features. Reactive programming should
-   feel native to staple in the way that signals and effects feel native when
+1. Reactions and signals are core language features. Reactive programming should
+   feel native to staple in the way that signals and reactions feel native when
    using Solid.js, rather than being an incidental library convention.
 2. Metaprogramming is powerful and approachable. staple should provide the
    directness and expressive power associated with Lisp metaprogramming while
@@ -21,18 +21,18 @@ These are defining goals of the language, even though their precise syntax and
 semantics have not yet been designed. Other language features should be
 evaluated partly by how well they compose with reactivity and metaprogramming.
 
-### Effects and signals
+### Reactions and signals
 
 Signals represent values that can change over time. Reading a signal from a
 reactive computation establishes a dependency on that signal. When a signal's
 value changes, computations which depend on it can be updated automatically.
 
-Effects are computations which react to their signal dependencies. As in
+Reactions are computations which react to their signal dependencies. As in
 Solid.js, dependency tracking should be fine-grained: changing a signal should
 update the computations which actually depend on it, without requiring a
 virtual DOM or broad re-execution of unrelated code.
 
-Signals and effects are intended to be language concepts rather than ordinary
+Signals and reactions are intended to be language concepts rather than ordinary
 types and functions supplied solely by a framework. This allows staple's type
 system, compiler, runtime, tooling, and metaprogramming facilities to understand
 reactive relationships directly.
@@ -40,9 +40,9 @@ reactive relationships directly.
 The following details remain unspecified:
 
 - the syntax for creating, reading, and writing signals;
-- the syntax for declaring effects and derived computations;
+- the syntax for declaring reactions and derived computations;
 - whether signal reads are implicit or explicit;
-- effect scheduling and batching;
+- reaction scheduling and batching;
 - ownership, disposal, and lifetime rules;
 - error handling and cycle detection; and
 - how reactive behavior appears in the type system.
