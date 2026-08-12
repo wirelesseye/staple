@@ -1609,7 +1609,12 @@ impl Grammar {
                     if self
                         .tokens
                         .get(self.next_non_trivia(checkpoint))
-                        .is_some_and(|token| token.kind == TokenKind::LParen) =>
+                        .is_some_and(|token| {
+                            matches!(
+                                token.kind,
+                                TokenKind::LParen | TokenKind::LBracket | TokenKind::LBrace
+                            )
+                        }) =>
                 {
                     self.position = checkpoint;
                     self.next_syntax_id = next_syntax_id;

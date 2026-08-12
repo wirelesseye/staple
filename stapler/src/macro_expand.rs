@@ -59,6 +59,7 @@ enum MetaType {
     Item,
     Visibility,
     MacroCallVisibility,
+    Comma,
     Delimited(DelimiterKind, DelimitedMetaContents),
 }
 
@@ -73,6 +74,10 @@ enum DelimiterKind {
 enum DelimitedMetaContents {
     Fixed(Vec<MetaType>),
     Sequence(Box<MetaType>),
+    Separated {
+        element: Box<MetaType>,
+        separator: Box<MetaType>,
+    },
 }
 
 impl MetaType {
@@ -111,6 +116,7 @@ enum SyntaxValue {
     Pattern(Pattern),
     Item(Box<Item>),
     Visibility(VisibilitySyntax),
+    Comma(Syntax),
     Delimited(DelimitedSyntaxValue),
 }
 
@@ -127,6 +133,11 @@ struct DelimitedSyntaxValue {
 enum DelimitedValueContents {
     Fixed(Vec<(Option<String>, Value)>),
     Sequence(Vec<Value>),
+    Separated {
+        elements: Vec<Value>,
+        separator: Box<Value>,
+        trailing: bool,
+    },
 }
 
 impl SyntaxValue {
@@ -149,7 +160,11 @@ impl SyntaxValue {
             Self::Call(call) => Some(Expression::Call(call)),
             Self::Unstructured(expression) => Some(expression),
             Self::Delimited(delimited) => delimited.into_expression(),
-            Self::Type(_) | Self::Pattern(_) | Self::Item(_) | Self::Visibility(_) => None,
+            Self::Type(_)
+            | Self::Pattern(_)
+            | Self::Item(_)
+            | Self::Visibility(_)
+            | Self::Comma(_) => None,
         }
     }
 }
@@ -167,6 +182,9 @@ impl DelimitedSyntaxValue {
                     DelimitedValueContents::Fixed(values) => values,
                     DelimitedValueContents::Sequence(values) => {
                         values.into_iter().map(|value| (None, value)).collect()
+                    }
+                    DelimitedValueContents::Separated { elements, .. } => {
+                        return separated_parenthesized(self.syntax, elements, &mut generated);
                     }
                 };
                 let mut expressions = values
@@ -207,6 +225,7 @@ impl DelimitedSyntaxValue {
                         .map(|(_, value)| value)
                         .collect::<Vec<_>>(),
                     DelimitedValueContents::Sequence(values) => values,
+                    DelimitedValueContents::Separated { .. } => return None,
                 };
                 let statements = values
                     .into_iter()
@@ -231,6 +250,10 @@ fn syntax_category(value: &SyntaxValue) -> &'static str {
         SyntaxValue::Pattern(_) => "pattern",
         SyntaxValue::Item(_) => "item",
         SyntaxValue::Visibility(_) => "visibility",
+        SyntaxValue::Comma(syntax) => {
+            let _ = syntax.id;
+            "comma"
+        }
         SyntaxValue::Delimited(value) => match value.kind {
             DelimiterKind::Parenthesized => "parenthesized",
             DelimiterKind::Bracketed => "bracketed",
@@ -253,6 +276,34 @@ enum Value {
     String(String),
     Nominal(String, Box<Value>),
     Sequence(Vec<Value>),
+    Separated {
+        elements: Vec<Value>,
+        separator: Box<Value>,
+        trailing: bool,
+    },
+}
+
+fn separated_parenthesized(
+    syntax: Syntax,
+    elements: Vec<Value>,
+    generated: &mut impl Iterator<Item = Syntax>,
+) -> Option<Expression> {
+    let elements = elements
+        .into_iter()
+        .map(|value| match value {
+            Value::Syntax(value) => Some(crate::ProductElement {
+                syntax: generated.next().unwrap_or_else(Syntax::compiler),
+                name: None,
+                value: value.into_expression()?,
+                spread: false,
+            }),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(Expression::Product(crate::ProductExpression {
+        syntax,
+        elements,
+    }))
 }
 
 #[derive(Clone)]
@@ -735,11 +786,11 @@ impl MacroExpander {
                     .declaration
                     .value
                     .as_ref()
-                    .is_some_and(invalid_sequence_parameter)
+                    .is_some_and(invalid_delimited_collection_parameter)
             {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
-                    "`Sequence` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`",
+                    "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`",
                 ));
             }
             if let Some(annotation) = &definition.declaration.annotation
@@ -747,8 +798,10 @@ impl MacroExpander {
             {
                 self.diagnostics.push(Diagnostic::new(
                     annotation.syntax().span.clone(),
-                    if type_contains_named(annotation, "Sequence") {
-                        "`Sequence` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
+                    if type_contains_named(annotation, "Sequence")
+                        || type_contains_named(annotation, "Separated")
+                    {
+                        "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
                     } else {
                         "a macro annotation must accept one or more syntax-category parameters and return a syntax category"
                     },
@@ -1629,6 +1682,8 @@ impl MacroExpander {
                 "Ident"
                     | "CallExpr"
                     | "Sequence"
+                    | "Separated"
+                    | "Comma"
                     | "Parenthesized"
                     | "Bracketed"
                     | "Braced"
@@ -2026,6 +2081,7 @@ impl MacroExpander {
                     MetaType::Item => "an item".to_owned(),
                     MetaType::Visibility => "visibility syntax".to_owned(),
                     MetaType::MacroCallVisibility => "macro-call visibility".to_owned(),
+                    MetaType::Comma => "comma syntax".to_owned(),
                     MetaType::Syntax | MetaType::Expr => "an expression".to_owned(),
                     MetaType::Delimited(_, _) => format!("`{}` syntax", format_meta_type(expected)),
                 };
@@ -2104,6 +2160,9 @@ impl MacroExpander {
                     }
                     let value = helper.binding.value?;
                     return self.eval_expression(helper.module, &value, &mut Environment::new());
+                }
+                if name.name == "Comma" {
+                    return Some(Value::Syntax(SyntaxValue::Comma(name.syntax.clone())));
                 }
                 if name.name.chars().next().is_some_and(char::is_uppercase) {
                     return Some(Value::Nominal(
@@ -2228,6 +2287,7 @@ impl MacroExpander {
                         "Ident"
                             | "CallExpr"
                             | "Sequence"
+                            | "Separated"
                             | "Parenthesized"
                             | "Bracketed"
                             | "Braced"
@@ -2518,6 +2578,95 @@ impl MacroExpander {
                 }
                 Some(Value::Sequence(values))
             }
+            "Separated" => {
+                let Value::Product(fields) = argument else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`Separated` requires `(separator: Syntax, elements: (...), trailing: Bool)`",
+                    ));
+                    return None;
+                };
+                let [
+                    (separator_name, separator),
+                    (elements_name, elements),
+                    (trailing_name, trailing),
+                ] = fields.as_slice()
+                else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`Separated` requires exactly `separator`, `elements`, and `trailing` fields",
+                    ));
+                    return None;
+                };
+                if separator_name.as_deref() != Some("separator")
+                    || elements_name.as_deref() != Some("elements")
+                    || trailing_name.as_deref() != Some("trailing")
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`Separated` fields must be named `separator`, `elements`, and `trailing`",
+                    ));
+                    return None;
+                }
+                if !matches!(separator, Value::Syntax(SyntaxValue::Comma(_))) {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`Separated.separator` must contain `Comma`",
+                    ));
+                    return None;
+                }
+                let Value::Product(elements) = elements else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`Separated.elements` must be a product of syntax values",
+                    ));
+                    return None;
+                };
+                if !elements
+                    .iter()
+                    .all(|(_, value)| matches!(value, Value::Syntax(_)))
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`Separated.elements` must contain only `Syntax`",
+                    ));
+                    return None;
+                }
+                let trailing = match trailing {
+                    Value::Nominal(name, value) if matches!(value.as_ref(), Value::Product(values) if values.is_empty()) => {
+                        match name.as_str() {
+                            "True" => true,
+                            "False" => false,
+                            _ => {
+                                self.diagnostics.push(Diagnostic::new(
+                                    span,
+                                    "`Separated.trailing` must be `True` or `False`",
+                                ));
+                                return None;
+                            }
+                        }
+                    }
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            span,
+                            "`Separated.trailing` must be `True` or `False`",
+                        ));
+                        return None;
+                    }
+                };
+                if trailing && elements.is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "an empty `Separated` value cannot have a trailing separator",
+                    ));
+                    return None;
+                }
+                Some(Value::Separated {
+                    elements: elements.iter().map(|(_, value)| value.clone()).collect(),
+                    separator: Box::new(separator.clone()),
+                    trailing,
+                })
+            }
             "Parenthesized" | "Bracketed" | "Braced" => {
                 let kind = delimiter_kind(constructor).expect("matched delimiter constructor");
                 let contents = match argument {
@@ -2528,6 +2677,26 @@ impl MacroExpander {
                             unreachable!("guarded sequence contents")
                         };
                         DelimitedValueContents::Sequence(values)
+                    }
+                    Value::Product(mut values)
+                        if values.len() == 1 && matches!(values[0].1, Value::Separated { .. }) =>
+                    {
+                        let (
+                            _,
+                            Value::Separated {
+                                elements,
+                                separator,
+                                trailing,
+                            },
+                        ) = values.remove(0)
+                        else {
+                            unreachable!("guarded separated contents")
+                        };
+                        DelimitedValueContents::Separated {
+                            elements,
+                            separator,
+                            trailing,
+                        }
                     }
                     Value::Product(values) => {
                         if !values
@@ -2543,6 +2712,15 @@ impl MacroExpander {
                         DelimitedValueContents::Fixed(values)
                     }
                     Value::Sequence(values) => DelimitedValueContents::Sequence(values),
+                    Value::Separated {
+                        elements,
+                        separator,
+                        trailing,
+                    } => DelimitedValueContents::Separated {
+                        elements,
+                        separator,
+                        trailing,
+                    },
                     _ => {
                         self.diagnostics.push(Diagnostic::new(
                             span,
@@ -2554,6 +2732,7 @@ impl MacroExpander {
                 let generated_count = match &contents {
                     DelimitedValueContents::Fixed(values) => values.len(),
                     DelimitedValueContents::Sequence(values) => values.len(),
+                    DelimitedValueContents::Separated { elements, .. } => elements.len(),
                 }
                 .saturating_mul(2)
                 .saturating_add(1);
@@ -2920,7 +3099,7 @@ impl MacroExpander {
     }
 }
 
-fn invalid_sequence_parameter(expression: &Expression) -> bool {
+fn invalid_delimited_collection_parameter(expression: &Expression) -> bool {
     let mut current = expression;
     while let Expression::Function(function) = current {
         let ty = match &function.pattern {
@@ -2928,7 +3107,10 @@ fn invalid_sequence_parameter(expression: &Expression) -> bool {
             Pattern::Wildcard(wildcard) => Some(&wildcard.ty),
             _ => None,
         };
-        if ty.is_some_and(|ty| type_contains_named(ty, "Sequence") && meta_type(ty).is_none()) {
+        if ty.is_some_and(|ty| {
+            (type_contains_named(ty, "Sequence") || type_contains_named(ty, "Separated"))
+                && meta_type(ty).is_none()
+        }) {
             return true;
         }
         current = &function.body;
@@ -2973,6 +3155,7 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "Item" => Some(MetaType::Item),
             "Visibility" => Some(MetaType::Visibility),
             "MacroCallVisibility" => Some(MetaType::MacroCallVisibility),
+            "Comma" => Some(MetaType::Comma),
             _ => None,
         },
         Type::Application(application) => {
@@ -3024,6 +3207,15 @@ fn delimiter_contents_meta(ty: &Type) -> Option<DelimitedMetaContents> {
     {
         return Some(DelimitedMetaContents::Sequence(Box::new(element)));
     }
+    if product.elements.len() == 1
+        && !product.elements[0].spread
+        && let Some((element, separator)) = separated_meta_type(&product.elements[0].ty)
+    {
+        return Some(DelimitedMetaContents::Separated {
+            element: Box::new(element),
+            separator: Box::new(separator),
+        });
+    }
     product
         .elements
         .iter()
@@ -3034,6 +3226,41 @@ fn delimiter_contents_meta(ty: &Type) -> Option<DelimitedMetaContents> {
         })
         .collect::<Option<Vec<_>>>()
         .map(DelimitedMetaContents::Fixed)
+}
+
+fn separated_meta_type(ty: &Type) -> Option<(MetaType, MetaType)> {
+    let mut arguments = Vec::new();
+    let mut current = ty;
+    while let Type::Application(application) = current {
+        arguments.push(application.argument.as_ref());
+        current = application.callee.as_ref();
+    }
+    arguments.reverse();
+    let Type::Named(name) = current else {
+        return None;
+    };
+    if name.namespace.is_some() || name.name != "Separated" {
+        return None;
+    }
+    let [element, separator] = arguments.as_slice() else {
+        return None;
+    };
+    let separator = meta_type(separator)?;
+    if separator != MetaType::Comma {
+        return None;
+    }
+    Some((meta_type(unwrap_singleton_product(element))?, separator))
+}
+
+fn unwrap_singleton_product(mut ty: &Type) -> &Type {
+    while let Type::Product(product) = ty
+        && let [element] = product.elements.as_slice()
+        && element.name.is_none()
+        && !element.spread
+    {
+        ty = &element.ty;
+    }
+    ty
 }
 
 /// `Sequence Ident String` is intentionally read as `Sequence (Ident String)`
@@ -3099,6 +3326,7 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             Expression::Name(_) | Expression::Call(_) | Expression::VisibilityArgument(_)
         ),
         MetaType::Item => false,
+        MetaType::Comma => matches_single_token(argument.syntax(), crate::TokenKind::Comma),
         MetaType::Delimited(_, _) => {
             let mut next_syntax_id = 0;
             delimiter_argument_value(expected, argument.syntax(), &mut next_syntax_id).is_some()
@@ -3135,6 +3363,16 @@ fn delimiter_argument_value(
             match_sequence_contents(syntax, first + 1, last, element, next_syntax_id)
                 .map(DelimitedValueContents::Sequence)
         }
+        DelimitedMetaContents::Separated { element, separator } => {
+            match_separated_contents(syntax, first + 1, last, element, separator, next_syntax_id)
+                .map(
+                    |(elements, separator, trailing)| DelimitedValueContents::Separated {
+                        elements,
+                        separator: Box::new(separator),
+                        trailing,
+                    },
+                )
+        }
     }?;
     let expression = crate::parser::parse_expression_fragment(syntax, next_syntax_id)
         .ok()
@@ -3146,6 +3384,84 @@ fn delimiter_argument_value(
         generated: Vec::new(),
         expression,
     }))
+}
+
+fn match_separated_contents(
+    parent: &Syntax,
+    mut cursor: usize,
+    end: usize,
+    element: &MetaType,
+    separator: &MetaType,
+    next_syntax_id: &mut usize,
+) -> Option<(Vec<Value>, Value, bool)> {
+    cursor = skip_trivia(parent.tokens(), cursor, end);
+    let separator_value = constructed_separator(separator)?;
+    if cursor == end {
+        return Some((Vec::new(), separator_value, false));
+    }
+    let mut elements = Vec::new();
+    loop {
+        let separator_at = find_top_level_separator(parent.tokens(), cursor, end, separator);
+        let element_end = separator_at.unwrap_or(end);
+        let element_end_trimmed = trim_trailing_trivia(parent.tokens(), cursor, element_end);
+        if element_end_trimmed == cursor {
+            return None;
+        }
+        let fragment = syntax_slice(parent, cursor, element_end_trimmed);
+        elements.push(match_syntax_fragment(element, &fragment, next_syntax_id)?);
+        let Some(separator_at) = separator_at else {
+            return Some((elements, separator_value, false));
+        };
+        let separator_end = separator_at + 1;
+        let separator_fragment = syntax_slice(parent, separator_at, separator_end);
+        match_syntax_fragment(separator, &separator_fragment, next_syntax_id)?;
+        cursor = skip_trivia(parent.tokens(), separator_end, end);
+        if cursor == end {
+            return Some((elements, separator_value, true));
+        }
+    }
+}
+
+fn constructed_separator(separator: &MetaType) -> Option<Value> {
+    match separator {
+        MetaType::Comma => Some(Value::Syntax(SyntaxValue::Comma(Syntax::compiler()))),
+        _ => None,
+    }
+}
+
+fn find_top_level_separator(
+    tokens: &[crate::SyntaxToken],
+    cursor: usize,
+    end: usize,
+    separator: &MetaType,
+) -> Option<usize> {
+    let separator_kind = match separator {
+        MetaType::Comma => crate::TokenKind::Comma,
+        _ => return None,
+    };
+    let mut delimiters = Vec::new();
+    for (index, token) in tokens.iter().enumerate().take(end).skip(cursor) {
+        match token.kind {
+            crate::TokenKind::LParen => delimiters.push(crate::TokenKind::RParen),
+            crate::TokenKind::LBracket => delimiters.push(crate::TokenKind::RBracket),
+            crate::TokenKind::LBrace => delimiters.push(crate::TokenKind::RBrace),
+            crate::TokenKind::RParen | crate::TokenKind::RBracket | crate::TokenKind::RBrace => {
+                if delimiters.last() == Some(&token.kind) {
+                    delimiters.pop();
+                }
+            }
+            kind if delimiters.is_empty() && kind == separator_kind => return Some(index),
+            _ => {}
+        }
+    }
+    None
+}
+
+fn trim_trailing_trivia(tokens: &[crate::SyntaxToken], start: usize, mut end: usize) -> usize {
+    while end > start && tokens[end - 1].kind.is_trivia() {
+        end -= 1;
+    }
+    end
 }
 
 fn match_fixed_contents(
@@ -3236,6 +3552,12 @@ fn match_syntax_fragment(
                 name: token.text.clone(),
             })
         }
+        MetaType::Comma => {
+            if !matches_single_token(syntax, crate::TokenKind::Comma) {
+                return None;
+            }
+            SyntaxValue::Comma(syntax.clone())
+        }
         MetaType::Expr | MetaType::CallExpr | MetaType::UnstructuredExpr => {
             let (value, ids) = expression()?;
             let value = SyntaxValue::from_expression(value);
@@ -3270,6 +3592,14 @@ fn match_syntax_fragment(
     Some(Value::Syntax(syntax_value))
 }
 
+fn matches_single_token(syntax: &Syntax, expected: crate::TokenKind) -> bool {
+    let mut tokens = syntax
+        .tokens()
+        .iter()
+        .filter(|token| !token.kind.is_trivia());
+    matches!(tokens.next(), Some(token) if token.kind == expected) && tokens.next().is_none()
+}
+
 fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Option<SyntaxValue> {
     let tokens = syntax
         .tokens()
@@ -3283,6 +3613,11 @@ fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Optio
             syntax: syntax.clone(),
             name: token.text.clone(),
         }));
+    }
+    if let [token] = tokens.as_slice()
+        && token.kind == crate::TokenKind::Comma
+    {
+        return Some(SyntaxValue::Comma(syntax.clone()));
     }
     if let Some((open, close, kind)) =
         tokens
@@ -3485,7 +3820,39 @@ fn contents_at_least_as_specific(
             .iter()
             .all(|left| meta_type_at_least_as_specific(left, right)),
         (DelimitedMetaContents::Sequence(_), DelimitedMetaContents::Fixed(_)) => false,
+        (
+            DelimitedMetaContents::Separated {
+                element: left_element,
+                separator: left_separator,
+            },
+            DelimitedMetaContents::Separated {
+                element: right_element,
+                separator: right_separator,
+            },
+        ) => {
+            meta_type_at_least_as_specific(left_element, right_element)
+                && meta_type_at_least_as_specific(left_separator, right_separator)
+        }
+        (
+            DelimitedMetaContents::Separated { element, separator },
+            DelimitedMetaContents::Sequence(right),
+        ) => {
+            meta_type_at_least_as_specific(element, right)
+                && meta_type_at_least_as_specific(separator, right)
+        }
+        (
+            DelimitedMetaContents::Fixed(left),
+            DelimitedMetaContents::Separated { element, separator },
+        ) => fixed_matches_separated(left, element, separator),
+        (DelimitedMetaContents::Sequence(_), DelimitedMetaContents::Separated { .. })
+        | (DelimitedMetaContents::Separated { .. }, DelimitedMetaContents::Fixed(_)) => false,
     }
+}
+
+fn fixed_matches_separated(left: &[MetaType], element: &MetaType, separator: &MetaType) -> bool {
+    left.iter().enumerate().all(|(index, value)| {
+        meta_type_at_least_as_specific(value, if index % 2 == 0 { element } else { separator })
+    })
 }
 
 fn signature_more_specific(left: &[MetaType], right: &[MetaType]) -> bool {
@@ -3512,6 +3879,7 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Item => "Item".to_owned(),
             MetaType::Visibility => "Visibility".to_owned(),
             MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
+            MetaType::Comma => "Comma".to_owned(),
             MetaType::Delimited(_, _) => format_meta_type(parameter),
         })
         .collect::<Vec<_>>()
@@ -3531,6 +3899,7 @@ fn format_meta_type(meta: &MetaType) -> String {
         MetaType::Item => "Item".to_owned(),
         MetaType::Visibility => "Visibility".to_owned(),
         MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
+        MetaType::Comma => "Comma".to_owned(),
         MetaType::Delimited(kind, contents) => {
             let name = match kind {
                 DelimiterKind::Parenthesized => "Parenthesized",
@@ -3549,6 +3918,11 @@ fn format_meta_type(meta: &MetaType) -> String {
                 DelimitedMetaContents::Sequence(element) => {
                     format!("(Sequence {})", format_meta_type(element))
                 }
+                DelimitedMetaContents::Separated { element, separator } => format!(
+                    "(Separated ({}) {})",
+                    format_meta_type(element),
+                    format_meta_type(separator)
+                ),
             };
             format!("{name} {contents}")
         }
@@ -3615,6 +3989,8 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Ident"
                 | "CallExpr"
                 | "Sequence"
+                | "Separated"
+                | "Comma"
                 | "Parenthesized"
                 | "Bracketed"
                 | "Braced"
@@ -3858,6 +4234,9 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             {
                 return true;
             }
+            if binding.name == "Comma" && matches!(value, Value::Syntax(SyntaxValue::Comma(_))) {
+                return true;
+            }
             if !matches_pattern_type(&binding.ty, &value) {
                 return false;
             }
@@ -3916,6 +4295,15 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 let contents = match &delimited.contents {
                     DelimitedValueContents::Fixed(values) => Value::Product(values.clone()),
                     DelimitedValueContents::Sequence(values) => Value::Sequence(values.clone()),
+                    DelimitedValueContents::Separated {
+                        elements,
+                        separator,
+                        trailing,
+                    } => Value::Separated {
+                        elements: elements.clone(),
+                        separator: separator.clone(),
+                        trailing: *trailing,
+                    },
                 };
                 return bind_pattern(&pattern.argument, contents, environment);
             }
@@ -3928,6 +4316,35 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     Value::Product(values.into_iter().map(|value| (None, value)).collect()),
                     environment,
                 );
+            }
+            if pattern.namespace.is_none()
+                && pattern.name == "Separated"
+                && let Value::Separated {
+                    elements,
+                    separator,
+                    trailing,
+                } = value
+            {
+                return bind_pattern(
+                    &pattern.argument,
+                    Value::Product(vec![
+                        (Some("separator".to_owned()), *separator),
+                        (
+                            Some("elements".to_owned()),
+                            Value::Product(
+                                elements.into_iter().map(|value| (None, value)).collect(),
+                            ),
+                        ),
+                        (Some("trailing".to_owned()), bool_value(trailing)),
+                    ]),
+                    environment,
+                );
+            }
+            if pattern.namespace.is_none()
+                && pattern.name == "Comma"
+                && matches!(value, Value::Syntax(SyntaxValue::Comma(_)))
+            {
+                return bind_pattern(&pattern.argument, Value::Product(Vec::new()), environment);
             }
             if pattern.namespace.is_none()
                 && let Value::Syntax(SyntaxValue::Visibility(visibility)) = &value
@@ -3972,6 +4389,7 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         (MetaType::Type, Value::Syntax(SyntaxValue::Type(_))) => true,
         (MetaType::Pattern, Value::Syntax(SyntaxValue::Pattern(_))) => true,
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
+        (MetaType::Comma, Value::Syntax(SyntaxValue::Comma(_))) => true,
         (
             MetaType::Delimited(expected_kind, expected_contents),
             Value::Syntax(SyntaxValue::Delimited(value)),
@@ -3993,6 +4411,22 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
                     ) => values
                         .iter()
                         .all(|value| meta_type_matches_value(expected, value)),
+                    (
+                        DelimitedValueContents::Separated {
+                            elements,
+                            separator,
+                            ..
+                        },
+                        DelimitedMetaContents::Separated {
+                            element,
+                            separator: expected_separator,
+                        },
+                    ) => {
+                        elements
+                            .iter()
+                            .all(|value| meta_type_matches_value(element, value))
+                            && meta_type_matches_value(expected_separator, separator)
+                    }
                     _ => false,
                 }
         }

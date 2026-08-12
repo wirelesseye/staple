@@ -2676,26 +2676,125 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
         .expect_err("bare Sequence should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message
-            == "`Sequence` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
+            == "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
     }));
 
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
+            "macro invalid = value: Separated (Ident String) Comma => quote { 0 }\n",
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("bare Separated should be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message
+            == "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
+    }));
+}
+
+#[test]
+fn matches_comma_and_separated_delimited_syntax() {
+    let module = type_check(concat!(
+        "macro fixed = _: Parenthesized (Ident String, Comma, Ident String) => quote { 1 }\n",
+        "macro separated = _: Parenthesized (Separated (Ident String) Comma) => quote { 2 }\n",
+        "macro bracketed = _: Bracketed (Separated (Ident String) Comma) => quote { 5 }\n",
+        "macro braced = _: Braced (Separated (Ident String) Comma) => quote { 6 }\n",
+        "macro syntax = value: Parenthesized (Sequence Syntax) => match value {\n",
+        "    Parenthesized (Sequence (Ident \"left\", Comma, Ident \"right\")) => quote { 3 },\n",
+        "    _ => quote { 0 },\n",
+        "}\n",
+        "macro comma = value: Parenthesized (Comma) => match value {\n",
+        "    Parenthesized Comma => quote { 4 },\n",
+        "}\n",
+        "let fixed_result: I32 = fixed (left, right)\n",
+        "let empty: I32 = separated ()\n",
+        "let single: I32 = separated (one)\n",
+        "let multiple: I32 = separated (one, two, three)\n",
+        "let trailing: I32 = separated (one, two,)\n",
+        "let structural: I32 = syntax (left, right)\n",
+        "let comma_result: I32 = comma (,)\n",
+        "let bracketed_result: I32 = bracketed [left, right,]\n",
+        "let braced_result: I32 = braced {left, right}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("comma and separated syntax should match");
+}
+
+#[test]
+fn separated_overloads_use_structural_specificity() {
+    let module = type_check(concat!(
+        "macro classify = _: Parenthesized (Sequence Syntax) => quote { 1 }\n",
+        "macro classify = _: Parenthesized (Separated (Ident String) Comma) => quote { 2 }\n",
+        "macro classify = _: Parenthesized (Ident String, Comma, Ident String) => quote { 3 }\n",
+        "let fixed: I32 = classify (one, two)\n",
+        "let separated: I32 = classify (one, two, three)\n",
+        "let empty: I32 = classify ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("fixed, separated, and ordinary sequence overloads should be ordered");
+}
+
+#[test]
+fn constructs_and_destructures_separated_syntax() {
+    let module = type_check(concat!(
+        "macro inspect = value: Parenthesized (Separated (Ident String) Comma) => match value {\n",
+        "    Parenthesized (Separated (separator: Comma, elements: (Ident \"one\", Ident \"two\"), trailing: True())) => quote { 1 },\n",
+        "    _ => quote { 0 },\n",
+        "}\n",
+        "macro construct = _: Expr => Parenthesized (Separated (\n",
+        "    separator: Comma,\n",
+        "    elements: (quote { 10 }, quote { 20 }),\n",
+        "    trailing: True,\n",
+        "))\n",
+        "let inspected: I32 = inspect (one, two,)\n",
+        "let constructed: (I32, I32) = construct ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("separated syntax should support construction and patterns");
+}
+
+#[test]
+fn rejects_malformed_separated_syntax() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for argument in ["(,)", "(, one)", "(one,, two)", "(one two)", "(one, 2)"] {
+        let source = format!(
+            "macro names = _: Parenthesized (Separated (Ident String) Comma) => quote {{ 0 }}\nlet value: I32 = names {argument}\n"
+        );
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&source, root)
+            .expect("source should parse");
+        NameResolver::new()
+            .resolve_program(program)
+            .expect_err("malformed separated syntax should be rejected");
+    }
+
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
             concat!(
-                "macro pair = _: Parenthesized (Ident String, Ident String) => quote { 0 }\n",
-                "let invalid: I32 = pair (left, right)\n",
+                "macro invalid = _: Expr => Parenthesized (Separated (\n",
+                "    separator: Comma, elements: (), trailing: True,\n",
+                "))\n",
+                "let value = invalid ()\n",
             ),
             root,
         )
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("source comma should require its own syntax node");
+        .expect_err("an empty separated value cannot have a trailing comma");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("must be `Parenthesized (Ident String, Ident String)` syntax")
+        diagnostic.message == "an empty `Separated` value cannot have a trailing separator"
     }));
 }
 

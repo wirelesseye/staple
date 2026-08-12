@@ -959,6 +959,8 @@ impl NameResolver {
             "Ident",
             "CallExpr",
             "Sequence",
+            "Separated",
+            "Comma",
             "Parenthesized",
             "Bracketed",
             "Braced",

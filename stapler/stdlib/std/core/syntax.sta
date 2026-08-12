@@ -11,6 +11,9 @@ pub(repr) type CallExpr = (
 @recursive_constructor
 pub(repr) type Sequence = Element => Element
 @recursive_constructor
+pub(repr) type Separated = Element => Separator => Element
+pub type Comma
+@recursive_constructor
 pub(repr) type Parenthesized = Contents => Contents
 @recursive_constructor
 pub(repr) type Bracketed = Contents => Contents
@@ -35,4 +38,4 @@ pub type MacroCallVisibility = opaque
 // satisfy it. It has no runtime methods or user implementations.
 pub trait StringType = T => {}
 
-pub type alias Syntax = Expr | Type | Pattern | Item | Visibility | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
+pub type alias Syntax = Expr | Type | Pattern | Item | Visibility | Comma | Parenthesized Syntax | Bracketed Syntax | Braced Syntax

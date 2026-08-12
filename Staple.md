@@ -61,8 +61,8 @@ work with structured syntax instead of assembling source-code strings.
 
 Expression macros transform compiler-owned syntax values before ordinary name
 resolution and type checking. `Syntax` is the permissive sum of `Expr`, `Type`,
-`Pattern`, `Item`, `Visibility`, and the three delimited syntax types. `Expr` is
-currently the sum of `Ident String`, `CallExpr`, and `UnstructuredExpr`.
+`Pattern`, `Item`, `Visibility`, `Comma`, and the three delimited syntax types.
+`Expr` is currently the sum of `Ident String`, `CallExpr`, and `UnstructuredExpr`.
 `CallExpr` exposes `callee: Expr` and
 `argument: Expr`; `UnstructuredExpr` preserves every other expression form
 without exposing its fields yet. A macro body is a curried compile-time Staple
@@ -109,8 +109,19 @@ instead contain `Sequence T`, which accepts zero or more consecutive values of
 two]`. `Sequence` is valid only as the entire contents of one of these three
 delimiter types and never changes a macro's top-level arity. `Sequence Syntax`
 uses shortest structural atoms, treating a nested balanced delimiter as one
-atom. Source punctuation requires its own syntax type before it can be matched
-structurally.
+atom.
+
+`Comma` is singleton syntax and may be matched explicitly, as in
+`Parenthesized (Ident String, Comma, Ident String)`. A homogeneous sequence
+whose elements are separated by commas uses `Separated (T) Comma`, for example
+`Parenthesized (Separated (Ident String) Comma)`. It accepts empty and singleton
+contents, requires one comma between subsequent elements, and permits a
+trailing comma. Its value contains the elements without the commas, together
+with its separator and whether the source had a trailing separator. Fresh
+values use `Separated (separator: Comma, elements: (...), trailing: True)` or
+the corresponding `False` value.
+Like `Sequence`, `Separated` is valid only as the complete contents of a
+delimiter.
 
 `Type` and `Pattern` parameters accept opaque type and pattern syntax. One
 atomic name may be passed directly; compound syntax uses an outer pair of
