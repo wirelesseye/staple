@@ -959,6 +959,7 @@ impl NameResolver {
             "Ident",
             "CallExpr",
             "Sequence",
+            "Optional",
             "Separated",
             "Comma",
             "Parenthesized",
@@ -1532,6 +1533,7 @@ impl NameResolver {
                     Item::Modified(_)
                     | Item::VisibilityMacroInvocation(_)
                     | Item::VisibilitySplice(_)
+                    | Item::RepeatedItemSplice(_)
                     | Item::UseDeclaration(_)
                     | Item::Submodule(_) => {}
                 }
@@ -2037,6 +2039,7 @@ impl NameResolver {
                 | Item::Modified(_)
                 | Item::VisibilityMacroInvocation(_)
                 | Item::VisibilitySplice(_)
+                | Item::RepeatedItemSplice(_)
                 | Item::Submodule(_)
                 | Item::TypeDeclaration(_)
                 | Item::MacroDeclaration(_)
@@ -2075,6 +2078,7 @@ impl NameResolver {
             Item::Modified(_)
             | Item::VisibilityMacroInvocation(_)
             | Item::VisibilitySplice(_)
+            | Item::RepeatedItemSplice(_)
             | Item::UseDeclaration(_)
             | Item::Submodule(_) => {}
             Item::ExternBlock(block) => {

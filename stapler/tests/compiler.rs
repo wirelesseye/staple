@@ -2170,6 +2170,80 @@ fn expands_visibility_aware_macros_and_contextual_visibility_splices() {
 }
 
 #[test]
+fn expands_standard_typegroup_into_module_variants_and_alias() {
+    let module = type_check(concat!(
+        "pub(repr) typegroup Pattern {\n",
+        "    Literal String,\n",
+        "    Wildcard,\n",
+        "}\n",
+        "let literal: Pattern = Pattern.Literal \"value\"\n",
+        "let wildcard: Pattern = Pattern.Wildcard\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generated typegroup variants and alias should compile");
+}
+
+#[test]
+fn typegroup_supports_private_construction_compound_types_and_trailing_commas() {
+    let module = type_check(concat!(
+        "typegroup Local {\n",
+        "    Pair (I32, String),\n",
+        "    Empty,\n",
+        "}\n",
+        "pub(repr) typegroup Generic {\n",
+        "    Wrapped Option I32,\n",
+        "}\n",
+        "pub typegroup PublicGroup {\n",
+        "    Unit,\n",
+        "}\n",
+        "let pair: Local = Local.Pair (1, \"value\")\n",
+        "let empty: Local = Local.Empty\n",
+        "let wrapped: Generic = Generic.Wrapped (Some 1)\n",
+        "let unit: PublicGroup = PublicGroup.Unit\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("private and compound typegroups should compile");
+}
+
+#[test]
+fn public_repr_is_allowed_on_singleton_types() {
+    type_check("pub(repr) type Unit\nlet unit: Unit = Unit\n");
+}
+
+#[test]
+fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (source, expected) in [
+        (
+            "typegroup Empty {}\n",
+            "compile-time match was not exhaustive",
+        ),
+        (
+            "macro invalid: Optional Type -> Expr = value => quote { 0 }\ninvalid I32\n",
+            "`Optional` and product syntax shapes may only appear inside delimited contents",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("invalid typegroup infrastructure use should fail");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
+            "expected `{expected}`, found {diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
 fn public_repr_macro_call_can_generate_a_public_representation() {
     let module = type_check(concat!(
         "macro define_box = vis: MacroCallVisibility => quote { $vis type Box = I32 }\n",
@@ -2531,15 +2605,11 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
         ),
         (
             "macro emit = _: Expr => quote { use std.core * }\nemit ()\n",
-            "item quotations cannot generate `use`, `mod`, or `macro` declarations yet",
-        ),
-        (
-            "macro emit = _: Expr => quote { mod generated {} }\nemit ()\n",
-            "item quotations cannot generate `use`, `mod`, or `macro` declarations yet",
+            "item quotations cannot generate `use` or `macro` declarations yet",
         ),
         (
             "macro emit = _: Expr => quote { macro generated = value => quote { $value } }\nemit ()\n",
-            "item quotations cannot generate `use`, `mod`, or `macro` declarations yet",
+            "item quotations cannot generate `use` or `macro` declarations yet",
         ),
         (
             "macro consume = value: Item => quote { 1 }\nconsume candidate\n",

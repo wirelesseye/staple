@@ -1,0 +1,76 @@
+def typegroup_public_visibility: Visibility -> Visibility = visibility => match visibility {
+    Private => Private,
+    Public => Public,
+    PublicRepr => Public,
+}
+
+def typegroup_variant_visibility: Visibility -> Visibility = visibility => match visibility {
+    Private => PublicRepr,
+    Public => Public,
+    PublicRepr => PublicRepr,
+}
+
+def typegroup_items:
+    Visibility ->
+    Sequence (Ident String, Optional Type) ->
+    Sequence Item =
+visibility => entries => match entries {
+    Sequence () => Sequence (),
+    Sequence (
+        first: (Ident String, Optional Type),
+        rest: Sequence (Ident String, Optional Type),
+    ) => match first {
+        (variant: Ident String, None) => Sequence (
+            first: quote { $visibility type $variant },
+            rest: typegroup_items visibility rest,
+        ),
+        (variant: Ident String, Some underlying) => Sequence (
+            first: quote { $visibility type $variant = $underlying },
+            rest: typegroup_items visibility rest,
+        ),
+    },
+}
+
+def typegroup_sum:
+    Ident String ->
+    Sequence (Ident String, Optional Type) ->
+    Type =
+group => entries => match entries {
+    Sequence (
+        first: (Ident String, Optional Type),
+        rest: Sequence (Ident String, Optional Type),
+    ) => match first {
+        (variant: Ident String, _) => {
+            let head: Type = quote { $group.$variant }
+            match rest {
+                Sequence () => head,
+                _ => {
+                    let tail = typegroup_sum group rest
+                    quote { $head | $tail } satisfies Type
+                },
+            }
+        },
+    },
+}
+
+pub macro typegroup =
+visibility: MacroCallVisibility =>
+group: Ident String =>
+body: Braced (Separated (Ident String, Optional Type) Comma) => match body {
+    Braced (Separated (
+        separator,
+        elements,
+        trailing,
+    )) => {
+        let item_visibility = typegroup_variant_visibility visibility
+        let public_visibility = typegroup_public_visibility visibility
+        let items = typegroup_items item_visibility elements
+        let sum: Type = typegroup_sum group elements
+        quote {
+            $public_visibility mod $group {
+                $items...
+            }
+            $public_visibility type alias $group = $sum
+        }
+    },
+}

@@ -104,6 +104,7 @@ impl DeclarationCollector<'_> {
             Item::Modified(value) => self.item(&value.item),
             Item::VisibilityMacroInvocation(value) => self.expression(&value.expression),
             Item::VisibilitySplice(value) => self.item(&value.item),
+            Item::RepeatedItemSplice(_) => {}
             Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
                     self.insert(DefinitionId::Module(id), &value.syntax, &value.name);
@@ -236,6 +237,8 @@ impl DeclarationCollector<'_> {
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression),
                 QuoteTemplate::Item(item) => self.item(item),
+                QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
+                QuoteTemplate::Raw => {}
             },
             Expression::Splice(_)
             | Expression::Name(_)
@@ -322,6 +325,7 @@ impl Collector<'_> {
             }
             Item::VisibilityMacroInvocation(value) => self.expression(&value.expression),
             Item::VisibilitySplice(value) => self.item(&value.item),
+            Item::RepeatedItemSplice(_) => {}
             Item::UseDeclaration(value) => self.use_declaration(value),
             Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
@@ -562,6 +566,8 @@ impl Collector<'_> {
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression),
                 QuoteTemplate::Item(item) => self.item(item),
+                QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
+                QuoteTemplate::Raw => {}
             },
             Expression::Name(value) => self.add_resolved(&value.syntax, &value.name, true),
             Expression::Splice(_)

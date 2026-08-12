@@ -63,6 +63,7 @@ impl Collector<'_> {
                 self.collect_expression_declarations(&value.expression)
             }
             Item::VisibilitySplice(value) => self.collect_item_declarations(&value.item),
+            Item::RepeatedItemSplice(_) => {}
             Item::Submodule(submodule) => self.collect_module_declarations(&submodule.module),
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
@@ -199,6 +200,10 @@ impl Collector<'_> {
                     self.collect_expression_declarations(expression)
                 }
                 QuoteTemplate::Item(item) => self.collect_item_declarations(item),
+                QuoteTemplate::Items(items) => items
+                    .iter()
+                    .for_each(|item| self.collect_item_declarations(item)),
+                QuoteTemplate::Raw => {}
             },
             Expression::Splice(_)
             | Expression::Name(_)
@@ -250,6 +255,7 @@ impl Collector<'_> {
             }
             Item::VisibilityMacroInvocation(value) => self.expression(&value.expression),
             Item::VisibilitySplice(value) => self.item(&value.item),
+            Item::RepeatedItemSplice(_) => {}
             Item::Submodule(submodule) => {
                 for item in &submodule.module.items {
                     self.item(item);
@@ -618,6 +624,8 @@ impl Collector<'_> {
             Expression::Quote(quote) => match &quote.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression),
                 QuoteTemplate::Item(item) => self.item(item),
+                QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
+                QuoteTemplate::Raw => {}
             },
             Expression::Splice(_)
             | Expression::Name(_)

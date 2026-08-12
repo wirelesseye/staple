@@ -99,6 +99,7 @@ pub struct ResumeExpression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuoteExpression {
     pub syntax: Syntax,
+    pub contents: Syntax,
     pub template: QuoteTemplate,
 }
 
@@ -106,6 +107,8 @@ pub struct QuoteExpression {
 pub enum QuoteTemplate {
     Expression(Box<Expression>),
     Item(Box<Item>),
+    Items(Vec<Item>),
+    Raw,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

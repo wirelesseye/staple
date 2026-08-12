@@ -198,6 +198,47 @@ impl Program {
         }
     }
 
+    /// Registers inline modules introduced after parsing, such as macro output.
+    pub(crate) fn rebuild_generated_inline_modules(&mut self) {
+        let mut parent = 0;
+        while parent < self.modules.len() {
+            let declarations = self.modules[parent]
+                .syntax
+                .items
+                .iter()
+                .filter_map(|item| match item {
+                    Item::Submodule(module)
+                        if !self.child_modules.contains_key(&module.syntax.id) =>
+                    {
+                        Some(module.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            for declaration in declarations {
+                let id = ModuleId(self.modules.len());
+                let qualified_name = format!(
+                    "{}.{}",
+                    self.modules[parent].qualified_name, declaration.name
+                );
+                self.modules.push(SourceModule {
+                    id,
+                    path: self.modules[parent].path.clone(),
+                    syntax: declaration.module,
+                    parent: Some(ModuleId(parent)),
+                    name: Some(declaration.name.clone()),
+                    visibility: declaration.visibility,
+                    qualified_name,
+                });
+                self.children.push(HashMap::new());
+                self.children[parent].insert(declaration.name, id);
+                self.child_modules.insert(declaration.syntax.id, id);
+            }
+            parent += 1;
+        }
+        self.initialization_order = initialization_order(&self.modules, &self.imported_modules);
+    }
+
     pub fn entry(&self) -> ModuleId {
         self.entry
     }

@@ -574,7 +574,18 @@ fn parses_expression_and_single_item_quotations_losslessly() {
             if matches!(item.as_ref(), Item::TypeDeclaration(_))
     ));
 
-    assert!(parse("macro invalid = _ => quote { def first = 1; def second = 2 }\n").is_err());
+    let module = parse("macro many = _ => quote { def first = 1; def second = 2 }\n")
+        .expect("multi-item quotation should parse");
+    let Item::MacroDeclaration(declaration) = &module.items[0] else {
+        panic!("expected macro declaration");
+    };
+    let Some(Expression::Function(function)) = &declaration.value else {
+        panic!("expected macro function");
+    };
+    assert!(matches!(
+        function.body.as_ref(),
+        Expression::Quote(quote) if matches!(&quote.template, stapler::QuoteTemplate::Items(items) if items.len() == 2)
+    ));
 }
 
 #[test]
@@ -1028,7 +1039,7 @@ fn parses_public_representations_and_nominal_patterns() {
 fn rejects_invalid_public_representation_and_pattern_visibility_syntax() {
     assert!(parse("pub(repr) type alias Number = I32\n").is_err());
     assert!(parse("pub(repr) type Handle = opaque\n").is_err());
-    assert!(parse("pub(repr) type Singleton\n").is_err());
+    assert!(parse("pub(repr) type Singleton\n").is_ok());
     assert!(parse("pub let (a, b) = (1, 2)\n").is_err());
     assert!(parse("pub(repr) def value = 1\n").is_err());
 }

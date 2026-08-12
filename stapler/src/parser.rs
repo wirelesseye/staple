@@ -40,6 +40,17 @@ pub(crate) fn parse_type_fragment(
     })
 }
 
+/// Reinterprets quotation contents as a type template, permitting splices.
+pub(crate) fn parse_type_template_fragment(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<Type, ParseError> {
+    parse_fragment(syntax, false, next_syntax_id, |grammar| {
+        grammar.quote_depth += 1;
+        grammar.parse_type()
+    })
+}
+
 /// Reinterprets one macro argument's original tokens as exactly one pattern.
 pub(crate) fn parse_pattern_fragment(
     syntax: &Syntax,
@@ -216,7 +227,11 @@ impl Grammar {
                 )?
                 .text;
             if self.eat(TokenKind::Ellipsis) {
-                return Err(self.error("repeated visibility splices are not supported"));
+                self.newline_terminates_expression = previous;
+                return Ok(Item::RepeatedItemSplice(crate::RepeatedItemSplice {
+                    syntax: self.syntax(item_start),
+                    name,
+                }));
             }
             let item = Box::new(self.parse_item()?);
             self.newline_terminates_expression = previous;
@@ -369,9 +384,7 @@ impl Grammar {
         start: usize,
     ) -> Result<Submodule, ParseError> {
         self.expect(TokenKind::Mod, "expected `mod`")?;
-        let name = self
-            .expect(TokenKind::Identifier, "expected submodule name")?
-            .text;
+        let name = self.parse_quoted_identifier("expected submodule name")?;
         self.expect(TokenKind::LBrace, "expected `{` after submodule name")?;
         let module_start = self.position;
         let mut items = Vec::new();
@@ -862,9 +875,7 @@ impl Grammar {
         } else {
             TypeDeclarationKind::Distinct
         };
-        let name = self
-            .expect(TokenKind::Identifier, "expected type name")?
-            .text;
+        let name = self.parse_quoted_identifier("expected type name")?;
         let has_body = self.eat(TokenKind::Equals);
         if !has_body && kind == TypeDeclarationKind::Alias {
             return Err(self.error("expected `=` after type alias name"));
@@ -891,7 +902,10 @@ impl Grammar {
             (kind, Some(self.parse_type()?))
         };
         if representation_visibility == Visibility::Public
-            && (kind != TypeDeclarationKind::Distinct || underlying.is_none())
+            && !matches!(
+                kind,
+                TypeDeclarationKind::Distinct | TypeDeclarationKind::Singleton
+            )
         {
             return Err(self.error("`pub(repr)` requires a represented distinct type"));
         }
@@ -1428,6 +1442,17 @@ impl Grammar {
             let name = self
                 .expect(TokenKind::Identifier, "expected a splice name after `$`")?
                 .text;
+            if self.eat(TokenKind::Dot) {
+                self.expect(TokenKind::Dollar, "expected `$` before a spliced type name")?;
+                let item = self
+                    .expect(TokenKind::Identifier, "expected a splice name after `$`")?
+                    .text;
+                return Ok(Type::Named(NamedType {
+                    syntax: self.syntax(start),
+                    namespace: Some(format!("${name}")),
+                    name: format!("${item}"),
+                }));
+            }
             let repeated = self.eat(TokenKind::Ellipsis);
             return Ok(Type::Splice(SpliceExpression {
                 syntax: self.syntax(start),
@@ -1885,20 +1910,67 @@ impl Grammar {
             _ => {
                 self.position = template_start;
                 self.next_syntax_id = next_syntax_id;
-                self.parse_item().map(|item| {
-                    self.eat(TokenKind::Semicolon);
-                    crate::QuoteTemplate::Item(Box::new(item))
-                })
+                let mut items = Vec::new();
+                while !self.at(TokenKind::RBrace) && self.peek().is_some() {
+                    match self.parse_item() {
+                        Ok(item) => {
+                            items.push(item);
+                            self.eat(TokenKind::Semicolon);
+                        }
+                        Err(_) => {
+                            items.clear();
+                            break;
+                        }
+                    }
+                }
+                if self.at(TokenKind::RBrace) && !items.is_empty() {
+                    Ok(if items.len() == 1 {
+                        crate::QuoteTemplate::Item(Box::new(items.remove(0)))
+                    } else {
+                        crate::QuoteTemplate::Items(items)
+                    })
+                } else {
+                    self.position = template_start;
+                    self.next_syntax_id = next_syntax_id;
+                    let mut depth = 0usize;
+                    while self.peek().is_some() {
+                        if self.at(TokenKind::RBrace) && depth == 0 {
+                            break;
+                        }
+                        let token = self.bump_token().expect("peeked quote token");
+                        match token.kind {
+                            TokenKind::LBrace => depth += 1,
+                            TokenKind::RBrace => depth = depth.saturating_sub(1),
+                            _ => {}
+                        }
+                    }
+                    Ok(crate::QuoteTemplate::Raw)
+                }
             }
         };
         self.brace_terminates_expression = previous;
         self.quote_depth -= 1;
         let template = template?;
+        let contents = self.syntax(template_start);
         self.expect(TokenKind::RBrace, "expected `}` after quoted syntax")?;
         Ok(QuoteExpression {
             syntax: self.syntax(start),
+            contents,
             template,
         })
+    }
+
+    fn parse_quoted_identifier(&mut self, message: &'static str) -> Result<String, ParseError> {
+        if self.quote_depth > 0 && self.eat(TokenKind::Dollar) {
+            return self
+                .expect(
+                    TokenKind::Identifier,
+                    "expected an identifier splice after `$`",
+                )
+                .map(|token| format!("${}", token.text));
+        }
+        self.expect(TokenKind::Identifier, message)
+            .map(|token| token.text)
     }
 
     fn parse_match_expression(&mut self) -> Result<MatchExpression, ParseError> {

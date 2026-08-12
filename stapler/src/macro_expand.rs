@@ -60,6 +60,9 @@ enum MetaType {
     Visibility,
     MacroCallVisibility,
     Comma,
+    Product(Vec<MetaType>),
+    Optional(Box<MetaType>),
+    Sequence(Box<MetaType>),
     Delimited(DelimiterKind, DelimitedMetaContents),
 }
 
@@ -115,6 +118,7 @@ enum SyntaxValue {
     Type(Type),
     Pattern(Pattern),
     Item(Box<Item>),
+    Items(Vec<Item>),
     Visibility(VisibilitySyntax),
     Comma(Syntax),
     Delimited(DelimitedSyntaxValue),
@@ -163,6 +167,7 @@ impl SyntaxValue {
             Self::Type(_)
             | Self::Pattern(_)
             | Self::Item(_)
+            | Self::Items(_)
             | Self::Visibility(_)
             | Self::Comma(_) => None,
         }
@@ -249,6 +254,7 @@ fn syntax_category(value: &SyntaxValue) -> &'static str {
         SyntaxValue::Type(_) => "type",
         SyntaxValue::Pattern(_) => "pattern",
         SyntaxValue::Item(_) => "item",
+        SyntaxValue::Items(_) => "item sequence",
         SyntaxValue::Visibility(_) => "visibility",
         SyntaxValue::Comma(syntax) => {
             let _ = syntax.id;
@@ -342,16 +348,6 @@ pub(crate) fn expand_program(mut program: Program) -> Result<Program, Vec<Diagno
                     "`MacroCallVisibility` may only be the first parameter of a function-style macro",
                 ));
             }
-            if let Item::Statement(statement) = item
-                && let Statement::Binding(binding) = statement.as_ref()
-                && binding.kind != BindingKind::Def
-                && binding_contains_syntax(binding)
-            {
-                expander.diagnostics.push(Diagnostic::new(
-                    binding.syntax.span.clone(),
-                    "`Syntax` values are compile-time-only",
-                ));
-            }
         }
     }
     if !expander.diagnostics.is_empty() {
@@ -360,9 +356,14 @@ pub(crate) fn expand_program(mut program: Program) -> Result<Program, Vec<Diagno
 
     for source_module in program.modules_mut() {
         let module = source_module.id;
-        let mut items = source_module.syntax.items.clone();
-        for item in &mut items {
-            expander.expand_item(module, item, 0);
+        let mut items = Vec::new();
+        for mut item in source_module.syntax.items.clone() {
+            expander.expand_item(module, &mut item, 0);
+            if let Some(generated) = expander.emitted_items.take() {
+                items.extend(expander.expand_generated_items(module, generated, 1));
+            } else {
+                items.push(item);
+            }
         }
         items.retain(|item| {
             !matches!(item,
@@ -371,8 +372,31 @@ pub(crate) fn expand_program(mut program: Program) -> Result<Program, Vec<Diagno
                         if binding_is_compile_time_helper(binding))
             )
         });
+        let declared = items
+            .iter()
+            .filter_map(|item| match item {
+                Item::TypeDeclaration(declaration) => Some(declaration.name.as_str()),
+                _ => None,
+            })
+            .collect::<std::collections::HashSet<_>>();
+        for item in &items {
+            if let Item::Statement(statement) = item
+                && let Statement::Binding(binding) = statement.as_ref()
+                && binding.kind != BindingKind::Def
+                && binding
+                    .annotation
+                    .as_ref()
+                    .is_some_and(|ty| type_contains_unshadowed_syntax(ty, &declared))
+            {
+                expander.diagnostics.push(Diagnostic::new(
+                    binding.syntax.span.clone(),
+                    "`Syntax` values are compile-time-only",
+                ));
+            }
+        }
         source_module.syntax.items = items;
     }
+    program.rebuild_generated_inline_modules();
     if expander.diagnostics.is_empty() {
         Ok(program)
     } else {
@@ -388,6 +412,7 @@ struct MacroExpander {
     next_mark: u64,
     steps: usize,
     expansion_stack: Vec<MacroKey>,
+    emitted_items: Option<Vec<Item>>,
 }
 
 impl MacroExpander {
@@ -714,6 +739,7 @@ impl MacroExpander {
             next_mark: 1,
             steps: 0,
             expansion_stack: Vec::new(),
+            emitted_items: None,
         }
     }
 
@@ -805,6 +831,26 @@ impl MacroExpander {
                     } else {
                         "a macro annotation must accept one or more syntax-category parameters and return a syntax category"
                     },
+                ));
+            }
+            if definition
+                .parameters
+                .iter()
+                .any(|parameter| matches!(parameter, MetaType::Optional(_) | MetaType::Product(_)))
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    "`Optional` and product syntax shapes may only appear inside delimited contents",
+                ));
+            }
+            if definition
+                .parameters
+                .iter()
+                .any(|parameter| matches!(parameter, MetaType::Sequence(_)))
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`",
                 ));
             }
             if let (Some(annotation), Some(body)) = (
@@ -981,6 +1027,13 @@ impl MacroExpander {
             ));
             return;
         }
+        if let Item::RepeatedItemSplice(splice) = item {
+            self.diagnostics.push(Diagnostic::new(
+                splice.syntax.span.clone(),
+                "repeated item splices are only available while evaluating `quote`",
+            ));
+            return;
+        }
         if let Item::Modified(modified) = item {
             let modified = modified.clone();
             if depth == 0 {
@@ -1018,10 +1071,15 @@ impl MacroExpander {
                 }
             }
             Item::EffectDeclaration(_) => {}
+            Item::Submodule(submodule) if submodule.syntax.definition_module().is_some() => {
+                let items = std::mem::take(&mut submodule.module.items);
+                submodule.module.items = self.expand_generated_items(module, items, depth + 1);
+            }
             Item::MacroDeclaration(_)
             | Item::Modified(_)
             | Item::VisibilityMacroInvocation(_)
             | Item::VisibilitySplice(_)
+            | Item::RepeatedItemSplice(_)
             | Item::Submodule(_)
             | Item::UseDeclaration(_)
             | Item::ExternBlock(_)
@@ -1084,6 +1142,20 @@ impl MacroExpander {
             return None;
         };
         let result = match result {
+            SyntaxValue::Items(items) => {
+                if arguments[consumed_count..].is_empty() {
+                    self.emitted_items = Some(items);
+                } else {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span.clone(),
+                        format!(
+                            "item-producing macro `{}` cannot have excess arguments",
+                            key.name
+                        ),
+                    ));
+                }
+                None
+            }
             SyntaxValue::Item(item) => {
                 if arguments[consumed_count..].is_empty() {
                     Some(*item)
@@ -1454,7 +1526,10 @@ impl MacroExpander {
         };
         let definition = selected.definition;
         let consumed_count = selected.consumed;
-        if !matches!(definition.result, MetaType::Syntax | MetaType::Item) {
+        if !matches!(
+            definition.result,
+            MetaType::Syntax | MetaType::Item | MetaType::Sequence(_)
+        ) {
             return false;
         }
         if depth >= MAX_EXPANSION_DEPTH {
@@ -1494,6 +1569,19 @@ impl MacroExpander {
         };
 
         match result {
+            SyntaxValue::Items(items) => {
+                if !arguments[consumed_count..].is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        format!(
+                            "item-producing macro `{}` cannot have excess arguments",
+                            key.name
+                        ),
+                    ));
+                } else {
+                    self.emitted_items = Some(items);
+                }
+            }
             SyntaxValue::Item(generated) => {
                 if !arguments[consumed_count..].is_empty() {
                     self.diagnostics.push(Diagnostic::new(
@@ -2006,6 +2094,18 @@ impl MacroExpander {
                 }
                 match value {
                     Value::Syntax(syntax) => Some(syntax),
+                    Value::Sequence(values)
+                        if matches!(definition.result, MetaType::Sequence(_)) =>
+                    {
+                        values
+                            .into_iter()
+                            .map(|value| match value {
+                                Value::Syntax(SyntaxValue::Item(item)) => Some(*item),
+                                _ => None,
+                            })
+                            .collect::<Option<Vec<_>>>()
+                            .map(SyntaxValue::Items)
+                    }
                     _ => {
                         self.diagnostics.push(Diagnostic::new(
                             definition.declaration.syntax.span.clone(),
@@ -2016,6 +2116,24 @@ impl MacroExpander {
                 }
             }
         }
+    }
+
+    fn expand_generated_items(
+        &mut self,
+        module: ModuleId,
+        generated: Vec<Item>,
+        depth: usize,
+    ) -> Vec<Item> {
+        let mut expanded = Vec::new();
+        for mut item in generated {
+            self.expand_item(module, &mut item, depth);
+            if let Some(nested) = self.emitted_items.take() {
+                expanded.extend(self.expand_generated_items(module, nested, depth + 1));
+            } else {
+                expanded.push(item);
+            }
+        }
+        expanded
     }
 
     fn meta_argument_value(
@@ -2082,6 +2200,9 @@ impl MacroExpander {
                     MetaType::Visibility => "visibility syntax".to_owned(),
                     MetaType::MacroCallVisibility => "macro-call visibility".to_owned(),
                     MetaType::Comma => "comma syntax".to_owned(),
+                    MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
+                        format!("`{}` syntax", format_meta_type(expected))
+                    }
                     MetaType::Syntax | MetaType::Expr => "an expression".to_owned(),
                     MetaType::Delimited(_, _) => format!("`{}` syntax", format_meta_type(expected)),
                 };
@@ -2135,6 +2256,11 @@ impl MacroExpander {
                 environment: environment.clone(),
             }),
             Expression::Satisfies(satisfies) => {
+                if matches!(meta_type(&satisfies.ty), Some(MetaType::Type))
+                    && let Expression::Quote(quote) = satisfies.value.as_ref()
+                {
+                    return self.instantiate_type_quote(module, quote, environment);
+                }
                 self.eval_expression(module, &satisfies.value, environment)
             }
             Expression::Quote(quote) => {
@@ -2163,6 +2289,17 @@ impl MacroExpander {
                 }
                 if name.name == "Comma" {
                     return Some(Value::Syntax(SyntaxValue::Comma(name.syntax.clone())));
+                }
+                if let Some(kind) = match name.name.as_str() {
+                    "Private" => Some(VisibilityKind::Private),
+                    "Public" => Some(VisibilityKind::Public),
+                    "PublicRepr" => Some(VisibilityKind::PublicRepr),
+                    _ => None,
+                } {
+                    return Some(Value::Syntax(SyntaxValue::Visibility(VisibilitySyntax {
+                        syntax: name.syntax.clone(),
+                        kind,
+                    })));
                 }
                 if name.name.chars().next().is_some_and(char::is_uppercase) {
                     return Some(Value::Nominal(
@@ -2418,7 +2555,16 @@ impl MacroExpander {
                                 ));
                                 return None;
                             };
-                            let value = self.eval_expression(module, value, &mut local)?;
+                            let value = if binding
+                                .annotation
+                                .as_ref()
+                                .is_some_and(|ty| matches!(meta_type(ty), Some(MetaType::Type)))
+                                && let Expression::Quote(quote) = value
+                            {
+                                self.instantiate_type_quote(module, quote, &local)?
+                            } else {
+                                self.eval_expression(module, value, &mut local)?
+                            };
                             local.insert(
                                 binding.name.clone(),
                                 EnvironmentBinding::new(value, binding.mutable),
@@ -2565,18 +2711,21 @@ impl MacroExpander {
                     ));
                     return None;
                 };
-                let mut values = Vec::with_capacity(elements.len());
-                for (_, value) in elements {
-                    if !matches!(value, Value::Syntax(_)) {
-                        self.diagnostics.push(Diagnostic::new(
-                            span,
-                            "`Sequence` elements must contain `Syntax`",
-                        ));
-                        return None;
-                    }
-                    values.push(value);
+                if let [
+                    (Some(first), first_value),
+                    (Some(rest), Value::Sequence(rest_values)),
+                ] = elements.as_slice()
+                    && first == "first"
+                    && rest == "rest"
+                {
+                    let mut values = Vec::with_capacity(rest_values.len() + 1);
+                    values.push(first_value.clone());
+                    values.extend(rest_values.clone());
+                    return Some(Value::Sequence(values));
                 }
-                Some(Value::Sequence(values))
+                Some(Value::Sequence(
+                    elements.into_iter().map(|(_, value)| value).collect(),
+                ))
             }
             "Separated" => {
                 let Value::Product(fields) = argument else {
@@ -2615,23 +2764,19 @@ impl MacroExpander {
                     ));
                     return None;
                 }
-                let Value::Product(elements) = elements else {
-                    self.diagnostics.push(Diagnostic::new(
-                        span,
-                        "`Separated.elements` must be a product of syntax values",
-                    ));
-                    return None;
+                let elements = match elements {
+                    Value::Product(elements) => {
+                        elements.iter().map(|(_, value)| value.clone()).collect()
+                    }
+                    Value::Sequence(elements) => elements.clone(),
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            span,
+                            "`Separated.elements` must be a product or `Sequence`",
+                        ));
+                        return None;
+                    }
                 };
-                if !elements
-                    .iter()
-                    .all(|(_, value)| matches!(value, Value::Syntax(_)))
-                {
-                    self.diagnostics.push(Diagnostic::new(
-                        span,
-                        "`Separated.elements` must contain only `Syntax`",
-                    ));
-                    return None;
-                }
                 let trailing = match trailing {
                     Value::Nominal(name, value) if matches!(value.as_ref(), Value::Product(values) if values.is_empty()) => {
                         match name.as_str() {
@@ -2662,7 +2807,7 @@ impl MacroExpander {
                     return None;
                 }
                 Some(Value::Separated {
-                    elements: elements.iter().map(|(_, value)| value.clone()).collect(),
+                    elements,
                     separator: Box::new(separator.clone()),
                     trailing,
                 })
@@ -2984,7 +3129,7 @@ impl MacroExpander {
                 if !item_output_supported(&item) {
                     self.diagnostics.push(Diagnostic::new(
                         item_syntax(&item).span.clone(),
-                        "item quotations cannot generate `use`, `mod`, or `macro` declarations yet",
+                        "item quotations cannot generate `use` or `macro` declarations yet",
                     ));
                     return None;
                 }
@@ -2993,7 +3138,52 @@ impl MacroExpander {
                 substitute_item(&mut item, environment, &mut self.diagnostics)?;
                 Some(SyntaxValue::Item(Box::new(item)))
             }
+            crate::QuoteTemplate::Items(templates) => {
+                let mut items = templates.clone();
+                for item in &items {
+                    if !item_output_supported(item) {
+                        self.diagnostics.push(Diagnostic::new(
+                            item_syntax(item).span.clone(),
+                            "item quotations cannot generate `use` or `macro` declarations yet",
+                        ));
+                        return None;
+                    }
+                }
+                for item in &mut items {
+                    alpha_rename_item(item, mark);
+                    freshen_item(self, item, module, mark);
+                }
+                substitute_item_list(&mut items, environment, &mut self.diagnostics)?;
+                Some(SyntaxValue::Items(items))
+            }
+            crate::QuoteTemplate::Raw => {
+                self.diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    "quotation requires a contextual syntax type",
+                ));
+                None
+            }
         }
+    }
+
+    fn instantiate_type_quote(
+        &mut self,
+        module: ModuleId,
+        quote: &crate::QuoteExpression,
+        environment: &Environment,
+    ) -> Option<Value> {
+        let mark = self.next_mark;
+        self.next_mark += 1;
+        let mut ty =
+            crate::parser::parse_type_template_fragment(&quote.contents, &mut self.next_syntax_id)
+                .map_err(|error| {
+                    self.diagnostics
+                        .push(Diagnostic::new(quote.contents.span.clone(), error.message));
+                })
+                .ok()?;
+        freshen_type(self, &mut ty, module, mark);
+        substitute_type(&mut ty, environment, &mut self.diagnostics)?;
+        Some(Value::Syntax(SyntaxValue::Type(ty)))
     }
 
     fn fresh_id(&mut self) -> SyntaxId {
@@ -3109,7 +3299,7 @@ fn invalid_delimited_collection_parameter(expression: &Expression) -> bool {
         };
         if ty.is_some_and(|ty| {
             (type_contains_named(ty, "Sequence") || type_contains_named(ty, "Separated"))
-                && meta_type(ty).is_none()
+                && (meta_type(ty).is_none() || matches!(meta_type(ty), Some(MetaType::Sequence(_))))
         }) {
             return true;
         }
@@ -3159,6 +3349,15 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             _ => None,
         },
         Type::Application(application) => {
+            if let Some(element) = sequence_meta_type(ty) {
+                return Some(MetaType::Sequence(Box::new(element)));
+            }
+            if let Some(element) = applied_meta_type(application, "Optional") {
+                return Some(MetaType::Optional(Box::new(element)));
+            }
+            if let Some(element) = applied_meta_type(application, "Sequence") {
+                return Some(MetaType::Sequence(Box::new(element)));
+            }
             let Type::Named(callee) = application.callee.as_ref() else {
                 return None;
             };
@@ -3184,8 +3383,30 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
                 _ => None,
             }
         }
+        Type::Product(product)
+            if product
+                .elements
+                .iter()
+                .all(|element| element.name.is_none() && !element.spread) =>
+        {
+            product
+                .elements
+                .iter()
+                .map(|element| meta_type(&element.ty))
+                .collect::<Option<Vec<_>>>()
+                .map(MetaType::Product)
+        }
         _ => None,
     }
+}
+
+fn applied_meta_type(application: &crate::TypeApplication, expected: &str) -> Option<MetaType> {
+    let Type::Named(callee) = application.callee.as_ref() else {
+        return None;
+    };
+    (callee.namespace.is_none() && callee.name == expected)
+        .then(|| meta_type(unwrap_singleton_product(&application.argument)))
+        .flatten()
 }
 
 fn delimiter_kind(name: &str) -> Option<DelimiterKind> {
@@ -3325,7 +3546,9 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             expression_argument,
             Expression::Name(_) | Expression::Call(_) | Expression::VisibilityArgument(_)
         ),
-        MetaType::Item => false,
+        MetaType::Item | MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
+            false
+        }
         MetaType::Comma => matches_single_token(argument.syntax(), crate::TokenKind::Comma),
         MetaType::Delimited(_, _) => {
             let mut next_syntax_id = 0;
@@ -3475,6 +3698,20 @@ fn match_fixed_contents(
     let Some((first, rest)) = expected.split_first() else {
         return (skip_trivia(parent.tokens(), cursor, end) == end).then(Vec::new);
     };
+    if matches!(first, MetaType::Optional(_)) {
+        let checkpoint = *next_syntax_id;
+        if let Some(mut values) = match_fixed_contents(parent, cursor, end, rest, next_syntax_id) {
+            values.insert(
+                0,
+                (
+                    None,
+                    Value::Nominal("None".to_owned(), Box::new(Value::Product(Vec::new()))),
+                ),
+            );
+            return Some(values);
+        }
+        *next_syntax_id = checkpoint;
+    }
     for candidate_end in candidate_ends(parent.tokens(), cursor, end) {
         let fragment = syntax_slice(parent, cursor, candidate_end);
         let checkpoint = *next_syntax_id;
@@ -3524,6 +3761,27 @@ fn match_syntax_fragment(
     syntax: &Syntax,
     next_syntax_id: &mut usize,
 ) -> Option<Value> {
+    match expected {
+        MetaType::Product(elements) => {
+            let values =
+                match_fixed_contents(syntax, 0, syntax.tokens().len(), elements, next_syntax_id)?;
+            return Some(Value::Product(values));
+        }
+        MetaType::Optional(element) => {
+            let empty = syntax.tokens().iter().all(|token| token.kind.is_trivia());
+            return if empty {
+                Some(Value::Nominal(
+                    "None".to_owned(),
+                    Box::new(Value::Product(Vec::new())),
+                ))
+            } else {
+                match_syntax_fragment(element, syntax, next_syntax_id)
+                    .map(|value| Value::Nominal("Some".to_owned(), Box::new(value)))
+            };
+        }
+        MetaType::Sequence(_) => return None,
+        _ => {}
+    }
     let expression = || {
         let mut ids = *next_syntax_id;
         let value = crate::parser::parse_expression_fragment(syntax, &mut ids).ok()?;
@@ -3588,6 +3846,7 @@ fn match_syntax_fragment(
             SyntaxValue::Visibility(value)
         }
         MetaType::Syntax => structural_syntax_value(syntax, next_syntax_id)?,
+        MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => unreachable!(),
     };
     Some(Value::Syntax(syntax_value))
 }
@@ -3783,6 +4042,17 @@ fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
         || matches!(left, MetaType::Delimited(_, _))
             && matches!(right, MetaType::Expr | MetaType::Type | MetaType::Pattern)
         || match (left, right) {
+            (MetaType::Product(left), MetaType::Product(right)) => {
+                left.len() == right.len()
+                    && left
+                        .iter()
+                        .zip(right)
+                        .all(|(left, right)| meta_type_at_least_as_specific(left, right))
+            }
+            (MetaType::Optional(left), MetaType::Optional(right))
+            | (MetaType::Sequence(left), MetaType::Sequence(right)) => {
+                meta_type_at_least_as_specific(left, right)
+            }
             (
                 MetaType::Delimited(left_kind, left_contents),
                 MetaType::Delimited(right_kind, right_contents),
@@ -3880,6 +4150,9 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Visibility => "Visibility".to_owned(),
             MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
             MetaType::Comma => "Comma".to_owned(),
+            MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
+                format_meta_type(parameter)
+            }
             MetaType::Delimited(_, _) => format_meta_type(parameter),
         })
         .collect::<Vec<_>>()
@@ -3900,6 +4173,16 @@ fn format_meta_type(meta: &MetaType) -> String {
         MetaType::Visibility => "Visibility".to_owned(),
         MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
         MetaType::Comma => "Comma".to_owned(),
+        MetaType::Product(elements) => format!(
+            "({})",
+            elements
+                .iter()
+                .map(format_meta_type)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        MetaType::Optional(element) => format!("Optional {}", format_meta_type(element)),
+        MetaType::Sequence(element) => format!("Sequence {}", format_meta_type(element)),
         MetaType::Delimited(kind, contents) => {
             let name = match kind {
                 DelimiterKind::Parenthesized => "Parenthesized",
@@ -3989,6 +4272,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Ident"
                 | "CallExpr"
                 | "Sequence"
+                | "Optional"
                 | "Separated"
                 | "Comma"
                 | "Parenthesized"
@@ -4023,6 +4307,49 @@ fn type_contains_syntax(ty: &Type) -> bool {
         }
         Type::Repeated(repeated) => type_contains_syntax(&repeated.element),
         Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => false,
+    }
+}
+
+fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashSet<&str>) -> bool {
+    match ty {
+        Type::Named(named)
+            if named.namespace.is_none() && declared.contains(named.name.as_str()) =>
+        {
+            false
+        }
+        Type::Named(_) | Type::StringLiteral(_) | Type::Inferred(_) | Type::Splice(_) => {
+            type_contains_syntax(ty)
+        }
+        Type::Function(function) => {
+            type_contains_unshadowed_syntax(&function.parameter, declared)
+                || function
+                    .effects
+                    .effects
+                    .iter()
+                    .any(|ty| type_contains_unshadowed_syntax(ty, declared))
+                || type_contains_unshadowed_syntax(&function.result, declared)
+        }
+        Type::Handler(handler) => {
+            type_contains_unshadowed_syntax(&handler.effect, declared)
+                || handler
+                    .effects
+                    .effects
+                    .iter()
+                    .any(|ty| type_contains_unshadowed_syntax(ty, declared))
+        }
+        Type::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| type_contains_unshadowed_syntax(&element.ty, declared)),
+        Type::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .any(|ty| type_contains_unshadowed_syntax(ty, declared)),
+        Type::Application(application) => {
+            type_contains_unshadowed_syntax(&application.callee, declared)
+                || type_contains_unshadowed_syntax(&application.argument, declared)
+        }
+        Type::Repeated(repeated) => type_contains_unshadowed_syntax(&repeated.element, declared),
     }
 }
 
@@ -4230,12 +4557,18 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
         }
         Pattern::Binding(binding) => {
             if let Value::Syntax(SyntaxValue::Visibility(visibility)) = &value
-                && visibility_pattern_matches(&binding.name, visibility.kind)
+                && matches!(binding.name.as_str(), "Private" | "Public" | "PublicRepr")
             {
-                return true;
+                return visibility_pattern_matches(&binding.name, visibility.kind);
             }
             if binding.name == "Comma" && matches!(value, Value::Syntax(SyntaxValue::Comma(_))) {
                 return true;
+            }
+            if binding.name.chars().next().is_some_and(char::is_uppercase)
+                && let Value::Nominal(name, argument) = &value
+            {
+                return binding.name == *name
+                    && matches!(argument.as_ref(), Value::Product(values) if values.is_empty());
             }
             if !matches_pattern_type(&binding.ty, &value) {
                 return false;
@@ -4247,8 +4580,10 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             true
         }
         Pattern::Product(product) => {
-            let Value::Product(values) = value else {
-                return false;
+            let values = match value {
+                Value::Product(values) => values,
+                Value::Sequence(values) => values.into_iter().map(|value| (None, value)).collect(),
+                _ => return false,
             };
             product.elements.len() == values.len()
                 && product
@@ -4305,12 +4640,36 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                         trailing: *trailing,
                     },
                 };
-                return bind_pattern(&pattern.argument, contents, environment);
+                let argument = match pattern.argument.as_ref() {
+                    Pattern::Product(product) if product.elements.len() == 1 => {
+                        &product.elements[0]
+                    }
+                    argument => argument,
+                };
+                return bind_pattern(argument, contents, environment);
             }
             if pattern.namespace.is_none()
                 && pattern.name == "Sequence"
                 && let Value::Sequence(values) = value
             {
+                if let Pattern::Product(product) = pattern.argument.as_ref()
+                    && let [Pattern::Binding(first), Pattern::Binding(rest)] =
+                        product.elements.as_slice()
+                    && first.name == "first"
+                    && rest.name == "rest"
+                {
+                    let Some((head, tail)) = values.split_first() else {
+                        return false;
+                    };
+                    return bind_pattern(
+                        &pattern.argument,
+                        Value::Product(vec![
+                            (Some("first".to_owned()), head.clone()),
+                            (Some("rest".to_owned()), Value::Sequence(tail.to_vec())),
+                        ]),
+                        environment,
+                    );
+                }
                 return bind_pattern(
                     &pattern.argument,
                     Value::Product(values.into_iter().map(|value| (None, value)).collect()),
@@ -4325,20 +4684,16 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     trailing,
                 } = value
             {
-                return bind_pattern(
+                let matched = bind_pattern(
                     &pattern.argument,
                     Value::Product(vec![
                         (Some("separator".to_owned()), *separator),
-                        (
-                            Some("elements".to_owned()),
-                            Value::Product(
-                                elements.into_iter().map(|value| (None, value)).collect(),
-                            ),
-                        ),
+                        (Some("elements".to_owned()), Value::Sequence(elements)),
                         (Some("trailing".to_owned()), bool_value(trailing)),
                     ]),
                     environment,
                 );
+                return matched;
             }
             if pattern.namespace.is_none()
                 && pattern.name == "Comma"
@@ -4390,6 +4745,21 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         (MetaType::Pattern, Value::Syntax(SyntaxValue::Pattern(_))) => true,
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
         (MetaType::Comma, Value::Syntax(SyntaxValue::Comma(_))) => true,
+        (MetaType::Product(expected), Value::Product(values)) => {
+            expected.len() == values.len()
+                && expected
+                    .iter()
+                    .zip(values)
+                    .all(|(expected, (_, value))| meta_type_matches_value(expected, value))
+        }
+        (MetaType::Optional(expected), Value::Nominal(name, value)) => match name.as_str() {
+            "None" => matches!(value.as_ref(), Value::Product(values) if values.is_empty()),
+            "Some" => meta_type_matches_value(expected, value),
+            _ => false,
+        },
+        (MetaType::Sequence(expected), Value::Sequence(values)) => values
+            .iter()
+            .all(|value| meta_type_matches_value(expected, value)),
         (
             MetaType::Delimited(expected_kind, expected_contents),
             Value::Syntax(SyntaxValue::Delimited(value)),
@@ -4607,6 +4977,7 @@ fn item_output_supported(item: &Item) -> bool {
     match item {
         Item::Modified(modified) => item_output_supported(&modified.item),
         Item::VisibilitySplice(splice) => item_output_supported(&splice.item),
+        Item::RepeatedItemSplice(_) => true,
         Item::VisibilityMacroInvocation(_) => true,
         Item::ExternBlock(_)
         | Item::TypeDeclaration(_)
@@ -4614,7 +4985,8 @@ fn item_output_supported(item: &Item) -> bool {
         | Item::TraitImplementation(_)
         | Item::EffectDeclaration(_)
         | Item::Statement(_) => true,
-        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => false,
+        Item::Submodule(_) => true,
+        Item::UseDeclaration(_) | Item::MacroDeclaration(_) => false,
     }
 }
 
@@ -4623,6 +4995,7 @@ fn modifier_target_supported(item: &Item) -> bool {
         Item::Modified(modified) => modifier_target_supported(&modified.item),
         Item::VisibilityMacroInvocation(_) => true,
         Item::VisibilitySplice(splice) => modifier_target_supported(&splice.item),
+        Item::RepeatedItemSplice(_) => false,
         Item::ExternBlock(_)
         | Item::TypeDeclaration(_)
         | Item::TraitDeclaration(_)
@@ -4641,6 +5014,7 @@ fn item_syntax(item: &Item) -> &Syntax {
         Item::Modified(value) => &value.syntax,
         Item::VisibilityMacroInvocation(value) => &value.syntax,
         Item::VisibilitySplice(value) => &value.syntax,
+        Item::RepeatedItemSplice(value) => &value.syntax,
         Item::UseDeclaration(value) => &value.syntax,
         Item::Submodule(value) => &value.syntax,
         Item::ExternBlock(value) => &value.syntax,
@@ -4769,7 +5143,13 @@ fn substitute_type(
         Type::Repeated(repeated) => {
             substitute_type(&mut repeated.element, environment, diagnostics)?
         }
-        Type::Inferred(_) | Type::StringLiteral(_) | Type::Named(_) => {}
+        Type::Named(named) => {
+            if let Some(namespace) = &mut named.namespace {
+                substitute_identifier(namespace, environment, diagnostics)?;
+            }
+            substitute_identifier(&mut named.name, environment, diagnostics)?;
+        }
+        Type::Inferred(_) | Type::StringLiteral(_) => {}
         Type::Splice(_) => unreachable!(),
     }
     Some(())
@@ -4892,6 +5272,7 @@ fn substitute_item(
                 substitute_splices(&invocation.expression, environment, diagnostics)?;
         }
         Item::VisibilitySplice(_) => unreachable!(),
+        Item::RepeatedItemSplice(_) => unreachable!("repeated item splices expand as lists"),
         Item::ExternBlock(block) => {
             for binding in &mut block.bindings {
                 substitute_binding(binding, environment, diagnostics)?;
@@ -4925,6 +5306,7 @@ fn substitute_item(
             substitute_statement(statement, environment, diagnostics)?;
         }
         Item::TypeDeclaration(declaration) => {
+            substitute_identifier(&mut declaration.name, environment, diagnostics)?;
             for bound in &mut declaration.trait_bounds {
                 substitute_trait_bound(bound, environment, diagnostics)?;
             }
@@ -4932,7 +5314,11 @@ fn substitute_item(
                 substitute_type(underlying, environment, diagnostics)?;
             }
         }
-        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => {
+        Item::Submodule(submodule) => {
+            substitute_identifier(&mut submodule.name, environment, diagnostics)?;
+            substitute_item_list(&mut submodule.module.items, environment, diagnostics)?;
+        }
+        Item::UseDeclaration(_) | Item::MacroDeclaration(_) => {
             unreachable!("unsupported item output must be rejected before substitution")
         }
     }
@@ -4955,6 +5341,7 @@ fn apply_visibility_to_item(
     };
     match item {
         Item::ExternBlock(block) if kind != VisibilityKind::PublicRepr => block.visibility = public,
+        Item::Submodule(submodule) => submodule.visibility = public,
         Item::TypeDeclaration(declaration) => {
             declaration.visibility = public;
             declaration.representation_visibility = if kind == VisibilityKind::PublicRepr {
@@ -4963,8 +5350,10 @@ fn apply_visibility_to_item(
                 Visibility::Private
             };
             if kind == VisibilityKind::PublicRepr
-                && (declaration.kind != crate::TypeDeclarationKind::Distinct
-                    || declaration.underlying.is_none())
+                && !matches!(
+                    declaration.kind,
+                    crate::TypeDeclarationKind::Distinct | crate::TypeDeclarationKind::Singleton
+                )
             {
                 diagnostics.push(Diagnostic::new(
                     span,
@@ -5011,6 +5400,70 @@ fn apply_visibility_to_item(
     Some(())
 }
 
+fn substitute_item_list(
+    items: &mut Vec<Item>,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    let mut substituted = Vec::new();
+    for mut item in std::mem::take(items) {
+        if let Item::RepeatedItemSplice(splice) = item {
+            let value = environment.get(&splice.name).map(EnvironmentBinding::get);
+            let Some(Value::Sequence(values)) = value else {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span,
+                    format!(
+                        "repeated item splice `${}` requires `Sequence Item`",
+                        splice.name
+                    ),
+                ));
+                return None;
+            };
+            for value in values {
+                let Value::Syntax(SyntaxValue::Item(item)) = value else {
+                    diagnostics.push(Diagnostic::new(
+                        splice.syntax.span.clone(),
+                        format!(
+                            "repeated item splice `${}` contains a non-item value",
+                            splice.name
+                        ),
+                    ));
+                    return None;
+                };
+                substituted.push(*item);
+            }
+        } else {
+            substitute_item(&mut item, environment, diagnostics)?;
+            substituted.push(item);
+        }
+    }
+    *items = substituted;
+    Some(())
+}
+
+fn substitute_identifier(
+    name: &mut String,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    let Some(splice) = name.strip_prefix('$') else {
+        return Some(());
+    };
+    match environment.get(splice).map(EnvironmentBinding::get) {
+        Some(Value::Syntax(SyntaxValue::Ident(identifier))) => {
+            *name = identifier.name;
+            Some(())
+        }
+        _ => {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("identifier splice `${splice}` requires `Ident String`"),
+            ));
+            None
+        }
+    }
+}
+
 fn alpha_rename_item(item: &mut Item, mark: u64) {
     let mut scopes = Vec::new();
     match item {
@@ -5028,6 +5481,7 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
             alpha_rename_expression(&mut invocation.expression, mark, &mut scopes);
         }
         Item::VisibilitySplice(splice) => alpha_rename_item(&mut splice.item, mark),
+        Item::RepeatedItemSplice(_) => {}
         Item::ExternBlock(block) => {
             for binding in &mut block.bindings {
                 if let Some(value) = &mut binding.value {
@@ -5075,7 +5529,12 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
             }
         },
         Item::TypeDeclaration(_) => {}
-        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => {
+        Item::Submodule(submodule) => {
+            for item in &mut submodule.module.items {
+                alpha_rename_item(item, mark);
+            }
+        }
+        Item::UseDeclaration(_) | Item::MacroDeclaration(_) => {
             unreachable!("unsupported item output must be rejected before hygiene")
         }
     }
@@ -5408,6 +5867,9 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             expander.freshen_syntax(&mut splice.syntax, module, mark);
             freshen_item(expander, &mut splice.item, module, mark);
         }
+        Item::RepeatedItemSplice(splice) => {
+            expander.freshen_syntax(&mut splice.syntax, module, mark);
+        }
         Item::ExternBlock(block) => {
             expander.freshen_syntax(&mut block.syntax, module, mark);
             for binding in &mut block.bindings {
@@ -5464,7 +5926,14 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             }
         }
         Item::Statement(statement) => freshen_statement(expander, statement, module, mark),
-        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => {
+        Item::Submodule(submodule) => {
+            expander.freshen_syntax(&mut submodule.syntax, module, mark);
+            expander.freshen_syntax(&mut submodule.module.syntax, module, mark);
+            for item in &mut submodule.module.items {
+                freshen_item(expander, item, module, mark);
+            }
+        }
+        Item::UseDeclaration(_) | Item::MacroDeclaration(_) => {
             unreachable!("unsupported item output must be rejected before freshening")
         }
     }

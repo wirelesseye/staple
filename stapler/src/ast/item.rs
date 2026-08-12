@@ -17,6 +17,7 @@ pub enum Item {
     Modified(ModifiedItem),
     VisibilityMacroInvocation(VisibilityMacroInvocation),
     VisibilitySplice(VisibilitySplice),
+    RepeatedItemSplice(RepeatedItemSplice),
     UseDeclaration(UseDeclaration),
     Submodule(Submodule),
     ExternBlock(ExternBlock),
@@ -26,6 +27,12 @@ pub enum Item {
     TraitImplementation(TraitImplementation),
     EffectDeclaration(EffectDeclaration),
     Statement(Box<Statement>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatedItemSplice {
+    pub syntax: Syntax,
+    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

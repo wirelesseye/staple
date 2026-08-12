@@ -106,8 +106,10 @@ not require commas in the source, so `Parenthesized (Ident String, Ident
 String)` accepts `(left right)`. `Parenthesized`, `Bracketed`, and `Braced` may
 instead contain `Sequence T`, which accepts zero or more consecutive values of
 `T`; for example, `Bracketed (Sequence Ident String)` accepts `[]` and `[one
-two]`. `Sequence` is valid only as the entire contents of one of these three
-delimiter types and never changes a macro's top-level arity. `Sequence Syntax`
+two]`. As a source matcher, `Sequence` is valid only as the entire contents of
+one of these three delimiter types and never changes a macro's top-level arity.
+Captured sequences may be passed through compile-time helpers and destructured
+as `Sequence ()` or `Sequence (first: T, rest: Sequence T)`. `Sequence Syntax`
 uses shortest structural atoms, treating a nested balanced delimiter as one
 atom.
 
@@ -121,7 +123,11 @@ with its separator and whether the source had a trailing separator. Fresh
 values use `Separated (separator: Comma, elements: (...), trailing: True)` or
 the corresponding `False` value.
 Like `Sequence`, `Separated` is valid only as the complete contents of a
-delimiter.
+delimiter. Its `elements` field is a `Sequence`. A separated element may be a
+fixed product shape. `Optional T` is available only inside such products and
+captures `None` or `Some value`, so
+`Braced (Separated (Ident String, Optional Type) Comma)` accepts both
+`Literal String` and `Wildcard` entries.
 
 `Type` and `Pattern` parameters accept opaque type and pattern syntax. One
 atomic name may be passed directly; compound syntax uses an outer pair of
@@ -282,9 +288,36 @@ only overloads beginning with `MacroCallVisibility`.
 Inside an item quotation, a visibility value may be spliced immediately before
 a declaration. `Private` emits no prefix, `Public` emits `pub`, and
 `PublicRepr` emits `pub(repr)`. Existing declaration rules are checked after
-substitution, so `PublicRepr` is valid only on a represented distinct type.
+substitution. `PublicRepr` is valid on represented distinct types and on
+singleton types, where representation visibility is a no-op.
 Modifiers surrounding a visibility-aware call run after that call has produced
 its item.
+
+Quotations may contain multiple items and return `Sequence Item`. Such a
+sequence can replace a top-level macro invocation or be inserted into an inline
+module with `$items...`. Identifier syntax may be spliced into generated module
+and type names. Type quotations are selected contextually by an annotated
+compile-time binding or `satisfies Type`:
+
+```staple
+let alternative: Type = quote { $group.$variant }
+quote { $left | $right } satisfies Type
+```
+
+The standard `typegroup` macro combines these facilities:
+
+```staple
+pub(repr) typegroup Pattern {
+    Literal String,
+    Wildcard,
+}
+```
+
+It generates a same-named inline module containing the nominal variants and a
+same-named parent-module alias whose alternatives are the qualified variants.
+Private groups use a private module and alias while keeping child variants
+public-representation inside that private boundary. `pub` groups expose opaque
+variants, and `pub(repr)` groups expose their representations.
 
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while

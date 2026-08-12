@@ -247,6 +247,9 @@ impl<'a> Classifier<'a> {
                 self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1);
                 self.item(&value.item, resolved);
             }
+            Item::RepeatedItemSplice(value) => {
+                self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1);
+            }
             Item::UseDeclaration(value) => {
                 for part in &value.path {
                     self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
@@ -543,6 +546,10 @@ impl<'a> Classifier<'a> {
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression, resolved),
                 QuoteTemplate::Item(item) => self.item(item, resolved),
+                QuoteTemplate::Items(items) => {
+                    items.iter().for_each(|item| self.item(item, resolved))
+                }
+                QuoteTemplate::Raw => {}
             },
             Expression::Splice(value) => self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1),
             Expression::Name(value) => {
