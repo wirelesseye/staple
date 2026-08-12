@@ -11,9 +11,10 @@ pub type USize = opaque
 pub type F32 = opaque
 pub type F64 = opaque
 
-pub type None
-pub(repr) type Some = T => T
-pub type alias Option = T => None | Some T
+pub(repr) typegroup Option = T => {
+    None,
+    Some T,
+}
 
 pub type Less
 pub type Equal

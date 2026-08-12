@@ -236,6 +236,7 @@ impl Program {
             }
             parent += 1;
         }
+        self.resolve_single_inline_imports();
         self.initialization_order = initialization_order(&self.modules, &self.imported_modules);
     }
 

@@ -154,6 +154,7 @@ struct Grammar {
     any_newline_terminates_type: bool,
     brace_terminates_expression: bool,
     with_terminates_expression: bool,
+    macro_punctuation_arguments: bool,
     quote_depth: usize,
     source_name: Option<Arc<str>>,
 }
@@ -180,6 +181,7 @@ impl Grammar {
             any_newline_terminates_type: false,
             brace_terminates_expression: false,
             with_terminates_expression: false,
+            macro_punctuation_arguments: false,
             quote_depth: 0,
             source_name,
         }
@@ -276,7 +278,11 @@ impl Grammar {
         if let Some(visibility) = visibility_syntax
             && self.peek() == Some(TokenKind::Identifier)
         {
-            let expression = self.parse_expression()?;
+            let previous_macro_punctuation = self.macro_punctuation_arguments;
+            self.macro_punctuation_arguments = true;
+            let expression = self.parse_expression();
+            self.macro_punctuation_arguments = previous_macro_punctuation;
+            let expression = expression?;
             self.newline_terminates_expression = previous;
             return Ok(Item::VisibilityMacroInvocation(VisibilityMacroInvocation {
                 syntax: self.syntax(item_start),
@@ -675,7 +681,17 @@ impl Grammar {
             }
             _ => {
                 let start = self.position;
+                let next_syntax_id = self.next_syntax_id;
                 let target = self.parse_expression()?;
+                if self.starts_declaration_macro_tail() && matches!(target, Expression::Call(_)) {
+                    self.position = start;
+                    self.next_syntax_id = next_syntax_id;
+                    let previous_macro_punctuation = self.macro_punctuation_arguments;
+                    self.macro_punctuation_arguments = true;
+                    let expression = self.parse_expression();
+                    self.macro_punctuation_arguments = previous_macro_punctuation;
+                    return expression.map(Statement::Expression);
+                }
                 if self.eat(TokenKind::Equals) {
                     let value = self.parse_expression()?;
                     Ok(Statement::Assignment(Assignment {
@@ -782,10 +798,7 @@ impl Grammar {
         start: usize,
     ) -> Result<UseDeclaration, ParseError> {
         self.expect(TokenKind::Use, "expected `use`")?;
-        let mut path = vec![
-            self.expect(TokenKind::Identifier, "expected module path after `use`")?
-                .text,
-        ];
+        let mut path = vec![self.parse_quoted_identifier("expected module path after `use`")?];
         while self.eat(TokenKind::Dot) {
             path.push(self.parse_value_name("expected module path component after `.`")?);
         }
@@ -1107,6 +1120,20 @@ impl Grammar {
 
     fn parse_type_parameter_pattern(&mut self) -> Result<TypeParameterPattern, ParseError> {
         let start = self.position;
+        if self.quote_depth > 0 && self.eat(TokenKind::Dollar) {
+            let name = self
+                .expect(TokenKind::Identifier, "expected a splice name after `$`")?
+                .text;
+            self.expect(
+                TokenKind::Ellipsis,
+                "type-parameter sequence splices require `...`",
+            )?;
+            return Ok(TypeParameterPattern::Splice(SpliceExpression {
+                syntax: self.syntax(start),
+                name,
+                repeated: true,
+            }));
+        }
         if self.eat(TokenKind::LParen) {
             let mut elements = Vec::new();
             if !self.at(TokenKind::RParen) {
@@ -1835,6 +1862,13 @@ impl Grammar {
                 }))
             }
             Some(TokenKind::Dollar) => Err(self.error("splices are only allowed inside `quote`")),
+            Some(TokenKind::Equals | TokenKind::FatArrow) if self.macro_punctuation_arguments => {
+                let start = self.position;
+                self.bump_token();
+                Ok(Expression::SyntaxArgument(SyntaxArgumentExpression {
+                    syntax: self.syntax(start),
+                }))
+            }
             _ => Err(self.error("expected expression")),
         }
     }
@@ -2124,7 +2158,37 @@ impl Grammar {
                     | TokenKind::Integer
                     | TokenKind::Float
             )
-        )
+        ) || self.macro_punctuation_arguments
+            && matches!(self.peek(), Some(TokenKind::Equals | TokenKind::FatArrow))
+    }
+
+    fn starts_declaration_macro_tail(&self) -> bool {
+        if self.peek() != Some(TokenKind::Equals) {
+            return false;
+        }
+        match self.peek_n(1) {
+            Some(TokenKind::LBrace) => true,
+            Some(TokenKind::Identifier) => self.peek_n(2) == Some(TokenKind::FatArrow),
+            Some(TokenKind::LParen) => {
+                let mut depth = 0usize;
+                let mut offset = 1usize;
+                loop {
+                    match self.peek_n(offset) {
+                        Some(TokenKind::LParen) => depth += 1,
+                        Some(TokenKind::RParen) => {
+                            depth = depth.saturating_sub(1);
+                            if depth == 0 {
+                                return self.peek_n(offset + 1) == Some(TokenKind::FatArrow);
+                            }
+                        }
+                        None => return false,
+                        _ => {}
+                    }
+                    offset += 1;
+                }
+            }
+            _ => false,
+        }
     }
 
     fn parenthesized_operator(&self) -> bool {
@@ -2389,6 +2453,7 @@ fn find_type_parameter_binding_mut<'a>(
                 }
             }
             TypeParameterPattern::Binding(_) => {}
+            TypeParameterPattern::Splice(_) => {}
         }
     }
     None

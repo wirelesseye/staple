@@ -270,6 +270,7 @@ impl DeclarationCollector<'_> {
                     self.type_parameter(element);
                 }
             }
+            TypeParameterPattern::Splice(_) => {}
         }
     }
 
@@ -608,6 +609,7 @@ impl Collector<'_> {
                     self.type_parameter(element);
                 }
             }
+            TypeParameterPattern::Splice(_) => {}
         }
     }
 

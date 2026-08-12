@@ -2439,6 +2439,9 @@ impl NameResolver {
                     self.declare_type_parameter_pattern(element);
                 }
             }
+            TypeParameterPattern::Splice(_) => {
+                unreachable!("type-parameter splices must be expanded before resolution")
+            }
         }
     }
 
@@ -2463,6 +2466,9 @@ impl NameResolver {
                     self.allocate_type_parameter_pattern(element, parameters);
                 }
             }
+            TypeParameterPattern::Splice(_) => {
+                unreachable!("type-parameter splices must be expanded before resolution")
+            }
         }
     }
 
@@ -2485,6 +2491,9 @@ impl NameResolver {
                 for element in &product.elements {
                     self.scope_allocated_type_parameter_pattern(element);
                 }
+            }
+            TypeParameterPattern::Splice(_) => {
+                unreachable!("type-parameter splices must be expanded before resolution")
             }
         }
     }

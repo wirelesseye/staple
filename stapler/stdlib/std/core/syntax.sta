@@ -15,6 +15,8 @@ pub(repr) type Optional = Element => Element
 @recursive_constructor
 pub(repr) type Separated = Element => Separator => Element
 pub type Comma
+pub type Equals
+pub type FatArrow
 @recursive_constructor
 pub(repr) type Parenthesized = Contents => Contents
 @recursive_constructor
@@ -40,4 +42,4 @@ pub type MacroCallVisibility = opaque
 // satisfy it. It has no runtime methods or user implementations.
 pub trait StringType = T => {}
 
-pub type alias Syntax = Expr | Type | Pattern | Item | Visibility | Comma | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
+pub type alias Syntax = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax

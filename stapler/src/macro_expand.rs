@@ -60,6 +60,8 @@ enum MetaType {
     Visibility,
     MacroCallVisibility,
     Comma,
+    Equals,
+    FatArrow,
     Product(Vec<MetaType>),
     Optional(Box<MetaType>),
     Sequence(Box<MetaType>),
@@ -121,6 +123,8 @@ enum SyntaxValue {
     Items(Vec<Item>),
     Visibility(VisibilitySyntax),
     Comma(Syntax),
+    Equals(Syntax),
+    FatArrow(Syntax),
     Delimited(DelimitedSyntaxValue),
 }
 
@@ -169,7 +173,9 @@ impl SyntaxValue {
             | Self::Item(_)
             | Self::Items(_)
             | Self::Visibility(_)
-            | Self::Comma(_) => None,
+            | Self::Comma(_)
+            | Self::Equals(_)
+            | Self::FatArrow(_) => None,
         }
     }
 }
@@ -259,6 +265,14 @@ fn syntax_category(value: &SyntaxValue) -> &'static str {
         SyntaxValue::Comma(syntax) => {
             let _ = syntax.id;
             "comma"
+        }
+        SyntaxValue::Equals(syntax) => {
+            let _ = syntax.id;
+            "equals"
+        }
+        SyntaxValue::FatArrow(syntax) => {
+            let _ = syntax.id;
+            "fat arrow"
         }
         SyntaxValue::Delimited(value) => match value.kind {
             DelimiterKind::Parenthesized => "parenthesized",
@@ -1772,6 +1786,8 @@ impl MacroExpander {
                     | "Sequence"
                     | "Separated"
                     | "Comma"
+                    | "Equals"
+                    | "FatArrow"
                     | "Parenthesized"
                     | "Bracketed"
                     | "Braced"
@@ -2168,6 +2184,9 @@ impl MacroExpander {
                 Some(SyntaxValue::Visibility(visibility.clone()))
             }
             MetaType::Item => None,
+            MetaType::Comma => Some(SyntaxValue::Comma(argument.syntax().clone())),
+            MetaType::Equals => Some(SyntaxValue::Equals(argument.syntax().clone())),
+            MetaType::FatArrow => Some(SyntaxValue::FatArrow(argument.syntax().clone())),
             MetaType::Delimited(_, _) => {
                 delimiter_argument_value(expected, argument.syntax(), &mut self.next_syntax_id)
             }
@@ -2200,6 +2219,8 @@ impl MacroExpander {
                     MetaType::Visibility => "visibility syntax".to_owned(),
                     MetaType::MacroCallVisibility => "macro-call visibility".to_owned(),
                     MetaType::Comma => "comma syntax".to_owned(),
+                    MetaType::Equals => "equals syntax".to_owned(),
+                    MetaType::FatArrow => "fat-arrow syntax".to_owned(),
                     MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
                         format!("`{}` syntax", format_meta_type(expected))
                     }
@@ -2289,6 +2310,12 @@ impl MacroExpander {
                 }
                 if name.name == "Comma" {
                     return Some(Value::Syntax(SyntaxValue::Comma(name.syntax.clone())));
+                }
+                if name.name == "Equals" {
+                    return Some(Value::Syntax(SyntaxValue::Equals(name.syntax.clone())));
+                }
+                if name.name == "FatArrow" {
+                    return Some(Value::Syntax(SyntaxValue::FatArrow(name.syntax.clone())));
                 }
                 if let Some(kind) = match name.name.as_str() {
                     "Private" => Some(VisibilityKind::Private),
@@ -3129,7 +3156,7 @@ impl MacroExpander {
                 if !item_output_supported(&item) {
                     self.diagnostics.push(Diagnostic::new(
                         item_syntax(&item).span.clone(),
-                        "item quotations cannot generate `use` or `macro` declarations yet",
+                        "item quotations cannot generate `macro` declarations yet",
                     ));
                     return None;
                 }
@@ -3144,7 +3171,7 @@ impl MacroExpander {
                     if !item_output_supported(item) {
                         self.diagnostics.push(Diagnostic::new(
                             item_syntax(item).span.clone(),
-                            "item quotations cannot generate `use` or `macro` declarations yet",
+                            "item quotations cannot generate `macro` declarations yet",
                         ));
                         return None;
                     }
@@ -3346,6 +3373,8 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "Visibility" => Some(MetaType::Visibility),
             "MacroCallVisibility" => Some(MetaType::MacroCallVisibility),
             "Comma" => Some(MetaType::Comma),
+            "Equals" => Some(MetaType::Equals),
+            "FatArrow" => Some(MetaType::FatArrow),
             _ => None,
         },
         Type::Application(application) => {
@@ -3550,6 +3579,8 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             false
         }
         MetaType::Comma => matches_single_token(argument.syntax(), crate::TokenKind::Comma),
+        MetaType::Equals => matches_single_token(argument.syntax(), crate::TokenKind::Equals),
+        MetaType::FatArrow => matches_single_token(argument.syntax(), crate::TokenKind::FatArrow),
         MetaType::Delimited(_, _) => {
             let mut next_syntax_id = 0;
             delimiter_argument_value(expected, argument.syntax(), &mut next_syntax_id).is_some()
@@ -3816,6 +3847,18 @@ fn match_syntax_fragment(
             }
             SyntaxValue::Comma(syntax.clone())
         }
+        MetaType::Equals => {
+            if !matches_single_token(syntax, crate::TokenKind::Equals) {
+                return None;
+            }
+            SyntaxValue::Equals(syntax.clone())
+        }
+        MetaType::FatArrow => {
+            if !matches_single_token(syntax, crate::TokenKind::FatArrow) {
+                return None;
+            }
+            SyntaxValue::FatArrow(syntax.clone())
+        }
         MetaType::Expr | MetaType::CallExpr | MetaType::UnstructuredExpr => {
             let (value, ids) = expression()?;
             let value = SyntaxValue::from_expression(value);
@@ -3877,6 +3920,16 @@ fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Optio
         && token.kind == crate::TokenKind::Comma
     {
         return Some(SyntaxValue::Comma(syntax.clone()));
+    }
+    if let [token] = tokens.as_slice()
+        && token.kind == crate::TokenKind::Equals
+    {
+        return Some(SyntaxValue::Equals(syntax.clone()));
+    }
+    if let [token] = tokens.as_slice()
+        && token.kind == crate::TokenKind::FatArrow
+    {
+        return Some(SyntaxValue::FatArrow(syntax.clone()));
     }
     if let Some((open, close, kind)) =
         tokens
@@ -4150,6 +4203,8 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Visibility => "Visibility".to_owned(),
             MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
             MetaType::Comma => "Comma".to_owned(),
+            MetaType::Equals => "Equals".to_owned(),
+            MetaType::FatArrow => "FatArrow".to_owned(),
             MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
                 format_meta_type(parameter)
             }
@@ -4173,6 +4228,8 @@ fn format_meta_type(meta: &MetaType) -> String {
         MetaType::Visibility => "Visibility".to_owned(),
         MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
         MetaType::Comma => "Comma".to_owned(),
+        MetaType::Equals => "Equals".to_owned(),
+        MetaType::FatArrow => "FatArrow".to_owned(),
         MetaType::Product(elements) => format!(
             "({})",
             elements
@@ -4275,6 +4332,8 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Optional"
                 | "Separated"
                 | "Comma"
+                | "Equals"
+                | "FatArrow"
                 | "Parenthesized"
                 | "Bracketed"
                 | "Braced"
@@ -4564,6 +4623,14 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             if binding.name == "Comma" && matches!(value, Value::Syntax(SyntaxValue::Comma(_))) {
                 return true;
             }
+            if binding.name == "Equals" && matches!(value, Value::Syntax(SyntaxValue::Equals(_))) {
+                return true;
+            }
+            if binding.name == "FatArrow"
+                && matches!(value, Value::Syntax(SyntaxValue::FatArrow(_)))
+            {
+                return true;
+            }
             if binding.name.chars().next().is_some_and(char::is_uppercase)
                 && let Value::Nominal(name, argument) = &value
             {
@@ -4702,6 +4769,18 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 return bind_pattern(&pattern.argument, Value::Product(Vec::new()), environment);
             }
             if pattern.namespace.is_none()
+                && pattern.name == "Equals"
+                && matches!(value, Value::Syntax(SyntaxValue::Equals(_)))
+            {
+                return bind_pattern(&pattern.argument, Value::Product(Vec::new()), environment);
+            }
+            if pattern.namespace.is_none()
+                && pattern.name == "FatArrow"
+                && matches!(value, Value::Syntax(SyntaxValue::FatArrow(_)))
+            {
+                return bind_pattern(&pattern.argument, Value::Product(Vec::new()), environment);
+            }
+            if pattern.namespace.is_none()
                 && let Value::Syntax(SyntaxValue::Visibility(visibility)) = &value
                 && visibility_pattern_matches(&pattern.name, visibility.kind)
             {
@@ -4745,6 +4824,8 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         (MetaType::Pattern, Value::Syntax(SyntaxValue::Pattern(_))) => true,
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
         (MetaType::Comma, Value::Syntax(SyntaxValue::Comma(_))) => true,
+        (MetaType::Equals, Value::Syntax(SyntaxValue::Equals(_))) => true,
+        (MetaType::FatArrow, Value::Syntax(SyntaxValue::FatArrow(_))) => true,
         (MetaType::Product(expected), Value::Product(values)) => {
             expected.len() == values.len()
                 && expected
@@ -4985,8 +5066,8 @@ fn item_output_supported(item: &Item) -> bool {
         | Item::TraitImplementation(_)
         | Item::EffectDeclaration(_)
         | Item::Statement(_) => true,
-        Item::Submodule(_) => true,
-        Item::UseDeclaration(_) | Item::MacroDeclaration(_) => false,
+        Item::Submodule(_) | Item::UseDeclaration(_) => true,
+        Item::MacroDeclaration(_) => false,
     }
 }
 
@@ -5083,6 +5164,62 @@ fn substitute_type(
         return match environment.get(&splice.name).map(EnvironmentBinding::get) {
             Some(Value::Syntax(SyntaxValue::Type(value))) => {
                 *ty = value;
+                Some(())
+            }
+            Some(Value::Syntax(SyntaxValue::Ident(identifier))) => {
+                *ty = Type::Named(crate::NamedType {
+                    syntax: identifier.syntax,
+                    namespace: None,
+                    name: identifier.name,
+                });
+                Some(())
+            }
+            Some(Value::Syntax(SyntaxValue::Delimited(delimited)))
+                if delimited.kind == DelimiterKind::Parenthesized =>
+            {
+                let values = match delimited.contents {
+                    DelimitedValueContents::Fixed(values) => {
+                        values.into_iter().map(|(_, value)| value).collect()
+                    }
+                    DelimitedValueContents::Sequence(values) => values,
+                    DelimitedValueContents::Separated { .. } => {
+                        diagnostics.push(Diagnostic::new(
+                            splice.syntax.span.clone(),
+                            "parenthesized type splice must contain identifiers",
+                        ));
+                        return None;
+                    }
+                };
+                let elements = values
+                    .into_iter()
+                    .map(|value| {
+                        let Value::Syntax(SyntaxValue::Ident(identifier)) = value else {
+                            return None;
+                        };
+                        Some(crate::TypeElement {
+                            syntax: identifier.syntax.clone(),
+                            name: None,
+                            ty: Type::Named(crate::NamedType {
+                                syntax: identifier.syntax,
+                                namespace: None,
+                                name: identifier.name,
+                            }),
+                            spread: false,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>();
+                let Some(elements) = elements else {
+                    diagnostics.push(Diagnostic::new(
+                        splice.syntax.span.clone(),
+                        "parenthesized type splice must contain identifiers",
+                    ));
+                    return None;
+                };
+                *ty = Type::Product(crate::ProductType {
+                    syntax: delimited.syntax,
+                    elements,
+                    variadic: false,
+                });
                 Some(())
             }
             Some(Value::Syntax(value)) => {
@@ -5307,6 +5444,11 @@ fn substitute_item(
         }
         Item::TypeDeclaration(declaration) => {
             substitute_identifier(&mut declaration.name, environment, diagnostics)?;
+            substitute_type_parameter_list(
+                &mut declaration.type_parameters,
+                environment,
+                diagnostics,
+            )?;
             for bound in &mut declaration.trait_bounds {
                 substitute_trait_bound(bound, environment, diagnostics)?;
             }
@@ -5318,7 +5460,12 @@ fn substitute_item(
             substitute_identifier(&mut submodule.name, environment, diagnostics)?;
             substitute_item_list(&mut submodule.module.items, environment, diagnostics)?;
         }
-        Item::UseDeclaration(_) | Item::MacroDeclaration(_) => {
+        Item::UseDeclaration(declaration) => {
+            for component in &mut declaration.path {
+                substitute_identifier(component, environment, diagnostics)?;
+            }
+        }
+        Item::MacroDeclaration(_) => {
             unreachable!("unsupported item output must be rejected before substitution")
         }
     }
@@ -5342,6 +5489,9 @@ fn apply_visibility_to_item(
     match item {
         Item::ExternBlock(block) if kind != VisibilityKind::PublicRepr => block.visibility = public,
         Item::Submodule(submodule) => submodule.visibility = public,
+        Item::UseDeclaration(declaration) if kind != VisibilityKind::PublicRepr => {
+            declaration.visibility = public
+        }
         Item::TypeDeclaration(declaration) => {
             declaration.visibility = public;
             declaration.representation_visibility = if kind == VisibilityKind::PublicRepr {
@@ -5441,6 +5591,58 @@ fn substitute_item_list(
     Some(())
 }
 
+fn substitute_type_parameter_list(
+    parameters: &mut Vec<crate::TypeParameterPattern>,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    let mut substituted = Vec::new();
+    for parameter in std::mem::take(parameters) {
+        let crate::TypeParameterPattern::Splice(splice) = parameter else {
+            substituted.push(parameter);
+            continue;
+        };
+        let value = environment.get(&splice.name).map(EnvironmentBinding::get);
+        let Some(Value::Sequence(values)) = value else {
+            let actual = match value {
+                None => "an unknown value",
+                Some(Value::Product(_)) => "a product",
+                Some(Value::Syntax(_)) => "syntax",
+                Some(_) => "another compile-time value",
+            };
+            diagnostics.push(Diagnostic::new(
+                splice.syntax.span,
+                format!(
+                    "type-parameter splice `${}...` requires `Sequence (Ident String)`, but contains {actual}",
+                    splice.name,
+                ),
+            ));
+            return None;
+        };
+        for value in values {
+            let Value::Syntax(SyntaxValue::Ident(identifier)) = value else {
+                diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    format!(
+                        "type-parameter splice `${}...` contains a non-identifier value",
+                        splice.name
+                    ),
+                ));
+                return None;
+            };
+            substituted.push(crate::TypeParameterPattern::Binding(
+                crate::TypeParameterBinding {
+                    syntax: identifier.syntax,
+                    name: identifier.name,
+                    sized: true,
+                },
+            ));
+        }
+    }
+    *parameters = substituted;
+    Some(())
+}
+
 fn substitute_identifier(
     name: &mut String,
     environment: &Environment,
@@ -5534,7 +5736,8 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
                 alpha_rename_item(item, mark);
             }
         }
-        Item::UseDeclaration(_) | Item::MacroDeclaration(_) => {
+        Item::UseDeclaration(_) => {}
+        Item::MacroDeclaration(_) => {
             unreachable!("unsupported item output must be rejected before hygiene")
         }
     }
@@ -5827,6 +6030,9 @@ fn freshen_type_parameter(
                 freshen_type_parameter(expander, element, module, mark);
             }
         }
+        crate::TypeParameterPattern::Splice(splice) => {
+            expander.freshen_syntax(&mut splice.syntax, module, mark);
+        }
     }
 }
 
@@ -5933,7 +6139,10 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
                 freshen_item(expander, item, module, mark);
             }
         }
-        Item::UseDeclaration(_) | Item::MacroDeclaration(_) => {
+        Item::UseDeclaration(declaration) => {
+            expander.freshen_syntax(&mut declaration.syntax, module, mark);
+        }
+        Item::MacroDeclaration(_) => {
             unreachable!("unsupported item output must be rejected before freshening")
         }
     }

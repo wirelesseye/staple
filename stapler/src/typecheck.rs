@@ -1427,6 +1427,9 @@ impl TypeChecker {
                     .collect(),
                 variadic: false,
             }),
+            TypeParameterPattern::Splice(_) => {
+                unreachable!("type-parameter splices must be expanded before type checking")
+            }
         }
     }
 
@@ -5335,6 +5338,9 @@ impl TypeChecker {
                             substitutions,
                         )
                     })
+            }
+            TypeParameterPattern::Splice(_) => {
+                unreachable!("type-parameter splices must be expanded before type checking")
             }
         }
     }

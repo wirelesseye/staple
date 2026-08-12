@@ -48,6 +48,7 @@ pub struct SumType {
 pub enum TypeParameterPattern {
     Binding(TypeParameterBinding),
     Product(TypeParameterProduct),
+    Splice(SpliceExpression),
 }
 
 impl TypeParameterPattern {
@@ -55,6 +56,7 @@ impl TypeParameterPattern {
         match self {
             Self::Binding(binding) => &binding.syntax,
             Self::Product(product) => &product.syntax,
+            Self::Splice(splice) => &splice.syntax,
         }
     }
 
@@ -66,6 +68,7 @@ impl TypeParameterPattern {
                 .iter()
                 .flat_map(TypeParameterPattern::names)
                 .collect(),
+            Self::Splice(_) => Vec::new(),
         }
     }
 }

@@ -660,6 +660,36 @@ fn parses_visibility_aware_macro_calls_and_splices_losslessly() {
 }
 
 #[test]
+fn parses_declaration_style_item_macro_punctuation_losslessly() {
+    let source = concat!(
+        "typegroup Local = { Unit, }\n",
+        "pub(repr) typegroup Result = (T, E,) => { Ok T, Err E, }\n",
+        "value = 1\n",
+        "identity = argument => argument\n",
+    );
+    let root = parse(source).expect("declaration-style macro calls should parse");
+    assert_eq!(root.text(), source);
+    assert!(matches!(
+        &root.items[0],
+        Item::Statement(statement)
+            if matches!(statement.as_ref(), Statement::Expression(Expression::Call(_)))
+    ));
+    assert!(matches!(
+        &root.items[1],
+        Item::VisibilityMacroInvocation(invocation)
+            if invocation.visibility.kind == stapler::VisibilityKind::PublicRepr
+    ));
+    assert!(matches!(
+        statement(&root.items[2]),
+        Statement::Assignment(_)
+    ));
+    assert!(matches!(
+        statement(&root.items[3]),
+        Statement::Assignment(_)
+    ));
+}
+
+#[test]
 fn parses_grouped_type_and_pattern_macro_arguments_losslessly() {
     let source = concat!(
         "inspect_type (I32 -> I32)\n",

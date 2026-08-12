@@ -1,6 +1,7 @@
-pub type True
-pub type False
-pub type alias Bool = True | False
+pub typegroup Bool = {
+    True,
+    False,
+}
 
 impl Eq Bool {
     def equal = left => right => match (left, right) {

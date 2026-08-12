@@ -642,6 +642,7 @@ impl<'a> Classifier<'a> {
                     self.type_parameter(element, resolved);
                 }
             }
+            TypeParameterPattern::Splice(_) => {}
         }
         let _ = resolved;
     }

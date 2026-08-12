@@ -2172,12 +2172,14 @@ fn expands_visibility_aware_macros_and_contextual_visibility_splices() {
 #[test]
 fn expands_standard_typegroup_into_module_variants_and_alias() {
     let module = type_check(concat!(
-        "pub(repr) typegroup Pattern {\n",
+        "pub(repr) typegroup Pattern = {\n",
         "    Literal String,\n",
         "    Wildcard,\n",
         "}\n",
         "let literal: Pattern = Pattern.Literal \"value\"\n",
         "let wildcard: Pattern = Pattern.Wildcard\n",
+        "let reexported_literal: Pattern = Literal \"value\"\n",
+        "let reexported_wildcard: Pattern = Wildcard\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -2186,16 +2188,97 @@ fn expands_standard_typegroup_into_module_variants_and_alias() {
 }
 
 #[test]
+fn typegroup_supports_generic_groups_and_reexports_their_variants() {
+    let module = type_check(concat!(
+        "pub(repr) typegroup Maybe = T => {\n",
+        "    Missing,\n",
+        "    Present T,\n",
+        "}\n",
+        "let missing: Maybe I32 = Missing\n",
+        "let present: Maybe I32 = Present 1\n",
+        "let qualified: Maybe String = Maybe.Present \"value\"\n",
+        "pub(repr) typegroup Either = (L, R,) => {\n",
+        "    Left L,\n",
+        "    Right R,\n",
+        "}\n",
+    ));
+    let either = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::TypeDeclaration(declaration) if declaration.name == "Either" => Some(declaration),
+            _ => None,
+        })
+        .expect("generated Either alias");
+    assert_eq!(
+        either
+            .type_parameters
+            .iter()
+            .flat_map(stapler::TypeParameterPattern::names)
+            .collect::<Vec<_>>(),
+        ["L", "R"],
+    );
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generic typegroup variants and their reexports should compile");
+}
+
+#[test]
+fn equals_and_fat_arrow_are_structured_syntax_nodes() {
+    let module = type_check(concat!(
+        "macro punctuation = _: Ident String => equal: Equals => _: Ident String => arrow: FatArrow => _: Braced (Sequence Syntax) =>\n",
+        "    match (equal, arrow, Equals, FatArrow) {\n",
+        "        (Equals, FatArrow, Equals, FatArrow) => quote { let punctuated: I32 = 42 },\n",
+        "    }\n",
+        "punctuation marker = T => {}\n",
+        "let result: I32 = punctuated\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("equals and fat-arrow syntax should match and construct");
+}
+
+#[test]
+fn rejects_legacy_typegroup_call_syntax() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for source in [
+        "typegroup Legacy { Unit, }\n",
+        "typegroup Legacy (T) { Wrapped T, }\n",
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("legacy syntax should still parse as an ordinary call");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("legacy typegroup syntax should not expand");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message.contains("macro `typegroup` requires")
+                    || diagnostic
+                        .message
+                        .contains("no overload of macro `typegroup`")
+            }),
+            "expected a typegroup overload diagnostic, found {diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
 fn typegroup_supports_private_construction_compound_types_and_trailing_commas() {
     let module = type_check(concat!(
-        "typegroup Local {\n",
+        "typegroup Local = {\n",
         "    Pair (I32, String),\n",
         "    Empty,\n",
         "}\n",
-        "pub(repr) typegroup Generic {\n",
+        "pub(repr) typegroup Generic = {\n",
         "    Wrapped Option I32,\n",
         "}\n",
-        "pub typegroup PublicGroup {\n",
+        "pub typegroup PublicGroup = {\n",
         "    Unit,\n",
         "}\n",
         "let pair: Local = Local.Pair (1, \"value\")\n",
@@ -2219,7 +2302,7 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for (source, expected) in [
         (
-            "typegroup Empty {}\n",
+            "typegroup Empty = {}\n",
             "compile-time match was not exhaustive",
         ),
         (
@@ -2604,12 +2687,8 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
             "item-producing macro `emit` cannot have excess arguments",
         ),
         (
-            "macro emit = _: Expr => quote { use std.core * }\nemit ()\n",
-            "item quotations cannot generate `use` or `macro` declarations yet",
-        ),
-        (
             "macro emit = _: Expr => quote { macro generated = value => quote { $value } }\nemit ()\n",
-            "item quotations cannot generate `use` or `macro` declarations yet",
+            "item quotations cannot generate `macro` declarations yet",
         ),
         (
             "macro consume = value: Item => quote { 1 }\nconsume candidate\n",
