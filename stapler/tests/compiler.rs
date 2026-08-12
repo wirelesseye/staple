@@ -1,6 +1,7 @@
 use inkwell::context::Context;
 use stapler::{
-    CheckedType, CodeGenerator, Item, NameResolver, ProgramLoader, Statement, TypeChecker, parse,
+    CheckedType, CodeGenerator, Item, NameResolver, ProgramLoader, RecursiveConstruction,
+    Statement, TypeChecker, parse,
 };
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -20,6 +21,30 @@ fn type_check(source: &str) -> stapler::TypedModule {
     TypeChecker::new()
         .check(resolve(source))
         .expect("source should type-check")
+}
+
+#[test]
+fn marks_compiler_owned_recursive_constructors() {
+    let resolved = resolve("");
+    let construction_for = |name: &str| {
+        resolved
+            .type_declarations()
+            .iter()
+            .find_map(|(id, declaration)| {
+                (declaration.name == name).then(|| resolved.recursive_construction(*id))
+            })
+            .flatten()
+    };
+
+    assert_eq!(
+        construction_for("Ref"),
+        Some(RecursiveConstruction::ManagedReference)
+    );
+    assert_eq!(
+        construction_for("CallExpr"),
+        Some(RecursiveConstruction::Syntax)
+    );
+    assert_eq!(construction_for("String"), None);
 }
 
 fn copy_directory(source: &Path, target: &Path) {
@@ -1979,6 +2004,22 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
         (
             "macro ordinary = value => quote { $value }\n@ordinary\nlet value = 1\n",
             "macro `ordinary` is function-style and cannot be used as modifier `@ordinary`",
+        ),
+        (
+            "macro @recursive_constructor: Item -> Item = item => item\n",
+            "modifier name `@recursive_constructor` is reserved by the compiler",
+        ),
+        (
+            "@recursive_constructor\ntype Box = I32\n",
+            "`@recursive_constructor` may only mark a compiler-owned recursive constructor",
+        ),
+        (
+            "@recursive_constructor(1)\ntype Box = I32\n",
+            "`@recursive_constructor` does not accept an argument",
+        ),
+        (
+            "@recursive_constructor\nlet value = 1\n",
+            "`@recursive_constructor` may only modify a type declaration",
         ),
         (
             "macro @identity: Item -> Item = item => item\n@identity\nuse std.core *\n",

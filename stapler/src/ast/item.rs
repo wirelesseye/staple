@@ -163,6 +163,7 @@ pub enum TypeDeclarationKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDeclaration {
     pub syntax: Syntax,
+    pub recursive_constructor: bool,
     pub visibility: Visibility,
     pub representation_visibility: Visibility,
     pub kind: TypeDeclarationKind,

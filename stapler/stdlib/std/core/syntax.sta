@@ -1,7 +1,9 @@
 // Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 // their data in the first structured-syntax slice; the remaining expression
 // forms round-trip through UnstructuredExpr without exposing their fields yet.
+@recursive_constructor
 pub(repr) type Ident = Spelling => StringType Spelling => Spelling
+@recursive_constructor
 pub(repr) type CallExpr = (
     callee: Expr,
     argument: Expr,

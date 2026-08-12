@@ -785,6 +785,7 @@ impl Grammar {
         }
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
+            recursive_constructor: false,
             visibility,
             representation_visibility,
             kind,

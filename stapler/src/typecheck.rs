@@ -1178,7 +1178,7 @@ impl TypeChecker {
 
     fn seed_constructors(&mut self, module: &ResolvedModule) {
         for (symbol, id) in module.constructors() {
-            if module.builtin_type(*id) == Some(BuiltinType::Syntax) {
+            if module.recursive_construction(*id) == Some(crate::RecursiveConstruction::Syntax) {
                 continue;
             }
             let declaration = self.type_declarations[id].clone();
@@ -4191,15 +4191,18 @@ impl TypeChecker {
                 pointee: Box::new(arguments[0].clone()),
             };
         }
-        if module.builtin_type(id) == Some(BuiltinType::Ref) {
-            return CheckedType::Ref(Box::new(arguments[0].clone()));
-        }
-        if module.builtin_type(id) == Some(BuiltinType::Syntax) {
-            return CheckedType::Opaque {
-                id,
-                name: display_name,
-                arguments,
-            };
+        match module.recursive_construction(id) {
+            Some(crate::RecursiveConstruction::ManagedReference) => {
+                return CheckedType::Ref(Box::new(arguments[0].clone()));
+            }
+            Some(crate::RecursiveConstruction::Syntax) => {
+                return CheckedType::Opaque {
+                    id,
+                    name: display_name,
+                    arguments,
+                };
+            }
+            None => {}
         }
         if declaration.kind == TypeDeclarationKind::Opaque {
             return CheckedType::Opaque {

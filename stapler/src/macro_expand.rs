@@ -656,6 +656,12 @@ impl MacroExpander {
                 }
             }
             if definition.key.modifier {
+                if definition.key.name == "recursive_constructor" {
+                    self.diagnostics.push(Diagnostic::new(
+                        definition.declaration.syntax.span.clone(),
+                        "modifier name `@recursive_constructor` is reserved by the compiler",
+                    ));
+                }
                 let valid_parameters = match definition.parameters.as_slice() {
                     [MetaType::Item] => true,
                     [argument, MetaType::Item] => matches!(
@@ -979,6 +985,24 @@ impl MacroExpander {
                     "macro expansion exceeded the limit of 128 nested expansions",
                 ));
                 return None;
+            }
+            if invocation.namespace.is_none() && invocation.name == "recursive_constructor" {
+                if invocation.argument.is_some() {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span,
+                        "`@recursive_constructor` does not accept an argument",
+                    ));
+                    return None;
+                }
+                let Item::TypeDeclaration(declaration) = &mut current else {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span,
+                        "`@recursive_constructor` may only modify a type declaration",
+                    ));
+                    return None;
+                };
+                declaration.recursive_constructor = true;
+                continue;
             }
             let (definition, argument) = self.select_modifier(module, &invocation)?;
             let key = definition.key.clone();

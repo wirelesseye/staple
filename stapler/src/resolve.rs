@@ -67,6 +67,18 @@ pub enum BuiltinType {
     Syntax,
 }
 
+/// Describes a compiler-owned construction strategy that may be entered while
+/// the constructed type is still being resolved.
+///
+/// This is declaration metadata rather than a trait obligation: construction
+/// participates in type resolution itself, so resolving a trait implementation
+/// first would be circular.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RecursiveConstruction {
+    ManagedReference,
+    Syntax,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FloatType {
     F32,
@@ -246,6 +258,7 @@ pub struct ResolvedModule {
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     lowered_infix: HashMap<SyntaxId, Expression>,
     builtin_types: HashMap<TypeId, BuiltinType>,
+    recursive_constructions: HashMap<TypeId, RecursiveConstruction>,
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     external_symbols: HashSet<SymbolId>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
@@ -423,6 +436,10 @@ impl ResolvedModule {
 
     pub fn builtin_type(&self, id: TypeId) -> Option<BuiltinType> {
         self.builtin_types.get(&id).copied()
+    }
+
+    pub fn recursive_construction(&self, id: TypeId) -> Option<RecursiveConstruction> {
+        self.recursive_constructions.get(&id).copied()
     }
 
     pub fn intrinsic_function(&self, symbol: SymbolId) -> Option<IntrinsicFunction> {
@@ -628,6 +645,7 @@ pub struct NameResolver {
     declared_fixities: Vec<HashMap<String, Fixity>>,
     lowered_infix: HashMap<SyntaxId, Expression>,
     builtin_types: HashMap<TypeId, BuiltinType>,
+    recursive_constructions: HashMap<TypeId, RecursiveConstruction>,
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     primitive_macros: HashMap<MacroId, PrimitiveMacro>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
@@ -784,6 +802,7 @@ impl NameResolver {
             syntax_modules: self.syntax_modules,
             lowered_infix: self.lowered_infix,
             builtin_types: self.builtin_types,
+            recursive_constructions: self.recursive_constructions,
             intrinsic_functions: self.intrinsic_functions,
             external_symbols,
             macro_calls: self.macro_calls,
@@ -849,6 +868,15 @@ impl NameResolver {
             self.register_builtin_type(cinterop, "std.cinterop", "CString", BuiltinType::CString);
             self.register_builtin_type(cinterop, "std.cinterop", "CPointer", BuiltinType::CPointer);
             self.register_primitive_macro(cinterop, "c_string", PrimitiveMacro::CString);
+        }
+
+        for (id, declaration) in &self.type_declarations {
+            if declaration.recursive_constructor && !self.recursive_constructions.contains_key(id) {
+                self.diagnostics.push(Diagnostic::new(
+                    declaration.syntax.span.clone(),
+                    "`@recursive_constructor` may only mark a compiler-owned recursive constructor",
+                ));
+            }
         }
 
         let mut expected = Vec::new();
@@ -1119,6 +1147,27 @@ impl NameResolver {
                 declaration.syntax.span.clone(),
                 "standard library type `Ref` must relax its parameter with `?Sized`",
             ));
+        }
+        let recursive_construction = match builtin {
+            BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
+            BuiltinType::Syntax if declaration.kind == crate::TypeDeclarationKind::Distinct => {
+                Some(RecursiveConstruction::Syntax)
+            }
+            _ => None,
+        };
+        match (declaration.recursive_constructor, recursive_construction) {
+            (true, Some(construction)) => {
+                self.recursive_constructions.insert(id, construction);
+            }
+            (false, Some(_)) => self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("standard library type `{name}` must be marked `@recursive_constructor`"),
+            )),
+            (true, None) => self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("standard library type `{name}` cannot be marked `@recursive_constructor`"),
+            )),
+            (false, None) => {}
         }
         self.type_names.insert(id, name.to_owned());
         self.builtin_types.insert(id, builtin);

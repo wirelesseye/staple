@@ -1,3 +1,4 @@
+@recursive_constructor
 pub(repr) type Ref = T => ?Sized T => T
 
 // TODO: move this to the `product` module

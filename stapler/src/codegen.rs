@@ -2210,8 +2210,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     if environment.did_return {
                         return Ok(self.unit_value());
                     }
-                    if self.typed_module.resolved().builtin_type(type_id)
-                        == Some(crate::BuiltinType::Ref)
+                    if self.typed_module.resolved().recursive_construction(type_id)
+                        == Some(crate::RecursiveConstruction::ManagedReference)
                     {
                         let constructor_type = self
                             .typed_module
