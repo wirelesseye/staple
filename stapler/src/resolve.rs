@@ -958,6 +958,10 @@ impl NameResolver {
         for name in [
             "Ident",
             "CallExpr",
+            "Sequence",
+            "Parenthesized",
+            "Bracketed",
+            "Braced",
             "UnstructuredExpr",
             "Expr",
             "Type",

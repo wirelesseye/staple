@@ -51,6 +51,26 @@ pub(crate) fn parse_pattern_fragment(
     })
 }
 
+/// Reinterprets original tokens as exactly one expression.
+pub(crate) fn parse_expression_fragment(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<Expression, ParseError> {
+    parse_fragment(syntax, false, next_syntax_id, |grammar| {
+        grammar.parse_expression()
+    })
+}
+
+/// Reinterprets original tokens as exactly one item.
+pub(crate) fn parse_item_fragment(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<Item, ParseError> {
+    parse_fragment(syntax, false, next_syntax_id, |grammar| {
+        grammar.parse_item()
+    })
+}
+
 fn parse_fragment<T>(
     syntax: &Syntax,
     grouped: bool,
@@ -1606,12 +1626,18 @@ impl Grammar {
         Ok(expression)
     }
 
-    /// Captures one balanced parenthesized macro argument after expression
-    /// parsing has failed. Its contents are interpreted during macro matching.
+    /// Captures one balanced delimited macro argument whose contents are
+    /// interpreted during macro matching.
     fn parse_syntax_argument(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
-        self.expect(TokenKind::LParen, "expected `(`")?;
-        let mut delimiters = vec![TokenKind::RParen];
+        let close = match self.peek() {
+            Some(TokenKind::LParen) => TokenKind::RParen,
+            Some(TokenKind::LBracket) => TokenKind::RBracket,
+            Some(TokenKind::LBrace) => TokenKind::RBrace,
+            _ => return Err(self.error("expected a delimited syntax argument")),
+        };
+        self.bump_token();
+        let mut delimiters = vec![close];
         while let Some(kind) = self.peek() {
             match kind {
                 TokenKind::LParen => {
@@ -1643,7 +1669,7 @@ impl Grammar {
                 }
             }
         }
-        Err(self.error("expected `)` after syntax argument"))
+        Err(self.error("expected closing delimiter after syntax argument"))
     }
 
     /// Parses chained named or positional product access.
@@ -1670,7 +1696,7 @@ impl Grammar {
                     value: Box::new(expression),
                     accessor,
                 });
-            } else if self.eat(TokenKind::LBracket) {
+            } else if !self.has_trivia_before_next_token() && self.eat(TokenKind::LBracket) {
                 let index = self.parse_expression()?;
                 self.expect(TokenKind::RBracket, "expected `]` after product index")?;
                 expression = Expression::Index(crate::IndexExpression {
@@ -1730,6 +1756,7 @@ impl Grammar {
                 }))
             }
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
+            Some(TokenKind::LBracket) => self.parse_syntax_argument(),
             Some(TokenKind::LParen) if self.parenthesized_operator() => self.parse_operator_value(),
             Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
             Some(TokenKind::Identifier) => {
@@ -2008,6 +2035,7 @@ impl Grammar {
             Some(
                 TokenKind::LBrace
                     | TokenKind::LParen
+                    | TokenKind::LBracket
                     | TokenKind::Match
                     | TokenKind::Loop
                     | TokenKind::Handle
@@ -2191,6 +2219,10 @@ impl Grammar {
         self.tokens[self.position..self.next_non_trivia(self.position)]
             .iter()
             .any(|token| token.kind == TokenKind::Newline)
+    }
+
+    fn has_trivia_before_next_token(&self) -> bool {
+        self.position < self.next_non_trivia(self.position)
     }
 
     /// Builds syntax metadata for tokens consumed since `start`.

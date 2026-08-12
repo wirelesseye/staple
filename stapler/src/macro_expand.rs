@@ -59,13 +59,31 @@ enum MetaType {
     Item,
     Visibility,
     MacroCallVisibility,
+    Delimited(DelimiterKind, DelimitedMetaContents),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum DelimiterKind {
+    Parenthesized,
+    Bracketed,
+    Braced,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+enum DelimitedMetaContents {
+    Fixed(Vec<MetaType>),
+    Sequence(Box<MetaType>),
 }
 
 impl MetaType {
     fn is_expression(&self) -> bool {
         matches!(
             self,
-            Self::Expr | Self::Ident(_) | Self::CallExpr | Self::UnstructuredExpr
+            Self::Expr
+                | Self::Ident(_)
+                | Self::CallExpr
+                | Self::UnstructuredExpr
+                | Self::Delimited(DelimiterKind::Parenthesized | DelimiterKind::Braced, _)
         )
     }
 }
@@ -93,6 +111,22 @@ enum SyntaxValue {
     Pattern(Pattern),
     Item(Box<Item>),
     Visibility(VisibilitySyntax),
+    Delimited(DelimitedSyntaxValue),
+}
+
+#[derive(Clone)]
+struct DelimitedSyntaxValue {
+    kind: DelimiterKind,
+    syntax: Syntax,
+    contents: DelimitedValueContents,
+    generated: Vec<Syntax>,
+    expression: Option<Box<Expression>>,
+}
+
+#[derive(Clone)]
+enum DelimitedValueContents {
+    Fixed(Vec<(Option<String>, Value)>),
+    Sequence(Vec<Value>),
 }
 
 impl SyntaxValue {
@@ -114,7 +148,78 @@ impl SyntaxValue {
             Self::Ident(name) => Some(Expression::Name(name)),
             Self::Call(call) => Some(Expression::Call(call)),
             Self::Unstructured(expression) => Some(expression),
+            Self::Delimited(delimited) => delimited.into_expression(),
             Self::Type(_) | Self::Pattern(_) | Self::Item(_) | Self::Visibility(_) => None,
+        }
+    }
+}
+
+impl DelimitedSyntaxValue {
+    fn into_expression(self) -> Option<Expression> {
+        if let Some(expression) = self.expression {
+            return Some(*expression);
+        }
+        let mut generated = self.generated.into_iter();
+        match self.kind {
+            DelimiterKind::Bracketed => None,
+            DelimiterKind::Parenthesized => {
+                let values = match self.contents {
+                    DelimitedValueContents::Fixed(values) => values,
+                    DelimitedValueContents::Sequence(values) => {
+                        values.into_iter().map(|value| (None, value)).collect()
+                    }
+                };
+                let mut expressions = values
+                    .into_iter()
+                    .map(|(_, value)| match value {
+                        Value::Syntax(value) => value.into_expression(),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                if expressions.is_empty() {
+                    return Some(Expression::Product(crate::ProductExpression {
+                        syntax: self.syntax,
+                        elements: Vec::new(),
+                    }));
+                }
+                let first = expressions.remove(0);
+                let expression = expressions.into_iter().fold(first, |callee, argument| {
+                    Expression::Call(crate::CallExpression {
+                        syntax: generated.next().unwrap_or_else(Syntax::compiler),
+                        callee: Box::new(callee),
+                        argument: Box::new(argument),
+                    })
+                });
+                Some(Expression::Product(crate::ProductExpression {
+                    syntax: self.syntax,
+                    elements: vec![crate::ProductElement {
+                        syntax: generated.next().unwrap_or_else(Syntax::compiler),
+                        name: None,
+                        value: expression,
+                        spread: false,
+                    }],
+                }))
+            }
+            DelimiterKind::Braced => {
+                let values = match self.contents {
+                    DelimitedValueContents::Fixed(values) => values
+                        .into_iter()
+                        .map(|(_, value)| value)
+                        .collect::<Vec<_>>(),
+                    DelimitedValueContents::Sequence(values) => values,
+                };
+                let statements = values
+                    .into_iter()
+                    .map(|value| match value {
+                        Value::Syntax(value) => value.into_expression().map(Statement::Expression),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Expression::Block(BlockExpression {
+                    syntax: self.syntax,
+                    statements,
+                }))
+            }
         }
     }
 }
@@ -126,6 +231,11 @@ fn syntax_category(value: &SyntaxValue) -> &'static str {
         SyntaxValue::Pattern(_) => "pattern",
         SyntaxValue::Item(_) => "item",
         SyntaxValue::Visibility(_) => "visibility",
+        SyntaxValue::Delimited(value) => match value.kind {
+            DelimiterKind::Parenthesized => "parenthesized",
+            DelimiterKind::Bracketed => "bracketed",
+            DelimiterKind::Braced => "braced",
+        },
     }
 }
 
@@ -142,6 +252,7 @@ enum Value {
     Integer(i128),
     String(String),
     Nominal(String, Box<Value>),
+    Sequence(Vec<Value>),
 }
 
 #[derive(Clone)]
@@ -619,12 +730,28 @@ impl MacroExpander {
             }
         }
         for definition in self.definitions.values() {
+            if definition.declaration.annotation.is_none()
+                && definition
+                    .declaration
+                    .value
+                    .as_ref()
+                    .is_some_and(invalid_sequence_parameter)
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    "`Sequence` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`",
+                ));
+            }
             if let Some(annotation) = &definition.declaration.annotation
                 && !valid_macro_annotation(annotation)
             {
                 self.diagnostics.push(Diagnostic::new(
                     annotation.syntax().span.clone(),
-                    "a macro annotation must accept one or more syntax-category parameters and return a syntax category",
+                    if type_contains_named(annotation, "Sequence") {
+                        "`Sequence` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
+                    } else {
+                        "a macro annotation must accept one or more syntax-category parameters and return a syntax category"
+                    },
                 ));
             }
             if let (Some(annotation), Some(body)) = (
@@ -1499,7 +1626,15 @@ impl MacroExpander {
         if let Expression::Name(name) = head
             && matches!(
                 name.name.as_str(),
-                "Ident" | "CallExpr" | "Private" | "Public" | "PublicRepr"
+                "Ident"
+                    | "CallExpr"
+                    | "Sequence"
+                    | "Parenthesized"
+                    | "Bracketed"
+                    | "Braced"
+                    | "Private"
+                    | "Public"
+                    | "PublicRepr"
             )
         {
             self.diagnostics.push(Diagnostic::new(
@@ -1860,6 +1995,9 @@ impl MacroExpander {
                 Some(SyntaxValue::Visibility(visibility.clone()))
             }
             MetaType::Item => None,
+            MetaType::Delimited(_, _) => {
+                delimiter_argument_value(expected, argument.syntax(), &mut self.next_syntax_id)
+            }
             _ => Some(SyntaxValue::from_expression(
                 meta_argument_expression(expected, argument).clone(),
             )),
@@ -1889,6 +2027,7 @@ impl MacroExpander {
                     MetaType::Visibility => "visibility syntax".to_owned(),
                     MetaType::MacroCallVisibility => "macro-call visibility".to_owned(),
                     MetaType::Syntax | MetaType::Expr => "an expression".to_owned(),
+                    MetaType::Delimited(_, _) => format!("`{}` syntax", format_meta_type(expected)),
                 };
                 self.diagnostics.push(Diagnostic::new(
                     argument.syntax().span.clone(),
@@ -2084,7 +2223,15 @@ impl MacroExpander {
                     && name.name.chars().next().is_some_and(char::is_uppercase)
                 {
                     let argument = self.eval_expression(module, &call.argument, environment)?;
-                    if matches!(name.name.as_str(), "Ident" | "CallExpr") {
+                    if matches!(
+                        name.name.as_str(),
+                        "Ident"
+                            | "CallExpr"
+                            | "Sequence"
+                            | "Parenthesized"
+                            | "Bracketed"
+                            | "Braced"
+                    ) {
                         return self.construct_syntax(
                             module,
                             &name.name,
@@ -2349,6 +2496,78 @@ impl MacroExpander {
                     callee: Box::new(callee.to_expression()?),
                     argument: Box::new(argument.to_expression()?),
                 })))
+            }
+            "Sequence" => {
+                let Value::Product(elements) = argument else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`Sequence` requires a product of syntax values",
+                    ));
+                    return None;
+                };
+                let mut values = Vec::with_capacity(elements.len());
+                for (_, value) in elements {
+                    if !matches!(value, Value::Syntax(_)) {
+                        self.diagnostics.push(Diagnostic::new(
+                            span,
+                            "`Sequence` elements must contain `Syntax`",
+                        ));
+                        return None;
+                    }
+                    values.push(value);
+                }
+                Some(Value::Sequence(values))
+            }
+            "Parenthesized" | "Bracketed" | "Braced" => {
+                let kind = delimiter_kind(constructor).expect("matched delimiter constructor");
+                let contents = match argument {
+                    Value::Product(mut values)
+                        if values.len() == 1 && matches!(values[0].1, Value::Sequence(_)) =>
+                    {
+                        let (_, Value::Sequence(values)) = values.remove(0) else {
+                            unreachable!("guarded sequence contents")
+                        };
+                        DelimitedValueContents::Sequence(values)
+                    }
+                    Value::Product(values) => {
+                        if !values
+                            .iter()
+                            .all(|(_, value)| matches!(value, Value::Syntax(_)))
+                        {
+                            self.diagnostics.push(Diagnostic::new(
+                                span,
+                                format!("`{constructor}` contents must contain `Syntax`"),
+                            ));
+                            return None;
+                        }
+                        DelimitedValueContents::Fixed(values)
+                    }
+                    Value::Sequence(values) => DelimitedValueContents::Sequence(values),
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            span,
+                            format!("`{constructor}` requires product or sequence contents"),
+                        ));
+                        return None;
+                    }
+                };
+                let generated_count = match &contents {
+                    DelimitedValueContents::Fixed(values) => values.len(),
+                    DelimitedValueContents::Sequence(values) => values.len(),
+                }
+                .saturating_mul(2)
+                .saturating_add(1);
+                Some(Value::Syntax(SyntaxValue::Delimited(
+                    DelimitedSyntaxValue {
+                        kind,
+                        syntax: self.generated_syntax(module, span.clone()),
+                        contents,
+                        generated: (0..generated_count)
+                            .map(|_| self.generated_syntax(module, span.clone()))
+                            .collect(),
+                        expression: None,
+                    },
+                )))
             }
             _ => unreachable!(),
         }
@@ -2701,6 +2920,22 @@ impl MacroExpander {
     }
 }
 
+fn invalid_sequence_parameter(expression: &Expression) -> bool {
+    let mut current = expression;
+    while let Expression::Function(function) = current {
+        let ty = match &function.pattern {
+            Pattern::Binding(binding) => Some(&binding.ty),
+            Pattern::Wildcard(wildcard) => Some(&wildcard.ty),
+            _ => None,
+        };
+        if ty.is_some_and(|ty| type_contains_named(ty, "Sequence") && meta_type(ty).is_none()) {
+            return true;
+        }
+        current = &function.body;
+    }
+    false
+}
+
 fn macro_is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId) -> bool {
     while let Some(parent) = program.parent_module(module) {
         if parent == ancestor {
@@ -2744,13 +2979,84 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             let Type::Named(callee) = application.callee.as_ref() else {
                 return None;
             };
-            if callee.namespace.is_some() || callee.name != "Ident" {
+            if callee.namespace.is_some() {
+                return None;
+            }
+            if let Some(kind) = delimiter_kind(&callee.name) {
+                return delimiter_contents_meta(application.argument.as_ref())
+                    .map(|contents| MetaType::Delimited(kind, contents));
+            }
+            if callee.name != "Ident" {
                 return None;
             }
             match application.argument.as_ref() {
                 Type::Named(argument)
                     if argument.namespace.is_none() && argument.name == "String" =>
                 {
+                    Some(MetaType::Ident(None))
+                }
+                Type::StringLiteral(literal) => crate::string_literal::decode(&literal.literal)
+                    .ok()
+                    .map(|spelling| MetaType::Ident(Some(spelling))),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn delimiter_kind(name: &str) -> Option<DelimiterKind> {
+    match name {
+        "Parenthesized" => Some(DelimiterKind::Parenthesized),
+        "Bracketed" => Some(DelimiterKind::Bracketed),
+        "Braced" => Some(DelimiterKind::Braced),
+        _ => None,
+    }
+}
+
+fn delimiter_contents_meta(ty: &Type) -> Option<DelimitedMetaContents> {
+    let Type::Product(product) = ty else {
+        return None;
+    };
+    if product.elements.len() == 1
+        && !product.elements[0].spread
+        && let Some(element) = sequence_meta_type(&product.elements[0].ty)
+    {
+        return Some(DelimitedMetaContents::Sequence(Box::new(element)));
+    }
+    product
+        .elements
+        .iter()
+        .map(|element| {
+            (!element.spread && element.name.is_none())
+                .then(|| meta_type(&element.ty))
+                .flatten()
+        })
+        .collect::<Option<Vec<_>>>()
+        .map(DelimitedMetaContents::Fixed)
+}
+
+/// `Sequence Ident String` is intentionally read as `Sequence (Ident String)`
+/// in syntax metadata, despite ordinary type application being left-associative.
+fn sequence_meta_type(ty: &Type) -> Option<MetaType> {
+    let mut arguments = Vec::new();
+    let mut current = ty;
+    while let Type::Application(application) = current {
+        arguments.push(application.argument.as_ref());
+        current = application.callee.as_ref();
+    }
+    arguments.reverse();
+    let Type::Named(name) = current else {
+        return None;
+    };
+    if name.namespace.is_some() || name.name != "Sequence" || arguments.is_empty() {
+        return None;
+    }
+    match arguments.as_slice() {
+        [element] => meta_type(element),
+        [first, second] if matches!(first, Type::Named(name) if name.namespace.is_none() && name.name == "Ident") => {
+            match second {
+                Type::Named(name) if name.namespace.is_none() && name.name == "String" => {
                     Some(MetaType::Ident(None))
                 }
                 Type::StringLiteral(literal) => crate::string_literal::decode(&literal.literal)
@@ -2793,7 +3099,248 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             Expression::Name(_) | Expression::Call(_) | Expression::VisibilityArgument(_)
         ),
         MetaType::Item => false,
+        MetaType::Delimited(_, _) => {
+            let mut next_syntax_id = 0;
+            delimiter_argument_value(expected, argument.syntax(), &mut next_syntax_id).is_some()
+        }
     }
+}
+
+fn delimiter_argument_value(
+    expected: &MetaType,
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Option<SyntaxValue> {
+    let MetaType::Delimited(expected_kind, expected_contents) = expected else {
+        return None;
+    };
+    let tokens = syntax.tokens();
+    let first = tokens.iter().position(|token| !token.kind.is_trivia())?;
+    let last = tokens.iter().rposition(|token| !token.kind.is_trivia())?;
+    let kind = match (tokens[first].kind, tokens[last].kind) {
+        (crate::TokenKind::LParen, crate::TokenKind::RParen) => DelimiterKind::Parenthesized,
+        (crate::TokenKind::LBracket, crate::TokenKind::RBracket) => DelimiterKind::Bracketed,
+        (crate::TokenKind::LBrace, crate::TokenKind::RBrace) => DelimiterKind::Braced,
+        _ => return None,
+    };
+    if kind != *expected_kind {
+        return None;
+    }
+    let contents = match expected_contents {
+        DelimitedMetaContents::Fixed(elements) => {
+            match_fixed_contents(syntax, first + 1, last, elements, next_syntax_id)
+                .map(DelimitedValueContents::Fixed)
+        }
+        DelimitedMetaContents::Sequence(element) => {
+            match_sequence_contents(syntax, first + 1, last, element, next_syntax_id)
+                .map(DelimitedValueContents::Sequence)
+        }
+    }?;
+    let expression = crate::parser::parse_expression_fragment(syntax, next_syntax_id)
+        .ok()
+        .map(Box::new);
+    Some(SyntaxValue::Delimited(DelimitedSyntaxValue {
+        kind,
+        syntax: syntax.clone(),
+        contents,
+        generated: Vec::new(),
+        expression,
+    }))
+}
+
+fn match_fixed_contents(
+    parent: &Syntax,
+    cursor: usize,
+    end: usize,
+    expected: &[MetaType],
+    next_syntax_id: &mut usize,
+) -> Option<Vec<(Option<String>, Value)>> {
+    let cursor = skip_trivia(parent.tokens(), cursor, end);
+    let Some((first, rest)) = expected.split_first() else {
+        return (skip_trivia(parent.tokens(), cursor, end) == end).then(Vec::new);
+    };
+    for candidate_end in candidate_ends(parent.tokens(), cursor, end) {
+        let fragment = syntax_slice(parent, cursor, candidate_end);
+        let checkpoint = *next_syntax_id;
+        if let Some(value) = match_syntax_fragment(first, &fragment, next_syntax_id)
+            && let Some(mut values) =
+                match_fixed_contents(parent, candidate_end, end, rest, next_syntax_id)
+        {
+            values.insert(0, (None, value));
+            return Some(values);
+        }
+        *next_syntax_id = checkpoint;
+    }
+    None
+}
+
+fn match_sequence_contents(
+    parent: &Syntax,
+    mut cursor: usize,
+    end: usize,
+    expected: &MetaType,
+    next_syntax_id: &mut usize,
+) -> Option<Vec<Value>> {
+    let mut values = Vec::new();
+    loop {
+        cursor = skip_trivia(parent.tokens(), cursor, end);
+        if cursor == end {
+            return Some(values);
+        }
+        let mut matched = None;
+        for candidate_end in candidate_ends(parent.tokens(), cursor, end) {
+            let fragment = syntax_slice(parent, cursor, candidate_end);
+            let checkpoint = *next_syntax_id;
+            if let Some(value) = match_syntax_fragment(expected, &fragment, next_syntax_id) {
+                matched = Some((value, candidate_end));
+                break;
+            }
+            *next_syntax_id = checkpoint;
+        }
+        let (value, candidate_end) = matched?;
+        values.push(value);
+        cursor = candidate_end;
+    }
+}
+
+fn match_syntax_fragment(
+    expected: &MetaType,
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Option<Value> {
+    let expression = || {
+        let mut ids = *next_syntax_id;
+        let value = crate::parser::parse_expression_fragment(syntax, &mut ids).ok()?;
+        Some((value, ids))
+    };
+    let syntax_value = match expected {
+        MetaType::Delimited(_, _) => {
+            return delimiter_argument_value(expected, syntax, next_syntax_id).map(Value::Syntax);
+        }
+        MetaType::Ident(spelling) => {
+            let mut tokens = syntax
+                .tokens()
+                .iter()
+                .filter(|token| !token.kind.is_trivia());
+            let token = tokens.next()?;
+            if token.kind != crate::TokenKind::Identifier
+                || tokens.next().is_some()
+                || spelling
+                    .as_ref()
+                    .is_some_and(|expected| expected != &token.text)
+            {
+                return None;
+            }
+            SyntaxValue::Ident(crate::NameExpression {
+                syntax: syntax.clone(),
+                name: token.text.clone(),
+            })
+        }
+        MetaType::Expr | MetaType::CallExpr | MetaType::UnstructuredExpr => {
+            let (value, ids) = expression()?;
+            let value = SyntaxValue::from_expression(value);
+            if matches!(expected, MetaType::CallExpr) && !matches!(value, SyntaxValue::Call(_))
+                || matches!(expected, MetaType::UnstructuredExpr)
+                    && !matches!(value, SyntaxValue::Unstructured(_))
+            {
+                return None;
+            }
+            *next_syntax_id = ids;
+            value
+        }
+        MetaType::Type => SyntaxValue::Type(
+            crate::parser::parse_type_fragment(syntax, false, next_syntax_id).ok()?,
+        ),
+        MetaType::Pattern => SyntaxValue::Pattern(
+            crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id).ok()?,
+        ),
+        MetaType::Item => SyntaxValue::Item(Box::new(
+            crate::parser::parse_item_fragment(syntax, next_syntax_id).ok()?,
+        )),
+        MetaType::Visibility | MetaType::MacroCallVisibility => {
+            let (value, ids) = expression()?;
+            let Expression::VisibilityArgument(value) = value else {
+                return None;
+            };
+            *next_syntax_id = ids;
+            SyntaxValue::Visibility(value)
+        }
+        MetaType::Syntax => structural_syntax_value(syntax, next_syntax_id)?,
+    };
+    Some(Value::Syntax(syntax_value))
+}
+
+fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Option<SyntaxValue> {
+    let tokens = syntax
+        .tokens()
+        .iter()
+        .filter(|token| !token.kind.is_trivia())
+        .collect::<Vec<_>>();
+    if let [token] = tokens.as_slice()
+        && token.kind == crate::TokenKind::Identifier
+    {
+        return Some(SyntaxValue::Ident(crate::NameExpression {
+            syntax: syntax.clone(),
+            name: token.text.clone(),
+        }));
+    }
+    if let Some((open, close, kind)) =
+        tokens
+            .first()
+            .zip(tokens.last())
+            .and_then(|(open, close)| match (open.kind, close.kind) {
+                (crate::TokenKind::LParen, crate::TokenKind::RParen) => {
+                    Some((open, close, DelimiterKind::Parenthesized))
+                }
+                (crate::TokenKind::LBracket, crate::TokenKind::RBracket) => {
+                    Some((open, close, DelimiterKind::Bracketed))
+                }
+                (crate::TokenKind::LBrace, crate::TokenKind::RBrace) => {
+                    Some((open, close, DelimiterKind::Braced))
+                }
+                _ => None,
+            })
+    {
+        let _ = (open, close);
+        let expected = MetaType::Delimited(
+            kind,
+            DelimitedMetaContents::Sequence(Box::new(MetaType::Syntax)),
+        );
+        return delimiter_argument_value(&expected, syntax, next_syntax_id);
+    }
+    if let Ok(expression) = crate::parser::parse_expression_fragment(syntax, next_syntax_id) {
+        return Some(SyntaxValue::from_expression(expression));
+    }
+    if let Ok(item) = crate::parser::parse_item_fragment(syntax, next_syntax_id) {
+        return Some(SyntaxValue::Item(Box::new(item)));
+    }
+    if let Ok(ty) = crate::parser::parse_type_fragment(syntax, false, next_syntax_id) {
+        return Some(SyntaxValue::Type(ty));
+    }
+    crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id)
+        .ok()
+        .map(SyntaxValue::Pattern)
+}
+
+fn skip_trivia(tokens: &[crate::SyntaxToken], mut cursor: usize, end: usize) -> usize {
+    while cursor < end && tokens[cursor].kind.is_trivia() {
+        cursor += 1;
+    }
+    cursor
+}
+
+fn candidate_ends(
+    tokens: &[crate::SyntaxToken],
+    cursor: usize,
+    end: usize,
+) -> impl Iterator<Item = usize> + '_ {
+    (cursor + 1..=end).filter(|candidate| !tokens[candidate - 1].kind.is_trivia())
+}
+
+fn syntax_slice(parent: &Syntax, start: usize, end: usize) -> Syntax {
+    let mut syntax = parent.clone();
+    syntax.token_range = parent.token_range.start + start..parent.token_range.start + end;
+    syntax
 }
 
 fn match_macro_arguments(
@@ -2898,6 +3445,17 @@ fn meta_argument_expression<'a>(expected: &MetaType, argument: &'a Expression) -
 fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
     left == right
         || matches!(right, MetaType::Syntax)
+        || matches!(left, MetaType::Delimited(_, _))
+            && matches!(right, MetaType::Expr | MetaType::Type | MetaType::Pattern)
+        || match (left, right) {
+            (
+                MetaType::Delimited(left_kind, left_contents),
+                MetaType::Delimited(right_kind, right_contents),
+            ) if left_kind == right_kind => {
+                contents_at_least_as_specific(left_contents, right_contents)
+            }
+            _ => false,
+        }
         || matches!(
             (left, right),
             (MetaType::Ident(_), MetaType::Expr)
@@ -2906,6 +3464,28 @@ fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
                 | (MetaType::Ident(Some(_)), MetaType::Ident(None))
                 | (MetaType::MacroCallVisibility, MetaType::Visibility)
         )
+}
+
+fn contents_at_least_as_specific(
+    left: &DelimitedMetaContents,
+    right: &DelimitedMetaContents,
+) -> bool {
+    match (left, right) {
+        (DelimitedMetaContents::Fixed(left), DelimitedMetaContents::Fixed(right)) => {
+            left.len() == right.len()
+                && left
+                    .iter()
+                    .zip(right)
+                    .all(|(left, right)| meta_type_at_least_as_specific(left, right))
+        }
+        (DelimitedMetaContents::Sequence(left), DelimitedMetaContents::Sequence(right)) => {
+            meta_type_at_least_as_specific(left, right)
+        }
+        (DelimitedMetaContents::Fixed(left), DelimitedMetaContents::Sequence(right)) => left
+            .iter()
+            .all(|left| meta_type_at_least_as_specific(left, right)),
+        (DelimitedMetaContents::Sequence(_), DelimitedMetaContents::Fixed(_)) => false,
+    }
 }
 
 fn signature_more_specific(left: &[MetaType], right: &[MetaType]) -> bool {
@@ -2932,9 +3512,47 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Item => "Item".to_owned(),
             MetaType::Visibility => "Visibility".to_owned(),
             MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
+            MetaType::Delimited(_, _) => format_meta_type(parameter),
         })
         .collect::<Vec<_>>()
         .join(" -> ")
+}
+
+fn format_meta_type(meta: &MetaType) -> String {
+    match meta {
+        MetaType::Syntax => "Syntax".to_owned(),
+        MetaType::Expr => "Expr".to_owned(),
+        MetaType::Ident(None) => "Ident String".to_owned(),
+        MetaType::Ident(Some(spelling)) => format!("Ident {spelling:?}"),
+        MetaType::CallExpr => "CallExpr".to_owned(),
+        MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
+        MetaType::Type => "Type".to_owned(),
+        MetaType::Pattern => "Pattern".to_owned(),
+        MetaType::Item => "Item".to_owned(),
+        MetaType::Visibility => "Visibility".to_owned(),
+        MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
+        MetaType::Delimited(kind, contents) => {
+            let name = match kind {
+                DelimiterKind::Parenthesized => "Parenthesized",
+                DelimiterKind::Bracketed => "Bracketed",
+                DelimiterKind::Braced => "Braced",
+            };
+            let contents = match contents {
+                DelimitedMetaContents::Fixed(elements) => format!(
+                    "({})",
+                    elements
+                        .iter()
+                        .map(format_meta_type)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
+                DelimitedMetaContents::Sequence(element) => {
+                    format!("(Sequence {})", format_meta_type(element))
+                }
+            };
+            format!("{name} {contents}")
+        }
+    }
 }
 
 fn macro_signature(annotation: &Type) -> Option<(Vec<MetaType>, MetaType)> {
@@ -2996,6 +3614,10 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Expr"
                 | "Ident"
                 | "CallExpr"
+                | "Sequence"
+                | "Parenthesized"
+                | "Bracketed"
+                | "Braced"
                 | "UnstructuredExpr"
                 | "Type"
                 | "Pattern"
@@ -3287,6 +3909,27 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 );
             }
             if pattern.namespace.is_none()
+                && let Some(kind) = delimiter_kind(&pattern.name)
+                && let Value::Syntax(SyntaxValue::Delimited(delimited)) = &value
+                && delimited.kind == kind
+            {
+                let contents = match &delimited.contents {
+                    DelimitedValueContents::Fixed(values) => Value::Product(values.clone()),
+                    DelimitedValueContents::Sequence(values) => Value::Sequence(values.clone()),
+                };
+                return bind_pattern(&pattern.argument, contents, environment);
+            }
+            if pattern.namespace.is_none()
+                && pattern.name == "Sequence"
+                && let Value::Sequence(values) = value
+            {
+                return bind_pattern(
+                    &pattern.argument,
+                    Value::Product(values.into_iter().map(|value| (None, value)).collect()),
+                    environment,
+                );
+            }
+            if pattern.namespace.is_none()
                 && let Value::Syntax(SyntaxValue::Visibility(visibility)) = &value
                 && visibility_pattern_matches(&pattern.name, visibility.kind)
             {
@@ -3329,6 +3972,30 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         (MetaType::Type, Value::Syntax(SyntaxValue::Type(_))) => true,
         (MetaType::Pattern, Value::Syntax(SyntaxValue::Pattern(_))) => true,
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
+        (
+            MetaType::Delimited(expected_kind, expected_contents),
+            Value::Syntax(SyntaxValue::Delimited(value)),
+        ) => {
+            value.kind == *expected_kind
+                && match (&value.contents, expected_contents) {
+                    (
+                        DelimitedValueContents::Fixed(values),
+                        DelimitedMetaContents::Fixed(expected),
+                    ) => {
+                        values.len() == expected.len()
+                            && values.iter().zip(expected).all(|((_, value), expected)| {
+                                meta_type_matches_value(expected, value)
+                            })
+                    }
+                    (
+                        DelimitedValueContents::Sequence(values),
+                        DelimitedMetaContents::Sequence(expected),
+                    ) => values
+                        .iter()
+                        .all(|value| meta_type_matches_value(expected, value)),
+                    _ => false,
+                }
+        }
         (
             MetaType::Visibility | MetaType::MacroCallVisibility,
             Value::Syntax(SyntaxValue::Visibility(_)),

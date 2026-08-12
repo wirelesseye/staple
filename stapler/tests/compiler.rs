@@ -2602,6 +2602,104 @@ fn expands_typed_macros_with_literal_identifier_parameters() {
 }
 
 #[test]
+fn expands_macros_with_delimited_syntax_parameters() {
+    let module = type_check(concat!(
+        "macro pair = _: Parenthesized (Ident String, Ident String) => quote { 11 }\n",
+        "macro names = _: Bracketed (Sequence Ident String) => quote { 22 }\n",
+        "macro body = _: Braced (Sequence Syntax) => quote { 33 }\n",
+        "let pair_result: I32 = pair (left right)\n",
+        "let empty_names: I32 = names []\n",
+        "let names_result: I32 = names [one two three]\n",
+        "let body_result: I32 = body { left (right nested) }\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("delimited macro parameters should expand");
+}
+
+#[test]
+fn delimited_macro_overloads_use_structural_specificity() {
+    let module = type_check(concat!(
+        "macro classify = _: Expr => quote { 1 }\n",
+        "macro classify = _: Parenthesized (Sequence Syntax) => quote { 2 }\n",
+        "macro classify = _: Parenthesized (Sequence Ident String) => quote { 3 }\n",
+        "macro classify = _: Parenthesized (Ident String, Ident String) => quote { 4 }\n",
+        "let fixed: I32 = classify (left right)\n",
+        "let sequence: I32 = classify (left)\n",
+        "let empty: I32 = classify ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("delimiter overloads should be ordered by structural specificity");
+}
+
+#[test]
+fn constructs_and_destructures_delimited_syntax_values() {
+    let module = type_check(concat!(
+        "macro inspect = value: Parenthesized (Sequence Ident String) => match value {\n",
+        "    Parenthesized (Sequence (Ident \"only\")) => quote { 1 },\n",
+        "    _ => quote { 0 },\n",
+        "}\n",
+        "macro construct = _: Expr => Parenthesized (quote { 7 })\n",
+        "macro construct_empty = _: Expr => Parenthesized (Sequence ())\n",
+        "macro construct_sequence = _: Expr => Parenthesized (Sequence (quote { increment }, quote { 41 }))\n",
+        "macro construct_braced = _: Expr => Braced (Sequence (quote { 9 }))\n",
+        "macro preserve = value: Parenthesized (Sequence Syntax) => value\n",
+        "def increment: I32 -> I32 = value => value + 1\n",
+        "let inspected: I32 = inspect (only)\n",
+        "let constructed: I32 = construct ()\n",
+        "let empty = construct_empty ()\n",
+        "let ordered: I32 = construct_sequence ()\n",
+        "let braced: I32 = construct_braced ()\n",
+        "let preserved: I32 = preserve ( 44 )\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("delimiter values should support constructors and nominal patterns");
+}
+
+#[test]
+fn rejects_invalid_sequence_positions_and_source_punctuation() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "macro invalid = value: Sequence Ident => quote { 0 }\n",
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("bare Sequence should be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message
+            == "`Sequence` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
+    }));
+
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "macro pair = _: Parenthesized (Ident String, Ident String) => quote { 0 }\n",
+                "let invalid: I32 = pair (left, right)\n",
+            ),
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("source comma should require its own syntax node");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("must be `Parenthesized (Ident String, Ident String)` syntax")
+    }));
+}
+
+#[test]
 fn expands_standard_if_overloads_and_nested_forms() {
     let module = type_check(concat!(
         "let condition: Bool = True\n",

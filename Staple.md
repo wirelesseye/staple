@@ -61,8 +61,9 @@ work with structured syntax instead of assembling source-code strings.
 
 Expression macros transform compiler-owned syntax values before ordinary name
 resolution and type checking. `Syntax` is the permissive sum of `Expr`, `Type`,
-`Pattern`, `Item`, and `Visibility`. `Expr` is currently the sum of `Ident String`,
-`CallExpr`, and `UnstructuredExpr`. `CallExpr` exposes `callee: Expr` and
+`Pattern`, `Item`, `Visibility`, and the three delimited syntax types. `Expr` is
+currently the sum of `Ident String`, `CallExpr`, and `UnstructuredExpr`.
+`CallExpr` exposes `callee: Expr` and
 `argument: Expr`; `UnstructuredExpr` preserves every other expression form
 without exposing its fields yet. A macro body is a curried compile-time Staple
 function. Every parameter consumes one atomic syntax unit; an omitted parameter
@@ -98,6 +99,18 @@ macro conditional =
     }
 }
 ```
+
+Delimited syntax parameters match one balanced source argument while exposing
+its contents structurally. Product commas separate expected children and do
+not require commas in the source, so `Parenthesized (Ident String, Ident
+String)` accepts `(left right)`. `Parenthesized`, `Bracketed`, and `Braced` may
+instead contain `Sequence T`, which accepts zero or more consecutive values of
+`T`; for example, `Bracketed (Sequence Ident String)` accepts `[]` and `[one
+two]`. `Sequence` is valid only as the entire contents of one of these three
+delimiter types and never changes a macro's top-level arity. `Sequence Syntax`
+uses shortest structural atoms, treating a nested balanced delimiter as one
+atom. Source punctuation requires its own syntax type before it can be matched
+structurally.
 
 `Type` and `Pattern` parameters accept opaque type and pattern syntax. One
 atomic name may be passed directly; compound syntax uses an outer pair of
