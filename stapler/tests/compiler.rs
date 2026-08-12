@@ -652,15 +652,56 @@ fn supports_match_catch_alls_wildcard_parameters_and_returning_arms() {
 }
 
 #[test]
-fn rejects_invalid_match_subjects_and_coverage() {
+fn matches_values_of_any_runtime_type() {
+    let module = type_check(concat!(
+        "pub(repr) type Wrapped = I32\n",
+        "def integer = value: I32 => match value { number => number }\n",
+        "def float = value: F64 => match value { _: F64 => value }\n",
+        "def identity = value: I32 => value\n",
+        "def function = value: (I32 -> I32) => match value { callable => callable 4 }\n",
+        "def nominal = value: Wrapped => match value { Wrapped number => number }\n",
+        "def generic: T => T -> T = value => match value { same: T => same }\n",
+        "integer 1\n",
+        "float 1.5\n",
+        "function identity\n",
+        "nominal (Wrapped 2)\n",
+        "generic 3\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("matches over arbitrary runtime values should generate LLVM");
+}
+
+#[test]
+fn rejects_invalid_match_patterns_and_coverage() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("match 1 { value => value, }\n"))
-        .expect_err("non-sum subjects should fail");
+        .check(resolve(concat!(
+            "def invalid = value: I32 => match value {\n",
+            "  text: String => 0,\n",
+            "  _ => 1,\n",
+            "}\n",
+        )))
+        .expect_err("an incompatible typed pattern should fail");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("match subject must have a sum or product type")
+            .contains("expected `String`, found `I32`")
     }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "match 1 {\n",
+            "  first => first,\n",
+            "  second => second,\n",
+            "}\n",
+        )))
+        .expect_err("an arm after a scalar catch-all should be unreachable");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unreachable match arm"))
+    );
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(

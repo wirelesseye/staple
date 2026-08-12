@@ -1131,7 +1131,7 @@ after the final expression does not discard that value.
 
 ## Match expressions
 
-`match` exhaustively selects an alternative of an sum and produces a value:
+`match` exhaustively selects a pattern and produces a value:
 
 ```staple
 def unwrap = result: Ok I32 | IOError => match result {
@@ -1140,10 +1140,12 @@ def unwrap = result: Ok I32 | IOError => match result {
 }
 ```
 
-The subject is evaluated exactly once and must have a sum or product type.
+The subject is evaluated exactly once and may have any runtime value type.
 Every arm has the form `<pattern> => <expression>`. Arms are separated by
 commas, and a trailing comma is permitted. Each arm has its own scope, so names
-introduced by its pattern are visible only in that arm's expression.
+introduced by its pattern are visible only in that arm's expression. The
+patterns available depend on the subject type; a binding or wildcard can match
+any value.
 
 A nominal pattern selects one sum alternative and may recursively destructure
 its representation with binding, product, nominal, and wildcard patterns. A

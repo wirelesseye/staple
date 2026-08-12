@@ -2740,22 +2740,6 @@ impl TypeChecker {
         if self.did_return {
             return CheckedType::empty_product();
         }
-        if !matches!(
-            source,
-            CheckedType::Sum(_)
-                | CheckedType::Product(_)
-                | CheckedType::Ref(_)
-                | CheckedType::String
-                | CheckedType::StringLiteralSet(_)
-        ) {
-            if source != CheckedType::Error {
-                self.diagnostics.push(Diagnostic::new(
-                    match_.subject.syntax().span.clone(),
-                    format!("a match subject must have a sum or product type, found `{source}`"),
-                ));
-            }
-            return CheckedType::Error;
-        }
 
         let outer_reachable = self.return_reachable;
         let mut previous_patterns = Vec::new();
