@@ -473,9 +473,14 @@ impl ProgramLoader {
             })
             .collect::<Vec<_>>();
         for declaration in uses {
-            let imported = self.resolve_import(module, &declaration, root)?;
-            self.imported_modules
-                .insert(declaration.syntax.id, imported);
+            match self.resolve_import(module, &declaration, root) {
+                Ok(imported) => {
+                    self.imported_modules
+                        .insert(declaration.syntax.id, imported);
+                }
+                Err(_) if self.can_defer_inline_import(module, &declaration) => {}
+                Err(error) => return Err(error),
+            }
         }
         let children = self.children[module.0]
             .values()
@@ -485,6 +490,33 @@ impl ProgramLoader {
             self.load_imports(child, root)?;
         }
         Ok(())
+    }
+
+    fn can_defer_inline_import(&self, module: ModuleId, declaration: &UseDeclaration) -> bool {
+        let [name] = declaration.path.as_slice() else {
+            return false;
+        };
+        self.modules[module.0]
+            .syntax
+            .items
+            .iter()
+            .take_while(|item| {
+                !matches!(item, Item::UseDeclaration(use_) if use_.syntax.id == declaration.syntax.id)
+            })
+            .any(|item| {
+                let syntax = match item {
+                    Item::VisibilityMacroInvocation(invocation) => &invocation.syntax,
+                    Item::Statement(statement) => match statement.as_ref() {
+                        crate::Statement::Expression(expression) => expression.syntax(),
+                        _ => return false,
+                    },
+                    _ => return false,
+                };
+                syntax
+                    .tokens()
+                    .iter()
+                    .any(|token| token.kind == crate::TokenKind::Identifier && token.text == *name)
+            })
     }
 
     fn resolve_import(

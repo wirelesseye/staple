@@ -140,7 +140,6 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match body {
             $public_visibility mod $group {
                 $items...
             }
-            $public_visibility use $group *
             $public_visibility type alias $group = $sum
         }
     },
@@ -171,7 +170,6 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match (
             $public_visibility mod $group {
                 $items...
             }
-            $public_visibility use $group *
             $public_visibility type alias $group = $parameters... => $sum
         }
     },
@@ -207,7 +205,6 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match (
             $public_visibility mod $group {
                 $items...
             }
-            $public_visibility use $group *
             $public_visibility type alias $group = $parameters... => $sum
         }
     },

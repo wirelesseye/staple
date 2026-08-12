@@ -2176,6 +2176,7 @@ fn expands_standard_typegroup_into_module_variants_and_alias() {
         "    Literal String,\n",
         "    Wildcard,\n",
         "}\n",
+        "pub use Pattern *\n",
         "let literal: Pattern = Pattern.Literal \"value\"\n",
         "let wildcard: Pattern = Pattern.Wildcard\n",
         "let reexported_literal: Pattern = Literal \"value\"\n",
@@ -2194,6 +2195,7 @@ fn typegroup_supports_generic_groups_and_reexports_their_variants() {
         "    Missing,\n",
         "    Present T,\n",
         "}\n",
+        "pub use Maybe *\n",
         "let missing: Maybe I32 = Missing\n",
         "let present: Maybe I32 = Present 1\n",
         "let qualified: Maybe String = Maybe.Present \"value\"\n",
@@ -2266,6 +2268,31 @@ fn rejects_legacy_typegroup_call_syntax() {
             "expected a typegroup overload diagnostic, found {diagnostics:#?}",
         );
     }
+}
+
+#[test]
+fn typegroup_variants_require_an_explicit_reexport() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "pub typegroup Status = { Ready, }\n",
+                "let qualified: Status = Status.Ready\n",
+                "let unqualified: Status = Ready\n",
+            ),
+            root,
+        )
+        .expect("typegroup source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("unqualified variants should require an explicit use");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown name `Ready`")),
+        "expected an unknown variant diagnostic, found {diagnostics:#?}",
+    );
 }
 
 #[test]

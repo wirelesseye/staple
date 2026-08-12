@@ -411,6 +411,18 @@ pub(crate) fn expand_program(mut program: Program) -> Result<Program, Vec<Diagno
         source_module.syntax.items = items;
     }
     program.rebuild_generated_inline_modules();
+    for source_module in program.modules() {
+        for item in &source_module.syntax.items {
+            if let Item::UseDeclaration(declaration) = item
+                && program.imported_module(declaration.syntax.id).is_none()
+            {
+                expander.diagnostics.push(Diagnostic::new(
+                    declaration.syntax.span.clone(),
+                    format!("could not resolve module `{}`", declaration.path.join(".")),
+                ));
+            }
+        }
+    }
     if expander.diagnostics.is_empty() {
         Ok(program)
     } else {

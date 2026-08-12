@@ -2,6 +2,7 @@ pub typegroup Bool = {
     True,
     False,
 }
+pub use Bool *
 
 impl Eq Bool {
     def equal = left => right => match (left, right) {
