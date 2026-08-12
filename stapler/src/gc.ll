@@ -1,6 +1,11 @@
+; Every allocation is stored as [GcHeader | payload]. The header fields are:
+; next allocation, requested payload size, mark bit, finalizer, finalized bit.
 %GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, {{SIZE}} }
+; Explicit roots form a linked list of byte ranges: start, size, next root.
 %GcRoot = type { ptr, {{SIZE}}, ptr }
 
+; Global collector state. The hash table contains payload pointers and uses
+; address 1 as a tombstone, allowing expected-O(1) pointer validation.
 @__staple_gc_head = internal global ptr null
 @__staple_gc_roots = internal global ptr null
 @__staple_gc_bytes = internal global {{SIZE}} 0
@@ -17,6 +22,7 @@ declare void @free(ptr)
 declare i32 @setjmp(ptr) returns_twice
 declare void @llvm.trap()
 
+; Insert into a particular open-addressed table. The caller guarantees space.
 define internal void @__staple_gc_hash_insert_into(ptr %table, {{SIZE}} %capacity, ptr %payload) {
 entry:
   %integer = ptrtoint ptr %payload to {{SIZE}}
@@ -43,6 +49,7 @@ insert:
   ret void
 }
 
+; Allocate a larger table and rehash every live entry from the old table.
 define internal void @__staple_gc_hash_grow() {
 entry:
   %old.table = load ptr, ptr @__staple_gc_table
@@ -96,6 +103,7 @@ trap:
   unreachable
 }
 
+; Keep the table at or below a 50% load factor before inserting a payload.
 define internal void @__staple_gc_hash_insert(ptr %payload) {
 entry:
   %capacity = load {{SIZE}}, ptr @__staple_gc_table_capacity
@@ -118,6 +126,8 @@ insert:
   ret void
 }
 
+; Return the allocation whose payload begins exactly at candidate, if any.
+; Interior pointers are deliberately not treated as references.
 define internal ptr @__staple_gc_hash_lookup({{SIZE}} %candidate) {
 entry:
   %table = load ptr, ptr @__staple_gc_table
@@ -161,6 +171,7 @@ not.found:
   ret ptr null
 }
 
+; Replace a removed payload with a tombstone so later probe chains stay valid.
 define internal void @__staple_gc_hash_remove(ptr %payload) {
 entry:
   %candidate = ptrtoint ptr %payload to {{SIZE}}
@@ -197,6 +208,7 @@ return:
   ret void
 }
 
+; Mark an exact payload pointer and recursively scan the newly reached object.
 define internal void @__staple_gc_mark_candidate({{SIZE}} %candidate) {
 entry:
   %payload = call ptr @__staple_gc_hash_lookup({{SIZE}} %candidate)
@@ -221,6 +233,8 @@ return:
   ret void
 }
 
+; Conservatively inspect every possibly unaligned pointer-sized window.
+; Advancing one byte at a time catches pointers stored at arbitrary alignment.
 define internal void @__staple_gc_scan_region(ptr %start, {{SIZE}} %size) {
 entry:
   %large.enough = icmp uge {{SIZE}} %size, {{PTR_BYTES}}
@@ -243,6 +257,7 @@ return:
   ret void
 }
 
+; Run a conservative mark/finalize/sweep collection.
 define internal void @__staple_gc_collect() {
 entry:
   %stack.bottom = load ptr, ptr @__staple_gc_stack_bottom
@@ -267,12 +282,14 @@ clear.body:
   br label %clear.loop
 
 roots.start:
+  ; setjmp exposes saved register state in a scannable memory buffer.
   %registers = alloca [64 x {{SIZE}}], align {{PTR_BYTES}}
   %registers.pointer = getelementptr [64 x {{SIZE}}], ptr %registers, i32 0, i32 0
   %ignored = call i32 @setjmp(ptr %registers.pointer)
   call void @__staple_gc_scan_region(ptr %registers.pointer, {{SIZE}} {{REGISTER_BYTES}})
   %stack.current.integer = ptrtoint ptr %registers.pointer to {{SIZE}}
   %stack.bottom.integer = ptrtoint ptr %stack.bottom to {{SIZE}}
+  ; Select the lower address so either upward- or downward-growing stacks work.
   %stack.grows.down = icmp ule {{SIZE}} %stack.current.integer, %stack.bottom.integer
   %stack.start = select i1 %stack.grows.down, ptr %registers.pointer, ptr %stack.bottom
   %stack.low = select i1 %stack.grows.down, {{SIZE}} %stack.current.integer, {{SIZE}} %stack.bottom.integer
@@ -298,6 +315,7 @@ roots.body:
   br label %roots.loop
 
 finalize.start:
+  ; Finalizers run before sweeping, and the finalized flag prevents repeat calls.
   %finalize.head = load ptr, ptr @__staple_gc_head
   br label %finalize.loop
 
@@ -332,6 +350,8 @@ finalize.continue:
   br label %finalize.loop
 
 sweep.start:
+  ; %link points to the list slot that names the current object. Keeping this
+  ; pointer-to-link makes removal possible without a separate previous node.
   br label %sweep.loop
 
 sweep.loop:
@@ -368,6 +388,7 @@ discard:
   br label %sweep.loop
 
 threshold:
+  ; Aim for at least 100% headroom after collection, with a 1 MiB floor.
   %live.bytes = load {{SIZE}}, ptr @__staple_gc_bytes
   %can.double = icmp ule {{SIZE}} %live.bytes, {{MAX_HALF}}
   %doubled = shl {{SIZE}} %live.bytes, 1
@@ -382,6 +403,7 @@ return:
   ret void
 }
 
+; Allocate a header and payload as one block, guarding the size addition.
 define internal ptr @__staple_gc_try_allocate({{SIZE}} %size) {
 entry:
   %has.payload = icmp ne {{SIZE}} %size, 0
@@ -399,6 +421,8 @@ trap:
   unreachable
 }
 
+; Allocate a managed object, collecting at the threshold and retrying once on
+; malloc failure. Zero-byte requests receive one physical payload byte.
 define ptr @__staple_gc_alloc({{SIZE}} %size) {
 entry:
   %has.payload = icmp ne {{SIZE}} %size, 0
@@ -446,6 +470,7 @@ initialize:
   %size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
   store {{SIZE}} %size, ptr %size.slot
   %mark.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 2
+  ; Objects allocated by a finalizer are live for the collection in progress.
   %initial.mark.bit = load i1, ptr @__staple_gc_collecting
   %initial.mark = zext i1 %initial.mark.bit to {{SIZE}}
   store {{SIZE}} %initial.mark, ptr %mark.slot
@@ -466,6 +491,7 @@ trap:
   unreachable
 }
 
+; Attach or replace the callback invoked when payload first becomes unreachable.
 define void @__staple_gc_set_finalizer(ptr %payload, ptr %finalizer) {
 entry:
   %header = getelementptr i8, ptr %payload, {{SIZE}} -{{HEADER_BYTES}}
@@ -474,12 +500,14 @@ entry:
   ret void
 }
 
+; Record the stack boundary supplied by the program's startup code.
 define void @__staple_gc_set_stack_bottom(ptr %bottom) {
 entry:
   store ptr %bottom, ptr @__staple_gc_stack_bottom
   ret void
 }
 
+; Permanently register an additional byte range for conservative root scanning.
 define void @__staple_gc_register_root(ptr %start, {{SIZE}} %size) {
 entry:
   %node = call ptr @malloc({{SIZE}} {{ROOT_BYTES}})
