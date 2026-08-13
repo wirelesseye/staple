@@ -33,6 +33,27 @@ builds, or project lockfiles.
 
 ## Commands
 
+Create a new project in `<name>/`:
+
+```text
+binder new hello
+```
+
+This creates:
+
+```text
+hello/
+├── binder.kdl
+├── .gitignore
+└── src/
+    └── main.sta
+```
+
+The manifest uses the default source root and entry path, `main.sta` contains a
+hello-world program, and `.gitignore` ignores `/build`. Binder refuses to create
+the project if the destination already exists and does not initialize a Git
+repository.
+
 Check a project without generating code:
 
 ```text

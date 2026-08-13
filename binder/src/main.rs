@@ -8,12 +8,14 @@ use kdl::{KdlDocument, KdlNode};
 enum Mode {
     Build,
     Check,
+    New,
     Run,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct Options {
     mode: Mode,
+    package_name: Option<String>,
     manifest_path: Option<PathBuf>,
     output: Option<PathBuf>,
     target: Option<String>,
@@ -55,7 +57,7 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
         println!("{}", usage());
         return Ok(Outcome::Completed);
     }
-    if matches!(arguments.as_slice(), [command, argument] if (argument == "-h" || argument == "--help") && matches!(command.to_str(), Some("build" | "check" | "run")))
+    if matches!(arguments.as_slice(), [command, argument] if (argument == "-h" || argument == "--help") && matches!(command.to_str(), Some("build" | "check" | "new" | "run")))
     {
         println!("{}", command_usage(arguments[0].to_str().unwrap()));
         return Ok(Outcome::Completed);
@@ -64,6 +66,15 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
     let options = parse_options(arguments)?;
     let current_directory = std::env::current_dir()
         .map_err(|error| format!("could not determine current directory: {error}"))?;
+    if options.mode == Mode::New {
+        let name = options
+            .package_name
+            .as_deref()
+            .expect("new command always has a package name");
+        let destination = create_project(&current_directory, name)?;
+        println!("Created package `{name}` at `{}`", destination.display());
+        return Ok(Outcome::Completed);
+    }
     let manifest = discover_manifest(options.manifest_path.as_deref(), &current_directory)?;
     let package = load_package(&manifest)?;
     let stapler = locate_stapler()?;
@@ -76,6 +87,7 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
                 .map_err(|error| compiler_start_error(&stapler, error))?;
             Ok(Outcome::Executed(status))
         }
+        Mode::New => unreachable!("new command returns before compiler invocation"),
         Mode::Build | Mode::Run => {
             let output = output_path(&package, &options)?;
             if options.output.is_none() {
@@ -117,11 +129,13 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
     let mode = match arguments.next().as_deref().and_then(OsStr::to_str) {
         Some("build") => Mode::Build,
         Some("check") => Mode::Check,
+        Some("new") => Mode::New,
         Some("run") => Mode::Run,
         _ => return Err(usage()),
     };
     let mut options = Options {
         mode,
+        package_name: None,
         manifest_path: None,
         output: None,
         target: None,
@@ -131,6 +145,24 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         libraries: Vec::new(),
         program_arguments: Vec::new(),
     };
+
+    if mode == Mode::New {
+        let name = arguments
+            .next()
+            .ok_or_else(|| command_usage("new"))?
+            .into_string()
+            .map_err(|_| "`binder new` requires a UTF-8 package name".to_owned())?;
+        validate_package_name(&name)?;
+        if let Some(argument) = arguments.next() {
+            return Err(format!(
+                "unexpected argument `{}`\n{}",
+                argument.to_string_lossy(),
+                command_usage("new")
+            ));
+        }
+        options.package_name = Some(name);
+        return Ok(options);
+    }
 
     while let Some(argument) = arguments.next() {
         if argument == "--" {
@@ -249,6 +281,58 @@ fn validate_options(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
+fn create_project(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    validate_package_name(name)?;
+    let destination = parent.join(name);
+    std::fs::create_dir(&destination).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            format!("destination `{}` already exists", destination.display())
+        } else {
+            format!(
+                "could not create project directory `{}`: {error}",
+                destination.display()
+            )
+        }
+    })?;
+
+    let creation = (|| {
+        let source_directory = destination.join("src");
+        std::fs::create_dir(&source_directory).map_err(|error| {
+            format!(
+                "could not create source directory `{}`: {error}",
+                source_directory.display()
+            )
+        })?;
+        write_project_file(
+            &destination.join("binder.kdl"),
+            &format!("package \"{name}\"\n"),
+        )?;
+        write_project_file(&destination.join(".gitignore"), "/build\n")?;
+        write_project_file(
+            &source_directory.join("main.sta"),
+            "use std.io println\n\ndef main = () => println \"Hello, world!\"\n",
+        )?;
+        Ok(())
+    })();
+
+    if let Err(error) = creation {
+        if let Err(cleanup) = std::fs::remove_dir_all(&destination) {
+            return Err(format!(
+                "{error}; also could not remove incomplete project `{}`: {cleanup}",
+                destination.display()
+            ));
+        }
+        return Err(error);
+    }
+
+    Ok(destination)
+}
+
+fn write_project_file(path: &Path, contents: &str) -> Result<(), String> {
+    std::fs::write(path, contents)
+        .map_err(|error| format!("could not write `{}`: {error}", path.display()))
+}
+
 fn discover_manifest(explicit: Option<&Path>, current: &Path) -> Result<PathBuf, String> {
     if let Some(path) = explicit {
         let path = if path.is_absolute() {
@@ -365,6 +449,11 @@ fn package_name(node: &KdlNode, manifest: &Path) -> Result<String, String> {
         .value()
         .as_string()
         .ok_or_else(|| format!("{}: `package` name must be a string", manifest.display()))?;
+    validate_package_name(name).map_err(|error| format!("{}: {error}", manifest.display()))?;
+    Ok(name.to_owned())
+}
+
+fn validate_package_name(name: &str) -> Result<(), String> {
     let mut characters = name.chars();
     if !characters
         .next()
@@ -373,11 +462,10 @@ fn package_name(node: &KdlNode, manifest: &Path) -> Result<String, String> {
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
     {
         return Err(format!(
-            "{}: package name `{name}` must start with an ASCII letter and contain only letters, numbers, `_`, or `-`",
-            manifest.display()
+            "package name `{name}` must start with an ASCII letter and contain only letters, numbers, `_`, or `-`"
         ));
     }
-    Ok(name.to_owned())
+    Ok(())
 }
 
 fn parse_path_child(
@@ -591,11 +679,12 @@ fn exit_code(status: ExitStatus) -> ExitCode {
 
 fn usage() -> String {
     concat!(
-        "usage: binder <build|check|run> [options]\n",
+        "usage: binder <build|check|new|run> [options]\n",
         "\n",
         "commands:\n",
         "  build  compile the package to a native executable\n",
         "  check  load, resolve, and type-check the package\n",
+        "  new    create a new package\n",
         "  run    build and run the package\n",
         "\n",
         "run `binder <command> --help` for command options",
@@ -620,6 +709,10 @@ fn command_usage(command: &str) -> String {
             "  --manifest-path <path>  use a specific binder.kdl\n",
             "  --stdlib <path>          Staple standard-library root",
         ),
+        "new" => concat!(
+            "usage: binder new <name>\n\n",
+            "Create a new package in a directory named <name>.",
+        ),
         "run" => concat!(
             "usage: binder run [options] [-- <arguments>...]\n\n",
             "  --manifest-path <path>  use a specific binder.kdl\n",
@@ -638,6 +731,7 @@ fn mode_usage(mode: Mode) -> String {
     command_usage(match mode {
         Mode::Build => "build",
         Mode::Check => "check",
+        Mode::New => "new",
         Mode::Run => "run",
     })
 }
@@ -787,6 +881,92 @@ mod tests {
         let run =
             parse_options(["run".into(), "--".into(), "first".into(), "--second".into()]).unwrap();
         assert_eq!(run.program_arguments, ["first", "--second"]);
+    }
+
+    #[test]
+    fn parses_new_with_one_safe_package_name() {
+        let options = parse_options(["new".into(), "hello-world".into()]).unwrap();
+
+        assert_eq!(options.mode, Mode::New);
+        assert_eq!(options.package_name.as_deref(), Some("hello-world"));
+        assert!(command_usage("new").starts_with("usage: binder new <name>"));
+    }
+
+    #[test]
+    fn rejects_invalid_new_arguments() {
+        for arguments in [
+            vec!["new"],
+            vec!["new", "../hello"],
+            vec!["new", "123"],
+            vec!["new", "hello", "extra"],
+            vec!["new", "--manifest-path=somewhere"],
+        ] {
+            assert!(
+                parse_options(arguments.into_iter().map(OsString::from)).is_err(),
+                "arguments should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn rejects_a_non_utf8_new_package_name() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let error = parse_options([OsString::from("new"), OsString::from_vec(vec![b'h', 0xff])])
+            .expect_err("non-UTF-8 name should be rejected");
+
+        assert!(error.contains("UTF-8 package name"));
+    }
+
+    #[test]
+    fn creates_a_loadable_project_with_exact_scaffold_contents() {
+        let fixture = Fixture::new();
+        let destination =
+            create_project(&fixture.root, "hello-world").expect("new project should be created");
+
+        assert_eq!(destination, fixture.root.join("hello-world"));
+        assert_eq!(
+            std::fs::read_to_string(destination.join("binder.kdl")).unwrap(),
+            "package \"hello-world\"\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join(".gitignore")).unwrap(),
+            "/build\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(destination.join("src/main.sta")).unwrap(),
+            "use std.io println\n\ndef main = () => println \"Hello, world!\"\n"
+        );
+
+        let package =
+            load_package(&destination.join("binder.kdl")).expect("generated manifest should load");
+        assert_eq!(package.name, "hello-world");
+        assert_eq!(package.entry, destination.join("src/main.sta"));
+    }
+
+    #[test]
+    fn refuses_every_existing_destination_without_modifying_it() {
+        let fixture = Fixture::new();
+        let existing_file = fixture.root.join("existing-file");
+        std::fs::write(&existing_file, "keep me").unwrap();
+        let empty_directory = fixture.root.join("empty-directory");
+        std::fs::create_dir(&empty_directory).unwrap();
+        let full_directory = fixture.root.join("full-directory");
+        std::fs::create_dir(&full_directory).unwrap();
+        std::fs::write(full_directory.join("keep.txt"), "keep me too").unwrap();
+
+        for name in ["existing-file", "empty-directory", "full-directory"] {
+            let error = create_project(&fixture.root, name)
+                .expect_err("existing destination should be rejected");
+            assert!(error.contains("already exists"));
+        }
+        assert_eq!(std::fs::read_to_string(existing_file).unwrap(), "keep me");
+        assert!(empty_directory.read_dir().unwrap().next().is_none());
+        assert_eq!(
+            std::fs::read_to_string(full_directory.join("keep.txt")).unwrap(),
+            "keep me too"
+        );
     }
 
     #[test]
