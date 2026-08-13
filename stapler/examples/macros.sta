@@ -31,9 +31,6 @@ macro select =
 let true_condition: Bool = True
 let false_condition: Bool = False
 
-select true_condition (println "the short macro form ran")
-select false_condition (println "the true branch ran") else (println "the else branch ran")
-
 def definition_site_identity: I32 -> I32 = value => value
 
 // Names written directly in a quote resolve where the macro is defined, while
@@ -50,9 +47,14 @@ let answer: I32 = {
 // Giving the result an explicit type also shows that the generated call
 // returned the spliced caller value, despite the shadowing binding above.
 let checked_answer: I32 = answer
-println "macro hygiene kept the definition-site binding"
 
 // Arguments left after expansion are applied to the generated expression as
 // ordinary calls.
 macro identity = value: Expr => quote { $value }
-identity println "arguments can follow a macro expansion"
+
+def main = () => {
+    select true_condition (println "the short macro form ran")
+    select false_condition (println "the true branch ran") else (println "the else branch ran")
+    println "macro hygiene kept the definition-site binding"
+    identity println "arguments can follow a macro expansion"
+}

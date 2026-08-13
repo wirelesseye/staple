@@ -10,5 +10,8 @@ let finish = move (start, 20, 22)
 
 let start_coordinates = (geometry.x start, geometry.y start)
 let finish_coordinates = (geometry.x finish, geometry.y finish)
-println title
-println "Namespace, selected, renamed, and glob imports evaluated successfully."
+
+def main = () => {
+    println title
+    println "Namespace, selected, renamed, and glob imports evaluated successfully."
+}

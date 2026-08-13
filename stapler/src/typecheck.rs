@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{
-    Accessor, Binding, BuiltinType, Diagnostic, Expression, FloatType, FunctionId, IntegerType,
-    Item, Module, ModuleId, Pattern, PatternBindingKind, ProductType, ResolvedFunction,
-    ResolvedModule, Span, Statement, SymbolId, SyntaxId, TraitId, TraitMethodId, Type,
-    TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
+    Accessor, Binding, BindingKind, BuiltinType, Diagnostic, Expression, FloatType, FunctionId,
+    IntegerType, Item, Module, ModuleId, Pattern, PatternBindingKind, ProductType,
+    ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, TraitId, TraitMethodId,
+    Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
 };
 
 const MAX_PRODUCT_ARITY: usize = 65_535;
@@ -522,6 +522,8 @@ pub struct TypedModule {
     copy_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
+    io_type: Option<TypeId>,
+    entry_function: Option<FunctionId>,
 }
 
 impl TypedModule {
@@ -590,6 +592,7 @@ impl TypedModule {
             value_type,
             self.copy_trait,
             self.drop_trait,
+            self.io_type,
             &self.trait_implementations,
             &[],
         )
@@ -614,9 +617,18 @@ impl TypedModule {
             value_type,
             self.copy_trait,
             self.drop_trait,
+            self.io_type,
             &self.trait_implementations,
             &bounds,
         )
+    }
+
+    pub(crate) fn is_io_type(&self, value_type: &CheckedType) -> bool {
+        matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.io_type)
+    }
+
+    pub(crate) fn entry_function(&self) -> Option<FunctionId> {
+        self.entry_function
     }
 
     pub(crate) fn is_drop_method(&self, function: FunctionId) -> bool {
@@ -767,6 +779,7 @@ pub struct TypeChecker {
     did_return: bool,
     return_reachable: bool,
     diagnostics: Vec<Diagnostic>,
+    io_type: Option<TypeId>,
 }
 
 impl TypeChecker {
@@ -775,6 +788,11 @@ impl TypeChecker {
     }
 
     pub fn check(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
+        self.io_type = module
+            .type_declarations()
+            .keys()
+            .find(|id| module.builtin_type(**id) == Some(BuiltinType::IO))
+            .copied();
         self.copy_trait = module.standard_trait("Copy");
         self.sized_trait = module.standard_trait("Sized");
         self.string_type_trait = module.standard_trait("StringType");
@@ -814,6 +832,7 @@ impl TypeChecker {
         {
             self.infer_resources(&module);
         }
+        let entry_function = self.validate_entry_function(&module);
 
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
@@ -842,6 +861,8 @@ impl TypeChecker {
             copy_trait: self.copy_trait,
             drop_trait: self.drop_trait,
             default_trait: self.default_trait,
+            io_type: self.io_type,
+            entry_function,
         };
         let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
         if ownership_diagnostics.is_empty() {
@@ -2005,6 +2026,72 @@ impl TypeChecker {
         }
     }
 
+    fn validate_entry_function(&mut self, module: &ResolvedModule) -> Option<FunctionId> {
+        let binding = module
+            .program()
+            .module(module.program().entry())
+            .syntax
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Statement(statement) => match statement.as_ref() {
+                    Statement::Binding(binding)
+                        if binding.kind == BindingKind::Def && binding.name == "main" =>
+                    {
+                        Some(binding)
+                    }
+                    _ => None,
+                },
+                _ => None,
+            })?;
+
+        if !binding.type_parameters.is_empty() || !binding.trait_bounds.is_empty() {
+            self.diagnostics.push(Diagnostic::new(
+                binding.syntax.span.clone(),
+                "entry-point `main` cannot be generic",
+            ));
+        }
+        let Some(Expression::Function(function)) = binding.value.as_ref() else {
+            self.diagnostics.push(Diagnostic::new(
+                binding.syntax.span.clone(),
+                "entry-point `main` must be defined directly as a function",
+            ));
+            return None;
+        };
+        let Some(function_id) = module.function_for(function.syntax.id) else {
+            return None;
+        };
+        let Some(function_type) = self.function_types.get(&function_id) else {
+            return Some(function_id);
+        };
+        if function_type.parameter.as_ref() != &CheckedType::empty_product() {
+            self.diagnostics.push(Diagnostic::new(
+                function.pattern.syntax().span.clone(),
+                "entry-point `main` must accept `()`",
+            ));
+        }
+        if function_type.result.as_ref() != &CheckedType::empty_product() {
+            self.diagnostics.push(Diagnostic::new(
+                function.body.syntax().span.clone(),
+                "entry-point `main` must return `()`",
+            ));
+        }
+        if function_type.resources.resources.len() > 1
+            || function_type.resources.resources.iter().any(|resource| {
+                !matches!(
+                    &resource.value_type,
+                    CheckedType::Opaque { id, .. } if Some(*id) == self.io_type
+                )
+            })
+        {
+            self.diagnostics.push(Diagnostic::new(
+                binding.syntax.span.clone(),
+                "entry-point `main` may require only the `std.io.IO` resource",
+            ));
+        }
+        Some(function_id)
+    }
+
     fn refreshed_expression_type(
         &self,
         module: &ResolvedModule,
@@ -2025,10 +2112,37 @@ impl TypeChecker {
                     _ => None,
                 })
                 .or_else(|| self.expression_types.get(&expression.syntax().id).cloned()),
-            Expression::Name(_) | Expression::Access(_) => module
-                .symbol_for(expression.syntax().id)
-                .and_then(|symbol| self.symbol_types.get(&symbol).cloned())
-                .or_else(|| self.expression_types.get(&expression.syntax().id).cloned()),
+            Expression::Name(_) | Expression::Access(_) => {
+                let refreshed = module
+                    .symbol_for(expression.syntax().id)
+                    .and_then(|symbol| self.symbol_types.get(&symbol).cloned());
+                let existing = self.expression_types.get(&expression.syntax().id).cloned();
+                match (refreshed, existing) {
+                    (
+                        Some(CheckedType::Function(template)),
+                        Some(CheckedType::Function(instantiated)),
+                    ) => {
+                        let template = CheckedType::Function(template);
+                        let instantiated = CheckedType::Function(instantiated);
+                        let mut inference_template = template.clone();
+                        let mut inference_actual = instantiated.clone();
+                        clear_function_resources(&mut inference_template);
+                        clear_function_resources(&mut inference_actual);
+                        let mut substitutions = HashMap::new();
+                        if infer_type_parameters(
+                            &inference_template,
+                            &inference_actual,
+                            &mut substitutions,
+                        ) {
+                            Some(substitute_type(template, &substitutions))
+                        } else {
+                            Some(instantiated)
+                        }
+                    }
+                    (Some(refreshed), _) => Some(refreshed),
+                    (None, existing) => existing,
+                }
+            }
             _ => self.expression_types.get(&expression.syntax().id).cloned(),
         }
     }
@@ -4440,6 +4554,7 @@ impl TypeChecker {
                 target,
                 self.copy_trait,
                 self.drop_trait,
+                self.io_type,
                 &self.trait_implementations,
                 &bounds,
             );
@@ -4805,7 +4920,8 @@ impl TypeChecker {
         let mut resources = Vec::new();
         for resource in &source.resources {
             let value_type = self.resolve_source_type_inner(module, resource);
-            let valid_nominal = matches!(&value_type, CheckedType::Distinct { .. });
+            let valid_nominal = matches!(&value_type, CheckedType::Distinct { .. })
+                || matches!(&value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.io_type);
             let concrete = !contains_type_parameter(&value_type)
                 && !contains_inferred_type(&value_type)
                 && value_type.is_fully_known();
@@ -4813,6 +4929,7 @@ impl TypeChecker {
                 &value_type,
                 self.copy_trait,
                 self.drop_trait,
+                self.io_type,
                 &self.trait_implementations,
                 &[],
             );
@@ -5186,6 +5303,11 @@ impl TypeChecker {
                 BuiltinType::CPointer => CheckedType::TypeConstructor {
                     id,
                     name: "CPointer".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::IO => CheckedType::Opaque {
+                    id,
+                    name: "IO".to_owned(),
                     arguments: Vec::new(),
                 },
                 BuiltinType::Syntax => {
@@ -5949,6 +6071,45 @@ pub(crate) fn infer_type_parameters(
     }
 }
 
+fn clear_function_resources(value_type: &mut CheckedType) {
+    match value_type {
+        CheckedType::CPointer { pointee }
+        | CheckedType::Ref(pointee)
+        | CheckedType::ErasedProduct(pointee) => clear_function_resources(pointee),
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
+            for argument in arguments {
+                clear_function_resources(argument);
+            }
+        }
+        CheckedType::Product(product) => {
+            for element in &mut product.elements {
+                clear_function_resources(&mut element.value_type);
+            }
+        }
+        CheckedType::Sum(sum) => {
+            for alternative in &mut sum.alternatives {
+                clear_function_resources(alternative);
+            }
+        }
+        CheckedType::Function(function) => {
+            function.resources = CheckedResourceSet::default();
+            clear_function_resources(&mut function.parameter);
+            clear_function_resources(&mut function.result);
+        }
+        CheckedType::Distinct {
+            arguments,
+            representation,
+            ..
+        } => {
+            for argument in arguments {
+                clear_function_resources(argument);
+            }
+            clear_function_resources(representation);
+        }
+        _ => {}
+    }
+}
+
 fn infer_type_parameters_for_expected(
     template: &CheckedType,
     expected: &CheckedType,
@@ -6108,6 +6269,7 @@ fn is_copy_type(
     value_type: &CheckedType,
     copy_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
+    io_type: Option<TypeId>,
     implementations: &[CheckedTraitImplementation],
     bounds: &[CheckedTraitBound],
 ) -> bool {
@@ -6147,22 +6309,32 @@ fn is_copy_type(
                 &element.value_type,
                 copy_trait,
                 drop_trait,
+                io_type,
                 implementations,
                 bounds,
             )
         }),
         CheckedType::ErasedProduct(_) => false,
         CheckedType::Sum(sum) => sum.alternatives.iter().all(|alternative| {
-            is_copy_type(alternative, copy_trait, drop_trait, implementations, bounds)
+            is_copy_type(
+                alternative,
+                copy_trait,
+                drop_trait,
+                io_type,
+                implementations,
+                bounds,
+            )
         }),
         CheckedType::Distinct { representation, .. } => is_copy_type(
             representation,
             copy_trait,
             drop_trait,
+            io_type,
             implementations,
             bounds,
         ),
-        CheckedType::Opaque { .. } | CheckedType::TypeConstructor { .. } => false,
+        CheckedType::Opaque { id, .. } => Some(*id) == io_type,
+        CheckedType::TypeConstructor { .. } => false,
     }
 }
 

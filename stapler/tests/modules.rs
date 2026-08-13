@@ -73,8 +73,10 @@ fn imports_standard_io_print_functions() {
         "main.sta",
         concat!(
             "use std.io (print, println)\n",
-            "print \"hello\"\n",
-            "println \" world\"\n",
+            "def main = () => {\n",
+            "  print \"hello\"\n",
+            "  println \" world\"\n",
+            "}\n",
         ),
     );
 
@@ -749,13 +751,31 @@ fn resolves_every_module_path_from_the_entry_directory() {
 }
 
 #[test]
-fn mangles_a_source_binding_named_main_away_from_the_generated_entry_point() {
+fn invokes_a_mangled_source_main_from_the_generated_entry_point() {
     let fixture = Fixture::new();
-    fixture.write("main.sta", "def main = () => 1\nmain ()\n");
+    fixture.write("main.sta", "def main = () => ()\n");
 
     let llvm = fixture.compile().expect("source main should compile");
-    assert!(llvm.contains("define i32 @__staple_m0_main(ptr %0)"));
+    assert!(llvm.contains("define <{}> @__staple_m0_main(ptr %0)"));
     assert!(llvm.contains("define i32 @main()"));
+    let native_main = llvm.split("define i32 @main()").nth(1).unwrap();
+    assert!(native_main.contains("%source.main = call <{}> @__staple_m0_main(ptr null)"));
+}
+
+#[test]
+fn does_not_select_imported_dependency_or_let_bindings_as_source_main() {
+    let fixture = Fixture::new();
+    fixture.write("dependency.sta", "pub def main = () => 1\n");
+    fixture.write(
+        "main.sta",
+        "use dependency main as dependency_main\nlet main = dependency_main\nmain ()\n",
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("ordinary main bindings should compile");
+    let native_main = llvm.split("define i32 @main()").nth(1).unwrap();
+    assert!(!native_main.contains("source.main"));
 }
 
 #[test]

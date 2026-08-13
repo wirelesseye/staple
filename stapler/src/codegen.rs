@@ -1174,6 +1174,25 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .build_call(self.initializers[module], &[], "initialize")
                 .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         }
+        if let Some(entry_function) = self.typed_module.entry_function() {
+            let source_main = self.functions[&entry_function];
+            let function_type = self
+                .typed_module
+                .type_of_function(entry_function)
+                .expect("checked entry function");
+            let mut arguments = vec![
+                self.context
+                    .ptr_type(AddressSpace::default())
+                    .const_null()
+                    .into(),
+            ];
+            if !function_type.resources.resources.is_empty() {
+                arguments.push(self.context.struct_type(&[], false).const_zero().into());
+            }
+            self.builder
+                .build_direct_call(source_main, &arguments, "source.main")
+                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+        }
         self.builder
             .build_return(Some(&integer_type.const_zero()))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
@@ -5853,6 +5872,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Span::Compiler,
                 format!("cannot generate code for partially applied type `{name}`"),
             )),
+            CheckedType::Opaque { .. } if self.typed_module.is_io_type(value_type) => {
+                Ok(self.context.struct_type(&[], false).into())
+            }
             CheckedType::Opaque { name, .. } => Err(Diagnostic::new(
                 Span::Compiler,
                 format!("opaque type `{name}` has no by-value representation"),

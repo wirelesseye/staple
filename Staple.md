@@ -440,9 +440,20 @@ extern "c" {
 printf (c_string "hello, world!\n")
 ```
 
-There is no distinguished source-level entry-point function. Stapler generates
-one native `main` function for the entry source file and the modules reachable
-from it.
+The entry module may define an optional source-level entry point:
+
+```staple
+use std.io println
+
+def main = () => println "Hello, world!"
+```
+
+Only a direct, non-generic `def main` in the entry module is selected. It must
+have parameter and result type `()`, and may require either no resources or only
+`std.io.IO`; the resource set may be explicit or inferred. A `let main`, an
+imported `main`, and functions named `main` in other modules remain ordinary
+bindings. Stapler generates the native `main`, initializes every reachable
+module, calls the source `main` when present, and then returns status zero.
 
 ### Modules and `use`
 
@@ -551,6 +562,8 @@ are initialized before modules which use them. Mutually recursive groups are
 initialized by canonical file path and then logical submodule path, and
 statements within one module keep source order. Declaring an inline submodule
 makes it reachable, so its top-level statements also execute exactly once.
+All reachable top-level initialization completes before the source `main` body
+begins.
 Module globals begin in the `Declared` state, enter `Initializing`
 while their initializer is evaluated, and become `Initialized(value)` only after
 that value has been stored. Reading a global before it is `Initialized` is an
@@ -1015,9 +1028,10 @@ type Logger = (
 ```
 
 Transparent aliases use the identity of their underlying nominal type. A
-structural type, opaque type, unspecialized generic type, unsized type, or
-move-only nominal type is not eligible. Consequently resources never add a
-new borrowing or ownership mode: their hidden values can always be copied.
+structural type, ordinary opaque type, unspecialized generic type, unsized type,
+or move-only nominal type is not eligible. The compiler-represented opaque
+`std.io.IO` type is the sole opaque exception. Consequently resources never add
+a new borrowing or ownership mode: their hidden values can always be copied.
 
 Function arrows list their implicit parameters in braces. Resource sets are
 unordered and duplicate-free, and each arrow in a curried type has its own set:
@@ -1062,6 +1076,12 @@ must supply every required resource. External functions cannot declare Staple
 resources because foreign ABIs do not include these hidden parameters.
 Resource-bearing function types and nominal resource identities are preserved
 when public definitions are imported or re-exported by another module.
+
+`std.io` exports the opaque `IO` resource and the functions `print` and
+`println`, both with type `String ->{IO} ()`. The native entry wrapper supplies
+`IO` only to source `main`; ordinary code receives it transitively through its
+function resource contract. Calling either output function from top-level
+initialization is therefore rejected.
 
 Macros may quote, splice, generate, and transform resource syntax. Attempting
 to evaluate `resource` or `with` as a compile-time macro operation is rejected;
@@ -1160,7 +1180,7 @@ A generic `def` adds one or more trait bounds between its compile-time parameter
 binder and its ordinary function type:
 
 ```staple
-def print: T => ToString T => T -> () = value => {
+def print: T => ToString T => T ->{IO} () = value => {
     print_string (to_string value)
 }
 
@@ -1188,7 +1208,7 @@ Function application is written by placing the argument expression after the
 function expression. No dedicated call punctuation is required.
 
 ```staple
-println "Hello, world!"
+def main = () => println "Hello, world!"
 ```
 
 Because each function accepts one value, passing several logical arguments

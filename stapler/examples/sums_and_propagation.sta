@@ -27,7 +27,10 @@ def explicit_return = value: I32 => {
     0
 }
 
-describe (doubled True)
-describe (doubled False)
 let returned = explicit_return 41
-println "Explicit return evaluated successfully."
+
+def main = () => {
+    describe (doubled True)
+    describe (doubled False)
+    println "Explicit return evaluated successfully."
+}

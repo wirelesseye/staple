@@ -80,6 +80,7 @@ pub struct Program {
     entry: ModuleId,
     standard_library_core: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
+    standard_library_io: Option<ModuleId>,
     modules: Vec<SourceModule>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
     child_modules: HashMap<SyntaxId, ModuleId>,
@@ -93,6 +94,7 @@ impl Program {
             entry: ModuleId(0),
             standard_library_core: None,
             standard_library_cinterop: None,
+            standard_library_io: None,
             modules: vec![SourceModule {
                 id: ModuleId(0),
                 path: PathBuf::from("<memory>.sta"),
@@ -252,6 +254,10 @@ impl Program {
         self.standard_library_cinterop
     }
 
+    pub fn standard_library_io(&self) -> Option<ModuleId> {
+        self.standard_library_io
+    }
+
     pub fn modules(&self) -> &[SourceModule] {
         &self.modules
     }
@@ -298,6 +304,7 @@ pub struct ProgramLoader {
     standard_library_root: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
+    standard_library_io: Option<ModuleId>,
 }
 
 impl ProgramLoader {
@@ -599,6 +606,9 @@ impl ProgramLoader {
         let cinterop =
             canonical_file(&root.join("std/cinterop.sta")).map_err(LoadDiagnostic::compiler)?;
         self.standard_library_cinterop = Some(self.load_file(&cinterop)?);
+        self.standard_library_io = canonical_file(&root.join("std/io.sta"))
+            .ok()
+            .and_then(|io| self.paths.get(&io).copied());
         Ok(())
     }
 
@@ -659,6 +669,7 @@ impl ProgramLoader {
             entry,
             standard_library_core: self.standard_library_core,
             standard_library_cinterop: self.standard_library_cinterop,
+            standard_library_io: self.standard_library_io,
             modules: self.modules,
             imported_modules: self.imported_modules,
             child_modules: self.child_modules,

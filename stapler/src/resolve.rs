@@ -64,6 +64,7 @@ pub enum BuiltinType {
     CChar,
     CString,
     CPointer,
+    IO,
     Syntax,
 }
 
@@ -717,6 +718,7 @@ pub struct NameResolver {
     multiple_modules: bool,
     standard_library_core: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
+    standard_library_io: Option<ModuleId>,
 }
 
 impl NameResolver {
@@ -732,6 +734,7 @@ impl NameResolver {
         let (program, macro_analysis) = crate::macro_expand::expand_program(program)?;
         self.standard_library_core = program.standard_library_core();
         self.standard_library_cinterop = program.standard_library_cinterop();
+        self.standard_library_io = program.standard_library_io();
         let standard_library_directory = self
             .standard_library_core
             .and_then(|core| program.module(core).path.parent());
@@ -895,6 +898,9 @@ impl NameResolver {
             self.register_builtin_type(cinterop, "std.cinterop", "CString", BuiltinType::CString);
             self.register_builtin_type(cinterop, "std.cinterop", "CPointer", BuiltinType::CPointer);
             self.register_primitive_macro(cinterop, "c_string", PrimitiveMacro::CString);
+        }
+        if let Some(io) = program.standard_library_io() {
+            self.register_builtin_type(io, "std.io", "IO", BuiltinType::IO);
         }
 
         for (id, declaration) in &self.type_declarations {
@@ -1162,6 +1168,12 @@ impl NameResolver {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 format!("standard library type `{name}` must accept one compile-time argument"),
+            ));
+        }
+        if builtin == BuiltinType::IO && !declaration.type_parameters.is_empty() {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                "standard library type `IO` must not accept compile-time arguments",
             ));
         }
         if builtin == BuiltinType::Ref
@@ -2337,6 +2349,7 @@ impl NameResolver {
                     || base_name == "main"
                     || Some(self.current_module) == self.standard_library_core
                     || Some(self.current_module) == self.standard_library_cinterop
+                    || Some(self.current_module) == self.standard_library_io
                 {
                     format!("__staple_m{}_{}", self.current_module.0, base_name)
                 } else {

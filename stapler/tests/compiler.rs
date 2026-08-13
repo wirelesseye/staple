@@ -90,6 +90,88 @@ fn rejects_invalid_resource_contracts_and_types() {
 }
 
 #[test]
+fn standard_io_is_a_compiler_provided_resource_and_propagates_to_main() {
+    let module = type_check(concat!(
+        "use std.io (IO, print, println)\n",
+        "def identity: T => T -> T = value => value\n",
+        "def explicit: String ->{IO} () = value => print value\n",
+        "def inferred = value: String => println value\n",
+        "def main = () => { explicit \"one\"; inferred (identity \"two\") }\n",
+    ));
+
+    for name in ["explicit", "inferred", "main"] {
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name.ends_with(name))
+            .expect("resource-bearing function");
+        let resources = &module
+            .type_of_function(function.id)
+            .unwrap()
+            .resources
+            .resources;
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0].value_type.to_string(), "IO");
+    }
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generic calls should remain specialized during resource inference");
+}
+
+#[test]
+fn rejects_io_at_top_level_and_non_builtin_opaque_resources() {
+    let top_level = TypeChecker::new()
+        .check(resolve("use std.io println\nprintln \"invalid\"\n"))
+        .expect_err("top-level output must require unavailable IO");
+    assert!(top_level.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("top-level initialization requires resources {IO}")
+    }));
+
+    for source in [
+        "type Token = opaque\ndef use_token: () ->{Token} () = () => ()\n",
+        "type IO = I32\ndef main: () ->{IO} () = () => ()\n",
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err("only std.io.IO may be an opaque or entry resource");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("concrete, sized, Copy nominal type")
+                || diagnostic
+                    .message
+                    .contains("may require only the `std.io.IO` resource")
+        }));
+    }
+}
+
+#[test]
+fn validates_source_main_signature_and_resource_boundary() {
+    for (source, expected) in [
+        ("def main = value => ()\n", "must accept `()`"),
+        ("def main = () => 1\n", "must return `()`"),
+        ("def main: T => () -> () = () => ()\n", "cannot be generic"),
+        (
+            "type Clock = I32\ndef main: () ->{Clock} () = () => ()\n",
+            "may require only the `std.io.IO` resource",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err("invalid source main must be rejected");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "expected {expected:?}, got {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
 fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
     let module = type_check(concat!(
         "type Clock = I32\n",

@@ -407,6 +407,50 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_source_main_with_io_after_top_level_initialization() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-main-io-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-main-io-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.io println\n",
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let mut initialized = 0\n",
+                "initialized = 41\n",
+                "def main = () => { println \"source main\"; exit (initialized - 41) }\n",
+            ),
+        )
+        .expect("temporary source-main source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("source-main executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("source-main executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(
+            result.status.success(),
+            "source main exited with {}",
+            result.status
+        );
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "source main\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_typed_resources_with_lexical_shadowing() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -1,15 +1,17 @@
 use std.cinterop *
 
+pub type IO = opaque
+
 extern "c" {
     let printf: (CPointer CChar, ...) -> I32
 }
 
-pub def print: String -> () = value => {
+pub def print: String ->{IO} () = value => {
     let _ = printf (c_string "%s", string_to_c_string value)
     ()
 }
 
-pub def println: String -> () = value => {
+pub def println: String ->{IO} () = value => {
     let _ = printf (c_string "%s\n", string_to_c_string value)
     ()
 }
