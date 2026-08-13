@@ -131,15 +131,6 @@ impl DeclarationCollector<'_> {
                     self.declaration(&member.syntax, &member.name);
                 }
             }
-            Item::EffectDeclaration(value) => {
-                self.declaration(&value.syntax, &value.name);
-                for parameter in &value.type_parameters {
-                    self.type_parameter(parameter);
-                }
-                for operation in &value.operations {
-                    self.declaration(&operation.syntax, &operation.name);
-                }
-            }
             Item::Statement(value) => self.statement(value),
             Item::UseDeclaration(_) | Item::MacroDeclaration(_) | Item::TraitImplementation(_) => {}
         }
@@ -193,22 +184,6 @@ impl DeclarationCollector<'_> {
                     self.statement(statement);
                 }
             }
-            Expression::Handler(value) => {
-                for clause in &value.clauses {
-                    self.pattern(&clause.pattern);
-                    self.expression(&clause.body);
-                }
-            }
-            Expression::Handle(value) => {
-                self.expression(&value.body);
-                if let HandleKind::Manual(clauses) = &value.handler {
-                    for clause in clauses {
-                        self.pattern(&clause.pattern);
-                        self.expression(&clause.body);
-                    }
-                }
-            }
-            Expression::Resume(value) => self.expression(&value.value),
             Expression::Block(value) => {
                 for statement in &value.statements {
                     self.statement(statement);
@@ -390,16 +365,6 @@ impl Collector<'_> {
                     self.expression(&member.value);
                 }
             }
-            Item::EffectDeclaration(value) => {
-                self.add_resolved(&value.syntax, &value.name, false);
-                for parameter in &value.type_parameters {
-                    self.type_parameter(parameter);
-                }
-                for operation in &value.operations {
-                    self.add_resolved(&operation.syntax, &operation.name, false);
-                    self.ty(&operation.annotation);
-                }
-            }
             Item::Statement(value) => self.statement(value),
         }
     }
@@ -495,28 +460,6 @@ impl Collector<'_> {
                     self.statement(statement);
                 }
             }
-            Expression::Handler(value) => {
-                self.ty(&value.effect);
-                for clause in &value.clauses {
-                    self.add_resolved(&clause.syntax, &clause.operation, true);
-                    self.pattern(&clause.pattern);
-                    self.expression(&clause.body);
-                }
-            }
-            Expression::Handle(value) => {
-                self.expression(&value.body);
-                match &value.handler {
-                    HandleKind::Manual(clauses) => {
-                        for clause in clauses {
-                            self.add_resolved(&clause.syntax, &clause.operation, true);
-                            self.pattern(&clause.pattern);
-                            self.expression(&clause.body);
-                        }
-                    }
-                    HandleKind::Value(handler) => self.expression(handler),
-                }
-            }
-            Expression::Resume(value) => self.expression(&value.value),
             Expression::Block(value) => {
                 for statement in &value.statements {
                     self.statement(statement);
@@ -635,16 +578,7 @@ impl Collector<'_> {
             }
             Type::Function(value) => {
                 self.ty(&value.parameter);
-                for effect in &value.effects.effects {
-                    self.ty(effect);
-                }
                 self.ty(&value.result);
-            }
-            Type::Handler(value) => {
-                self.ty(&value.effect);
-                for effect in &value.effects.effects {
-                    self.ty(effect);
-                }
             }
             Type::Application(value) => {
                 self.ty(&value.callee);

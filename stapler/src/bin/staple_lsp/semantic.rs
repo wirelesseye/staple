@@ -358,28 +358,6 @@ impl<'a> Classifier<'a> {
                     self.expression(&member.value, resolved);
                 }
             }
-            Item::EffectDeclaration(value) => {
-                self.mark_first(
-                    &value.syntax,
-                    &value.name,
-                    INTERFACE,
-                    DECLARATION | DEFINITION | READONLY,
-                    1,
-                );
-                for parameter in &value.type_parameters {
-                    self.type_parameter(parameter, resolved);
-                }
-                for operation in &value.operations {
-                    self.mark_first(
-                        &operation.syntax,
-                        &operation.name,
-                        FUNCTION,
-                        DECLARATION | READONLY,
-                        1,
-                    );
-                    self.ty(&operation.annotation, resolved);
-                }
-            }
             Item::Statement(value) => self.statement(value, resolved),
         }
     }
@@ -484,28 +462,6 @@ impl<'a> Classifier<'a> {
                     self.statement(statement, resolved);
                 }
             }
-            Expression::Handler(value) => {
-                self.ty(&value.effect, resolved);
-                for clause in &value.clauses {
-                    self.mark_last(&clause.syntax, &clause.operation, FUNCTION, 0, 1);
-                    self.pattern(&clause.pattern, PARAMETER, resolved);
-                    self.expression(&clause.body, resolved);
-                }
-            }
-            Expression::Handle(value) => {
-                self.expression(&value.body, resolved);
-                match &value.handler {
-                    HandleKind::Manual(clauses) => {
-                        for clause in clauses {
-                            self.mark_last(&clause.syntax, &clause.operation, FUNCTION, 0, 1);
-                            self.pattern(&clause.pattern, PARAMETER, resolved);
-                            self.expression(&clause.body, resolved);
-                        }
-                    }
-                    HandleKind::Value(handler) => self.expression(handler, resolved),
-                }
-            }
-            Expression::Resume(value) => self.expression(&value.value, resolved),
             Expression::Block(value) => {
                 for statement in &value.statements {
                     self.statement(statement, resolved);
@@ -715,16 +671,7 @@ impl<'a> Classifier<'a> {
             }
             Type::Function(value) => {
                 self.ty(&value.parameter, resolved);
-                for effect in &value.effects.effects {
-                    self.ty(effect, resolved);
-                }
                 self.ty(&value.result, resolved);
-            }
-            Type::Handler(value) => {
-                self.ty(&value.effect, resolved);
-                for effect in &value.effects.effects {
-                    self.ty(effect, resolved);
-                }
             }
             Type::Application(value) => {
                 self.ty(&value.callee, resolved);

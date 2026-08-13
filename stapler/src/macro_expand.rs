@@ -1121,7 +1121,6 @@ impl MacroExpander {
                     }
                 }
             }
-            Item::EffectDeclaration(_) => {}
             Item::Submodule(submodule) if submodule.syntax.definition_module().is_some() => {
                 let items = std::mem::take(&mut submodule.module.items);
                 submodule.module.items = self.expand_generated_items(module, items, depth + 1);
@@ -2305,13 +2304,6 @@ impl MacroExpander {
             return None;
         }
         match expression {
-            Expression::Handler(_) | Expression::Handle(_) | Expression::Resume(_) => {
-                self.diagnostics.push(Diagnostic::new(
-                    expression.syntax().span.clone(),
-                    "effects are not available during compile-time macro evaluation",
-                ));
-                None
-            }
             Expression::Function(function) => Some(Value::Function {
                 module,
                 function: function.as_ref().clone(),
@@ -3290,32 +3282,6 @@ impl MacroExpander {
                 for statement in &mut loop_.body.statements {
                     freshen_statement(self, statement, module, mark);
                 }
-            }
-            Expression::Handler(handler) => {
-                freshen_type(self, &mut handler.effect, module, mark);
-                for clause in &mut handler.clauses {
-                    self.freshen_syntax(&mut clause.syntax, module, mark);
-                    freshen_pattern(self, &mut clause.pattern, module, mark);
-                    self.freshen_expression(&mut clause.body, module, mark);
-                }
-            }
-            Expression::Handle(handle) => {
-                self.freshen_expression(&mut handle.body, module, mark);
-                match &mut handle.handler {
-                    crate::HandleKind::Manual(clauses) => {
-                        for clause in clauses {
-                            self.freshen_syntax(&mut clause.syntax, module, mark);
-                            freshen_pattern(self, &mut clause.pattern, module, mark);
-                            self.freshen_expression(&mut clause.body, module, mark);
-                        }
-                    }
-                    crate::HandleKind::Value(value) => {
-                        self.freshen_expression(value, module, mark);
-                    }
-                }
-            }
-            Expression::Resume(resume) => {
-                self.freshen_expression(&mut resume.value, module, mark);
             }
             Expression::Block(block) => {
                 for statement in &mut block.statements {
@@ -4406,13 +4372,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "PublicRepr"
         ),
         Type::Function(function) => {
-            type_contains_syntax(&function.parameter)
-                || function.effects.effects.iter().any(type_contains_syntax)
-                || type_contains_syntax(&function.result)
-        }
-        Type::Handler(handler) => {
-            type_contains_syntax(&handler.effect)
-                || handler.effects.effects.iter().any(type_contains_syntax)
+            type_contains_syntax(&function.parameter) || type_contains_syntax(&function.result)
         }
         Type::Product(product) => product
             .elements
@@ -4439,20 +4399,7 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
         }
         Type::Function(function) => {
             type_contains_unshadowed_syntax(&function.parameter, declared)
-                || function
-                    .effects
-                    .effects
-                    .iter()
-                    .any(|ty| type_contains_unshadowed_syntax(ty, declared))
                 || type_contains_unshadowed_syntax(&function.result, declared)
-        }
-        Type::Handler(handler) => {
-            type_contains_unshadowed_syntax(&handler.effect, declared)
-                || handler
-                    .effects
-                    .effects
-                    .iter()
-                    .any(|ty| type_contains_unshadowed_syntax(ty, declared))
         }
         Type::Product(product) => product
             .elements
@@ -4516,20 +4463,7 @@ fn type_contains_named(ty: &Type, expected: &str) -> bool {
         Type::Named(named) => named.namespace.is_none() && named.name == expected,
         Type::Function(function) => {
             type_contains_named(&function.parameter, expected)
-                || function
-                    .effects
-                    .effects
-                    .iter()
-                    .any(|effect| type_contains_named(effect, expected))
                 || type_contains_named(&function.result, expected)
-        }
-        Type::Handler(handler) => {
-            type_contains_named(&handler.effect, expected)
-                || handler
-                    .effects
-                    .effects
-                    .iter()
-                    .any(|effect| type_contains_named(effect, expected))
         }
         Type::Product(product) => product
             .elements
@@ -4592,7 +4526,6 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
             .iter()
             .any(|arm| obviously_not_syntax(&arm.body, 0)),
         Expression::Loop(_) => true,
-        Expression::Handler(_) | Expression::Handle(_) | Expression::Resume(_) => true,
         Expression::Block(block) => {
             block
                 .statements
@@ -5017,30 +4950,6 @@ fn substitute_splices(
                 substitute_statement(statement, environment, diagnostics)?;
             }
         }
-        Expression::Handler(handler) => {
-            substitute_type(&mut handler.effect, environment, diagnostics)?;
-            for clause in &mut handler.clauses {
-                substitute_pattern(&mut clause.pattern, environment, diagnostics)?;
-                clause.body = substitute_splices(&clause.body, environment, diagnostics)?;
-            }
-        }
-        Expression::Handle(handle) => {
-            *handle.body = substitute_splices(&handle.body, environment, diagnostics)?;
-            match &mut handle.handler {
-                crate::HandleKind::Manual(clauses) => {
-                    for clause in clauses {
-                        substitute_pattern(&mut clause.pattern, environment, diagnostics)?;
-                        clause.body = substitute_splices(&clause.body, environment, diagnostics)?;
-                    }
-                }
-                crate::HandleKind::Value(value) => {
-                    **value = substitute_splices(value, environment, diagnostics)?;
-                }
-            }
-        }
-        Expression::Resume(resume) => {
-            *resume.value = substitute_splices(&resume.value, environment, diagnostics)?;
-        }
         Expression::Block(block) => {
             for statement in &mut block.statements {
                 substitute_statement(statement, environment, diagnostics)?;
@@ -5122,7 +5031,6 @@ fn item_output_supported(item: &Item) -> bool {
         | Item::TypeDeclaration(_)
         | Item::TraitDeclaration(_)
         | Item::TraitImplementation(_)
-        | Item::EffectDeclaration(_)
         | Item::Statement(_) => true,
         Item::Submodule(_) | Item::UseDeclaration(_) => true,
         Item::MacroDeclaration(_) => false,
@@ -5138,8 +5046,7 @@ fn modifier_target_supported(item: &Item) -> bool {
         Item::ExternBlock(_)
         | Item::TypeDeclaration(_)
         | Item::TraitDeclaration(_)
-        | Item::TraitImplementation(_)
-        | Item::EffectDeclaration(_) => true,
+        | Item::TraitImplementation(_) => true,
         Item::Statement(statement) => matches!(
             statement.as_ref(),
             Statement::Binding(_) | Statement::PatternBinding(_)
@@ -5161,7 +5068,6 @@ fn item_syntax(item: &Item) -> &Syntax {
         Item::MacroDeclaration(value) => &value.syntax,
         Item::TraitDeclaration(value) => &value.syntax,
         Item::TraitImplementation(value) => &value.syntax,
-        Item::EffectDeclaration(value) => &value.syntax,
         Item::Statement(value) => statement_syntax(value),
     }
 }
@@ -5320,16 +5226,7 @@ fn substitute_type(
         }
         Type::Function(function) => {
             substitute_type(&mut function.parameter, environment, diagnostics)?;
-            for effect in &mut function.effects.effects {
-                substitute_type(effect, environment, diagnostics)?;
-            }
             substitute_type(&mut function.result, environment, diagnostics)?;
-        }
-        Type::Handler(handler) => {
-            substitute_type(&mut handler.effect, environment, diagnostics)?;
-            for effect in &mut handler.effects.effects {
-                substitute_type(effect, environment, diagnostics)?;
-            }
         }
         Type::Application(application) => {
             substitute_type(&mut application.callee, environment, diagnostics)?;
@@ -5492,11 +5389,6 @@ fn substitute_item(
                 member.value = substitute_splices(&member.value, environment, diagnostics)?;
             }
         }
-        Item::EffectDeclaration(declaration) => {
-            for operation in &mut declaration.operations {
-                substitute_type(&mut operation.annotation, environment, diagnostics)?;
-            }
-        }
         Item::Statement(statement) => {
             substitute_statement(statement, environment, diagnostics)?;
         }
@@ -5571,9 +5463,6 @@ fn apply_visibility_to_item(
             }
         }
         Item::TraitDeclaration(declaration) if kind != VisibilityKind::PublicRepr => {
-            declaration.visibility = public
-        }
-        Item::EffectDeclaration(declaration) if kind != VisibilityKind::PublicRepr => {
             declaration.visibility = public
         }
         Item::Statement(statement) => {
@@ -5761,7 +5650,6 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
                 alpha_rename_expression(&mut member.value, mark, &mut scopes);
             }
         }
-        Item::EffectDeclaration(_) => {}
         Item::Statement(statement) => match statement.as_mut() {
             Statement::Binding(binding) => {
                 if let Some(value) = &mut binding.value {
@@ -5859,31 +5747,6 @@ fn alpha_rename_expression(
         Expression::Loop(loop_) => {
             alpha_rename_block(&mut loop_.body, mark, scopes);
         }
-        Expression::Handler(handler) => {
-            for clause in &mut handler.clauses {
-                let mut scope = HashMap::new();
-                alpha_rename_pattern(&mut clause.pattern, mark, &mut scope);
-                scopes.push(scope);
-                alpha_rename_expression(&mut clause.body, mark, scopes);
-                scopes.pop();
-            }
-        }
-        Expression::Handle(handle) => {
-            alpha_rename_expression(&mut handle.body, mark, scopes);
-            match &mut handle.handler {
-                crate::HandleKind::Manual(clauses) => {
-                    for clause in clauses {
-                        let mut scope = HashMap::new();
-                        alpha_rename_pattern(&mut clause.pattern, mark, &mut scope);
-                        scopes.push(scope);
-                        alpha_rename_expression(&mut clause.body, mark, scopes);
-                        scopes.pop();
-                    }
-                }
-                crate::HandleKind::Value(value) => alpha_rename_expression(value, mark, scopes),
-            }
-        }
-        Expression::Resume(resume) => alpha_rename_expression(&mut resume.value, mark, scopes),
         Expression::Block(block) => {
             alpha_rename_block(block, mark, scopes);
         }
@@ -5963,9 +5826,6 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Satisfies(value) => &mut value.syntax,
         Expression::Match(value) => &mut value.syntax,
         Expression::Loop(value) => &mut value.syntax,
-        Expression::Handler(value) => &mut value.syntax,
-        Expression::Handle(value) => &mut value.syntax,
-        Expression::Resume(value) => &mut value.syntax,
         Expression::Block(value) => &mut value.syntax,
         Expression::Product(value) => &mut value.syntax,
         Expression::Call(value) => &mut value.syntax,
@@ -6179,16 +6039,6 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
                 expander.freshen_expression(&mut member.value, module, mark);
             }
         }
-        Item::EffectDeclaration(declaration) => {
-            expander.freshen_syntax(&mut declaration.syntax, module, mark);
-            for parameter in &mut declaration.type_parameters {
-                freshen_type_parameter(expander, parameter, module, mark);
-            }
-            for operation in &mut declaration.operations {
-                expander.freshen_syntax(&mut operation.syntax, module, mark);
-                freshen_type(expander, &mut operation.annotation, module, mark);
-            }
-        }
         Item::Statement(statement) => freshen_statement(expander, statement, module, mark),
         Item::Submodule(submodule) => {
             expander.freshen_syntax(&mut submodule.syntax, module, mark);
@@ -6214,7 +6064,6 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         Type::Product(ty) => &mut ty.syntax,
         Type::Sum(ty) => &mut ty.syntax,
         Type::Function(ty) => &mut ty.syntax,
-        Type::Handler(ty) => &mut ty.syntax,
         Type::Application(ty) => &mut ty.syntax,
         Type::Repeated(ty) => &mut ty.syntax,
         Type::Splice(ty) => &mut ty.syntax,
@@ -6234,18 +6083,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         }
         Type::Function(function) => {
             freshen_type(expander, &mut function.parameter, module, mark);
-            expander.freshen_syntax(&mut function.effects.syntax, module, mark);
-            for effect in &mut function.effects.effects {
-                freshen_type(expander, effect, module, mark);
-            }
             freshen_type(expander, &mut function.result, module, mark);
-        }
-        Type::Handler(handler) => {
-            freshen_type(expander, &mut handler.effect, module, mark);
-            expander.freshen_syntax(&mut handler.effects.syntax, module, mark);
-            for effect in &mut handler.effects.effects {
-                freshen_type(expander, effect, module, mark);
-            }
         }
         Type::Application(application) => {
             freshen_type(expander, &mut application.callee, module, mark);

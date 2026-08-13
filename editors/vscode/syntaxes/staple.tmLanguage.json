@@ -79,14 +79,6 @@
           }
         },
         {
-          "name": "meta.effect.definition.staple",
-          "match": "\\b(effect)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
-          "captures": {
-            "1": { "name": "storage.type.effect.staple" },
-            "2": { "name": "entity.name.type.interface.staple" }
-          }
-        },
-        {
           "name": "meta.implementation.staple",
           "match": "\\b(impl)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
           "captures": {
@@ -126,7 +118,7 @@
       "patterns": [
         {
           "name": "keyword.control.staple",
-          "match": "\\b(?:break|continue|handle|loop|match|resume|return|with)\\b"
+          "match": "\\b(?:break|continue|loop|match|return)\\b"
         },
         {
           "name": "keyword.control.import.staple",
@@ -134,7 +126,7 @@
         },
         {
           "name": "keyword.declaration.staple",
-          "match": "\\b(?:def|effect|extern|handler|impl|let|macro|mod|trait|type)\\b"
+          "match": "\\b(?:def|extern|impl|let|macro|mod|trait|type)\\b"
         },
         {
           "name": "storage.modifier.staple",

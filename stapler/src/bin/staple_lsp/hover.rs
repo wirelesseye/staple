@@ -94,7 +94,6 @@ impl Collector<'_> {
                     self.collect_expression_declarations(&member.value);
                 }
             }
-            Item::EffectDeclaration(_) => {}
             Item::Statement(statement) => self.collect_statement_declarations(statement),
             Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
         }
@@ -161,22 +160,6 @@ impl Collector<'_> {
                     self.collect_statement_declarations(statement);
                 }
             }
-            Expression::Handler(handler) => {
-                for clause in &handler.clauses {
-                    self.collect_pattern_declarations(&clause.pattern, None);
-                    self.collect_expression_declarations(&clause.body);
-                }
-            }
-            Expression::Handle(handle) => {
-                self.collect_expression_declarations(&handle.body);
-                if let HandleKind::Manual(clauses) = &handle.handler {
-                    for clause in clauses {
-                        self.collect_pattern_declarations(&clause.pattern, None);
-                        self.collect_expression_declarations(&clause.body);
-                    }
-                }
-            }
-            Expression::Resume(resume) => self.collect_expression_declarations(&resume.value),
             Expression::Block(block) => {
                 for statement in &block.statements {
                     self.collect_statement_declarations(statement);
@@ -336,28 +319,6 @@ impl Collector<'_> {
                 }
             }
             Item::TypeDeclaration(declaration) => self.type_declaration(declaration),
-            Item::EffectDeclaration(declaration) => {
-                self.named(
-                    &declaration.syntax,
-                    &declaration.name,
-                    format!("effect {}", declaration.name),
-                );
-                for parameter in &declaration.type_parameters {
-                    self.type_parameter(parameter);
-                }
-                for operation in &declaration.operations {
-                    self.named(
-                        &operation.syntax,
-                        &operation.name,
-                        format!(
-                            "<effect operation> {}: {}",
-                            operation.name,
-                            operation.annotation.syntax().text().trim()
-                        ),
-                    );
-                    self.ty(&operation.annotation);
-                }
-            }
             Item::Statement(statement) => self.statement(statement),
             Item::UseDeclaration(_) => {}
         }
@@ -587,44 +548,6 @@ impl Collector<'_> {
                     self.statement(statement);
                 }
             }
-            Expression::Handler(handler) => {
-                self.ty(&handler.effect);
-                for clause in &handler.clauses {
-                    self.pattern(&clause.pattern);
-                    self.expression(&clause.body);
-                }
-            }
-            Expression::Handle(handle) => {
-                self.expression(&handle.body);
-                match &handle.handler {
-                    HandleKind::Manual(clauses) => {
-                        for clause in clauses {
-                            if let Some(operation) = self
-                                .typed
-                                .resolved()
-                                .effect_operations_for_expression(clause.syntax.id)
-                                .first()
-                                .copied()
-                                && let Some(function) = self.typed.effect_operation_type(operation)
-                            {
-                                self.named(
-                                    &clause.syntax,
-                                    &clause.operation,
-                                    format!(
-                                        "<effect operation> {}: {}",
-                                        clause.operation,
-                                        self.display_type(&CheckedType::Function(function.clone()))
-                                    ),
-                                );
-                            }
-                            self.pattern(&clause.pattern);
-                            self.expression(&clause.body);
-                        }
-                    }
-                    HandleKind::Value(handler) => self.expression(handler),
-                }
-            }
-            Expression::Resume(resume) => self.expression(&resume.value),
             Expression::Block(block) => {
                 for statement in &block.statements {
                     self.statement(statement);
@@ -740,16 +663,7 @@ impl Collector<'_> {
             }
             Type::Function(function) => {
                 self.ty(&function.parameter);
-                for effect in &function.effects.effects {
-                    self.ty(effect);
-                }
                 self.ty(&function.result);
-            }
-            Type::Handler(handler) => {
-                self.ty(&handler.effect);
-                for effect in &handler.effects.effects {
-                    self.ty(effect);
-                }
             }
             Type::Application(application) => {
                 self.ty(&application.callee);

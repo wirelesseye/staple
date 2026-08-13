@@ -153,7 +153,6 @@ struct Grammar {
     newline_terminates_type: bool,
     any_newline_terminates_type: bool,
     brace_terminates_expression: bool,
-    with_terminates_expression: bool,
     macro_punctuation_arguments: bool,
     quote_depth: usize,
     source_name: Option<Arc<str>>,
@@ -180,7 +179,6 @@ impl Grammar {
             newline_terminates_type: false,
             any_newline_terminates_type: false,
             brace_terminates_expression: false,
-            with_terminates_expression: false,
             macro_punctuation_arguments: false,
             quote_depth: 0,
             source_name,
@@ -312,9 +310,6 @@ impl Grammar {
             Some(TokenKind::Trait) => self
                 .parse_trait_declaration(visibility, item_start)
                 .map(Item::TraitDeclaration),
-            Some(TokenKind::Effect) => self
-                .parse_effect_declaration(visibility, item_start)
-                .map(Item::EffectDeclaration),
             Some(TokenKind::Impl) if visibility == Visibility::Private => self
                 .parse_trait_implementation(item_start)
                 .map(Item::TraitImplementation),
@@ -562,93 +557,6 @@ impl Grammar {
             arguments,
             members,
         })
-    }
-
-    fn parse_effect_declaration(
-        &mut self,
-        visibility: Visibility,
-        start: usize,
-    ) -> Result<EffectDeclaration, ParseError> {
-        self.expect(TokenKind::Effect, "expected `effect`")?;
-        let name = self
-            .expect(TokenKind::Identifier, "expected effect name")?
-            .text;
-        self.expect(TokenKind::Equals, "expected `=` after effect name")?;
-        let type_parameters = self.parse_type_parameters()?;
-        self.expect(TokenKind::LBrace, "expected `{` before effect operations")?;
-        let mut operations = Vec::new();
-        while !self.at(TokenKind::RBrace) {
-            if self.peek().is_none() {
-                return Err(self.error("unterminated effect declaration"));
-            }
-            let operation_start = self.position;
-            let operation = self
-                .expect(TokenKind::Identifier, "expected effect operation name")?
-                .text;
-            self.expect(TokenKind::Colon, "expected `:` after effect operation name")?;
-            let previous = self.newline_terminates_type;
-            self.newline_terminates_type = true;
-            let annotation = self.parse_type();
-            self.newline_terminates_type = previous;
-            operations.push(EffectOperation {
-                syntax: self.syntax(operation_start),
-                name: operation,
-                annotation: annotation?,
-            });
-            self.eat(TokenKind::Semicolon);
-        }
-        self.expect(TokenKind::RBrace, "expected `}` after effect operations")?;
-        Ok(EffectDeclaration {
-            syntax: self.syntax(start),
-            visibility,
-            name,
-            type_parameters,
-            operations,
-        })
-    }
-
-    fn parse_handler_clauses(&mut self) -> Result<Vec<HandlerClause>, ParseError> {
-        let mut clauses = Vec::new();
-        while !self.at(TokenKind::RBrace) {
-            if self.peek().is_none() {
-                return Err(self.error("unterminated handler"));
-            }
-            let start = self.position;
-            let first = self
-                .expect(
-                    TokenKind::Identifier,
-                    "expected effect operation in handler",
-                )?
-                .text;
-            let (namespace, operation) = if self.eat(TokenKind::Dot) {
-                let operation = self
-                    .expect(
-                        TokenKind::Identifier,
-                        "expected operation after effect name",
-                    )?
-                    .text;
-                (Some(first), operation)
-            } else {
-                (None, first)
-            };
-            let pattern = self.parse_pattern()?;
-            self.expect(
-                TokenKind::FatArrow,
-                "expected `=>` after handler operation pattern",
-            )?;
-            let body = self.parse_expression()?;
-            clauses.push(HandlerClause {
-                syntax: self.syntax(start),
-                namespace,
-                operation,
-                pattern,
-                body,
-            });
-            if !self.eat(TokenKind::Comma) {
-                self.eat(TokenKind::Semicolon);
-            }
-        }
-        Ok(clauses)
     }
 
     /// Parses a private statement in a block expression.
@@ -1336,16 +1244,10 @@ impl Grammar {
         let start = self.position;
         let parameter = self.parse_type_union()?;
         if self.eat(TokenKind::Arrow) {
-            let effects = if self.at(TokenKind::LBrace) {
-                self.parse_effect_set()?
-            } else {
-                EffectSet::empty()
-            };
             let result = self.parse_type()?;
             Ok(Type::Function(FunctionType {
                 syntax: self.syntax(start),
                 parameter: Box::new(parameter),
-                effects,
                 result: Box::new(result),
             }))
         } else {
@@ -1353,43 +1255,9 @@ impl Grammar {
         }
     }
 
-    fn parse_effect_set(&mut self) -> Result<EffectSet, ParseError> {
-        let start = self.position;
-        self.expect(TokenKind::LBrace, "expected `{` before effect set")?;
-        let mut effects = Vec::new();
-        if !self.at(TokenKind::RBrace) {
-            loop {
-                effects.push(self.parse_type_union()?);
-                if !self.eat(TokenKind::Comma) {
-                    break;
-                }
-            }
-        }
-        self.expect(TokenKind::RBrace, "expected `}` after effect set")?;
-        Ok(EffectSet {
-            syntax: self.syntax(start),
-            effects,
-        })
-    }
-
     /// Parses an unordered structural sum, tighter than a function arrow.
     fn parse_type_union(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
-        if self.peek() == Some(TokenKind::Identifier)
-            && self
-                .tokens
-                .get(self.next_non_trivia(self.position))
-                .is_some_and(|token| token.text == "Handler")
-        {
-            self.bump_token();
-            let effect = self.parse_type_application()?;
-            let effects = self.parse_effect_set()?;
-            return Ok(Type::Handler(crate::HandlerType {
-                syntax: self.syntax(start),
-                effect: Box::new(effect),
-                effects,
-            }));
-        }
         let first = self.parse_type_application()?;
         if !self.eat_operator("|") {
             return Ok(first);
@@ -1782,15 +1650,6 @@ impl Grammar {
         match self.peek() {
             Some(TokenKind::Match) => self.parse_match_expression().map(Expression::Match),
             Some(TokenKind::Loop) => self.parse_loop_expression().map(Expression::Loop),
-            Some(TokenKind::Handler) => self
-                .parse_handler_expression()
-                .map(|value| Expression::Handler(Box::new(value))),
-            Some(TokenKind::Handle) => self
-                .parse_handle_expression()
-                .map(|value| Expression::Handle(Box::new(value))),
-            Some(TokenKind::Resume) => self
-                .parse_resume_expression()
-                .map(|value| Expression::Resume(Box::new(value))),
             Some(TokenKind::Pub) => {
                 let start = self.position;
                 self.expect(TokenKind::Pub, "expected `pub`")?;
@@ -1871,59 +1730,6 @@ impl Grammar {
             }
             _ => Err(self.error("expected expression")),
         }
-    }
-
-    fn parse_handle_expression(&mut self) -> Result<HandleExpression, ParseError> {
-        let start = self.position;
-        self.expect(TokenKind::Handle, "expected `handle`")?;
-        let previous = self.brace_terminates_expression;
-        let previous_with = self.with_terminates_expression;
-        self.brace_terminates_expression = true;
-        self.with_terminates_expression = true;
-        let body = self.parse_expression();
-        self.brace_terminates_expression = previous;
-        self.with_terminates_expression = previous_with;
-        let body = Box::new(body?);
-        let handler = if self.eat_contextual("with") {
-            HandleKind::Value(Box::new(self.parse_expression()?))
-        } else {
-            self.expect(
-                TokenKind::LBrace,
-                "expected `{` or `with` after handled expression",
-            )?;
-            let clauses = self.parse_handler_clauses()?;
-            self.expect(TokenKind::RBrace, "expected `}` after handler clauses")?;
-            HandleKind::Manual(clauses)
-        };
-        Ok(HandleExpression {
-            syntax: self.syntax(start),
-            body,
-            handler,
-        })
-    }
-
-    fn parse_handler_expression(&mut self) -> Result<HandlerExpression, ParseError> {
-        let start = self.position;
-        self.expect(TokenKind::Handler, "expected `handler`")?;
-        let effect = self.parse_type_union()?;
-        self.expect(TokenKind::LBrace, "expected `{` before handler clauses")?;
-        let clauses = self.parse_handler_clauses()?;
-        self.expect(TokenKind::RBrace, "expected `}` after handler clauses")?;
-        Ok(HandlerExpression {
-            syntax: self.syntax(start),
-            effect,
-            clauses,
-        })
-    }
-
-    fn parse_resume_expression(&mut self) -> Result<ResumeExpression, ParseError> {
-        let start = self.position;
-        self.expect(TokenKind::Resume, "expected `resume`")?;
-        let value = Box::new(self.parse_expression()?);
-        Ok(ResumeExpression {
-            syntax: self.syntax(start),
-            value,
-        })
     }
 
     fn parse_quote_expression(&mut self) -> Result<QuoteExpression, ParseError> {
@@ -2132,15 +1938,6 @@ impl Grammar {
         if self.brace_terminates_expression && self.peek() == Some(TokenKind::LBrace) {
             return false;
         }
-        if self.with_terminates_expression
-            && self.peek() == Some(TokenKind::Identifier)
-            && self
-                .tokens
-                .get(self.next_non_trivia(self.position))
-                .is_some_and(|token| token.text == "with")
-        {
-            return false;
-        }
         matches!(
             self.peek(),
             Some(
@@ -2149,8 +1946,6 @@ impl Grammar {
                     | TokenKind::LBracket
                     | TokenKind::Match
                     | TokenKind::Loop
-                    | TokenKind::Handle
-                    | TokenKind::Resume
                     | TokenKind::Pub
                     | TokenKind::Identifier
                     | TokenKind::Dollar
@@ -2199,20 +1994,6 @@ impl Grammar {
                     && self.peek_n(2) == Some(TokenKind::Dot)
                     && self.peek_n(3).is_some_and(is_symbol_kind)
                     && self.peek_n(4) == Some(TokenKind::RParen))
-    }
-
-    fn eat_contextual(&mut self, text: &str) -> bool {
-        if self.peek() == Some(TokenKind::Identifier)
-            && self
-                .tokens
-                .get(self.next_non_trivia(self.position))
-                .is_some_and(|token| token.text == text)
-        {
-            self.bump_token();
-            true
-        } else {
-            false
-        }
     }
 
     fn parse_operator_value(&mut self) -> Result<Expression, ParseError> {

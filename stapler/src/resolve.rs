@@ -23,12 +23,6 @@ pub struct TraitId(pub usize);
 pub struct TraitMethodId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EffectId(pub usize);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct EffectOperationId(pub usize);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TypeParameterId(pub usize);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -41,8 +35,6 @@ pub enum DefinitionId {
     TypeParameter(TypeParameterId),
     Trait(TraitId),
     TraitMethod(TraitMethodId),
-    Effect(EffectId),
-    EffectOperation(EffectOperationId),
     Module(ModuleId),
 }
 
@@ -61,14 +53,6 @@ pub struct ResolvedTraitImplementation {
     pub trait_id: TraitId,
     pub arguments: Vec<Type>,
     pub methods: HashMap<TraitMethodId, FunctionId>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ResolvedEffect {
-    pub id: EffectId,
-    pub declaration: crate::EffectDeclaration,
-    pub parameters: Vec<TypeParameterId>,
-    pub operations: Vec<EffectOperationId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -297,11 +281,6 @@ pub struct ResolvedModule {
     trait_references: HashMap<SyntaxId, TraitId>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
-    effects: HashMap<EffectId, ResolvedEffect>,
-    effect_operations: HashMap<EffectOperationId, crate::EffectOperation>,
-    effect_operation_effects: HashMap<EffectOperationId, EffectId>,
-    effect_references: HashMap<SyntaxId, EffectId>,
-    effect_operation_references: HashMap<SyntaxId, Vec<EffectOperationId>>,
     standard_traits: HashMap<String, TraitId>,
     checked_initialization_symbols: HashSet<SymbolId>,
     checked_initialization_reads: HashSet<SyntaxId>,
@@ -367,15 +346,6 @@ impl ResolvedModule {
                 .copied()
                 .map(DefinitionId::TraitMethod),
         );
-        if let Some(effect) = self.effect_for(syntax_id) {
-            definitions.push(DefinitionId::Effect(effect));
-        }
-        definitions.extend(
-            self.effect_operations_for_expression(syntax_id)
-                .iter()
-                .copied()
-                .map(DefinitionId::EffectOperation),
-        );
         for (id, declaration) in &self.type_declarations {
             if declaration.syntax.id == syntax_id {
                 definitions.push(DefinitionId::Type(*id));
@@ -389,16 +359,6 @@ impl ResolvedModule {
         for (id, member) in &self.trait_methods {
             if member.syntax.id == syntax_id {
                 definitions.push(DefinitionId::TraitMethod(*id));
-            }
-        }
-        for (id, effect) in &self.effects {
-            if effect.declaration.syntax.id == syntax_id {
-                definitions.push(DefinitionId::Effect(*id));
-            }
-        }
-        for (id, operation) in &self.effect_operations {
-            if operation.syntax.id == syntax_id {
-                definitions.push(DefinitionId::EffectOperation(*id));
             }
         }
         let mut seen = HashSet::new();
@@ -425,13 +385,6 @@ impl ResolvedModule {
             DefinitionId::TraitMethod(id) => {
                 self.trait_methods.get(&id).map(|value| value.syntax.id)
             }
-            DefinitionId::Effect(id) => self
-                .effects
-                .get(&id)
-                .map(|value| value.declaration.syntax.id),
-            DefinitionId::EffectOperation(id) => {
-                self.effect_operations.get(&id).map(|value| value.syntax.id)
-            }
             DefinitionId::Module(id) => self.program.modules().iter().find_map(|module| {
                 module.syntax.items.iter().find_map(|item| {
                     let Item::Submodule(submodule) = item else {
@@ -453,15 +406,6 @@ impl ResolvedModule {
             DefinitionId::TraitMethod(id) => self
                 .trait_for_method(id)
                 .and_then(|trait_id| self.trait_modules.get(&trait_id).copied()),
-            DefinitionId::Effect(id) => self
-                .effects
-                .get(&id)
-                .and_then(|value| self.module_for_syntax(value.declaration.syntax.id)),
-            DefinitionId::EffectOperation(id) => self
-                .effect_operation_effects
-                .get(&id)
-                .and_then(|effect| self.effects.get(effect))
-                .and_then(|value| self.module_for_syntax(value.declaration.syntax.id)),
             DefinitionId::Module(id) => Some(id),
         }
     }
@@ -579,24 +523,6 @@ impl ResolvedModule {
         self.standard_traits.get(name).copied()
     }
 
-    pub fn effects(&self) -> &HashMap<EffectId, ResolvedEffect> {
-        &self.effects
-    }
-    pub fn effect_for(&self, syntax: SyntaxId) -> Option<EffectId> {
-        self.effect_references.get(&syntax).copied()
-    }
-    pub fn effect_operation(&self, id: EffectOperationId) -> Option<&crate::EffectOperation> {
-        self.effect_operations.get(&id)
-    }
-    pub fn effect_for_operation(&self, id: EffectOperationId) -> Option<EffectId> {
-        self.effect_operation_effects.get(&id).copied()
-    }
-    pub fn effect_operations_for_expression(&self, syntax: SyntaxId) -> &[EffectOperationId] {
-        self.effect_operation_references
-            .get(&syntax)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
-    }
     pub fn requires_initialization_state(&self, symbol: SymbolId) -> bool {
         self.checked_initialization_symbols.contains(&symbol)
     }
@@ -621,7 +547,6 @@ struct Interface {
     types: HashMap<String, TypeId>,
     macros: HashMap<String, Vec<MacroId>>,
     traits: HashMap<String, TraitId>,
-    effects: HashMap<String, EffectId>,
 }
 
 fn is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId) -> bool {
@@ -676,9 +601,6 @@ fn extend_interface(exported: &mut Interface, imported: &Interface) -> bool {
     for name in imported.traits.keys() {
         changed |= export_interface_item(exported, imported, name, name);
     }
-    for name in imported.effects.keys() {
-        changed |= export_interface_item(exported, imported, name, name);
-    }
     changed
 }
 
@@ -710,12 +632,6 @@ fn export_interface_item(
             .insert(alias.to_owned(), *trait_id)
             .is_none();
     }
-    if let Some(effect_id) = imported.effects.get(item) {
-        changed |= exported
-            .effects
-            .insert(alias.to_owned(), *effect_id)
-            .is_none();
-    }
     changed
 }
 
@@ -727,19 +643,16 @@ pub struct NameResolver {
     imported_fixities: HashMap<String, Fixity>,
     imported_macros: HashMap<String, Vec<MacroId>>,
     imported_traits: HashMap<String, TraitId>,
-    imported_effects: HashMap<String, EffectId>,
     private_glob_values: HashMap<String, Vec<String>>,
     private_glob_types: HashMap<String, Vec<String>>,
     private_glob_traits: HashMap<String, Vec<String>>,
     visible_trait_methods: HashMap<String, Vec<TraitMethodId>>,
-    visible_effect_operations: HashMap<String, Vec<EffectOperationId>>,
     type_parameter_scopes: Vec<HashMap<String, TypeParameterId>>,
     prelude_values: HashMap<String, SymbolId>,
     prelude_types: HashMap<String, TypeId>,
     prelude_fixities: HashMap<String, Fixity>,
     prelude_macros: HashMap<String, Vec<MacroId>>,
     prelude_traits: HashMap<String, TraitId>,
-    prelude_effects: HashMap<String, EffectId>,
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
@@ -775,12 +688,6 @@ pub struct NameResolver {
     trait_references: HashMap<SyntaxId, TraitId>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
     trait_implementations: Vec<ResolvedTraitImplementation>,
-    effects: HashMap<EffectId, ResolvedEffect>,
-    effect_operations: HashMap<EffectOperationId, crate::EffectOperation>,
-    effect_operation_effects: HashMap<EffectOperationId, EffectId>,
-    effect_member_ids: HashMap<(EffectId, String), EffectOperationId>,
-    effect_references: HashMap<SyntaxId, EffectId>,
-    effect_operation_references: HashMap<SyntaxId, Vec<EffectOperationId>>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     mutable_symbols: HashSet<SymbolId>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
@@ -798,15 +705,12 @@ pub struct NameResolver {
     declared_types: Vec<HashMap<String, TypeId>>,
     declared_macros: Vec<HashMap<String, Vec<MacroId>>>,
     declared_traits: Vec<HashMap<String, TraitId>>,
-    declared_effects: Vec<HashMap<String, EffectId>>,
     diagnostics: Vec<Diagnostic>,
     next_symbol_id: usize,
     next_function_id: usize,
     next_macro_id: usize,
     next_trait_id: usize,
     next_trait_method_id: usize,
-    next_effect_id: usize,
-    next_effect_operation_id: usize,
     next_type_parameter_id: usize,
     next_syntax_id: usize,
     current_module: ModuleId,
@@ -858,24 +762,20 @@ impl NameResolver {
             self.imported_fixities.clear();
             self.imported_macros.clear();
             self.imported_traits.clear();
-            self.imported_effects.clear();
             self.private_glob_values.clear();
             self.private_glob_types.clear();
             self.private_glob_traits.clear();
             self.visible_trait_methods.clear();
-            self.visible_effect_operations.clear();
             self.prelude_values.clear();
             self.prelude_types.clear();
             self.prelude_fixities.clear();
             self.prelude_macros.clear();
             self.prelude_traits.clear();
-            self.prelude_effects.clear();
             self.push_scope();
             self.install_child_namespaces(&program, source_module.id);
             self.install_prelude(&program, source_module.id);
             self.install_imports(&program, source_module.id);
             self.install_local_traits(source_module.id);
-            self.install_local_effects(source_module.id);
             self.predeclare_items(&source_module.syntax.items);
             for item in &source_module.syntax.items {
                 self.resolve_item(item);
@@ -936,11 +836,6 @@ impl NameResolver {
             trait_references: self.trait_references,
             trait_method_references: self.trait_method_references,
             trait_implementations: self.trait_implementations,
-            effects: self.effects,
-            effect_operations: self.effect_operations,
-            effect_operation_effects: self.effect_operation_effects,
-            effect_references: self.effect_references,
-            effect_operation_references: self.effect_operation_references,
             standard_traits,
             checked_initialization_symbols: HashSet::new(),
             checked_initialization_reads: HashSet::new(),
@@ -1318,9 +1213,6 @@ impl NameResolver {
         self.declared_traits = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
-        self.declared_effects = (0..program.modules().len())
-            .map(|_| HashMap::new())
-            .collect();
         self.declared_fixities = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
@@ -1471,56 +1363,6 @@ impl NameResolver {
                         }
                     }
                     Item::TraitImplementation(_) => {}
-                    Item::EffectDeclaration(declaration) => {
-                        let id = EffectId(self.next_effect_id);
-                        self.next_effect_id += 1;
-                        if self.declared_effects[source_module.id.0]
-                            .insert(declaration.name.clone(), id)
-                            .is_some()
-                        {
-                            self.diagnostics.push(Diagnostic::new(
-                                declaration.syntax.span.clone(),
-                                format!("duplicate effect definition of `{}`", declaration.name),
-                            ));
-                        }
-                        let mut parameters = Vec::new();
-                        for pattern in &declaration.type_parameters {
-                            self.allocate_type_parameter_pattern(pattern, &mut parameters);
-                        }
-                        let mut operations = Vec::new();
-                        for operation in &declaration.operations {
-                            let operation_id = EffectOperationId(self.next_effect_operation_id);
-                            self.next_effect_operation_id += 1;
-                            if self
-                                .effect_member_ids
-                                .insert((id, operation.name.clone()), operation_id)
-                                .is_some()
-                            {
-                                self.diagnostics.push(Diagnostic::new(
-                                    operation.syntax.span.clone(),
-                                    format!("duplicate effect operation `{}`", operation.name),
-                                ));
-                            }
-                            self.effect_operations
-                                .insert(operation_id, operation.clone());
-                            self.effect_operation_effects.insert(operation_id, id);
-                            operations.push(operation_id);
-                        }
-                        self.effects.insert(
-                            id,
-                            ResolvedEffect {
-                                id,
-                                declaration: declaration.clone(),
-                                parameters,
-                                operations,
-                            },
-                        );
-                        if declaration.visibility == Visibility::Public {
-                            self.interfaces[source_module.id.0]
-                                .effects
-                                .insert(declaration.name.clone(), id);
-                        }
-                    }
                     Item::Statement(statement) => match statement.as_ref() {
                         Statement::Binding(binding) => {
                             let symbol = self.allocate_symbol(binding);
@@ -1762,13 +1604,6 @@ impl NameResolver {
                     for (name, trait_id) in interface.traits.clone() {
                         self.insert_imported_trait(name, trait_id, declaration.syntax.span.clone());
                     }
-                    for (name, effect_id) in interface.effects.clone() {
-                        self.insert_imported_effect(
-                            name,
-                            effect_id,
-                            declaration.syntax.span.clone(),
-                        );
-                    }
                 }
                 UseKind::Selected(names) => {
                     for name in names {
@@ -1820,9 +1655,6 @@ impl NameResolver {
         if let Some(trait_id) = interface.traits.get(item).copied() {
             definitions.push(DefinitionId::Trait(trait_id));
         }
-        if let Some(effect_id) = interface.effects.get(item).copied() {
-            definitions.push(DefinitionId::Effect(effect_id));
-        }
         let mut seen = HashSet::new();
         definitions.retain(|definition| seen.insert(*definition));
         for name in [item, alias] {
@@ -1858,7 +1690,6 @@ impl NameResolver {
             types: self.declared_types[module.0].clone(),
             macros: self.declared_macros[module.0].clone(),
             traits: self.declared_traits[module.0].clone(),
-            effects: self.declared_effects[module.0].clone(),
         }
     }
 
@@ -1904,12 +1735,8 @@ impl NameResolver {
         self.prelude_fixities = self.interfaces[core.0].fixities.clone();
         self.prelude_macros = self.interfaces[core.0].macros.clone();
         self.prelude_traits = self.interfaces[core.0].traits.clone();
-        self.prelude_effects = self.interfaces[core.0].effects.clone();
         for trait_id in self.prelude_traits.values().copied().collect::<Vec<_>>() {
             self.add_visible_trait_methods(trait_id);
-        }
-        for effect_id in self.prelude_effects.values().copied().collect::<Vec<_>>() {
-            self.add_visible_effect_operations(effect_id);
         }
     }
 
@@ -1933,10 +1760,6 @@ impl NameResolver {
         if let Some(trait_id) = interface.traits.get(item).copied() {
             found = true;
             self.insert_imported_trait(local.to_owned(), trait_id, span.clone());
-        }
-        if let Some(effect_id) = interface.effects.get(item).copied() {
-            found = true;
-            self.insert_imported_effect(local.to_owned(), effect_id, span.clone());
         }
         if !found {
             self.diagnostics.push(Diagnostic::new(
@@ -1981,16 +1804,6 @@ impl NameResolver {
         }
     }
 
-    fn insert_imported_effect(&mut self, name: String, id: EffectId, span: Span) {
-        if self.declared_effects[self.current_module.0].contains_key(&name)
-            || self.imported_effects.insert(name.clone(), id).is_some()
-        {
-            self.duplicate_import(&name, span);
-        } else {
-            self.add_visible_effect_operations(id);
-        }
-    }
-
     fn install_local_traits(&mut self, module: ModuleId) {
         for trait_id in self.declared_traits[module.0]
             .values()
@@ -1998,27 +1811,6 @@ impl NameResolver {
             .collect::<Vec<_>>()
         {
             self.add_visible_trait_methods(trait_id);
-        }
-    }
-
-    fn install_local_effects(&mut self, module: ModuleId) {
-        for effect in self.declared_effects[module.0]
-            .values()
-            .copied()
-            .collect::<Vec<_>>()
-        {
-            self.add_visible_effect_operations(effect);
-        }
-    }
-
-    fn add_visible_effect_operations(&mut self, effect: EffectId) {
-        let operations = self.effects[&effect].operations.clone();
-        for operation in operations {
-            let name = self.effect_operations[&operation].name.clone();
-            let candidates = self.visible_effect_operations.entry(name).or_default();
-            if !candidates.contains(&operation) {
-                candidates.push(operation);
-            }
         }
     }
 
@@ -2064,8 +1856,7 @@ impl NameResolver {
                 | Item::TypeDeclaration(_)
                 | Item::MacroDeclaration(_)
                 | Item::TraitDeclaration(_)
-                | Item::TraitImplementation(_)
-                | Item::EffectDeclaration(_) => {}
+                | Item::TraitImplementation(_) => {}
             }
         }
         for item in items {
@@ -2251,16 +2042,6 @@ impl NameResolver {
                             methods,
                         });
                 }
-            }
-            Item::EffectDeclaration(declaration) => {
-                self.push_type_parameter_scope();
-                for parameter in &declaration.type_parameters {
-                    self.scope_allocated_type_parameter_pattern(parameter);
-                }
-                for operation in &declaration.operations {
-                    self.resolve_type(&operation.annotation);
-                }
-                self.pop_type_parameter_scope();
             }
             Item::Statement(statement) => self.resolve_statement(statement),
         }
@@ -2604,44 +2385,6 @@ impl NameResolver {
                 self.resolve_block(&loop_.body);
                 self.loop_depth -= 1;
             }
-            Expression::Handler(handler) => {
-                self.resolve_effect_type(&handler.effect);
-                for clause in &handler.clauses {
-                    if let Some(operation) = self.resolve_handler_operation(clause, None) {
-                        self.effect_operation_references
-                            .insert(clause.syntax.id, vec![operation]);
-                    }
-                    self.resolve_pattern_types(&clause.pattern);
-                    self.push_scope();
-                    self.declare_pattern(&clause.pattern);
-                    self.resolve_expression(&clause.body, None, None);
-                    self.pop_scope();
-                }
-            }
-            Expression::Handle(handle) => {
-                self.resolve_expression(&handle.body, expected_type, None);
-                match &handle.handler {
-                    crate::HandleKind::Manual(clauses) => {
-                        for clause in clauses {
-                            if let Some(operation) = self.resolve_handler_operation(clause, None) {
-                                self.effect_operation_references
-                                    .insert(clause.syntax.id, vec![operation]);
-                            }
-                            self.resolve_pattern_types(&clause.pattern);
-                            self.push_scope();
-                            self.declare_pattern(&clause.pattern);
-                            self.resolve_expression(&clause.body, expected_type, None);
-                            self.pop_scope();
-                        }
-                    }
-                    crate::HandleKind::Value(value) => {
-                        self.resolve_expression(value, None, None);
-                    }
-                }
-            }
-            Expression::Resume(resume) => {
-                self.resolve_expression(&resume.value, None, None);
-            }
             Expression::Block(block) => self.resolve_block(block),
             Expression::Product(product) => {
                 for element in &product.elements {
@@ -2669,22 +2412,6 @@ impl NameResolver {
             }
             Expression::Access(access) => {
                 if let Accessor::Name(member_name) = &access.accessor
-                    && let Some(effect_id) = self.effect_id_from_expression(&access.value)
-                {
-                    if let Some(operation) = self
-                        .effect_member_ids
-                        .get(&(effect_id, member_name.clone()))
-                        .copied()
-                    {
-                        self.effect_operation_references
-                            .insert(access.syntax.id, vec![operation]);
-                    } else {
-                        self.diagnostics.push(Diagnostic::new(
-                            access.syntax.span.clone(),
-                            format!("effect has no operation named `{member_name}`"),
-                        ));
-                    }
-                } else if let Accessor::Name(member_name) = &access.accessor
                     && let Some(trait_id) = self.trait_id_from_expression(&access.value)
                 {
                     if let Some(method) = self
@@ -2756,13 +2483,9 @@ impl NameResolver {
                     .get(&name.name)
                     .cloned()
                     .unwrap_or_default(),
-                self.visible_effect_operations
-                    .get(&name.name)
-                    .cloned()
-                    .unwrap_or_default(),
             ) {
-                (Some(symbol), methods, operations)
-                    if (!methods.is_empty() || !operations.is_empty())
+                (Some(symbol), methods)
+                    if !methods.is_empty()
                         && self.intrinsic_functions.get(&symbol)
                             != Some(&IntrinsicFunction::Drop) =>
                 {
@@ -2771,46 +2494,26 @@ impl NameResolver {
                         format!("ambiguous name `{}`; qualify the trait method", name.name),
                     ))
                 }
-                (Some(symbol), _, _) => {
+                (Some(symbol), _) => {
                     self.symbols.insert(name.syntax.id, symbol);
                     self.record_capture(symbol);
                 }
-                (None, methods, operations) if !methods.is_empty() && !operations.is_empty() => {
-                    self.diagnostics.push(Diagnostic::new(
-                        name.syntax.span.clone(),
-                        format!(
-                            "ambiguous operation or trait member `{}`; qualify it",
-                            name.name
-                        ),
-                    ));
-                }
-                (None, methods, _) if !methods.is_empty() => {
+                (None, methods) if !methods.is_empty() => {
                     self.trait_method_references.insert(name.syntax.id, methods);
                 }
-                (None, _, operations) if !operations.is_empty() => {
-                    if operations.len() > 1 {
-                        self.diagnostics.push(Diagnostic::new(
-                            name.syntax.span.clone(),
-                            format!("ambiguous effect operation `{}`; qualify it", name.name),
-                        ));
-                    } else {
-                        self.effect_operation_references
-                            .insert(name.syntax.id, operations);
-                    }
-                }
-                (None, _, _) if self.namespaces.contains_key(&name.name) => {
+                (None, _) if self.namespaces.contains_key(&name.name) => {
                     self.diagnostics.push(Diagnostic::new(
                         name.syntax.span.clone(),
                         format!("module namespace `{}` is not a value", name.name),
                     ))
                 }
-                (None, _, _) if self.lookup_macro(&name.name).is_some() => {
+                (None, _) if self.lookup_macro(&name.name).is_some() => {
                     self.diagnostics.push(Diagnostic::new(
                         name.syntax.span.clone(),
                         format!("macro `{}` must be invoked", name.name),
                     ))
                 }
-                (None, _, _) => {
+                (None, _) => {
                     let message =
                         unknown_item_message("name", &name.name, &self.private_glob_values);
                     self.diagnostics
@@ -2901,16 +2604,7 @@ impl NameResolver {
             }
             Type::Function(function) => {
                 self.resolve_type(&function.parameter);
-                for effect in &function.effects.effects {
-                    self.resolve_effect_type(effect);
-                }
                 self.resolve_type(&function.result);
-            }
-            Type::Handler(handler) => {
-                self.resolve_effect_type(&handler.effect);
-                for effect in &handler.effects.effects {
-                    self.resolve_effect_type(effect);
-                }
             }
             Type::Application(application) => {
                 self.resolve_type(&application.callee);
@@ -2946,141 +2640,6 @@ impl NameResolver {
                 .push(Diagnostic::new(name.syntax.span.clone(), message));
         }
         resolved
-    }
-
-    fn resolve_effect_type(&mut self, ty: &Type) -> Option<EffectId> {
-        fn ungroup(ty: &Type) -> &Type {
-            match ty {
-                Type::Product(product)
-                    if !product.variadic
-                        && product.elements.len() == 1
-                        && product.elements[0].name.is_none()
-                        && !product.elements[0].spread =>
-                {
-                    ungroup(&product.elements[0].ty)
-                }
-                _ => ty,
-            }
-        }
-        fn head(ty: &Type) -> Option<&crate::NamedType> {
-            match ungroup(ty) {
-                Type::Named(named) => Some(named),
-                Type::Application(application) => head(&application.callee),
-                _ => None,
-            }
-        }
-        fn resolve_arguments(resolver: &mut NameResolver, ty: &Type) {
-            if let Type::Application(application) = ungroup(ty) {
-                resolve_arguments(resolver, &application.callee);
-                resolver.resolve_type(&application.argument);
-            }
-        }
-        let Some(named) = head(ty) else {
-            self.diagnostics.push(Diagnostic::new(
-                ty.syntax().span.clone(),
-                "an effect set entry must be a named effect application",
-            ));
-            return None;
-        };
-        let resolved = if let Some(namespace) = &named.namespace {
-            self.namespaces
-                .get(namespace)
-                .and_then(|module| self.interfaces[module.0].effects.get(&named.name))
-                .copied()
-        } else {
-            self.declared_effects[self.current_module.0]
-                .get(&named.name)
-                .copied()
-                .or_else(|| self.imported_effects.get(&named.name).copied())
-                .or_else(|| self.prelude_effects.get(&named.name).copied())
-        };
-        resolve_arguments(self, ty);
-        if let Some(effect) = resolved {
-            self.effect_references.insert(named.syntax.id, effect);
-            self.effect_references.insert(ty.syntax().id, effect);
-        } else {
-            self.diagnostics.push(Diagnostic::new(
-                named.syntax.span.clone(),
-                format!("unknown effect `{}`", named.name),
-            ));
-        }
-        resolved
-    }
-
-    fn effect_id_from_expression(&self, expression: &Expression) -> Option<EffectId> {
-        match expression {
-            Expression::Name(name) => self.declared_effects[self.current_module.0]
-                .get(&name.name)
-                .copied()
-                .or_else(|| self.imported_effects.get(&name.name).copied())
-                .or_else(|| self.prelude_effects.get(&name.name).copied()),
-            Expression::Access(access) => {
-                let Expression::Name(namespace) = access.value.as_ref() else {
-                    return None;
-                };
-                let Accessor::Name(name) = &access.accessor else {
-                    return None;
-                };
-                self.namespaces
-                    .get(&namespace.name)
-                    .and_then(|module| self.interfaces[module.0].effects.get(name))
-                    .copied()
-            }
-            _ => None,
-        }
-    }
-
-    fn resolve_handler_operation(
-        &mut self,
-        clause: &crate::HandlerClause,
-        expected_effect: Option<EffectId>,
-    ) -> Option<EffectOperationId> {
-        let candidates = if let Some(effect_name) = &clause.namespace {
-            let effect = self.declared_effects[self.current_module.0]
-                .get(effect_name)
-                .copied()
-                .or_else(|| self.imported_effects.get(effect_name).copied())
-                .or_else(|| self.prelude_effects.get(effect_name).copied());
-            effect
-                .and_then(|effect| {
-                    self.effect_member_ids
-                        .get(&(effect, clause.operation.clone()))
-                        .copied()
-                })
-                .into_iter()
-                .collect::<Vec<_>>()
-        } else if let Some(effect) = expected_effect {
-            self.effect_member_ids
-                .get(&(effect, clause.operation.clone()))
-                .copied()
-                .into_iter()
-                .collect()
-        } else {
-            self.visible_effect_operations
-                .get(&clause.operation)
-                .cloned()
-                .unwrap_or_default()
-        };
-        match candidates.as_slice() {
-            [operation] => Some(*operation),
-            [] => {
-                self.diagnostics.push(Diagnostic::new(
-                    clause.syntax.span.clone(),
-                    format!("unknown effect operation `{}`", clause.operation),
-                ));
-                None
-            }
-            _ => {
-                self.diagnostics.push(Diagnostic::new(
-                    clause.syntax.span.clone(),
-                    format!(
-                        "ambiguous effect operation `{}`; qualify it",
-                        clause.operation
-                    ),
-                ));
-                None
-            }
-        }
     }
 
     fn trait_id_from_expression(&self, expression: &Expression) -> Option<TraitId> {
@@ -3188,12 +2747,6 @@ impl NameResolver {
             Type::Function(function) => {
                 self.validate_public_representation(&function.parameter);
                 self.validate_public_representation(&function.result);
-            }
-            Type::Handler(handler) => {
-                self.validate_public_representation(&handler.effect);
-                for effect in &handler.effects.effects {
-                    self.validate_public_representation(effect);
-                }
             }
             Type::Application(application) => {
                 self.validate_public_representation(&application.callee);
@@ -3694,35 +3247,6 @@ impl<'a> InitializationAnalyzer<'a> {
             Expression::Loop(loop_) => {
                 self.expression(&Expression::Block(loop_.body.clone()), local, outer);
             }
-            Expression::Handler(handler) => {
-                for clause in &handler.clauses {
-                    let mut clause_local = local.clone();
-                    self.set_pattern_state(
-                        &clause.pattern,
-                        InitializationState::Initialized,
-                        &mut clause_local,
-                    );
-                    self.expression(&clause.body, &mut clause_local, outer);
-                }
-            }
-            Expression::Handle(handle) => {
-                self.expression(&handle.body, local, outer);
-                match &handle.handler {
-                    crate::HandleKind::Manual(clauses) => {
-                        for clause in clauses {
-                            let mut clause_local = local.clone();
-                            self.set_pattern_state(
-                                &clause.pattern,
-                                InitializationState::Initialized,
-                                &mut clause_local,
-                            );
-                            self.expression(&clause.body, &mut clause_local, outer);
-                        }
-                    }
-                    crate::HandleKind::Value(value) => self.expression(value, local, outer),
-                }
-            }
-            Expression::Resume(resume) => self.expression(&resume.value, local, outer),
             Expression::Block(block) => {
                 let original = local.clone();
                 for statement in &block.statements {

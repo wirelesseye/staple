@@ -25,7 +25,6 @@ pub enum Item {
     MacroDeclaration(MacroDeclaration),
     TraitDeclaration(TraitDeclaration),
     TraitImplementation(TraitImplementation),
-    EffectDeclaration(EffectDeclaration),
     Statement(Box<Statement>),
 }
 
@@ -236,31 +235,6 @@ pub struct ImplementationMember {
     pub syntax: Syntax,
     pub name: String,
     pub value: Expression,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EffectDeclaration {
-    pub syntax: Syntax,
-    pub visibility: Visibility,
-    pub name: String,
-    pub type_parameters: Vec<TypeParameterPattern>,
-    pub operations: Vec<EffectOperation>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EffectOperation {
-    pub syntax: Syntax,
-    pub name: String,
-    pub annotation: Type,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HandlerClause {
-    pub syntax: Syntax,
-    pub namespace: Option<String>,
-    pub operation: String,
-    pub pattern: super::Pattern,
-    pub body: Expression,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

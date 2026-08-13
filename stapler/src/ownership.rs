@@ -32,13 +32,6 @@ enum ValueState {
     Frozen,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ResumeState {
-    Available,
-    Consumed,
-    MaybeConsumed,
-}
-
 /// Checks Staple's affine ownership rules after ordinary type checking has
 /// resolved every expression and pattern type.
 pub(crate) struct OwnershipChecker<'a> {
@@ -48,7 +41,6 @@ pub(crate) struct OwnershipChecker<'a> {
     info: OwnershipInfo,
     diagnostics: Vec<Diagnostic>,
     loops: Vec<LoopOwnershipContext>,
-    resumptions: Vec<ResumeState>,
 }
 
 #[derive(Default)]
@@ -66,7 +58,6 @@ impl<'a> OwnershipChecker<'a> {
             info: OwnershipInfo::default(),
             diagnostics: vec![],
             loops: vec![],
-            resumptions: vec![],
         };
         checker.check_globals();
 
@@ -138,7 +129,6 @@ impl<'a> OwnershipChecker<'a> {
         self.function = Some(function.id);
         self.states.clear();
         self.loops.clear();
-        self.resumptions.clear();
 
         let drop_method = self.module.is_drop_method(function.id);
         self.bind_pattern(&function.pattern, drop_method);
@@ -180,34 +170,18 @@ impl<'a> OwnershipChecker<'a> {
                 self.check_expression(&value.subject, true);
                 let outer = self.states.clone();
                 let mut continuing = vec![];
-                let outer_resume = self.resumptions.last().copied();
-                let mut continuing_resumes = Vec::new();
                 for arm in &value.arms {
                     self.states = outer.clone();
-                    if let (Some(state), Some(current)) =
-                        (outer_resume, self.resumptions.last_mut())
-                    {
-                        *current = state;
-                    }
                     self.bind_pattern(&arm.pattern, false);
                     if self.check_expression(&arm.body, consume) {
                         continuing.push(self.states.clone());
-                        if let Some(state) = self.resumptions.last().copied() {
-                            continuing_resumes.push(state);
-                        }
                     }
                 }
                 self.states = merge_states(&outer, &continuing);
-                if let Some(current) = self.resumptions.last_mut()
-                    && !continuing_resumes.is_empty()
-                {
-                    *current = merge_resume_states(&continuing_resumes);
-                }
                 !continuing.is_empty()
             }
             Expression::Loop(value) => {
                 let entry = self.states.clone();
-                let resume_entry = self.resumptions.last().copied();
                 self.loops.push(LoopOwnershipContext::default());
                 if self.check_expression(&Expression::Block(value.body.clone()), false) {
                     self.loops
@@ -233,65 +207,7 @@ impl<'a> OwnershipChecker<'a> {
                     }
                 }
                 self.states = merge_states(&entry, &context.breaks);
-                if let (Some(before), Some(after)) =
-                    (resume_entry, self.resumptions.last().copied())
-                    && before != after
-                {
-                    self.diagnostics.push(Diagnostic::new(
-                        value.syntax.span.clone(),
-                        "a one-shot resumption cannot be consumed on a loop back-edge",
-                    ));
-                    if let Some(current) = self.resumptions.last_mut() {
-                        *current = ResumeState::MaybeConsumed;
-                    }
-                }
                 !context.breaks.is_empty()
-            }
-            Expression::Handler(value) => {
-                let outer = self.states.clone();
-                for clause in &value.clauses {
-                    self.states = outer.clone();
-                    self.bind_pattern(&clause.pattern, false);
-                    self.resumptions.push(ResumeState::Available);
-                    self.check_expression(&clause.body, true);
-                    self.resumptions.pop();
-                }
-                self.states = outer;
-                true
-            }
-            Expression::Handle(value) => {
-                if let crate::HandleKind::Value(handler) = &value.handler {
-                    self.check_expression(handler, false);
-                }
-                self.check_expression(&value.body, consume);
-                match &value.handler {
-                    crate::HandleKind::Manual(clauses) => {
-                        let outer = self.states.clone();
-                        for clause in clauses {
-                            self.states = outer.clone();
-                            self.bind_pattern(&clause.pattern, false);
-                            self.resumptions.push(ResumeState::Available);
-                            self.check_expression(&clause.body, consume);
-                            self.resumptions.pop();
-                        }
-                        self.states = outer;
-                    }
-                    crate::HandleKind::Value(_) => {}
-                }
-                true
-            }
-            Expression::Resume(value) => {
-                match self.resumptions.last_mut() {
-                    Some(state @ ResumeState::Available) => *state = ResumeState::Consumed,
-                    Some(ResumeState::Consumed | ResumeState::MaybeConsumed) => {
-                        self.diagnostics.push(Diagnostic::new(
-                            value.syntax.span.clone(),
-                            "one-shot resumption may be consumed more than once",
-                        ))
-                    }
-                    None => {}
-                }
-                self.check_expression(&value.value, true)
             }
             Expression::Block(value) => {
                 for statement in &value.statements {
@@ -568,13 +484,4 @@ fn merge_states(
         );
     }
     result
-}
-
-fn merge_resume_states(branches: &[ResumeState]) -> ResumeState {
-    let first = branches[0];
-    if branches.iter().all(|state| *state == first) {
-        first
-    } else {
-        ResumeState::MaybeConsumed
-    }
 }
