@@ -50,6 +50,20 @@ impl Fixture {
             .compile_module(&typed)
             .map_err(format_diagnostics)
     }
+
+    fn check_at(&self, entry: &str, root: &str) -> Result<(), String> {
+        let program = ProgramLoader::new()
+            .with_module_root(self.root.join(root))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_path(&self.root.join(entry))?;
+        let resolved = NameResolver::new()
+            .resolve_program(program)
+            .map_err(format_diagnostics)?;
+        TypeChecker::new()
+            .check(resolved)
+            .map(|_| ())
+            .map_err(format_diagnostics)
+    }
 }
 
 impl Drop for Fixture {
@@ -738,9 +752,9 @@ fn emits_dependency_initializers_before_the_entry_initializer() {
 #[test]
 fn resolves_every_module_path_from_the_entry_directory() {
     let fixture = Fixture::new();
-    fixture.write("main.sta", "use package.first *\nanswer\n");
+    fixture.write("main.sta", "use folder.first *\nanswer\n");
     fixture.write(
-        "package/first.sta",
+        "folder/first.sta",
         "use shared *\npub let answer = shared_answer\n",
     );
     fixture.write("shared.sta", "pub let shared_answer = 42\n");
@@ -748,6 +762,69 @@ fn resolves_every_module_path_from_the_entry_directory() {
     fixture
         .compile()
         .expect("nested imports should remain entry-relative");
+}
+
+#[test]
+fn resolves_package_paths_from_an_explicit_module_root() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/bin/main.sta",
+        "use package.models answer\nlet result: I32 = answer\n",
+    );
+    fixture.write("src/models.sta", "pub let answer: I32 = 42\n");
+
+    fixture
+        .check_at("src/bin/main.sta", "src")
+        .expect("package-qualified import should use the configured module root");
+}
+
+#[test]
+fn bare_package_refers_to_the_entry_module_during_a_cycle() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/bin/main.sta",
+        "pub def answer: () -> I32 = () => 42\nuse package.helper result\ndef observed: () -> I32 = () => result ()\n",
+    );
+    fixture.write(
+        "src/helper.sta",
+        "use package answer\npub def result: () -> I32 = () => answer ()\n",
+    );
+
+    fixture
+        .check_at("src/bin/main.sta", "src")
+        .expect("bare package import should resolve to the entry before recursive loading");
+}
+
+#[test]
+fn package_qualification_bypasses_inline_child_shadowing() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        concat!(
+            "mod models { pub let answer: Bool = True }\n",
+            "use package.models answer\n",
+            "let result: I32 = answer\n",
+        ),
+    );
+    fixture.write("src/models.sta", "pub let answer: I32 = 42\n");
+
+    fixture
+        .check_at("src/main.sta", "src")
+        .expect("package qualifier should bypass an inline child with the same name");
+}
+
+#[test]
+fn package_named_file_uses_a_repeated_package_component() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        "use package.package answer\nlet result: I32 = answer\n",
+    );
+    fixture.write("src/package.sta", "pub let answer: I32 = 42\n");
+
+    fixture
+        .check_at("src/main.sta", "src")
+        .expect("package.package should address package.sta");
 }
 
 #[test]

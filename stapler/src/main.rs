@@ -18,6 +18,7 @@ enum EmitKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Compile,
+    Check,
     Run,
 }
 
@@ -38,6 +39,7 @@ struct Options {
     libraries: Vec<OsString>,
     linker: Option<OsString>,
     standard_library: Option<PathBuf>,
+    module_root: Option<PathBuf>,
     program_arguments: Vec<OsString>,
 }
 
@@ -61,25 +63,40 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
     if matches!(arguments.as_slice(), [argument] if argument == "-h" || argument == "--help") {
         return Ok(Outcome::Completed(Some(format!("{}\n", usage()))));
     }
-    if matches!(arguments.as_slice(), [command, argument] if command == "run" && (argument == "-h" || argument == "--help"))
+    if let [command, argument] = arguments.as_slice()
+        && (argument == "-h" || argument == "--help")
     {
-        return Ok(Outcome::Completed(Some(format!("{}\n", run_usage()))));
+        if command == "run" {
+            return Ok(Outcome::Completed(Some(format!("{}\n", run_usage()))));
+        }
+        if command == "check" {
+            return Ok(Outcome::Completed(Some(format!("{}\n", check_usage()))));
+        }
     }
     let options = parse_options(arguments)?;
-    let loader = match &options.standard_library {
+    let mut loader = match &options.standard_library {
         Some(root) => ProgramLoader::new().with_standard_library_root(root),
         None => ProgramLoader::new(),
     };
+    if let Some(root) = &options.module_root {
+        loader = loader.with_module_root(root);
+    }
     let module = if options.input == "-" {
         let source = read_source(&options.input)?;
-        let root = std::env::current_dir()
-            .map_err(|error| format!("could not determine current directory: {error}"))?;
+        let root = match &options.module_root {
+            Some(root) => root.clone(),
+            None => std::env::current_dir()
+                .map_err(|error| format!("could not determine current directory: {error}"))?,
+        };
         let program = loader.load_source(&source, &root)?;
         compile_program(program)?
     } else {
         let program = loader.load_path(Path::new(&options.input))?;
         compile_program(program)?
     };
+    if options.mode == Mode::Check {
+        return Ok(Outcome::Completed(None));
+    }
     let context = inkwell::context::Context::create();
     let generator = CodeGenerator::new(&context);
 
@@ -136,11 +153,16 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
 
 fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Options, String> {
     let mut arguments = arguments.into_iter().peekable();
-    let mode = if arguments.peek().is_some_and(|argument| argument == "run") {
-        arguments.next();
-        Mode::Run
-    } else {
-        Mode::Compile
+    let mode = match arguments.peek().and_then(|argument| argument.to_str()) {
+        Some("run") => {
+            arguments.next();
+            Mode::Run
+        }
+        Some("check") => {
+            arguments.next();
+            Mode::Check
+        }
+        _ => Mode::Compile,
     };
     let mut options = Options {
         mode,
@@ -152,6 +174,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         libraries: Vec::new(),
         linker: None,
         standard_library: None,
+        module_root: None,
         program_arguments: Vec::new(),
     };
     let mut positional_only = false;
@@ -190,6 +213,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.standard_library = Some(PathBuf::from(next_value(&mut arguments, "--stdlib")?));
             continue;
         }
+        if !positional_only && argument == "--module-root" {
+            options.module_root = Some(PathBuf::from(next_value(&mut arguments, "--module-root")?));
+            continue;
+        }
         if !positional_only && argument == "-L" {
             options
                 .library_paths
@@ -211,15 +238,17 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.linker = Some(value.into());
         } else if !positional_only && let Some(value) = text.strip_prefix("--stdlib=") {
             options.standard_library = Some(PathBuf::from(value));
+        } else if !positional_only && let Some(value) = text.strip_prefix("--module-root=") {
+            options.module_root = Some(PathBuf::from(value));
         } else if !positional_only && text.starts_with("-L") && text.len() > 2 {
             options.library_paths.push(PathBuf::from(&text[2..]));
         } else if !positional_only && text.starts_with("-l") && text.len() > 2 {
             options.libraries.push(text[2..].into());
         } else if !positional_only && text.starts_with('-') && argument != "-" {
-            let usage = if options.mode == Mode::Run {
-                run_usage()
-            } else {
-                usage()
+            let usage = match options.mode {
+                Mode::Run => run_usage(),
+                Mode::Check => check_usage(),
+                Mode::Compile => usage(),
             };
             return Err(format!("unknown option `{text}`\n{usage}"));
         } else if options.input.is_empty() {
@@ -230,15 +259,19 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
                 run_usage()
             ));
         } else {
-            return Err(usage());
+            return Err(if options.mode == Mode::Check {
+                check_usage()
+            } else {
+                usage()
+            });
         }
     }
 
     if options.input.is_empty() {
-        return Err(if options.mode == Mode::Run {
-            run_usage()
-        } else {
-            usage()
+        return Err(match options.mode {
+            Mode::Run => run_usage(),
+            Mode::Check => check_usage(),
+            Mode::Compile => usage(),
         });
     }
     if options.mode == Mode::Run {
@@ -253,6 +286,23 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
                 "`--target` is not supported by `stapler run`; programs run on the host target"
                     .to_owned(),
             );
+        }
+    }
+    if options.mode == Mode::Check {
+        if options.output.is_some() {
+            return Err("`-o` is not supported by `stapler check`".to_owned());
+        }
+        if emit_specified {
+            return Err("`--emit` is not supported by `stapler check`".to_owned());
+        }
+        if options.target.is_some() {
+            return Err("`--target` is not supported by `stapler check`".to_owned());
+        }
+        if options.linker.is_some()
+            || !options.library_paths.is_empty()
+            || !options.libraries.is_empty()
+        {
+            return Err("linker options are not supported by `stapler check`".to_owned());
         }
     }
     if options.emit != EmitKind::Executable
@@ -424,6 +474,7 @@ fn exit_code(status: ExitStatus) -> ExitCode {
 fn usage() -> String {
     concat!(
         "usage: stapler [options] <input.sta>\n",
+        "       stapler check [options] <input.sta>\n",
         "       stapler run [options] <input.sta> [-- <arguments>...]\n",
         "\n",
         "options:\n",
@@ -433,6 +484,7 @@ fn usage() -> String {
         "  --target <triple>         LLVM target triple\n",
         "  --linker <command>        linker driver (default: $CC or cc)\n",
         "  --stdlib <path>           Staple standard-library root\n",
+        "  --module-root <path>      package source root (default: entry directory)\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         stop parsing options\n",
@@ -449,10 +501,24 @@ fn run_usage() -> String {
         "  -h, --help                print this help\n",
         "  --linker <command>        linker driver (default: $CC or cc)\n",
         "  --stdlib <path>           Staple standard-library root\n",
+        "  --module-root <path>      package source root (default: entry directory)\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         pass remaining arguments to the program\n",
         "  -                          read source from standard input",
+    )
+    .to_owned()
+}
+
+fn check_usage() -> String {
+    concat!(
+        "usage: stapler check [options] <input.sta>\n",
+        "\n",
+        "options:\n",
+        "  -h, --help                print this help\n",
+        "  --stdlib <path>           Staple standard-library root\n",
+        "  --module-root <path>      package source root (default: entry directory)\n",
+        "  --                         stop parsing options",
     )
     .to_owned()
 }
@@ -496,6 +562,70 @@ mod tests {
 
         assert!(help.starts_with("usage: stapler run"));
         assert!(help.contains("pass remaining arguments to the program"));
+    }
+
+    #[test]
+    fn parses_check_with_an_explicit_module_root() {
+        let options = parse_options([
+            "check".into(),
+            "--module-root=src".into(),
+            "--stdlib".into(),
+            "vendor/stdlib".into(),
+            "src/bin/main.sta".into(),
+        ])
+        .expect("check options should parse");
+
+        assert_eq!(options.mode, Mode::Check);
+        assert_eq!(
+            options.module_root.unwrap(),
+            std::path::PathBuf::from("src")
+        );
+        assert_eq!(options.input, "src/bin/main.sta");
+    }
+
+    #[test]
+    fn rejects_codegen_and_linker_options_in_check_mode() {
+        for arguments in [
+            vec!["check", "-o", "output", "input.sta"],
+            vec!["check", "--emit=llvm", "input.sta"],
+            vec!["check", "--target=native", "input.sta"],
+            vec!["check", "-lm", "input.sta"],
+        ] {
+            let error = parse_options(arguments.into_iter().map(OsString::from))
+                .expect_err("code generation option should be rejected in check mode");
+            assert!(error.contains("not supported by `stapler check`"));
+        }
+    }
+
+    #[test]
+    fn checks_a_nested_entry_without_creating_an_artifact() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("stapler-check-{nonce}"));
+        std::fs::create_dir_all(root.join("bin")).unwrap();
+        std::fs::write(
+            root.join("bin/main.sta"),
+            "use package.values answer\nlet checked: I32 = answer\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("values.sta"), "pub let answer: I32 = 42\n").unwrap();
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+
+        let outcome = run([
+            "check".into(),
+            "--module-root".into(),
+            root.clone().into_os_string(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            root.join("bin/main.sta").into_os_string(),
+        ])
+        .expect("nested package should type-check");
+
+        assert!(matches!(outcome, Outcome::Completed(None)));
+        assert!(!root.join("bin/main").exists());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

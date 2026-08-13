@@ -301,6 +301,7 @@ pub struct ProgramLoader {
     loaded_imports: HashSet<ModuleId>,
     next_syntax_id: usize,
     module_root: Option<PathBuf>,
+    package_entry: Option<ModuleId>,
     standard_library_root: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
@@ -317,6 +318,15 @@ impl ProgramLoader {
         self
     }
 
+    /// Resolves non-standard file modules from an explicit package source root.
+    ///
+    /// Without this setting, file modules remain relative to the entry file's
+    /// directory for compatibility with standalone compilation.
+    pub fn with_module_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.module_root = Some(root.into());
+        self
+    }
+
     pub fn load_path(mut self, entry: &Path) -> Result<Program, String> {
         self.load_path_diagnostic(entry)
             .map_err(|error| error.to_string())
@@ -324,8 +334,30 @@ impl ProgramLoader {
 
     fn load_path_diagnostic(&mut self, entry: &Path) -> Result<Program, LoadDiagnostic> {
         let entry = canonical_file(entry).map_err(LoadDiagnostic::compiler)?;
-        self.module_root = Some(entry.parent().unwrap_or_else(|| Path::new(".")).to_owned());
-        let entry_id = self.load_file(&entry)?;
+        let root = match &self.module_root {
+            Some(root) => {
+                canonical_directory(root, "module root").map_err(LoadDiagnostic::compiler)?
+            }
+            None => entry.parent().unwrap_or_else(|| Path::new(".")).to_owned(),
+        };
+        if !entry.starts_with(&root) {
+            return Err(LoadDiagnostic::compiler(format!(
+                "entry module `{}` is outside module root `{}`",
+                entry.display(),
+                root.display()
+            )));
+        }
+        self.module_root = Some(root.clone());
+        let source = std::fs::read_to_string(&entry).map_err(|error| {
+            LoadDiagnostic::source(
+                &entry,
+                None,
+                format!("could not read `{}`: {error}", entry.display()),
+            )
+        })?;
+        let entry_id = self.insert_source(entry, &source)?;
+        self.package_entry = Some(entry_id);
+        self.load_imports(entry_id, &root)?;
         self.load_standard_library()?;
         Ok(self.finish_ref(entry_id))
     }
@@ -349,13 +381,15 @@ impl ProgramLoader {
         self.module_root = Some(root.clone());
         let path = root.join("<stdin>.sta");
         let entry = self.insert_source(path, source)?;
+        self.package_entry = Some(entry);
         self.load_imports(entry, &root)?;
         self.load_standard_library()?;
         Ok(self.finish_ref(entry))
     }
 
     /// Loads an entry module from in-memory text while retaining its real path.
-    /// Imported modules are loaded from disk relative to the entry module.
+    /// Imported modules are loaded from the configured module root, or from the
+    /// entry module's directory when no root was configured.
     pub fn load_source_at(mut self, path: &Path, source: &str) -> Result<Program, LoadDiagnostic> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
         let root = std::fs::canonicalize(parent).map_err(|error| {
@@ -368,13 +402,30 @@ impl ProgramLoader {
                 ),
             )
         })?;
+        let module_root = match &self.module_root {
+            Some(module_root) => canonical_directory(module_root, "module root")
+                .map_err(|error| LoadDiagnostic::source(path, None, error))?,
+            None => root.clone(),
+        };
         let file_name = path
             .file_name()
             .ok_or_else(|| LoadDiagnostic::source(path, None, "source path has no file name"))?;
         let entry_path = root.join(file_name);
-        self.module_root = Some(root.clone());
+        if !entry_path.starts_with(&module_root) {
+            return Err(LoadDiagnostic::source(
+                path,
+                None,
+                format!(
+                    "entry module `{}` is outside module root `{}`",
+                    entry_path.display(),
+                    module_root.display()
+                ),
+            ));
+        }
+        self.module_root = Some(module_root.clone());
         let entry = self.insert_source(entry_path, source)?;
-        self.load_imports(entry, &root)?;
+        self.package_entry = Some(entry);
+        self.load_imports(entry, &module_root)?;
         self.load_standard_library()?;
         Ok(self.finish_ref(entry))
     }
@@ -545,6 +596,16 @@ impl ProgramLoader {
             return self.traverse_children(target, &parts[index..], true, declaration);
         }
 
+        if parts.first().is_some_and(|part| part == "package") {
+            let entry = self.package_entry.ok_or_else(|| {
+                load_diagnostic_at(&declaration.syntax.span, "package entry module is not set")
+            })?;
+            if parts.len() == 1 {
+                return Ok(entry);
+            }
+            return self.resolve_file_import(&parts[1..], root, declaration);
+        }
+
         if let Some(first) = parts.first()
             && let Some(child) = self.children[module.0].get(first).copied()
         {
@@ -556,8 +617,17 @@ impl ProgramLoader {
         } else {
             root.to_owned()
         };
+        self.resolve_file_import(parts, &import_root, declaration)
+    }
+
+    fn resolve_file_import(
+        &mut self,
+        parts: &[String],
+        import_root: &Path,
+        declaration: &UseDeclaration,
+    ) -> Result<ModuleId, LoadDiagnostic> {
         for prefix_len in (1..=parts.len()).rev() {
-            let mut path = import_root.clone();
+            let mut path = import_root.to_owned();
             for component in &parts[..prefix_len] {
                 path.push(component);
             }
@@ -570,7 +640,7 @@ impl ProgramLoader {
         }
         Err(load_diagnostic_at(
             &declaration.syntax.span,
-            format!("could not resolve module `{}`", parts.join(".")),
+            format!("could not resolve module `{}`", declaration.path.join(".")),
         ))
     }
 

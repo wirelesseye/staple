@@ -383,62 +383,6 @@ including after the last item in a sequence.
 
 Line comments begin with `//` and continue to the end of the line.
 
-### Compiler output
-
-`stapler` builds a native executable by default. Without `-o`, the output is
-written next to the source file without the `.sta` extension:
-
-```text
-stapler examples/hello_world.sta
-# writes examples/hello_world
-```
-
-It can explicitly write LLVM IR, a native object file, or a linked executable:
-
-```text
-stapler --emit llvm examples/hello_world.sta       # LLVM IR on stdout
-stapler --emit llvm -o hello_world.ll examples/hello_world.sta
-stapler --emit object -o hello_world.o examples/hello_world.sta
-stapler --emit exe -o hello_world examples/hello_world.sta
-```
-
-`stapler run` runs a source file without leaving a compiled executable next to
-it:
-
-```text
-stapler run examples/hello_world.sta
-stapler run examples/hello_world.sta -- first --second
-```
-
-Run mode privately compiles and links a temporary host executable, executes it
-with inherited standard input and output, and removes its temporary artifacts.
-Arguments after `--` are forwarded to the process, although Staple does not yet
-provide a source-level API for reading them. `--stdlib`, `--linker`, `-L`, and
-`-l` are supported; `-o`, `--emit`, and cross-target `--target` are not.
-
-The native target is used unless `--target <triple>` is supplied. Executables
-are linked through `$CC`, or `cc` when `$CC` is unset. `--linker` selects a
-different linker driver. `-L <path>` and `-l <name>` add library search paths
-and libraries for executable output.
-
-Stapler loads the standard library at compile time. Install the repository copy
-to the default per-user location with:
-
-```sh
-./stapler/scripts/install-stdlib.sh
-```
-
-This installs to `~/.local/lib/staple/stdlib`; an optional first argument selects
-a different destination. `--stdlib <path>` selects the root explicitly and
-`STAPLE_STDLIB` provides the same path through the environment. Otherwise both
-the compiler and language server look in `../lib/staple/stdlib` relative to
-their executable and then in the per-user default location. The standard-library root
-contains `std/core.sta`, feature modules under `std/core/`, and
-`std/cinterop.sta`. Core features include numbers, booleans, strings,
-references, results, syntax, equality, copying, dropping, and defaults.
-`std.core` re-exports their public items and remains the stable prelude
-interface.
-
 ### Top-level statements
 
 A source file may contain expression statements alongside bindings, type
@@ -466,23 +410,41 @@ Only a direct, non-generic `def main` in the entry module is selected. It must
 have parameter and result type `()`, and may require either no resources or only
 `std.io.IO`; the resource set may be explicit or inferred. A `let main`, an
 imported `main`, and functions named `main` in other modules remain ordinary
-bindings. Stapler generates the native `main`, initializes every reachable
-module, calls the source `main` when present, and then returns status zero.
+bindings. The native entry point initializes every reachable module, calls the
+source `main` when present, and then returns status zero.
 
 ### Modules and `use`
 
-Every `.sta` file is a module. A dotted module path is resolved from the entry
-file's directory by replacing dots with path separators and adding `.sta`:
+Every `.sta` file is a module. Each compilation has a module root. A dotted
+module path is resolved from that root by replacing dots with path separators
+and adding `.sta`:
 
 ```staple
 use tools.format
 // loads tools/format.sta
 ```
 
-When the entry program is read from standard input, module paths are resolved
-from stapler's current working directory. Only modules reachable from the entry
-module are compiled. A source file is loaded once even when several modules use
-it, and mutually recursive module dependencies are allowed.
+Paths beginning with `std` resolve from the standard-library module root rather
+than the package module root. `std.core` is the stable prelude interface and
+provides core numbers, booleans, strings, references, results, syntax,
+equality, copying, dropping, and defaults. Interoperability features are
+available through `std.cinterop`.
+
+The contextual leading component `package` always selects the current package
+root, bypassing inline children with the same name:
+
+```staple
+use package.models User
+```
+
+Here `models` loads `<module-root>/models.sta`. A bare `use package` refers to
+the entry module. `package` is contextual only in the first component of a
+`use` path and remains available as an ordinary identifier elsewhere. A file
+named `package.sta` is addressed as `use package.package`.
+
+Only modules reachable from the entry module are compiled. A source file is
+loaded once even when several modules use it, and mutually recursive module
+dependencies are allowed.
 
 A module can be brought into scope as a namespace. The namespace name is the
 last component of its path:
@@ -682,7 +644,7 @@ def get_number: _ -> I32 = () => {
 }
 ```
 
-`_` is an inferred type placeholder. In this example, stapler infers the
+`_` is an inferred type placeholder. In this example, the compiler infers the
 function's parameter type from `()` while requiring its result to be `I32`.
 Inferred placeholders may appear wherever a type is expected.
 
@@ -881,9 +843,9 @@ pattern matches the elements of a product, and a nominal pattern exposes the
 single representation value of a distinct type when that representation is
 visible.
 
-`=>` introduces the body of the abstraction. Stapler infers the result type
-from the body unless a surrounding function type or a `satisfies` expression
-constrains it.
+`=>` introduces the body of the abstraction. The compiler infers the result
+type from the body unless a surrounding function type or a `satisfies`
+expression constrains it.
 
 A binding pattern normally has a name and a type:
 
@@ -904,8 +866,8 @@ The type may be omitted when a surrounding function type supplies it:
 def identity: I32 -> I32 = value => value
 ```
 
-An omitted parameter type without such a context is an error. Stapler does not
-infer parameter types from operations in the function body.
+An omitted parameter type without such a context is an error. The compiler does
+not infer parameter types from operations in the function body.
 
 A nullary product pattern is written as `()`:
 
@@ -1210,9 +1172,9 @@ function values and may be called unqualified when unambiguous or qualified as
 `strings.ToString.to_string`.
 
 Traits use static dispatch. Bounds and implementations add no runtime values or
-function parameters. During monomorphization, Stapler substitutes the concrete
-trait arguments and emits a direct reference to the selected implementation
-member. Trait objects, runtime dictionaries, associated items,
+function parameters. During monomorphization, the compiler substitutes the
+concrete trait arguments and emits a direct reference to the selected
+implementation member. Trait objects, runtime dictionaries, associated items,
 generic implementations, and independently generic trait
 members are not currently supported.
 
@@ -1545,7 +1507,7 @@ argument, validates and copies UTF-8 into a `String`, then frees it;
 `string_to_c_string` allocates an owned copy, appends a terminator, and traps on
 an interior NUL byte. Invalid UTF-8 also traps.
 
-An underscore asks stapler to infer a type:
+An underscore asks the compiler to infer a type:
 
 ```staple
 _
@@ -1604,7 +1566,7 @@ Arguments are part of nominal identity, so two applications with different
 arguments are distinct. A by-value use requires a representation supplied by
 the compiler or another future implementation mechanism. `std.core.I32` and
 `std.cinterop.CPointer` are opaque declarations whose representations are
-provided by Stapler.
+provided by the compiler.
 
 #### Singleton types
 
@@ -1804,11 +1766,11 @@ other tag returns immediately and is widened into the enclosing result type.
 The selected representation must be visible under the ordinary `pub(repr)`
 rules.
 
-When the function result is omitted, Stapler joins its trailing value, reachable
-explicit returns, and every propagated alternative. The example therefore
-infers `Ok Tree | IOError | ParseError`. With an explicit binding annotation or
-`satisfies` constraint on the body, every normal and propagated result must be
-contained in that type.
+When the function result is omitted, the compiler joins its trailing value,
+reachable explicit returns, and every propagated alternative. The example
+therefore infers `Ok Tree | IOError | ParseError`. With an explicit binding
+annotation or `satisfies` constraint on the body, every normal and propagated
+result must be contained in that type.
 
 Sum types use Staple's internal tagged inline representation and may not appear
 anywhere inside an `extern` binding type.
@@ -1830,7 +1792,6 @@ The example declares an immutable foreign value named `printf`. Its type is a
 function from one product parameter—containing a C string pointer followed by
 variadic values—to an `I32` result.
 
-External symbols are resolved by the native linker when producing an
-executable. Libraries outside the platform defaults can be supplied to
-`stapler --emit exe` with `-L` and `-l`. Calling-convention details, supported
-ABI names, foreign symbol aliases, and foreign type layouts remain unspecified.
+External symbols are resolved during native linking. Calling-convention
+details, supported ABI names, foreign symbol aliases, foreign library selection,
+and foreign type layouts remain unspecified.
