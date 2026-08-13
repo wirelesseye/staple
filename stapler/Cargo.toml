@@ -2,6 +2,16 @@
 name = "stapler"
 version = "0.1.0"
 edition = "2024"
+autobins = false
+default-run = "stpl"
+
+[[bin]]
+name = "stpl"
+path = "src/main.rs"
+
+[[bin]]
+name = "staple-lsp"
+path = "src/bin/staple-lsp.rs"
 
 [dependencies]
 inkwell = { version = "0.10.0", features = ["llvm21-1"] }

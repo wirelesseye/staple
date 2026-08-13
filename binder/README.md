@@ -3,7 +3,8 @@
 Binder is the project manager for the [Staple language](../Staple.md). It is a
 separate executable from [Stapler](../stapler/README.md) and invokes the compiler
 as a subprocess. A Staple toolchain installation should provide both programs;
-Binder looks for Stapler beside its own executable first and then on `PATH`.
+Binder looks for the Stapler executable, `stpl`, beside its own executable first
+and then on `PATH`.
 
 ## Manifest
 
@@ -57,4 +58,3 @@ binder run -- first --second
 `binder run` performs a fresh build, inherits standard input and output, and
 forwards arguments following `--`. It accepts `--stdlib`, `--linker`, `-L`, and
 `-l`; cross-target execution and `-o` are not supported.
-

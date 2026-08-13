@@ -4,21 +4,21 @@ Stapler is the compiler and language server for the [Staple language](../Staple.
 
 ## Compiling
 
-Stapler builds a native executable by default. Without `-o`, the output is
-written next to the source file without the `.sta` extension:
+The `stpl` command builds a native executable by default. Without `-o`, the
+output is written next to the source file without the `.sta` extension:
 
 ```text
-stapler examples/hello_world.sta
+stpl examples/hello_world.sta
 # writes examples/hello_world
 ```
 
 It can explicitly write LLVM IR, a native object file, or a linked executable:
 
 ```text
-stapler --emit llvm examples/hello_world.sta
-stapler --emit llvm -o hello_world.ll examples/hello_world.sta
-stapler --emit object -o hello_world.o examples/hello_world.sta
-stapler --emit exe -o hello_world examples/hello_world.sta
+stpl --emit llvm examples/hello_world.sta
+stpl --emit llvm -o hello_world.ll examples/hello_world.sta
+stpl --emit object -o hello_world.o examples/hello_world.sta
+stpl --emit exe -o hello_world examples/hello_world.sta
 ```
 
 The native target is used unless `--target <triple>` is supplied. Executables
@@ -28,22 +28,22 @@ and libraries for executable output.
 
 ## Checking
 
-`stapler check` stops after loading, name resolution, and type checking. An
+`stpl check` stops after loading, name resolution, and type checking. An
 explicit module root allows an entry file to live in a nested directory while
 imports remain rooted at the package's source directory:
 
 ```text
-stapler check --module-root src src/bin/main.sta
+stpl check --module-root src src/bin/main.sta
 ```
 
 ## Running
 
-`stapler run` runs a source file without leaving a compiled executable next to
+`stpl run` runs a source file without leaving a compiled executable next to
 it:
 
 ```text
-stapler run examples/hello_world.sta
-stapler run examples/hello_world.sta -- first --second
+stpl run examples/hello_world.sta
+stpl run examples/hello_world.sta -- first --second
 ```
 
 Run mode privately compiles and links a temporary host executable, executes it
@@ -72,4 +72,3 @@ The standard-library root contains `std/core.sta`, feature modules under
 strings, references, results, syntax, equality, copying, dropping, and defaults.
 `std.core` re-exports their public items and remains the stable prelude
 interface.
-

@@ -488,12 +488,12 @@ fn locate_stapler() -> Result<OsString, String> {
     if let Ok(executable) = std::env::current_exe()
         && let Some(directory) = executable.parent()
     {
-        let sibling = directory.join(format!("stapler{}", std::env::consts::EXE_SUFFIX));
+        let sibling = directory.join(format!("stpl{}", std::env::consts::EXE_SUFFIX));
         if sibling.is_file() {
             return Ok(sibling.into_os_string());
         }
     }
-    Ok(OsString::from("stapler"))
+    Ok(OsString::from("stpl"))
 }
 
 fn stapler_arguments(package: &Package, options: &Options, output: Option<&Path>) -> Vec<OsString> {
@@ -544,7 +544,7 @@ fn output_path(package: &Package, options: &Options) -> Result<PathBuf, String> 
 fn compiler_start_error(compiler: &OsStr, error: std::io::Error) -> String {
     if error.kind() == std::io::ErrorKind::NotFound {
         format!(
-            "could not find Stapler beside Binder or on PATH; install the Staple toolchain ({error})"
+            "could not find Stapler (`stpl`) beside Binder or on PATH; install the Staple toolchain ({error})"
         )
     } else {
         format!("could not start `{}`: {error}", compiler.to_string_lossy())

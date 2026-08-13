@@ -1,7 +1,7 @@
 # The staple language
 
 **staple** is an expression-oriented programming language. Its compiler is
-called **stapler**.
+called **Stapler**.
 
 This document describes the language as it currently exists. Details listed as
 unspecified are not yet part of the language design.

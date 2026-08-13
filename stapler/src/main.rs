@@ -52,7 +52,7 @@ fn main() -> ExitCode {
         Ok(Outcome::Completed(None)) => ExitCode::SUCCESS,
         Ok(Outcome::Executed(status)) => exit_code(status),
         Err(message) => {
-            eprintln!("stapler: {message}");
+            eprintln!("stpl: {message}");
             ExitCode::FAILURE
         }
     }
@@ -276,33 +276,33 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
     }
     if options.mode == Mode::Run {
         if options.output.is_some() {
-            return Err("`-o` is not supported by `stapler run`".to_owned());
+            return Err("`-o` is not supported by `stpl run`".to_owned());
         }
         if emit_specified {
-            return Err("`--emit` is not supported by `stapler run`".to_owned());
+            return Err("`--emit` is not supported by `stpl run`".to_owned());
         }
         if options.target.is_some() {
             return Err(
-                "`--target` is not supported by `stapler run`; programs run on the host target"
+                "`--target` is not supported by `stpl run`; programs run on the host target"
                     .to_owned(),
             );
         }
     }
     if options.mode == Mode::Check {
         if options.output.is_some() {
-            return Err("`-o` is not supported by `stapler check`".to_owned());
+            return Err("`-o` is not supported by `stpl check`".to_owned());
         }
         if emit_specified {
-            return Err("`--emit` is not supported by `stapler check`".to_owned());
+            return Err("`--emit` is not supported by `stpl check`".to_owned());
         }
         if options.target.is_some() {
-            return Err("`--target` is not supported by `stapler check`".to_owned());
+            return Err("`--target` is not supported by `stpl check`".to_owned());
         }
         if options.linker.is_some()
             || !options.library_paths.is_empty()
             || !options.libraries.is_empty()
         {
-            return Err("linker options are not supported by `stapler check`".to_owned());
+            return Err("linker options are not supported by `stpl check`".to_owned());
         }
     }
     if options.emit != EmitKind::Executable
@@ -473,9 +473,9 @@ fn exit_code(status: ExitStatus) -> ExitCode {
 
 fn usage() -> String {
     concat!(
-        "usage: stapler [options] <input.sta>\n",
-        "       stapler check [options] <input.sta>\n",
-        "       stapler run [options] <input.sta> [-- <arguments>...]\n",
+        "usage: stpl [options] <input.sta>\n",
+        "       stpl check [options] <input.sta>\n",
+        "       stpl run [options] <input.sta> [-- <arguments>...]\n",
         "\n",
         "options:\n",
         "  -h, --help                print this help\n",
@@ -495,7 +495,7 @@ fn usage() -> String {
 
 fn run_usage() -> String {
     concat!(
-        "usage: stapler run [options] <input.sta> [-- <arguments>...]\n",
+        "usage: stpl run [options] <input.sta> [-- <arguments>...]\n",
         "\n",
         "options:\n",
         "  -h, --help                print this help\n",
@@ -512,7 +512,7 @@ fn run_usage() -> String {
 
 fn check_usage() -> String {
     concat!(
-        "usage: stapler check [options] <input.sta>\n",
+        "usage: stpl check [options] <input.sta>\n",
         "\n",
         "options:\n",
         "  -h, --help                print this help\n",
@@ -547,9 +547,9 @@ mod tests {
             panic!("help should be printed");
         };
 
-        assert!(help.starts_with("usage: stapler"));
+        assert!(help.starts_with("usage: stpl"));
         assert!(help.contains("--emit <llvm|object|exe>"));
-        assert!(help.contains("stapler run"));
+        assert!(help.contains("stpl run"));
     }
 
     #[test]
@@ -560,7 +560,7 @@ mod tests {
             panic!("run help should be printed");
         };
 
-        assert!(help.starts_with("usage: stapler run"));
+        assert!(help.starts_with("usage: stpl run"));
         assert!(help.contains("pass remaining arguments to the program"));
     }
 
@@ -593,7 +593,7 @@ mod tests {
         ] {
             let error = parse_options(arguments.into_iter().map(OsString::from))
                 .expect_err("code generation option should be rejected in check mode");
-            assert!(error.contains("not supported by `stapler check`"));
+            assert!(error.contains("not supported by `stpl check`"));
         }
     }
 
@@ -664,7 +664,7 @@ mod tests {
         ] {
             let error = parse_options(arguments.into_iter().map(OsString::from))
                 .expect_err("build-only option should be rejected in run mode");
-            assert!(error.contains("not supported by `stapler run`"));
+            assert!(error.contains("not supported by `stpl run`"));
         }
     }
 
