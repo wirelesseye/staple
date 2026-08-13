@@ -49,6 +49,13 @@ impl Collector<'_> {
         match item {
             Item::Modified(value) => {
                 for modifier in &value.modifiers {
+                    if let Some(info) = self
+                        .typed
+                        .resolved()
+                        .macro_invocation_for(modifier.syntax.id)
+                    {
+                        self.named_last(&modifier.syntax, &modifier.name, macro_signature(info));
+                    }
                     if let Some(expression) = modifier
                         .argument
                         .as_ref()
@@ -267,6 +274,17 @@ impl Collector<'_> {
                 }
             }
             Item::MacroDeclaration(declaration) => {
+                if let Some(info) = self
+                    .typed
+                    .resolved()
+                    .macro_definition_for(declaration.syntax.id)
+                {
+                    self.named(
+                        &declaration.syntax,
+                        &declaration.name,
+                        macro_signature(info),
+                    );
+                }
                 if let Some(annotation) = &declaration.annotation {
                     self.ty(annotation);
                 }
@@ -513,6 +531,23 @@ impl Collector<'_> {
     }
 
     fn expression(&mut self, expression: &Expression) {
+        if let Some(info) = self
+            .typed
+            .resolved()
+            .macro_invocation_for(expression.syntax().id)
+        {
+            match expression {
+                Expression::Name(name) => {
+                    self.named(&name.syntax, &name.name, macro_signature(info))
+                }
+                Expression::Access(access) => {
+                    if let Accessor::Name(name) = &access.accessor {
+                        self.named_last(&access.syntax, name, macro_signature(info));
+                    }
+                }
+                _ => {}
+            }
+        }
         if let Some(value_type) = self.typed.type_of_expression(expression.syntax().id) {
             let value_type = self.display_type(value_type);
             let signature = self
@@ -749,6 +784,29 @@ impl Collector<'_> {
             });
         }
     }
+
+    fn named_last(&mut self, syntax: &Syntax, name: &str, signature: String) {
+        if let Some(token) = syntax
+            .tokens()
+            .iter()
+            .rev()
+            .find(|token| token.text == name)
+        {
+            self.entries.push(HoverEntry {
+                range: token.span.clone(),
+                signature,
+            });
+        }
+    }
+}
+
+fn macro_signature(info: &ResolvedMacro) -> String {
+    format!(
+        "macro {}{}: {}",
+        if info.modifier { "@" } else { "" },
+        info.name,
+        info.signature
+    )
 }
 
 impl Declaration {
@@ -787,6 +845,59 @@ mod tests {
                 .iter()
                 .all(|entry| entry.signature == "let answer: I32")
         );
+    }
+
+    #[test]
+    fn indexes_macro_declarations_and_selected_invocations() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-hover-macro-invocations-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("dependency.sta"),
+            "pub macro imported: Expr -> Expr = value: Expr => quote { $value }\n",
+        )
+        .unwrap();
+        let source = concat!(
+            "use dependency\n",
+            "macro choose: Expr -> Expr = _: Expr => quote { 1 }\n",
+            "macro choose: CallExpr -> Expr = _: CallExpr => quote { 2 }\n",
+            "macro inferred = value => quote { $value }\n",
+            "macro @identity: Item -> Item = item: Item => item\n",
+            "let selected = choose (discarded 0)\n",
+            "let inferred_value = inferred 4\n",
+            "@identity let decorated = dependency.imported 3\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        let signatures = entries
+            .iter()
+            .map(|entry| (&source[entry.range.clone()], entry.signature.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(signatures.contains(&("choose", "macro choose: Expr -> Expr")));
+        assert!(signatures.contains(&("choose", "macro choose: CallExpr -> Expr")));
+        assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
+        assert!(signatures.contains(&("inferred", "macro inferred: Syntax -> Syntax")));
+        assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
+        assert!(
+            signatures
+                .iter()
+                .filter(|signature| **signature == ("choose", "macro choose: CallExpr -> Expr"))
+                .count()
+                >= 2,
+            "signatures: {signatures:?}"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

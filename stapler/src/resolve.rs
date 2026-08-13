@@ -218,6 +218,14 @@ pub enum PrimitiveMacro {
     CString,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedMacro {
+    pub declaration: SyntaxId,
+    pub name: String,
+    pub modifier: bool,
+    pub signature: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IntrinsicFunction {
     IntegerBinary {
@@ -278,6 +286,8 @@ pub struct ResolvedModule {
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     external_symbols: HashSet<SymbolId>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
+    macro_definitions: HashMap<SyntaxId, ResolvedMacro>,
+    macro_invocations: HashMap<SyntaxId, ResolvedMacro>,
     constructors: HashMap<SymbolId, TypeId>,
     singleton_values: HashMap<SymbolId, TypeId>,
     type_modules: HashMap<TypeId, ModuleId>,
@@ -317,6 +327,14 @@ impl ResolvedModule {
 
     pub fn symbol_for(&self, syntax_id: SyntaxId) -> Option<SymbolId> {
         self.symbols.get(&syntax_id).copied()
+    }
+
+    pub fn macro_definition_for(&self, syntax_id: SyntaxId) -> Option<&ResolvedMacro> {
+        self.macro_definitions.get(&syntax_id)
+    }
+
+    pub fn macro_invocation_for(&self, syntax_id: SyntaxId) -> Option<&ResolvedMacro> {
+        self.macro_invocations.get(&syntax_id)
     }
 
     pub fn definitions_for(&self, syntax_id: SyntaxId) -> Vec<DefinitionId> {
@@ -807,7 +825,7 @@ impl NameResolver {
     }
 
     pub fn resolve_program(mut self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
-        let program = crate::macro_expand::expand_program(program)?;
+        let (program, macro_analysis) = crate::macro_expand::expand_program(program)?;
         self.standard_library_core = program.standard_library_core();
         self.standard_library_cinterop = program.standard_library_cinterop();
         let standard_library_directory = self
@@ -906,6 +924,8 @@ impl NameResolver {
             intrinsic_functions: self.intrinsic_functions,
             external_symbols,
             macro_calls: self.macro_calls,
+            macro_definitions: macro_analysis.definitions,
+            macro_invocations: macro_analysis.invocations,
             constructors: self.constructors,
             singleton_values: self.singleton_values,
             type_modules: self.type_modules,

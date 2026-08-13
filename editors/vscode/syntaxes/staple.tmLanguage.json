@@ -58,7 +58,7 @@
           "match": "\\b(macro)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
           "captures": {
             "1": { "name": "storage.type.macro.staple" },
-            "2": { "name": "entity.name.function.preprocessor.staple" }
+            "2": { "name": "entity.name.macro.staple" }
           }
         },
         {

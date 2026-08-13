@@ -30,7 +30,7 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenType::TYPE,
             SemanticTokenType::TYPE_PARAMETER,
             SemanticTokenType::INTERFACE,
-            SemanticTokenType::MACRO,
+            SemanticTokenType::new("stapleMacro"),
             SemanticTokenType::FUNCTION,
             SemanticTokenType::PARAMETER,
             SemanticTokenType::VARIABLE,
@@ -524,6 +524,18 @@ impl<'a> Classifier<'a> {
                 self.expression(&value.argument, resolved);
             }
             Expression::Access(value) => {
+                if resolved
+                    .and_then(|module| module.macro_invocation_for(value.syntax.id))
+                    .is_some()
+                {
+                    if let Expression::Name(namespace) = value.value.as_ref() {
+                        self.mark_last(&namespace.syntax, &namespace.name, NAMESPACE, 0, 2);
+                    }
+                    if let Accessor::Name(name) = &value.accessor {
+                        self.mark_last(&value.syntax, name, MACRO, READONLY, 2);
+                    }
+                    return;
+                }
                 self.expression_with_mod(&value.value, resolved, modifiers);
                 if let Accessor::Name(name) = &value.accessor {
                     self.mark_last(&value.syntax, name, PROPERTY, modifiers, 1);
@@ -553,6 +565,13 @@ impl<'a> Classifier<'a> {
             },
             Expression::Splice(value) => self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1),
             Expression::Name(value) => {
+                if resolved
+                    .and_then(|module| module.macro_invocation_for(value.syntax.id))
+                    .is_some()
+                {
+                    self.mark_last(&value.syntax, &value.name, MACRO, READONLY, 2);
+                    return;
+                }
                 let kind = resolved
                     .and_then(|module| module.symbol_for(value.syntax.id))
                     .map(|symbol| {
@@ -931,6 +950,10 @@ mod tests {
             SemanticTokenType::COMMENT
         );
         assert_eq!(
+            legend.token_types[MACRO as usize],
+            SemanticTokenType::new("stapleMacro")
+        );
+        assert_eq!(
             legend.token_modifiers[0],
             SemanticTokenModifier::DECLARATION
         );
@@ -1011,6 +1034,60 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn classifies_resolved_macro_invocations_and_qualifiers() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-semantic-macro-invocations-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("dependency.sta"),
+            "pub macro imported: Expr -> Expr = value: Expr => quote { $value }\n",
+        )
+        .unwrap();
+        let source = concat!(
+            "use dependency\n",
+            "macro choose: Expr -> Expr = _: Expr => quote { 1 }\n",
+            "macro choose: CallExpr -> Expr = _: CallExpr => quote { 2 }\n",
+            "macro inferred = value => quote { $value }\n",
+            "macro @identity: Item -> Item = item: Item => item\n",
+            "let selected = choose (discarded 0)\n",
+            "let inferred_value = inferred 4\n",
+            "@identity let decorated = dependency.imported 3\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let labels = labels(
+            source,
+            &tokens(source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
+
+        assert!(
+            labels
+                .iter()
+                .filter(|token| **token == ("choose", MACRO))
+                .count()
+                >= 3,
+            "labels: {labels:?}"
+        );
+        assert!(labels.contains(&("identity", MACRO)), "labels: {labels:?}");
+        assert!(labels.contains(&("inferred", MACRO)), "labels: {labels:?}");
+        assert!(
+            labels.contains(&("dependency", NAMESPACE)),
+            "labels: {labels:?}"
+        );
+        assert!(labels.contains(&("imported", MACRO)), "labels: {labels:?}");
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

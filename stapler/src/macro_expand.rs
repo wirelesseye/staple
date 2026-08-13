@@ -2,8 +2,9 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc};
 
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
-    MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program, Span,
-    Statement, Syntax, SyntaxId, Type, UseKind, Visibility, VisibilityKind, VisibilitySyntax,
+    MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program,
+    ResolvedMacro, Span, Statement, Syntax, SyntaxId, Type, UseKind, Visibility, VisibilityKind,
+    VisibilitySyntax,
 };
 
 const MAX_EXPANSION_DEPTH: usize = 128;
@@ -347,7 +348,14 @@ impl EnvironmentBinding {
 
 type Environment = HashMap<String, EnvironmentBinding>;
 
-pub(crate) fn expand_program(mut program: Program) -> Result<Program, Vec<Diagnostic>> {
+pub(crate) struct MacroAnalysis {
+    pub definitions: HashMap<SyntaxId, ResolvedMacro>,
+    pub invocations: HashMap<SyntaxId, ResolvedMacro>,
+}
+
+pub(crate) fn expand_program(
+    mut program: Program,
+) -> Result<(Program, MacroAnalysis), Vec<Diagnostic>> {
     let mut expander = MacroExpander::new(&program);
     expander.validate_definitions();
     for module in program.modules() {
@@ -424,7 +432,7 @@ pub(crate) fn expand_program(mut program: Program) -> Result<Program, Vec<Diagno
         }
     }
     if expander.diagnostics.is_empty() {
-        Ok(program)
+        Ok((program, expander.analysis()))
     } else {
         Err(expander.diagnostics)
     }
@@ -439,6 +447,7 @@ struct MacroExpander {
     steps: usize,
     expansion_stack: Vec<MacroKey>,
     emitted_items: Option<Vec<Item>>,
+    invocations: HashMap<SyntaxId, ResolvedMacro>,
 }
 
 impl MacroExpander {
@@ -766,7 +775,23 @@ impl MacroExpander {
             steps: 0,
             expansion_stack: Vec::new(),
             emitted_items: None,
+            invocations: HashMap::new(),
         }
+    }
+
+    fn analysis(&self) -> MacroAnalysis {
+        MacroAnalysis {
+            definitions: self
+                .definitions
+                .values()
+                .map(|definition| (definition.declaration.syntax.id, resolved_macro(definition)))
+                .collect(),
+            invocations: self.invocations.clone(),
+        }
+    }
+
+    fn record_invocation(&mut self, syntax: SyntaxId, definition: &MacroDefinition) {
+        self.invocations.insert(syntax, resolved_macro(definition));
     }
 
     fn install_selected(
@@ -1133,6 +1158,7 @@ impl MacroExpander {
             Some(&invocation.visibility),
             invocation.syntax.span.clone(),
         )?;
+        self.record_invocation(head.syntax().id, &selected.definition);
         if depth >= MAX_EXPANSION_DEPTH {
             self.diagnostics.push(Diagnostic::new(
                 invocation.syntax.span.clone(),
@@ -1284,6 +1310,7 @@ impl MacroExpander {
                 continue;
             }
             let (definition, argument) = self.select_modifier(module, &invocation)?;
+            self.record_invocation(invocation.syntax.id, &definition);
             let key = definition.key.clone();
             if self.expansion_stack.contains(&key) {
                 self.diagnostics.push(Diagnostic::new(
@@ -1550,6 +1577,7 @@ impl MacroExpander {
         else {
             return true;
         };
+        self.record_invocation(head.syntax().id, &selected.definition);
         let definition = selected.definition;
         let consumed_count = selected.consumed;
         if !matches!(
@@ -1709,6 +1737,7 @@ impl MacroExpander {
             else {
                 return expression;
             };
+            self.record_invocation(head.syntax().id, &selected.definition);
             let definition = selected.definition;
             let consumed_count = selected.consumed;
             let key = definition.key.clone();
@@ -2401,6 +2430,7 @@ impl MacroExpander {
                         None,
                         expression.syntax().span.clone(),
                     )?;
+                    self.record_invocation(head.syntax().id, &selected.definition);
                     let definition = selected.definition;
                     let consumed_count = selected.consumed;
                     let key = definition.key.clone();
@@ -4224,6 +4254,22 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
         })
         .collect::<Vec<_>>()
         .join(" -> ")
+}
+
+fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
+    let parameters = format_meta_signature(&definition.parameters);
+    let result = format_meta_type(&definition.result);
+    let signature = if parameters.is_empty() {
+        result
+    } else {
+        format!("{parameters} -> {result}")
+    };
+    ResolvedMacro {
+        declaration: definition.declaration.syntax.id,
+        name: definition.key.name.clone(),
+        modifier: definition.key.modifier,
+        signature,
+    }
 }
 
 fn format_meta_type(meta: &MetaType) -> String {
