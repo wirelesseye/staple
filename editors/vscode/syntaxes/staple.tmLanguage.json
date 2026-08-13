@@ -118,7 +118,7 @@
       "patterns": [
         {
           "name": "keyword.control.staple",
-          "match": "\\b(?:break|continue|loop|match|return)\\b"
+          "match": "\\b(?:break|continue|loop|match|return|with)\\b"
         },
         {
           "name": "keyword.control.import.staple",
@@ -134,7 +134,7 @@
         },
         {
           "name": "keyword.operator.expression.staple",
-          "match": "\\bsatisfies\\b"
+          "match": "\\b(?:resource|satisfies)\\b"
         },
         {
           "name": "variable.language.wildcard.staple",

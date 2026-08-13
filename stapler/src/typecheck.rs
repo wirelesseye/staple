@@ -45,6 +45,7 @@ pub struct CheckedAccess {
     pub index: usize,
     pub dereference: Option<CheckedType>,
     pub erased: bool,
+    pub scalar: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,7 +175,67 @@ pub struct CheckedSumType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedFunctionType {
     pub parameter: Box<CheckedType>,
+    pub resources: CheckedResourceSet,
     pub result: Box<CheckedType>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedResource {
+    pub value_type: CheckedType,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CheckedResourceSet {
+    pub resources: Vec<CheckedResource>,
+}
+
+impl CheckedResourceSet {
+    pub fn canonical(mut resources: Vec<CheckedResource>) -> Self {
+        resources.sort_by(|left, right| {
+            format!("{:?}", left.value_type).cmp(&format!("{:?}", right.value_type))
+        });
+        resources.dedup();
+        Self { resources }
+    }
+
+    pub fn union(&self, other: &Self) -> Self {
+        Self::canonical(
+            self.resources
+                .iter()
+                .chain(&other.resources)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    pub fn without(&self, resource: &CheckedResource) -> Self {
+        Self::canonical(
+            self.resources
+                .iter()
+                .filter(|candidate| *candidate != resource)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    pub fn is_subset_of(&self, other: &Self) -> bool {
+        self.resources
+            .iter()
+            .all(|resource| other.resources.contains(resource))
+    }
+}
+
+impl fmt::Display for CheckedResourceSet {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("{")?;
+        for (index, resource) in self.resources.iter().enumerate() {
+            if index > 0 {
+                formatter.write_str(", ")?;
+            }
+            write!(formatter, "{}", resource.value_type)?;
+        }
+        formatter.write_str("}")
+    }
 }
 
 impl CheckedType {
@@ -246,7 +307,13 @@ impl CheckedType {
                 .all(|element| element.value_type.is_fully_known()),
             Self::Sum(sum) => sum.alternatives.iter().all(CheckedType::is_fully_known),
             Self::Function(function) => {
-                function.parameter.is_fully_known() && function.result.is_fully_known()
+                function.parameter.is_fully_known()
+                    && function
+                        .resources
+                        .resources
+                        .iter()
+                        .all(|resource| resource.value_type.is_fully_known())
+                    && function.result.is_fully_known()
             }
             Self::Distinct { representation, .. } => representation.is_fully_known(),
             Self::I32
@@ -389,7 +456,15 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::Function(function) => {
-                write!(formatter, "{} -> {}", function.parameter, function.result)
+                if function.resources.resources.is_empty() {
+                    write!(formatter, "{} -> {}", function.parameter, function.result)
+                } else {
+                    write!(
+                        formatter,
+                        "{} ->{} {}",
+                        function.parameter, function.resources, function.result
+                    )
+                }
             }
             Self::Distinct {
                 name, arguments, ..
@@ -429,6 +504,8 @@ pub struct TypedModule {
     expression_types: HashMap<SyntaxId, CheckedType>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
+    expression_resources: HashMap<SyntaxId, CheckedResourceSet>,
+    resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
@@ -470,6 +547,14 @@ impl TypedModule {
 
     pub fn type_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.expression_types.get(&syntax_id)
+    }
+
+    pub fn resources_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedResourceSet> {
+        self.expression_resources.get(&syntax_id)
+    }
+
+    pub fn resource_for_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedResource> {
+        self.resource_types.get(&syntax_id)
     }
 
     pub fn coercion_for(&self, syntax_id: SyntaxId) -> Option<&CheckedCoercion> {
@@ -643,6 +728,8 @@ pub struct TypeChecker {
     expression_types: HashMap<SyntaxId, CheckedType>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
+    expression_resources: HashMap<SyntaxId, CheckedResourceSet>,
+    resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
@@ -719,6 +806,14 @@ impl TypeChecker {
         for function_id in function_ids {
             self.ensure_function_checked(&module, function_id);
         }
+        if !self.resource_types.is_empty()
+            || self
+                .function_types
+                .values()
+                .any(|function| !function.resources.resources.is_empty())
+        {
+            self.infer_resources(&module);
+        }
 
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
@@ -729,6 +824,8 @@ impl TypeChecker {
             expression_types: self.expression_types,
             symbol_types: self.symbol_types,
             function_types: self.function_types,
+            expression_resources: self.expression_resources,
+            resource_types: self.resource_types,
             function_bounds: self.function_bounds,
             trait_method_types: self.trait_method_types,
             trait_parameter_arguments: self.trait_parameter_arguments,
@@ -1196,6 +1293,7 @@ impl TypeChecker {
                 *symbol,
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
+                    resources: CheckedResourceSet::default(),
                     result: Box::new(result),
                 }),
             );
@@ -1313,6 +1411,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        resources: CheckedResourceSet::default(),
                         result: Box::new(integer),
                     })
                 }
@@ -1340,6 +1439,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        resources: CheckedResourceSet::default(),
                         result: Box::new(result),
                     })
                 }
@@ -1353,6 +1453,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        resources: CheckedResourceSet::default(),
                         result: Box::new(float),
                     })
                 }
@@ -1374,18 +1475,21 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        resources: CheckedResourceSet::default(),
                         result: Box::new(result),
                     })
                 }
                 crate::IntrinsicFunction::StringFromCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::CString),
+                        resources: CheckedResourceSet::default(),
                         result: Box::new(CheckedType::String),
                     })
                 }
                 crate::IntrinsicFunction::StringToCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::String),
+                        resources: CheckedResourceSet::default(),
                         result: Box::new(CheckedType::CString),
                     })
                 }
@@ -1497,8 +1601,19 @@ impl TypeChecker {
                 ));
                 result = CheckedType::Error;
             }
+            let resources = function
+                .binding_annotation
+                .as_ref()
+                .and_then(
+                    |annotation| match self.resolve_source_type(module, annotation) {
+                        CheckedType::Function(function) => Some(function.resources),
+                        _ => None,
+                    },
+                )
+                .unwrap_or_default();
             let mut function_type = CheckedFunctionType {
                 parameter: Box::new(parameter),
+                resources,
                 result: Box::new(result),
             };
 
@@ -1617,6 +1732,7 @@ impl TypeChecker {
         self.return_reachable = outer_return_reachable;
         let checked_function_type = CheckedFunctionType {
             parameter: function_type.parameter,
+            resources: function_type.resources,
             result: Box::new(result_type),
         };
         self.function_types
@@ -1649,6 +1765,547 @@ impl TypeChecker {
             return values.remove(0);
         }
         self.normalize_sum_type(values, span)
+    }
+
+    fn expression_resources_now(
+        &self,
+        module: &ResolvedModule,
+        expression: &Expression,
+    ) -> CheckedResourceSet {
+        let union = |values: Vec<CheckedResourceSet>| {
+            values
+                .into_iter()
+                .fold(CheckedResourceSet::default(), |resources, value| {
+                    resources.union(&value)
+                })
+        };
+        match expression {
+            Expression::Function(_) => CheckedResourceSet::default(),
+            Expression::Satisfies(value) => self.expression_resources_now(module, &value.value),
+            Expression::Match(value) => union(
+                std::iter::once(self.expression_resources_now(module, &value.subject))
+                    .chain(
+                        value
+                            .arms
+                            .iter()
+                            .map(|arm| self.expression_resources_now(module, &arm.body)),
+                    )
+                    .collect(),
+            ),
+            Expression::Loop(value) => self.block_resources_now(module, &value.body),
+            Expression::Resource(value) => self
+                .resource_types
+                .get(&value.syntax.id)
+                .cloned()
+                .map(|resource| CheckedResourceSet::canonical(vec![resource]))
+                .unwrap_or_default(),
+            Expression::With(value) => {
+                let provider = self.expression_resources_now(module, &value.value);
+                let body = self.block_resources_now(module, &value.body);
+                let body = self
+                    .resource_types
+                    .get(&value.syntax.id)
+                    .map_or(body.clone(), |resource| body.without(resource));
+                provider.union(&body)
+            }
+            Expression::Block(value) => self.block_resources_now(module, value),
+            Expression::Product(value) => union(
+                value
+                    .elements
+                    .iter()
+                    .map(|element| self.expression_resources_now(module, &element.value))
+                    .collect(),
+            ),
+            Expression::Call(value) => {
+                let children = self
+                    .expression_resources_now(module, &value.callee)
+                    .union(&self.expression_resources_now(module, &value.argument));
+                let called = self
+                    .function_origin(module, &value.callee)
+                    .and_then(|function| {
+                        self.function_types
+                            .get(&function)
+                            .map(|function| function.resources.clone())
+                    })
+                    .or_else(|| {
+                        self.expression_types
+                            .get(&value.callee.syntax().id)
+                            .and_then(|ty| match ty {
+                                CheckedType::Function(function) => Some(function.resources.clone()),
+                                _ => None,
+                            })
+                    })
+                    .unwrap_or_default();
+                children.union(&called)
+            }
+            Expression::Access(value) => self.expression_resources_now(module, &value.value),
+            Expression::Index(value) => self
+                .expression_resources_now(module, &value.value)
+                .union(&self.expression_resources_now(module, &value.index)),
+            Expression::Infix(value) => module.lowered_infix(value.syntax.id).map_or_else(
+                || {
+                    union(
+                        value
+                            .operands
+                            .iter()
+                            .map(|operand| self.expression_resources_now(module, operand))
+                            .collect(),
+                    )
+                },
+                |lowered| self.expression_resources_now(module, lowered),
+            ),
+            Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_)
+            | Expression::Name(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => CheckedResourceSet::default(),
+        }
+    }
+
+    fn block_resources_now(
+        &self,
+        module: &ResolvedModule,
+        block: &crate::BlockExpression,
+    ) -> CheckedResourceSet {
+        block
+            .statements
+            .iter()
+            .fold(CheckedResourceSet::default(), |resources, statement| {
+                resources.union(&match statement {
+                    Statement::Binding(value) => value
+                        .value
+                        .as_ref()
+                        .map(|value| self.expression_resources_now(module, value))
+                        .unwrap_or_default(),
+                    Statement::PatternBinding(value) => {
+                        self.expression_resources_now(module, &value.value)
+                    }
+                    Statement::Assignment(value) => self
+                        .expression_resources_now(module, &value.target)
+                        .union(&self.expression_resources_now(module, &value.value)),
+                    Statement::Return(value) => self.expression_resources_now(module, &value.value),
+                    Statement::Break(value) => value
+                        .value
+                        .as_ref()
+                        .map(|value| self.expression_resources_now(module, value))
+                        .unwrap_or_default(),
+                    Statement::Continue(_) => CheckedResourceSet::default(),
+                    Statement::Expression(value) => self.expression_resources_now(module, value),
+                })
+            })
+    }
+
+    fn infer_resources(&mut self, module: &ResolvedModule) {
+        let declared = module
+            .functions()
+            .iter()
+            .filter_map(|function| {
+                function.binding_annotation.as_ref().and_then(|annotation| {
+                    matches!(annotation, Type::Function(_)).then(|| {
+                        (
+                            function.id,
+                            self.function_types[&function.id].resources.clone(),
+                        )
+                    })
+                })
+            })
+            .collect::<HashMap<_, _>>();
+
+        for _ in 0..=module.functions().len() {
+            let mut updates = Vec::new();
+            for function in module.functions() {
+                if declared.contains_key(&function.id) {
+                    continue;
+                }
+                let inferred = self.expression_resources_now(module, &function.body);
+                if self.function_types[&function.id].resources != inferred {
+                    updates.push((function.id, function.binding_syntax, inferred));
+                }
+            }
+            let had_updates = !updates.is_empty();
+            for (function, binding, resources) in updates {
+                self.function_types
+                    .get_mut(&function)
+                    .expect("function type")
+                    .resources = resources.clone();
+                if let Some(syntax) = binding
+                    && let Some(symbol) = module.symbol_for(syntax)
+                    && let Some(CheckedType::Function(function_type)) =
+                        self.symbol_types.get_mut(&symbol)
+                {
+                    function_type.resources = resources;
+                }
+            }
+            let refreshed = self.refresh_function_value_types(module);
+            if !had_updates && !refreshed {
+                break;
+            }
+        }
+
+        for function in module.functions() {
+            let actual = self.expression_resources_now(module, &function.body);
+            if let Some(allowed) = declared.get(&function.id)
+                && !actual.is_subset_of(allowed)
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    function.body.syntax().span.clone(),
+                    format!(
+                        "function body requires resources {actual}, which are not contained in its declared resource set {allowed}"
+                    ),
+                ));
+            }
+            self.record_expression_resources(module, &function.body);
+        }
+
+        for source_module in module.program().modules() {
+            for item in &source_module.syntax.items {
+                let Item::Statement(statement) = item else {
+                    continue;
+                };
+                let (syntax, resources) = match statement.as_ref() {
+                    Statement::Binding(binding) => binding.value.as_ref().map(|value| {
+                        (value.syntax(), self.expression_resources_now(module, value))
+                    }),
+                    Statement::PatternBinding(binding) => Some((
+                        binding.value.syntax(),
+                        self.expression_resources_now(module, &binding.value),
+                    )),
+                    Statement::Assignment(value) => Some((
+                        &value.syntax,
+                        self.expression_resources_now(module, &value.target)
+                            .union(&self.expression_resources_now(module, &value.value)),
+                    )),
+                    Statement::Return(value) => Some((
+                        &value.syntax,
+                        self.expression_resources_now(module, &value.value),
+                    )),
+                    Statement::Break(value) => value.value.as_ref().map(|expression| {
+                        (
+                            &value.syntax,
+                            self.expression_resources_now(module, expression),
+                        )
+                    }),
+                    Statement::Continue(_) => None,
+                    Statement::Expression(value) => {
+                        Some((value.syntax(), self.expression_resources_now(module, value)))
+                    }
+                }
+                .unwrap_or((&source_module.syntax.syntax, CheckedResourceSet::default()));
+                if !resources.resources.is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        syntax.span.clone(),
+                        format!("top-level initialization requires resources {resources}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    fn refreshed_expression_type(
+        &self,
+        module: &ResolvedModule,
+        expression: &Expression,
+    ) -> Option<CheckedType> {
+        match expression {
+            Expression::Function(function) => module
+                .function_for(function.syntax.id)
+                .and_then(|id| self.function_types.get(&id).cloned())
+                .map(CheckedType::Function),
+            Expression::Satisfies(_) => self.expression_types.get(&expression.syntax().id).cloned(),
+            Expression::With(with) => self.refreshed_block_type(module, &with.body),
+            Expression::Block(block) => self.refreshed_block_type(module, block),
+            Expression::Call(call) => self
+                .refreshed_expression_type(module, &call.callee)
+                .and_then(|ty| match ty {
+                    CheckedType::Function(function) => Some(*function.result),
+                    _ => None,
+                })
+                .or_else(|| self.expression_types.get(&expression.syntax().id).cloned()),
+            Expression::Name(_) | Expression::Access(_) => module
+                .symbol_for(expression.syntax().id)
+                .and_then(|symbol| self.symbol_types.get(&symbol).cloned())
+                .or_else(|| self.expression_types.get(&expression.syntax().id).cloned()),
+            _ => self.expression_types.get(&expression.syntax().id).cloned(),
+        }
+    }
+
+    fn refreshed_block_type(
+        &self,
+        module: &ResolvedModule,
+        block: &crate::BlockExpression,
+    ) -> Option<CheckedType> {
+        match block.statements.last()? {
+            Statement::Expression(expression) => self.refreshed_expression_type(module, expression),
+            Statement::Return(value) => self.refreshed_expression_type(module, &value.value),
+            _ => None,
+        }
+    }
+
+    fn refresh_function_value_types(&mut self, module: &ResolvedModule) -> bool {
+        let mut changed = false;
+        for function in module.functions() {
+            if function.binding_annotation.is_none()
+                && function.result_annotation.is_none()
+                && let Some(result) = self.refreshed_expression_type(module, &function.body)
+                && let Some(function_type) = self.function_types.get_mut(&function.id)
+                && matches!(function_type.result.as_ref(), CheckedType::Function(_))
+                && matches!(&result, CheckedType::Function(_))
+                && function_type.result.as_ref() != &result
+            {
+                function_type.result = Box::new(result);
+                changed = true;
+            }
+            if let Some(binding) = function.binding_syntax
+                && let Some(symbol) = module.symbol_for(binding)
+                && let Some(function_type) = self.function_types.get(&function.id).cloned()
+            {
+                self.symbol_types
+                    .insert(symbol, CheckedType::Function(function_type));
+            }
+        }
+
+        for source_module in module.program().modules() {
+            for item in &source_module.syntax.items {
+                if let Item::Statement(statement) = item {
+                    changed |= self.refresh_statement_function_types(module, statement);
+                }
+            }
+        }
+        let bodies = module
+            .functions()
+            .iter()
+            .map(|function| function.body.clone())
+            .collect::<Vec<_>>();
+        for body in &bodies {
+            changed |= self.refresh_expression_function_types(module, body);
+        }
+        changed
+    }
+
+    fn refresh_statement_function_types(
+        &mut self,
+        module: &ResolvedModule,
+        statement: &Statement,
+    ) -> bool {
+        match statement {
+            Statement::Binding(binding) => {
+                let mut changed = false;
+                if let Some(value) = &binding.value {
+                    changed |= self.refresh_expression_function_types(module, value);
+                    if let Some(symbol) = module.symbol_for(binding.syntax.id)
+                        && !self.function_symbols.contains_key(&symbol)
+                        && let Some(value_type) = self.refreshed_expression_type(module, value)
+                        && matches!(&value_type, CheckedType::Function(_))
+                        && matches!(
+                            self.symbol_types.get(&symbol),
+                            Some(CheckedType::Function(_))
+                        )
+                        && self.symbol_types.get(&symbol) != Some(&value_type)
+                    {
+                        self.symbol_types.insert(symbol, value_type);
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            Statement::PatternBinding(binding) => {
+                self.refresh_expression_function_types(module, &binding.value)
+            }
+            Statement::Assignment(value) => {
+                self.refresh_expression_function_types(module, &value.target)
+                    | self.refresh_expression_function_types(module, &value.value)
+            }
+            Statement::Return(value) => {
+                self.refresh_expression_function_types(module, &value.value)
+            }
+            Statement::Break(value) => value
+                .value
+                .as_ref()
+                .is_some_and(|value| self.refresh_expression_function_types(module, value)),
+            Statement::Continue(_) => false,
+            Statement::Expression(value) => self.refresh_expression_function_types(module, value),
+        }
+    }
+
+    fn refresh_expression_function_types(
+        &mut self,
+        module: &ResolvedModule,
+        expression: &Expression,
+    ) -> bool {
+        let mut changed = match expression {
+            Expression::Function(function) => {
+                self.refresh_expression_function_types(module, &function.body)
+            }
+            Expression::Satisfies(value) => {
+                self.refresh_expression_function_types(module, &value.value)
+            }
+            Expression::Match(value) => {
+                let mut changed = self.refresh_expression_function_types(module, &value.subject);
+                for arm in &value.arms {
+                    changed |= self.refresh_expression_function_types(module, &arm.body);
+                }
+                changed
+            }
+            Expression::Loop(value) => {
+                value
+                    .body
+                    .statements
+                    .iter()
+                    .fold(false, |changed, statement| {
+                        self.refresh_statement_function_types(module, statement) | changed
+                    })
+            }
+            Expression::With(value) => {
+                let mut changed = self.refresh_expression_function_types(module, &value.value);
+                for statement in &value.body.statements {
+                    changed |= self.refresh_statement_function_types(module, statement);
+                }
+                changed
+            }
+            Expression::Block(value) => {
+                value.statements.iter().fold(false, |changed, statement| {
+                    self.refresh_statement_function_types(module, statement) | changed
+                })
+            }
+            Expression::Product(value) => value.elements.iter().fold(false, |changed, element| {
+                self.refresh_expression_function_types(module, &element.value) | changed
+            }),
+            Expression::Call(value) => {
+                self.refresh_expression_function_types(module, &value.callee)
+                    | self.refresh_expression_function_types(module, &value.argument)
+            }
+            Expression::Access(value) => {
+                self.refresh_expression_function_types(module, &value.value)
+            }
+            Expression::Index(value) => {
+                self.refresh_expression_function_types(module, &value.value)
+                    | self.refresh_expression_function_types(module, &value.index)
+            }
+            Expression::Infix(value) => value.operands.iter().fold(false, |changed, operand| {
+                self.refresh_expression_function_types(module, operand) | changed
+            }),
+            Expression::Resource(_)
+            | Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_)
+            | Expression::Name(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => false,
+        };
+        if matches!(
+            self.expression_types.get(&expression.syntax().id),
+            Some(CheckedType::Function(_))
+        ) && let Some(value_type) = self.refreshed_expression_type(module, expression)
+            && matches!(&value_type, CheckedType::Function(_))
+            && self.expression_types.get(&expression.syntax().id) != Some(&value_type)
+        {
+            self.expression_types
+                .insert(expression.syntax().id, value_type);
+            changed = true;
+        }
+        changed
+    }
+
+    fn record_expression_resources(&mut self, module: &ResolvedModule, expression: &Expression) {
+        if let Some(function_id) = self.function_origin(module, expression)
+            && let Some(resources) = self
+                .function_types
+                .get(&function_id)
+                .map(|function| function.resources.clone())
+            && let Some(CheckedType::Function(function)) =
+                self.expression_types.get_mut(&expression.syntax().id)
+        {
+            function.resources = resources;
+        }
+        let resources = self.expression_resources_now(module, expression);
+        self.expression_resources
+            .insert(expression.syntax().id, resources);
+        match expression {
+            Expression::Function(_) | Expression::Resource(_) => {}
+            Expression::Satisfies(value) => self.record_expression_resources(module, &value.value),
+            Expression::Match(value) => {
+                self.record_expression_resources(module, &value.subject);
+                for arm in &value.arms {
+                    self.record_expression_resources(module, &arm.body);
+                }
+            }
+            Expression::Loop(value) => {
+                for statement in &value.body.statements {
+                    self.record_statement_resources(module, statement);
+                }
+            }
+            Expression::With(value) => {
+                self.record_expression_resources(module, &value.value);
+                for statement in &value.body.statements {
+                    self.record_statement_resources(module, statement);
+                }
+            }
+            Expression::Block(value) => {
+                for statement in &value.statements {
+                    self.record_statement_resources(module, statement);
+                }
+            }
+            Expression::Product(value) => {
+                for element in &value.elements {
+                    self.record_expression_resources(module, &element.value);
+                }
+            }
+            Expression::Call(value) => {
+                self.record_expression_resources(module, &value.callee);
+                self.record_expression_resources(module, &value.argument);
+            }
+            Expression::Access(value) => self.record_expression_resources(module, &value.value),
+            Expression::Index(value) => {
+                self.record_expression_resources(module, &value.value);
+                self.record_expression_resources(module, &value.index);
+            }
+            Expression::Infix(value) => {
+                for operand in &value.operands {
+                    self.record_expression_resources(module, operand);
+                }
+            }
+            Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_)
+            | Expression::Name(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
+        }
+    }
+
+    fn record_statement_resources(&mut self, module: &ResolvedModule, statement: &Statement) {
+        match statement {
+            Statement::Binding(value) => {
+                if let Some(value) = &value.value {
+                    self.record_expression_resources(module, value);
+                }
+            }
+            Statement::PatternBinding(value) => {
+                self.record_expression_resources(module, &value.value)
+            }
+            Statement::Assignment(value) => {
+                self.record_expression_resources(module, &value.target);
+                self.record_expression_resources(module, &value.value);
+            }
+            Statement::Return(value) => self.record_expression_resources(module, &value.value),
+            Statement::Break(value) => {
+                if let Some(value) = &value.value {
+                    self.record_expression_resources(module, value);
+                }
+            }
+            Statement::Continue(_) => {}
+            Statement::Expression(value) => self.record_expression_resources(module, value),
+        }
     }
 
     fn bind_pattern_types(
@@ -1815,13 +2472,23 @@ impl TypeChecker {
                             ));
                         }
                         if matches!(
-                            external_type,
+                            &external_type,
                             Some(CheckedType::Function(CheckedFunctionType { result, .. }))
                                 if checked_type_contains_cstring(&result)
                         ) {
                             self.diagnostics.push(Diagnostic::new(
                                 binding.syntax.span.clone(),
                                 "external functions cannot return owned `CString` values",
+                            ));
+                        }
+                        if matches!(
+                            &external_type,
+                            Some(CheckedType::Function(CheckedFunctionType { resources, .. }))
+                                if !resources.resources.is_empty()
+                        ) {
+                            self.diagnostics.push(Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                "external functions cannot require Staple resources",
                             ));
                         }
                     }
@@ -2208,6 +2875,45 @@ impl TypeChecker {
             }
             Expression::Match(match_) => self.check_match_expression(module, match_, expected),
             Expression::Loop(loop_) => self.check_loop_expression(module, loop_, expected),
+            Expression::Resource(resource) => {
+                let resources = self.resolve_resource_set(
+                    module,
+                    &crate::ResourceSet {
+                        syntax: resource.resource.syntax().clone(),
+                        resources: vec![resource.resource.clone()],
+                    },
+                );
+                let Some(resource_type) = resources.resources.into_iter().next() else {
+                    return CheckedType::Error;
+                };
+                self.resource_types
+                    .insert(resource.syntax.id, resource_type.clone());
+                resource_type.value_type
+            }
+            Expression::With(with) => {
+                let resources = self.resolve_resource_set(
+                    module,
+                    &crate::ResourceSet {
+                        syntax: with.resource.syntax().clone(),
+                        resources: vec![with.resource.clone()],
+                    },
+                );
+                let Some(resource_type) = resources.resources.into_iter().next() else {
+                    return CheckedType::Error;
+                };
+                self.resource_types
+                    .insert(with.syntax.id, resource_type.clone());
+                self.check_expression_expected(
+                    module,
+                    &with.value,
+                    Some(&resource_type.value_type),
+                );
+                self.check_expression_expected(
+                    module,
+                    &Expression::Block(with.body.clone()),
+                    expected,
+                )
+            }
             Expression::Block(block) => {
                 let mut result = CheckedType::empty_product();
                 let mut block_returned = false;
@@ -2373,6 +3079,10 @@ impl TypeChecker {
                     {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
                             parameter: Box::new(argument_type.clone()),
+                            resources: match &raw_callee_type {
+                                CheckedType::Function(function) => function.resources.clone(),
+                                _ => CheckedResourceSet::default(),
+                            },
                             result: Box::new(expected_result.clone()),
                         });
                         raw_callee_type = self.check_expression_expected(
@@ -2454,6 +3164,27 @@ impl TypeChecker {
                 if self.did_return {
                     return CheckedType::empty_product();
                 }
+                if let CheckedType::Distinct {
+                    id, representation, ..
+                } = &value_type
+                    && let Some(Type::Product(product)) = self
+                        .type_declarations
+                        .get(id)
+                        .and_then(|declaration| declaration.underlying.as_ref())
+                    && let [element] = product.elements.as_slice()
+                    && matches!(&access.accessor, Accessor::Name(name) if element.name.as_deref() == Some(name))
+                {
+                    self.accesses.insert(
+                        access.syntax.id,
+                        CheckedAccess {
+                            index: 0,
+                            dereference: None,
+                            erased: false,
+                            scalar: true,
+                        },
+                    );
+                    return representation.as_ref().clone();
+                }
                 let mut accessible = value_type.clone();
                 let mut dereference = None;
                 accessible = loop {
@@ -2504,6 +3235,7 @@ impl TypeChecker {
                                 index,
                                 dereference,
                                 erased: false,
+                                scalar: false,
                             },
                         );
                         element.value_type.clone()
@@ -2523,6 +3255,7 @@ impl TypeChecker {
                                     index,
                                     dereference,
                                     erased: true,
+                                    scalar: false,
                                 },
                             );
                             *element
@@ -4002,6 +4735,7 @@ impl TypeChecker {
             }
             Type::Function(function) => {
                 let parameter = self.resolve_source_type_inner(module, &function.parameter);
+                let resources = self.resolve_resource_set(module, &function.resources);
                 let result = self.resolve_source_type_inner(module, &function.result);
                 if (!parameter.is_sized() && parameter != CheckedType::Error)
                     || (!result.is_sized() && result != CheckedType::Error)
@@ -4014,6 +4748,7 @@ impl TypeChecker {
                 }
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
+                    resources,
                     result: Box::new(result),
                 })
             }
@@ -4060,6 +4795,42 @@ impl TypeChecker {
             }
             Type::Splice(_) => CheckedType::Error,
         }
+    }
+
+    fn resolve_resource_set(
+        &mut self,
+        module: &ResolvedModule,
+        source: &crate::ResourceSet,
+    ) -> CheckedResourceSet {
+        let mut resources = Vec::new();
+        for resource in &source.resources {
+            let value_type = self.resolve_source_type_inner(module, resource);
+            let valid_nominal = matches!(&value_type, CheckedType::Distinct { .. });
+            let concrete = !contains_type_parameter(&value_type)
+                && !contains_inferred_type(&value_type)
+                && value_type.is_fully_known();
+            let copy = is_copy_type(
+                &value_type,
+                self.copy_trait,
+                self.drop_trait,
+                &self.trait_implementations,
+                &[],
+            );
+            if value_type == CheckedType::Error {
+                continue;
+            }
+            if !valid_nominal || !concrete || !value_type.is_sized() || !copy {
+                self.diagnostics.push(Diagnostic::new(
+                    resource.syntax().span.clone(),
+                    format!(
+                        "resource type `{value_type}` must be a concrete, sized, Copy nominal type"
+                    ),
+                ));
+                continue;
+            }
+            resources.push(CheckedResource { value_type });
+        }
+        CheckedResourceSet::canonical(resources)
     }
 
     fn normalize_sum_type(&mut self, alternatives: Vec<CheckedType>, span: Span) -> CheckedType {
@@ -4624,8 +5395,12 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             Some(normalize_product_type(elements, actual.variadic))
         }
         (CheckedType::Function(actual), CheckedType::Function(expected)) => {
+            if actual.resources != expected.resources {
+                return None;
+            }
             Some(CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(merge_types(*actual.parameter, *expected.parameter)?),
+                resources: actual.resources,
                 result: Box::new(merge_types(*actual.result, *expected.result)?),
             }))
         }
@@ -4801,6 +5576,16 @@ pub(crate) fn substitute_type(
         }),
         CheckedType::Function(function) => CheckedType::Function(CheckedFunctionType {
             parameter: Box::new(substitute_type(*function.parameter, substitutions)),
+            resources: CheckedResourceSet::canonical(
+                function
+                    .resources
+                    .resources
+                    .into_iter()
+                    .map(|resource| CheckedResource {
+                        value_type: substitute_type(resource.value_type, substitutions),
+                    })
+                    .collect(),
+            ),
             result: Box::new(substitute_type(*function.result, substitutions)),
         }),
         CheckedType::Sum(sum) => normalize_substituted_sum(
@@ -4884,6 +5669,11 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
             .any(|element| contains_type_parameter(&element.value_type)),
         CheckedType::Function(function) => {
             contains_type_parameter(&function.parameter)
+                || function
+                    .resources
+                    .resources
+                    .iter()
+                    .any(|resource| contains_type_parameter(&resource.value_type))
                 || contains_type_parameter(&function.result)
         }
         CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_type_parameter),
@@ -4917,7 +5707,13 @@ fn contains_inferred_type(value_type: &CheckedType) -> bool {
             .iter()
             .any(|element| contains_inferred_type(&element.value_type)),
         CheckedType::Function(function) => {
-            contains_inferred_type(&function.parameter) || contains_inferred_type(&function.result)
+            contains_inferred_type(&function.parameter)
+                || function
+                    .resources
+                    .resources
+                    .iter()
+                    .any(|resource| contains_inferred_type(&resource.value_type))
+                || contains_inferred_type(&function.result)
         }
         CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_inferred_type),
         CheckedType::Distinct {
@@ -4950,6 +5746,9 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
             }
             CheckedType::Function(function) => {
                 collect(&function.parameter, ids);
+                for resource in &function.resources.resources {
+                    collect(&resource.value_type, ids);
+                }
                 collect(&function.result, ids);
             }
             CheckedType::Sum(sum) => {
@@ -5115,7 +5914,8 @@ pub(crate) fn infer_type_parameters(
             let CheckedType::Function(actual) = actual else {
                 return false;
             };
-            infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
+            template.resources == actual.resources
+                && infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
                 && infer_type_parameters(&template.result, &actual.result, substitutions)
         }
         CheckedType::Sum(template) => {
@@ -5156,7 +5956,8 @@ fn infer_type_parameters_for_expected(
 ) -> bool {
     if let (CheckedType::Function(template), CheckedType::Function(expected)) = (template, expected)
     {
-        return infer_type_parameters(&template.parameter, &expected.parameter, substitutions)
+        return template.resources == expected.resources
+            && infer_type_parameters(&template.parameter, &expected.parameter, substitutions)
             && infer_type_parameters_for_expected(
                 &template.result,
                 &expected.result,

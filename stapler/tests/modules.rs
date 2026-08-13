@@ -1072,3 +1072,28 @@ fn rejects_an_early_read_across_a_module_cycle() {
         .expect_err("the earlier module must not observe a default value");
     assert!(error.contains("binding is read before it is initialized"));
 }
+
+#[test]
+fn imports_resource_types_and_resource_bearing_functions() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "clocks.sta",
+        concat!(
+            "pub type Clock = I32\n",
+            "pub def system_clock = () => Clock 42\n",
+            "pub def read: () ->{Clock} Clock = () => resource Clock\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use clocks *\n",
+            "with Clock = system_clock () { read () }\n",
+        ),
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("imported resource contracts should compile and lower");
+    assert!(llvm.contains("__staple_m1_read"));
+}

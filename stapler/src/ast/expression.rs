@@ -6,6 +6,8 @@ pub enum Expression {
     Satisfies(Box<SatisfiesExpression>),
     Match(MatchExpression),
     Loop(LoopExpression),
+    Resource(Box<ResourceExpression>),
+    With(Box<WithResourceExpression>),
     Block(BlockExpression),
     Product(ProductExpression),
     Call(CallExpression),
@@ -30,6 +32,8 @@ impl Expression {
             Self::Satisfies(expression) => &expression.syntax,
             Self::Match(expression) => &expression.syntax,
             Self::Loop(expression) => &expression.syntax,
+            Self::Resource(expression) => &expression.syntax,
+            Self::With(expression) => &expression.syntax,
             Self::Block(expression) => &expression.syntax,
             Self::Product(expression) => &expression.syntax,
             Self::Call(expression) => &expression.syntax,
@@ -61,6 +65,20 @@ pub struct SyntaxArgumentExpression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopExpression {
     pub syntax: Syntax,
+    pub body: BlockExpression,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceExpression {
+    pub syntax: Syntax,
+    pub resource: Type,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithResourceExpression {
+    pub syntax: Syntax,
+    pub resource: Type,
+    pub value: Box<Expression>,
     pub body: BlockExpression,
 }
 

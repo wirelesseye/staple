@@ -20,10 +20,11 @@ use crate::typecheck::{
     substitute_type,
 };
 use crate::{
-    CallExpression, CheckedFunctionType, CheckedProductType, CheckedType, Diagnostic, Expression,
-    FloatType, FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType,
-    IntrinsicFunction, Item, ModuleId, Pattern, PatternBindingKind, ProductExpression,
-    ResolvedFunction, Span, Statement, SymbolId, TypeParameterId, TypedModule,
+    CallExpression, CheckedFunctionType, CheckedProductType, CheckedResource, CheckedResourceSet,
+    CheckedType, Diagnostic, Expression, FloatType, FunctionId, IntegerBinaryOperation,
+    IntegerCompareOperation, IntegerType, IntrinsicFunction, Item, ModuleId, Pattern,
+    PatternBindingKind, ProductExpression, ResolvedFunction, Span, Statement, SymbolId,
+    TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -80,6 +81,7 @@ struct FunctionEnvironment<'context> {
     binding_cells: HashMap<SymbolId, inkwell::values::PointerValue<'context>>,
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
+    resources: Vec<(CheckedResource, inkwell::values::AnyValueEnum<'context>)>,
     did_return: bool,
     loops: Vec<LoopCodegenContext<'context>>,
 }
@@ -655,10 +657,32 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     }
 
     fn concrete_expression_type(&self, expression: &Expression) -> Option<CheckedType> {
-        self.typed_module
+        let mut value_type = self
+            .typed_module
             .type_of_expression(expression.syntax().id)
             .cloned()
-            .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
+            .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))?;
+        let function_id = self
+            .typed_module
+            .function_for(expression.syntax().id)
+            .or_else(|| {
+                self.typed_module
+                    .symbol_for(expression.syntax().id)
+                    .and_then(|symbol| self.function_symbols.get(&symbol).copied())
+            });
+        if let Some(function_id) = function_id
+            && let CheckedType::Function(function) = &mut value_type
+            && let Some(template) = self.typed_module.type_of_function(function_id)
+        {
+            let resources = substitute_type(
+                CheckedType::Function(template.clone()),
+                &self.active_type_substitutions,
+            );
+            if let CheckedType::Function(template) = resources {
+                function.resources = template.resources;
+            }
+        }
+        Some(value_type)
     }
 
     fn bind_function_parameters(
@@ -674,6 +698,28 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing closure environment"))?
             .into_pointer_value();
         environment.closure_environment = Some(environment_pointer);
+        let function_type = self
+            .typed_module
+            .type_of_function(function.id)
+            .cloned()
+            .map(|ty| substitute_type(CheckedType::Function(ty), &self.active_type_substitutions))
+            .and_then(|ty| match ty {
+                CheckedType::Function(function) => Some(function),
+                _ => None,
+            })
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing checked function type"))?;
+        let resource_count = function_type.resources.resources.len();
+        for (resource, value) in function_type
+            .resources
+            .resources
+            .iter()
+            .cloned()
+            .zip(parameters.iter().skip(1).take(resource_count).copied())
+        {
+            environment
+                .resources
+                .push((resource, value.as_any_value_enum()));
+        }
         if !function.captures.is_empty() {
             let environment_type = self.compile_capture_type(function)?;
             let environment_value = self
@@ -700,7 +746,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
             }
         }
-        self.bind_top_level_pattern(environment, &function.pattern, &parameters[1..])
+        self.bind_top_level_pattern(
+            environment,
+            &function.pattern,
+            &parameters[1 + resource_count..],
+        )
     }
 
     fn bind_top_level_pattern(
@@ -1783,6 +1833,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let result_type = self.concrete_expression_type(expression).ok_or_else(|| {
                     Diagnostic::new(access.syntax.span.clone(), "unchecked access place")
                 })?;
+                if checked.scalar {
+                    let (pointer, _, symbol) =
+                        self.compile_place_pointer(environment, &access.value)?;
+                    return Ok((pointer, result_type, symbol));
+                }
                 if checked.erased {
                     let reference = self.compile_expression(environment, &access.value)?;
                     let Some(BasicValueEnum::StructValue(reference)) = value_as_basic(reference)
@@ -2177,6 +2232,44 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Expression::Match(match_) => self.compile_match_expression(environment, match_),
             Expression::Loop(loop_) => self.compile_loop_expression(environment, loop_),
+            Expression::Resource(resource) => {
+                let expected = self
+                    .typed_module
+                    .resource_for_expression(resource.syntax.id)
+                    .ok_or_else(|| {
+                        Diagnostic::new(resource.syntax.span.clone(), "unchecked resource access")
+                    })?;
+                environment
+                    .resources
+                    .iter()
+                    .rev()
+                    .find(|(candidate, _)| candidate == expected)
+                    .map(|(_, value)| *value)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            resource.syntax.span.clone(),
+                            format!("resource `{}` is not available", expected.value_type),
+                        )
+                    })
+            }
+            Expression::With(with) => {
+                let resource = self
+                    .typed_module
+                    .resource_for_expression(with.syntax.id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        Diagnostic::new(with.syntax.span.clone(), "unchecked resource provider")
+                    })?;
+                let value = self.compile_expression(environment, &with.value)?;
+                if environment.did_return {
+                    return Ok(self.unit_value());
+                }
+                environment.resources.push((resource, value));
+                let result =
+                    self.compile_expression(environment, &Expression::Block(with.body.clone()));
+                environment.resources.pop();
+                result
+            }
             Expression::Block(block) => {
                 let owned_before = environment.owned_order.len();
                 self.predeclare_checked_bindings(environment, &block.statements)?;
@@ -2282,6 +2375,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "element access requires a product value",
                     )
                 })?;
+                if checked.scalar {
+                    return Ok(value.as_any_value_enum());
+                }
                 if checked.erased {
                     let BasicValueEnum::StructValue(reference) = value else {
                         return Err(Diagnostic::new(
@@ -4201,12 +4297,25 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 dispatch.method,
                 call.callee.syntax().span.clone(),
             )?;
-            let expected_count = function.count_params() as usize - 1;
+            let function_type = self
+                .typed_module
+                .instantiated_trait_method_type(trait_id, &arguments, dispatch.method)
+                .ok_or_else(|| Diagnostic::new(call.syntax.span.clone(), "unchecked trait call"))?;
+            let expected_count = self
+                .compile_parameter_types(&function_type.parameter)?
+                .len();
             let mut arguments =
                 self.compile_arguments(environment, &call.argument, expected_count, false)?;
             if environment.did_return {
                 return Ok(self.unit_value());
             }
+            let mut hidden = self.compile_resource_arguments(
+                environment,
+                &function_type.resources,
+                call.syntax.span.clone(),
+            )?;
+            hidden.append(&mut arguments);
+            arguments = hidden;
             arguments.insert(
                 0,
                 self.context
@@ -4264,7 +4373,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 ));
             };
             let function = self.ensure_function_specialization(function_id, &function_type)?;
-            let expected_count = function.count_params() as usize - 1;
+            let expected_count = self
+                .compile_parameter_types(&function_type.parameter)?
+                .len();
             let mut arguments =
                 self.compile_arguments(environment, &call.argument, expected_count, false)?;
             if environment.did_return {
@@ -4277,6 +4388,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             } else {
                 self.context.ptr_type(AddressSpace::default()).const_null()
             };
+            let mut hidden = self.compile_resource_arguments(
+                environment,
+                &function_type.resources,
+                call.syntax.span.clone(),
+            )?;
+            hidden.append(&mut arguments);
+            arguments = hidden;
             arguments.insert(0, closure_environment.into());
             let call_site = self
                 .builder
@@ -4292,6 +4410,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             && let Some(AnyValueEnum::FunctionValue(function)) = self.globals.get(&symbol).copied()
         {
             let internal = !self.external_symbols.contains(&symbol);
+            let function_type = match self.concrete_expression_type(&call.callee) {
+                Some(CheckedType::Function(function)) => Some(function),
+                _ => None,
+            };
             let scoped_c_string_temporary = !internal
                 && self
                     .concrete_expression_type(&call.argument)
@@ -4300,7 +4422,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .symbol_for(call.argument.syntax().id)
                     .is_none();
-            let expected_count = function.count_params() as usize - usize::from(internal);
+            let expected_count = function_type
+                .as_ref()
+                .map(|function| self.compile_parameter_types(&function.parameter))
+                .transpose()?
+                .map_or(
+                    function.count_params() as usize - usize::from(internal),
+                    |types| types.len(),
+                );
             let mut arguments = self.compile_arguments(
                 environment,
                 &call.argument,
@@ -4319,6 +4448,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     } else {
                         self.context.ptr_type(AddressSpace::default()).const_null()
                     };
+                let empty_resources = CheckedResourceSet::default();
+                let resources = function_type
+                    .as_ref()
+                    .map(|function| &function.resources)
+                    .unwrap_or(&empty_resources);
+                let mut hidden = self.compile_resource_arguments(
+                    environment,
+                    resources,
+                    call.syntax.span.clone(),
+                )?;
+                hidden.append(&mut arguments);
+                arguments = hidden;
                 arguments.insert(0, closure_environment.into());
             }
             let call_site = self
@@ -4377,6 +4518,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_extract_value(closure, 1, "closure.environment")
             .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?
             .into_pointer_value();
+        let mut hidden = self.compile_resource_arguments(
+            environment,
+            &function_type.resources,
+            call.syntax.span.clone(),
+        )?;
+        hidden.append(&mut arguments);
+        arguments = hidden;
         arguments.insert(0, closure_environment.into());
         let call_site = self
             .builder
@@ -4391,6 +4539,35 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .try_as_basic_value()
             .unwrap_basic()
             .as_any_value_enum())
+    }
+
+    fn compile_resource_arguments(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        resources: &CheckedResourceSet,
+        span: Span,
+    ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
+        resources
+            .resources
+            .iter()
+            .map(|resource| {
+                let value = environment
+                    .resources
+                    .iter()
+                    .rev()
+                    .find(|(candidate, _)| candidate == resource)
+                    .map(|(_, value)| *value)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            span.clone(),
+                            format!("resource `{}` is not available", resource.value_type),
+                        )
+                    })?;
+                value_as_basic(value)
+                    .map(Into::into)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "resource is not first-class"))
+            })
+            .collect()
     }
 
     fn compile_intrinsic_call(
@@ -5612,6 +5789,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
         let return_type = self.compile_type(&function_type.result)?;
         let mut parameter_types = vec![self.context.ptr_type(AddressSpace::default()).into()];
+        for resource in &function_type.resources.resources {
+            parameter_types.push(self.compile_type(&resource.value_type)?.into());
+        }
         parameter_types.extend(self.compile_parameter_types(&function_type.parameter)?);
         Ok(match return_type {
             inkwell::types::BasicTypeEnum::ArrayType(value) => {

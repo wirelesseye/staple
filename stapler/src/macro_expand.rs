@@ -1038,6 +1038,12 @@ impl MacroExpander {
                         ),
                     ))
                 }
+                MacroKind::User(body) if directly_evaluates_resource(body, definition.arity) => {
+                    self.diagnostics.push(Diagnostic::new(
+                        body.syntax().span.clone(),
+                        "resources are not available during compile-time macro evaluation",
+                    ));
+                }
                 MacroKind::User(body) if obviously_not_syntax(body, definition.arity) => {
                     self.diagnostics.push(Diagnostic::new(
                         body.syntax().span.clone(),
@@ -2304,6 +2310,13 @@ impl MacroExpander {
             return None;
         }
         match expression {
+            Expression::Resource(_) | Expression::With(_) => {
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    "resources are not available during compile-time macro evaluation",
+                ));
+                None
+            }
             Expression::Function(function) => Some(Value::Function {
                 module,
                 function: function.as_ref().clone(),
@@ -3280,6 +3293,17 @@ impl MacroExpander {
             Expression::Loop(loop_) => {
                 self.freshen_syntax(&mut loop_.body.syntax, module, mark);
                 for statement in &mut loop_.body.statements {
+                    freshen_statement(self, statement, module, mark);
+                }
+            }
+            Expression::Resource(resource) => {
+                freshen_type(self, &mut resource.resource, module, mark);
+            }
+            Expression::With(with) => {
+                freshen_type(self, &mut with.resource, module, mark);
+                self.freshen_expression(&mut with.value, module, mark);
+                self.freshen_syntax(&mut with.body.syntax, module, mark);
+                for statement in &mut with.body.statements {
                     freshen_statement(self, statement, module, mark);
                 }
             }
@@ -4372,7 +4396,13 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "PublicRepr"
         ),
         Type::Function(function) => {
-            type_contains_syntax(&function.parameter) || type_contains_syntax(&function.result)
+            type_contains_syntax(&function.parameter)
+                || function
+                    .resources
+                    .resources
+                    .iter()
+                    .any(type_contains_syntax)
+                || type_contains_syntax(&function.result)
         }
         Type::Product(product) => product
             .elements
@@ -4399,6 +4429,11 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
         }
         Type::Function(function) => {
             type_contains_unshadowed_syntax(&function.parameter, declared)
+                || function
+                    .resources
+                    .resources
+                    .iter()
+                    .any(|ty| type_contains_unshadowed_syntax(ty, declared))
                 || type_contains_unshadowed_syntax(&function.result, declared)
         }
         Type::Product(product) => product
@@ -4463,6 +4498,11 @@ fn type_contains_named(ty: &Type, expected: &str) -> bool {
         Type::Named(named) => named.namespace.is_none() && named.name == expected,
         Type::Function(function) => {
             type_contains_named(&function.parameter, expected)
+                || function
+                    .resources
+                    .resources
+                    .iter()
+                    .any(|resource| type_contains_named(resource, expected))
                 || type_contains_named(&function.result, expected)
         }
         Type::Product(product) => product
@@ -4526,6 +4566,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
             .iter()
             .any(|arm| obviously_not_syntax(&arm.body, 0)),
         Expression::Loop(_) => true,
+        Expression::Resource(_) | Expression::With(_) => true,
         Expression::Block(block) => {
             block
                 .statements
@@ -4547,6 +4588,25 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         | Expression::CString(_)
         | Expression::Integer(_)
         | Expression::Float(_) => true,
+    }
+}
+
+fn directly_evaluates_resource(expression: &Expression, arity: usize) -> bool {
+    if arity > 0 {
+        return match expression {
+            Expression::Function(function) => {
+                directly_evaluates_resource(&function.body, arity - 1)
+            }
+            Expression::Satisfies(satisfies) => {
+                directly_evaluates_resource(&satisfies.value, arity)
+            }
+            _ => false,
+        };
+    }
+    match expression {
+        Expression::Resource(_) | Expression::With(_) => true,
+        Expression::Satisfies(satisfies) => directly_evaluates_resource(&satisfies.value, 0),
+        _ => false,
     }
 }
 
@@ -4950,6 +5010,16 @@ fn substitute_splices(
                 substitute_statement(statement, environment, diagnostics)?;
             }
         }
+        Expression::Resource(resource) => {
+            substitute_type(&mut resource.resource, environment, diagnostics)?;
+        }
+        Expression::With(with) => {
+            substitute_type(&mut with.resource, environment, diagnostics)?;
+            *with.value = substitute_splices(&with.value, environment, diagnostics)?;
+            for statement in &mut with.body.statements {
+                substitute_statement(statement, environment, diagnostics)?;
+            }
+        }
         Expression::Block(block) => {
             for statement in &mut block.statements {
                 substitute_statement(statement, environment, diagnostics)?;
@@ -5226,6 +5296,9 @@ fn substitute_type(
         }
         Type::Function(function) => {
             substitute_type(&mut function.parameter, environment, diagnostics)?;
+            for resource in &mut function.resources.resources {
+                substitute_type(resource, environment, diagnostics)?;
+            }
             substitute_type(&mut function.result, environment, diagnostics)?;
         }
         Type::Application(application) => {
@@ -5747,6 +5820,11 @@ fn alpha_rename_expression(
         Expression::Loop(loop_) => {
             alpha_rename_block(&mut loop_.body, mark, scopes);
         }
+        Expression::Resource(_) => {}
+        Expression::With(with) => {
+            alpha_rename_expression(&mut with.value, mark, scopes);
+            alpha_rename_block(&mut with.body, mark, scopes);
+        }
         Expression::Block(block) => {
             alpha_rename_block(block, mark, scopes);
         }
@@ -5826,6 +5904,8 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Satisfies(value) => &mut value.syntax,
         Expression::Match(value) => &mut value.syntax,
         Expression::Loop(value) => &mut value.syntax,
+        Expression::Resource(value) => &mut value.syntax,
+        Expression::With(value) => &mut value.syntax,
         Expression::Block(value) => &mut value.syntax,
         Expression::Product(value) => &mut value.syntax,
         Expression::Call(value) => &mut value.syntax,
@@ -6083,6 +6163,10 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         }
         Type::Function(function) => {
             freshen_type(expander, &mut function.parameter, module, mark);
+            expander.freshen_syntax(&mut function.resources.syntax, module, mark);
+            for resource in &mut function.resources.resources {
+                freshen_type(expander, resource, module, mark);
+            }
             freshen_type(expander, &mut function.result, module, mark);
         }
         Type::Application(application) => {

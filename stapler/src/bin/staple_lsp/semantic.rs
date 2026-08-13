@@ -462,6 +462,18 @@ impl<'a> Classifier<'a> {
                     self.statement(statement, resolved);
                 }
             }
+            Expression::Resource(value) => {
+                self.mark_first(&value.syntax, "resource", KEYWORD, 0, 1);
+                self.ty(&value.resource, resolved);
+            }
+            Expression::With(value) => {
+                self.mark_first(&value.syntax, "with", KEYWORD, 0, 1);
+                self.ty(&value.resource, resolved);
+                self.expression(&value.value, resolved);
+                for statement in &value.body.statements {
+                    self.statement(statement, resolved);
+                }
+            }
             Expression::Block(value) => {
                 for statement in &value.statements {
                     self.statement(statement, resolved);
@@ -671,6 +683,9 @@ impl<'a> Classifier<'a> {
             }
             Type::Function(value) => {
                 self.ty(&value.parameter, resolved);
+                for resource in &value.resources.resources {
+                    self.ty(resource, resolved);
+                }
                 self.ty(&value.result, resolved);
             }
             Type::Application(value) => {
@@ -937,6 +952,9 @@ mod tests {
             "macro identity = value => quote { $value }\n",
             "def project: T => T -> T = value => (field: value).field\n",
             "mod child { def nested = () => 1 }\n",
+            "type Clock = I32\n",
+            "def read: () ->{Clock} Clock = () => resource Clock\n",
+            "with Clock = Clock 1 { read () }\n",
         );
         let module = parse(source).unwrap();
         let labels = labels(source, &tokens(source, Some(&module), None, None));
@@ -951,6 +969,8 @@ mod tests {
             ("field", PROPERTY),
             ("child", NAMESPACE),
             ("nested", VARIABLE),
+            ("resource", KEYWORD),
+            ("with", KEYWORD),
         ] {
             assert!(
                 labels.contains(&expected),

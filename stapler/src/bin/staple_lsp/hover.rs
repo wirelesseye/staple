@@ -160,6 +160,13 @@ impl Collector<'_> {
                     self.collect_statement_declarations(statement);
                 }
             }
+            Expression::Resource(_) => {}
+            Expression::With(with) => {
+                self.collect_expression_declarations(&with.value);
+                for statement in &with.body.statements {
+                    self.collect_statement_declarations(statement);
+                }
+            }
             Expression::Block(block) => {
                 for statement in &block.statements {
                     self.collect_statement_declarations(statement);
@@ -548,6 +555,14 @@ impl Collector<'_> {
                     self.statement(statement);
                 }
             }
+            Expression::Resource(resource) => self.ty(&resource.resource),
+            Expression::With(with) => {
+                self.ty(&with.resource);
+                self.expression(&with.value);
+                for statement in &with.body.statements {
+                    self.statement(statement);
+                }
+            }
             Expression::Block(block) => {
                 for statement in &block.statements {
                     self.statement(statement);
@@ -663,6 +678,9 @@ impl Collector<'_> {
             }
             Type::Function(function) => {
                 self.ty(&function.parameter);
+                for resource in &function.resources.resources {
+                    self.ty(resource);
+                }
                 self.ty(&function.result);
             }
             Type::Application(application) => {
@@ -759,6 +777,24 @@ mod tests {
                 .iter()
                 .all(|entry| entry.signature == "let answer: I32")
         );
+    }
+
+    #[test]
+    fn displays_inferred_resource_contracts() {
+        let source = "type Clock = I32\ndef read = () => resource Clock\n";
+        let path = std::env::temp_dir().join("staple-hover-resources.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "read"
+                && entry.signature == "def read: () ->{Clock} Clock"
+        }));
     }
 
     #[test]

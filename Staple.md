@@ -998,6 +998,75 @@ appear only once for that parameter. It is a relaxation, not a trait bound:
 cannot itself be passed or returned by value. `Sized` is compiler-derived, so
 explicit `impl Sized` declarations are rejected.
 
+### Typed resources
+
+A typed resource is an implicit value identified by its concrete nominal type.
+There is no separate resource declaration: any fully concrete, sized nominal
+type whose representation is compiler-derived `Copy` may be used. For example:
+
+```staple
+type Clock = (
+    now: () -> I32,
+)
+
+type Logger = (
+    write: String -> (),
+)
+```
+
+Transparent aliases use the identity of their underlying nominal type. A
+structural type, opaque type, unspecialized generic type, unsized type, or
+move-only nominal type is not eligible. Consequently resources never add a
+new borrowing or ownership mode: their hidden values can always be copied.
+
+Function arrows list their implicit parameters in braces. Resource sets are
+unordered and duplicate-free, and each arrow in a curried type has its own set:
+
+```staple
+def timestamp: () ->{Clock} I32 = () => {
+    let clock = resource Clock
+    clock.now ()
+}
+```
+
+The empty set may be written explicitly as `->{}`. Reordering or repeating
+entries does not change a function type or the canonical hidden-parameter
+order.
+
+`resource Clock` has type `Clock` and makes the enclosing function require that
+resource. Calls propagate requirements transitively, including through
+recursion, trait methods, and function values. An unannotated function infers
+the minimal required set. An explicit set remains part of its declared
+contract: resources may be unused, but the body cannot require an unlisted
+resource. Function types with different resource sets are distinct and are not
+implicitly widened.
+
+Resources are supplied lexically with `with`:
+
+```staple
+with Clock = system_clock {
+    timestamp ()
+}
+```
+
+The provider is evaluated before its binding is installed. A nested provider
+of the same concrete type shadows the nearest outer provider, while its own
+initializer can still use the outer value. The body result is the result of the
+`with` expression. Creating a function inside `with` does not capture the
+provider: the function keeps the resource in its type and receives it when it
+is called.
+
+Resource values are passed as hidden `Copy` parameters, after the closure
+environment and before explicit arguments. Executable top-level initialization
+must supply every required resource. External functions cannot declare Staple
+resources because foreign ABIs do not include these hidden parameters.
+Resource-bearing function types and nominal resource identities are preserved
+when public definitions are imported or re-exported by another module.
+
+Macros may quote, splice, generate, and transform resource syntax. Attempting
+to evaluate `resource` or `with` as a compile-time macro operation is rejected;
+providers exist only in runtime lexical scopes.
+
 ### Traits and bounded generic functions
 
 A trait declares a set of functions for one or more compile-time parameters.

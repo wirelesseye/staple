@@ -184,6 +184,13 @@ impl DeclarationCollector<'_> {
                     self.statement(statement);
                 }
             }
+            Expression::Resource(_) => {}
+            Expression::With(value) => {
+                self.expression(&value.value);
+                for statement in &value.body.statements {
+                    self.statement(statement);
+                }
+            }
             Expression::Block(value) => {
                 for statement in &value.statements {
                     self.statement(statement);
@@ -460,6 +467,14 @@ impl Collector<'_> {
                     self.statement(statement);
                 }
             }
+            Expression::Resource(value) => self.ty(&value.resource),
+            Expression::With(value) => {
+                self.ty(&value.resource);
+                self.expression(&value.value);
+                for statement in &value.body.statements {
+                    self.statement(statement);
+                }
+            }
             Expression::Block(value) => {
                 for statement in &value.statements {
                     self.statement(statement);
@@ -578,6 +593,9 @@ impl Collector<'_> {
             }
             Type::Function(value) => {
                 self.ty(&value.parameter);
+                for resource in &value.resources.resources {
+                    self.ty(resource);
+                }
                 self.ty(&value.result);
             }
             Type::Application(value) => {

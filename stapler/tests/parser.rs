@@ -3,6 +3,37 @@ use stapler::{
     TypeDeclarationKind, UseKind, Visibility, parse,
 };
 
+#[test]
+fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
+    let source = concat!(
+        "type Clock = (now: () -> I32)\n",
+        "def read: () ->{Clock} I32 = () => (resource Clock).now ()\n",
+        "def nested: () ->{Clock} () ->{} I32 = () => () => 1\n",
+        "with Clock = system_clock { read () }\n",
+        "macro request = () => quote { resource Clock }\n",
+        "macro provide = value => quote { with Clock = $value { resource Clock } }\n",
+    );
+    let module = parse(source).expect("resource syntax should parse");
+    assert_eq!(module.syntax.text(), source);
+    let Item::Statement(statement) = &module.items[1] else {
+        panic!("expected resource function declaration")
+    };
+    let Statement::Binding(binding) = statement.as_ref() else {
+        panic!("expected binding")
+    };
+    let Some(Type::Function(function)) = &binding.annotation else {
+        panic!("expected function annotation")
+    };
+    assert_eq!(function.resources.resources.len(), 1);
+    assert!(matches!(module.items[3], Item::Statement(_)));
+    assert!(matches!(module.items[4], Item::MacroDeclaration(_)));
+    assert!(matches!(module.items[5], Item::MacroDeclaration(_)));
+
+    assert!(parse("resource () ->\n").is_err());
+    assert!(parse("with Clock = {}\n").is_err());
+    assert!(parse("def bad: () ->{Clock I32 = () => 0\n").is_err());
+}
+
 fn statement(item: &Item) -> &Statement {
     let Item::Statement(statement) = item else {
         panic!("expected statement");

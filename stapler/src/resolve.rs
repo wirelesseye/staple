@@ -2385,6 +2385,12 @@ impl NameResolver {
                 self.resolve_block(&loop_.body);
                 self.loop_depth -= 1;
             }
+            Expression::Resource(resource) => self.resolve_type(&resource.resource),
+            Expression::With(with) => {
+                self.resolve_type(&with.resource);
+                self.resolve_expression(&with.value, Some(&with.resource), None);
+                self.resolve_block(&with.body);
+            }
             Expression::Block(block) => self.resolve_block(block),
             Expression::Product(product) => {
                 for element in &product.elements {
@@ -2604,6 +2610,9 @@ impl NameResolver {
             }
             Type::Function(function) => {
                 self.resolve_type(&function.parameter);
+                for resource in &function.resources.resources {
+                    self.resolve_type(resource);
+                }
                 self.resolve_type(&function.result);
             }
             Type::Application(application) => {
@@ -2746,6 +2755,9 @@ impl NameResolver {
             }
             Type::Function(function) => {
                 self.validate_public_representation(&function.parameter);
+                for resource in &function.resources.resources {
+                    self.validate_public_representation(resource);
+                }
                 self.validate_public_representation(&function.result);
             }
             Type::Application(application) => {
@@ -3246,6 +3258,11 @@ impl<'a> InitializationAnalyzer<'a> {
             }
             Expression::Loop(loop_) => {
                 self.expression(&Expression::Block(loop_.body.clone()), local, outer);
+            }
+            Expression::Resource(_) => {}
+            Expression::With(with) => {
+                self.expression(&with.value, local, outer);
+                self.expression(&Expression::Block(with.body.clone()), local, outer);
             }
             Expression::Block(block) => {
                 let original = local.clone();

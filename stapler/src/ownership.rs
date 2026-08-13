@@ -209,6 +209,11 @@ impl<'a> OwnershipChecker<'a> {
                 self.states = merge_states(&entry, &context.breaks);
                 !context.breaks.is_empty()
             }
+            Expression::Resource(_) => true,
+            Expression::With(value) => {
+                self.check_expression(&value.value, true);
+                self.check_expression(&Expression::Block(value.body.clone()), consume)
+            }
             Expression::Block(value) => {
                 for statement in &value.statements {
                     if !self.check_statement(statement) {

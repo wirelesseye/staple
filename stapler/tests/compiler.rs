@@ -24,6 +24,178 @@ fn type_check(source: &str) -> stapler::TypedModule {
 }
 
 #[test]
+fn infers_checks_and_lowers_typed_resources() {
+    let module = type_check(concat!(
+        "type Clock = (now: () -> I32)\n",
+        "type Logger = (write: I32 -> ())\n",
+        "def system_clock = Clock (now: () => 41)\n",
+        "def logger = Logger (write: value => ())\n",
+        "def read: () ->{Clock} I32 = () => (resource Clock).now ()\n",
+        "def inferred = () => read ()\n",
+        "def both: () ->{Logger, Clock} I32 = () => {\n",
+        "  (resource Logger).write (inferred ())\n",
+        "  inferred ()\n",
+        "}\n",
+        "with Clock = system_clock {\n",
+        "  with Logger = logger { both () }\n",
+        "}\n",
+    ));
+
+    let inferred = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "inferred")
+        .expect("inferred function");
+    let resources = &module
+        .type_of_function(inferred.id)
+        .expect("inferred function type")
+        .resources;
+    assert_eq!(resources.resources.len(), 1);
+    assert_eq!(resources.resources[0].value_type.to_string(), "Clock");
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("typed resources should lower to hidden parameters");
+    assert!(llvm.contains("define i32 @read"));
+}
+
+#[test]
+fn rejects_invalid_resource_contracts_and_types() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop *\n",
+            "type MoveOnly = CString\n",
+            "def invalid: () ->{MoveOnly} () = () => ()\n",
+        )))
+        .expect_err("move-only resources must be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("concrete, sized, Copy nominal type")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Clock = (now: () -> I32)\n",
+            "def need = () => (resource Clock).now ()\n",
+            "def invalid: () ->{} I32 = () => need ()\n",
+        )))
+        .expect_err("undeclared resources must be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("not contained in its declared resource set")
+    }));
+}
+
+#[test]
+fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
+    let module = type_check(concat!(
+        "type Clock = I32\n",
+        "type alias CurrentClock = Clock\n",
+        "type Logger = I32\n",
+        "type Box = T => (value: T)\n",
+        "trait Observe = T => { observe: T ->{Clock} Clock }\n",
+        "impl Observe I32 { def observe = value => resource CurrentClock }\n",
+        "macro request = _: Ident \"clock\" => quote { resource CurrentClock }\n",
+        "def generated = () => request clock\n",
+        "def declared: () ->{Logger, Clock, Clock} () = () => ()\n",
+        "def through_trait = () => observe 1\n",
+        "def boxed: () ->{Box I32} I32 = () => (resource Box I32).value\n",
+        "with Clock = Clock 7 {\n",
+        "  with Logger = Logger 8 { declared (); generated (); through_trait () }\n",
+        "}\n",
+        "with Box I32 = Box (value: 9) { boxed () }\n",
+    ));
+    let declared = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "declared")
+        .expect("declared function");
+    assert_eq!(
+        module
+            .type_of_function(declared.id)
+            .expect("declared function type")
+            .resources
+            .resources
+            .len(),
+        2
+    );
+    for name in ["generated", "through_trait"] {
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .expect("resource function");
+        assert_eq!(
+            module
+                .type_of_function(function.id)
+                .expect("resource function type")
+                .resources
+                .resources
+                .len(),
+            1
+        );
+    }
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("trait and specialized resource calls should lower");
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Clock = I32\n",
+            "def need: () ->{Clock} Clock = () => resource Clock\n",
+            "let incompatible: () -> Clock = need\n",
+        )))
+        .expect_err("resource-bearing and pure function types must compare exactly");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("expected `() -> Clock`")
+            && diagnostic.message.contains("->{Clock}")
+    }));
+
+    for (source, expected) in [
+        (
+            "type Clock = I32\nresource Clock\n",
+            "top-level initialization requires resources",
+        ),
+        (
+            "type Clock = I32\nextern \"c\" { let read: () ->{Clock} Clock }\n",
+            "external functions cannot require Staple resources",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err("resource boundary must be rejected");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "expected {expected:?}, got {diagnostics:?}"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "macro bad: Expr -> Expr = value: Expr => resource Expr\nlet generated = bad 1\n",
+            root,
+        )
+        .expect("macro resource source should parse");
+    let diagnostics = match NameResolver::new().resolve_program(program) {
+        Err(diagnostics) => diagnostics,
+        Ok(_) => panic!("resources must not be evaluated by macros"),
+    };
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("resources are not available during compile-time macro evaluation")
+    }));
+}
+
+#[test]
 fn marks_compiler_owned_recursive_constructors() {
     let resolved = resolve("");
     let construction_for = |name: &str| {
@@ -3213,8 +3385,10 @@ fn type_checks_and_generates_curried_functions() {
             module.type_of_function(function.id).expect("checked type"),
             &stapler::CheckedFunctionType {
                 parameter: Box::new(CheckedType::I32),
+                resources: stapler::CheckedResourceSet::default(),
                 result: Box::new(CheckedType::Function(stapler::CheckedFunctionType {
                     parameter: Box::new(CheckedType::I32),
+                    resources: stapler::CheckedResourceSet::default(),
                     result: Box::new(CheckedType::I32),
                 })),
             },

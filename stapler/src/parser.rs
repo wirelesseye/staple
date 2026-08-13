@@ -142,6 +142,7 @@ fn fragment_error(syntax: &Syntax, message: &'static str) -> ParseError {
     }
 }
 
+#[derive(Clone)]
 struct Grammar {
     tokens: Arc<[SyntaxToken]>,
     position: usize,
@@ -1186,7 +1187,10 @@ impl Grammar {
         start: usize,
         mutable: bool,
     ) -> Result<Pattern, ParseError> {
-        let first = self.expect(TokenKind::Identifier, "expected pattern")?.text;
+        let first = match self.peek() {
+            Some(TokenKind::Identifier) => self.bump_token().expect("peeked pattern").text,
+            _ => return Err(self.error("expected pattern")),
+        };
         let (namespace, name) = if self.eat(TokenKind::Dot) {
             let name = self
                 .expect(TokenKind::Identifier, "expected type name after namespace")?
@@ -1244,15 +1248,40 @@ impl Grammar {
         let start = self.position;
         let parameter = self.parse_type_union()?;
         if self.eat(TokenKind::Arrow) {
+            let resources = if self.at(TokenKind::LBrace) {
+                self.parse_resource_set()?
+            } else {
+                ResourceSet::empty()
+            };
             let result = self.parse_type()?;
             Ok(Type::Function(FunctionType {
                 syntax: self.syntax(start),
                 parameter: Box::new(parameter),
+                resources,
                 result: Box::new(result),
             }))
         } else {
             Ok(parameter)
         }
+    }
+
+    fn parse_resource_set(&mut self) -> Result<ResourceSet, ParseError> {
+        let start = self.position;
+        self.expect(TokenKind::LBrace, "expected `{` before resource set")?;
+        let mut resources = Vec::new();
+        if !self.at(TokenKind::RBrace) {
+            loop {
+                resources.push(self.parse_type_union()?);
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RBrace, "expected `}` after resource set")?;
+        Ok(ResourceSet {
+            syntax: self.syntax(start),
+            resources,
+        })
     }
 
     /// Parses an unordered structural sum, tighter than a function arrow.
@@ -1276,6 +1305,8 @@ impl Grammar {
         let start = self.position;
         let mut ty = self.parse_type_postfix()?;
         while self.starts_type_atom()
+            && !(self.has_newline_before_next_token()
+                && (self.peek_text("resource") || self.peek_text("with")))
             && !(self.newline_terminates_type
                 && self.has_newline_before_next_token()
                 && (self.any_newline_terminates_type
@@ -1647,6 +1678,16 @@ impl Grammar {
         {
             return self.parse_quote_expression().map(Expression::Quote);
         }
+        if self.peek_text("resource") && self.is_resource_expression_start() {
+            return self
+                .parse_resource_expression()
+                .map(|value| Expression::Resource(Box::new(value)));
+        }
+        if self.peek_text("with") && self.is_with_resource_expression_start() {
+            return self
+                .parse_with_resource_expression()
+                .map(|value| Expression::With(Box::new(value)));
+        }
         match self.peek() {
             Some(TokenKind::Match) => self.parse_match_expression().map(Expression::Match),
             Some(TokenKind::Loop) => self.parse_loop_expression().map(Expression::Loop),
@@ -1857,6 +1898,51 @@ impl Grammar {
         let body = self.parse_block_expression()?;
         Ok(LoopExpression {
             syntax: self.syntax(start),
+            body,
+        })
+    }
+
+    fn parse_resource_expression(&mut self) -> Result<ResourceExpression, ParseError> {
+        let start = self.position;
+        let keyword = self.expect(TokenKind::Identifier, "expected `resource`")?;
+        if keyword.text != "resource" {
+            return Err(self.error("expected `resource`"));
+        }
+        let resource = self.parse_type_union()?;
+        Ok(ResourceExpression {
+            syntax: self.syntax(start),
+            resource,
+        })
+    }
+
+    fn is_resource_expression_start(&self) -> bool {
+        self.peek_n(1).is_some_and(is_type_atom_start)
+    }
+
+    fn is_with_resource_expression_start(&self) -> bool {
+        let mut candidate = self.clone();
+        candidate.bump_token();
+        candidate.parse_type_union().is_ok() && candidate.at(TokenKind::Equals)
+    }
+
+    fn parse_with_resource_expression(&mut self) -> Result<WithResourceExpression, ParseError> {
+        let start = self.position;
+        let keyword = self.expect(TokenKind::Identifier, "expected `with`")?;
+        if keyword.text != "with" {
+            return Err(self.error("expected `with`"));
+        }
+        let resource = self.parse_type_union()?;
+        self.expect(TokenKind::Equals, "expected `=` after resource type")?;
+        let previous = self.brace_terminates_expression;
+        self.brace_terminates_expression = true;
+        let value = self.parse_expression();
+        self.brace_terminates_expression = previous;
+        let value = Box::new(value?);
+        let body = self.parse_block_expression()?;
+        Ok(WithResourceExpression {
+            syntax: self.syntax(start),
+            resource,
+            value,
             body,
         })
     }
@@ -2072,6 +2158,12 @@ impl Grammar {
             position += 1;
         }
         None
+    }
+
+    fn peek_text(&self, expected: &str) -> bool {
+        self.tokens
+            .get(self.next_non_trivia(self.position))
+            .is_some_and(|token| token.text == expected)
     }
 
     /// Returns whether the next non-trivia token has `kind`.

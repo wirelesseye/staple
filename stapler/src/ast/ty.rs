@@ -138,7 +138,23 @@ pub struct RepeatedType {
 pub struct FunctionType {
     pub syntax: Syntax,
     pub parameter: Box<Type>,
+    pub resources: ResourceSet,
     pub result: Box<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceSet {
+    pub syntax: Syntax,
+    pub resources: Vec<Type>,
+}
+
+impl ResourceSet {
+    pub fn empty() -> Self {
+        Self {
+            syntax: Syntax::compiler(),
+            resources: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

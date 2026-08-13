@@ -407,6 +407,52 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_typed_resources_with_lexical_shadowing() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-resources-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-resources-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "type Clock = (now: () -> I32)\n",
+                "def clock = value: I32 => Clock (now: () => value)\n",
+                "def read = () => (resource Clock).now ()\n",
+                "def derive = () => clock (read () + 1)\n",
+                "def make_reader = () => () => read ()\n",
+                "let outer = clock 41\n",
+                "let inner = clock 7\n",
+                "let derived = with Clock = outer { with Clock = derive () { read () } }\n",
+                "let reader = with Clock = outer { make_reader () }\n",
+                "let later = with Clock = inner { reader () }\n",
+                "exit ((derived - 42) + (later - 7))\n",
+            ),
+        )
+        .expect("temporary resource source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("typed resource executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("typed resource executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "resource executable exited with {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_refs_across_automatic_collection() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
