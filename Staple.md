@@ -402,6 +402,20 @@ stapler --emit object -o hello_world.o examples/hello_world.sta
 stapler --emit exe -o hello_world examples/hello_world.sta
 ```
 
+`stapler run` runs a source file without leaving a compiled executable next to
+it:
+
+```text
+stapler run examples/hello_world.sta
+stapler run examples/hello_world.sta -- first --second
+```
+
+Run mode privately compiles and links a temporary host executable, executes it
+with inherited standard input and output, and removes its temporary artifacts.
+Arguments after `--` are forwarded to the process, although Staple does not yet
+provide a source-level API for reading them. `--stdlib`, `--linker`, `-L`, and
+`-l` are supported; `-o`, `--emit`, and cross-target `--target` are not.
+
 The native target is used unless `--target <triple>` is supplied. Executables
 are linked through `$CC`, or `cc` when `$CC` is unset. `--linker` selects a
 different linker driver. `-L <path>` and `-l <name>` add library search paths

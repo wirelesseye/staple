@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, ExitCode};
+use std::process::{Command, ExitCode, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use stapler::{
@@ -15,8 +15,21 @@ enum EmitKind {
     Executable,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Compile,
+    Run,
+}
+
+#[derive(Debug)]
+enum Outcome {
+    Completed(Option<String>),
+    Executed(ExitStatus),
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct Options {
+    mode: Mode,
     input: OsString,
     output: Option<PathBuf>,
     emit: EmitKind,
@@ -25,15 +38,17 @@ struct Options {
     libraries: Vec<OsString>,
     linker: Option<OsString>,
     standard_library: Option<PathBuf>,
+    program_arguments: Vec<OsString>,
 }
 
 fn main() -> ExitCode {
     match run(std::env::args_os().skip(1)) {
-        Ok(Some(llvm)) => {
-            print!("{llvm}");
+        Ok(Outcome::Completed(Some(output))) => {
+            print!("{output}");
             ExitCode::SUCCESS
         }
-        Ok(None) => ExitCode::SUCCESS,
+        Ok(Outcome::Completed(None)) => ExitCode::SUCCESS,
+        Ok(Outcome::Executed(status)) => exit_code(status),
         Err(message) => {
             eprintln!("stapler: {message}");
             ExitCode::FAILURE
@@ -41,10 +56,14 @@ fn main() -> ExitCode {
     }
 }
 
-fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Option<String>, String> {
+fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String> {
     let arguments = arguments.into_iter().collect::<Vec<_>>();
     if matches!(arguments.as_slice(), [argument] if argument == "-h" || argument == "--help") {
-        return Ok(Some(format!("{}\n", usage())));
+        return Ok(Outcome::Completed(Some(format!("{}\n", usage()))));
+    }
+    if matches!(arguments.as_slice(), [command, argument] if command == "run" && (argument == "-h" || argument == "--help"))
+    {
+        return Ok(Outcome::Completed(Some(format!("{}\n", run_usage()))));
     }
     let options = parse_options(arguments)?;
     let loader = match &options.standard_library {
@@ -64,6 +83,25 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Option<String>, 
     let context = inkwell::context::Context::create();
     let generator = CodeGenerator::new(&context);
 
+    if options.mode == Mode::Run {
+        let object = TemporaryArtifact::new("object", "o");
+        generator
+            .emit_object(&module, object.path(), None)
+            .map_err(format_diagnostics)?;
+        let executable = TemporaryArtifact::new("executable", executable_extension());
+        link_executable(object.path(), executable.path(), &options)?;
+        let status = Command::new(executable.path())
+            .args(&options.program_arguments)
+            .status()
+            .map_err(|error| {
+                format!(
+                    "could not run temporary executable `{}`: {error}",
+                    executable.path().display()
+                )
+            })?;
+        return Ok(Outcome::Executed(status));
+    }
+
     match options.emit {
         EmitKind::Llvm => {
             let llvm = generator
@@ -72,9 +110,9 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Option<String>, 
             if let Some(output) = options.output {
                 std::fs::write(&output, llvm)
                     .map_err(|error| format!("could not write `{}`: {error}", output.display()))?;
-                Ok(None)
+                Ok(Outcome::Completed(None))
             } else {
-                Ok(Some(llvm))
+                Ok(Outcome::Completed(Some(llvm)))
             }
         }
         EmitKind::Object => {
@@ -82,28 +120,30 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Option<String>, 
             generator
                 .emit_object(&module, &output, options.target.as_deref())
                 .map_err(format_diagnostics)?;
-            Ok(None)
+            Ok(Outcome::Completed(None))
         }
         EmitKind::Executable => {
             let output = artifact_output(&options, executable_extension())?;
-            let object = temporary_object_path();
-            let emission = generator
-                .emit_object(&module, &object, options.target.as_deref())
-                .map_err(format_diagnostics);
-            if let Err(error) = emission {
-                let _ = std::fs::remove_file(&object);
-                return Err(error);
-            }
-            let result = link_executable(&object, &output, &options);
-            let _ = std::fs::remove_file(&object);
-            result.map(|()| None)
+            let object = TemporaryArtifact::new("object", "o");
+            generator
+                .emit_object(&module, object.path(), options.target.as_deref())
+                .map_err(format_diagnostics)?;
+            link_executable(object.path(), &output, &options)?;
+            Ok(Outcome::Completed(None))
         }
     }
 }
 
 fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Options, String> {
-    let mut arguments = arguments.into_iter();
+    let mut arguments = arguments.into_iter().peekable();
+    let mode = if arguments.peek().is_some_and(|argument| argument == "run") {
+        arguments.next();
+        Mode::Run
+    } else {
+        Mode::Compile
+    };
     let mut options = Options {
+        mode,
         input: OsString::new(),
         output: None,
         emit: EmitKind::Executable,
@@ -112,11 +152,17 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         libraries: Vec::new(),
         linker: None,
         standard_library: None,
+        program_arguments: Vec::new(),
     };
     let mut positional_only = false;
+    let mut emit_specified = false;
 
     while let Some(argument) = arguments.next() {
         if !positional_only && argument == "--" {
+            if options.mode == Mode::Run && !options.input.is_empty() {
+                options.program_arguments.extend(arguments);
+                break;
+            }
             positional_only = true;
             continue;
         }
@@ -125,6 +171,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             continue;
         }
         if !positional_only && argument == "--emit" {
+            emit_specified = true;
             options.emit = parse_emit(&next_value(&mut arguments, "--emit")?)?;
             continue;
         }
@@ -156,6 +203,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
 
         let text = argument.to_string_lossy();
         if !positional_only && let Some(value) = text.strip_prefix("--emit=") {
+            emit_specified = true;
             options.emit = parse_emit(OsStr::new(value))?;
         } else if !positional_only && let Some(value) = text.strip_prefix("--target=") {
             options.target = Some(value.to_owned());
@@ -168,16 +216,44 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         } else if !positional_only && text.starts_with("-l") && text.len() > 2 {
             options.libraries.push(text[2..].into());
         } else if !positional_only && text.starts_with('-') && argument != "-" {
-            return Err(format!("unknown option `{text}`\n{}", usage()));
+            let usage = if options.mode == Mode::Run {
+                run_usage()
+            } else {
+                usage()
+            };
+            return Err(format!("unknown option `{text}`\n{usage}"));
         } else if options.input.is_empty() {
             options.input = argument;
+        } else if options.mode == Mode::Run {
+            return Err(format!(
+                "program arguments require `--` after the input file\n{}",
+                run_usage()
+            ));
         } else {
             return Err(usage());
         }
     }
 
     if options.input.is_empty() {
-        return Err(usage());
+        return Err(if options.mode == Mode::Run {
+            run_usage()
+        } else {
+            usage()
+        });
+    }
+    if options.mode == Mode::Run {
+        if options.output.is_some() {
+            return Err("`-o` is not supported by `stapler run`".to_owned());
+        }
+        if emit_specified {
+            return Err("`--emit` is not supported by `stapler run`".to_owned());
+        }
+        if options.target.is_some() {
+            return Err(
+                "`--target` is not supported by `stapler run`; programs run on the host target"
+                    .to_owned(),
+            );
+        }
     }
     if options.emit != EmitKind::Executable
         && (!options.library_paths.is_empty() || !options.libraries.is_empty())
@@ -260,12 +336,38 @@ fn executable_extension() -> &'static str {
     if cfg!(windows) { "exe" } else { "" }
 }
 
-fn temporary_object_path() -> PathBuf {
-    let nonce = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    std::env::temp_dir().join(format!("stapler-{}-{nonce}.o", std::process::id()))
+struct TemporaryArtifact {
+    path: PathBuf,
+}
+
+impl TemporaryArtifact {
+    fn new(kind: &str, extension: &str) -> Self {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let extension = if extension.is_empty() {
+            String::new()
+        } else {
+            format!(".{extension}")
+        };
+        Self {
+            path: std::env::temp_dir().join(format!(
+                "stapler-{}-{nonce}-{kind}{extension}",
+                std::process::id()
+            )),
+        }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TemporaryArtifact {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 fn link_executable(object: &Path, output: &Path, options: &Options) -> Result<(), String> {
@@ -311,9 +413,18 @@ fn format_diagnostics(diagnostics: Vec<Diagnostic>) -> String {
         .join("\n")
 }
 
+fn exit_code(status: ExitStatus) -> ExitCode {
+    status
+        .code()
+        .and_then(|code| u8::try_from(code).ok())
+        .map(ExitCode::from)
+        .unwrap_or(ExitCode::FAILURE)
+}
+
 fn usage() -> String {
     concat!(
         "usage: stapler [options] <input.sta>\n",
+        "       stapler run [options] <input.sta> [-- <arguments>...]\n",
         "\n",
         "options:\n",
         "  -h, --help                print this help\n",
@@ -330,9 +441,26 @@ fn usage() -> String {
     .to_owned()
 }
 
+fn run_usage() -> String {
+    concat!(
+        "usage: stapler run [options] <input.sta> [-- <arguments>...]\n",
+        "\n",
+        "options:\n",
+        "  -h, --help                print this help\n",
+        "  --linker <command>        linker driver (default: $CC or cc)\n",
+        "  --stdlib <path>           Staple standard-library root\n",
+        "  -L <path>                 add a library search path when linking\n",
+        "  -l <name>                 link a library\n",
+        "  --                         pass remaining arguments to the program\n",
+        "  -                          read source from standard input",
+    )
+    .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{EmitKind, compile, parse_options, run};
+    use super::{EmitKind, Mode, Outcome, TemporaryArtifact, compile, parse_options, run};
+    use std::ffi::{OsStr, OsString};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -348,12 +476,86 @@ mod tests {
 
     #[test]
     fn prints_help_without_an_input() {
-        let help = run(["--help".into()])
-            .expect("help should succeed")
-            .expect("help should be printed");
+        let Outcome::Completed(Some(help)) = run(["--help".into()]).expect("help should succeed")
+        else {
+            panic!("help should be printed");
+        };
 
         assert!(help.starts_with("usage: stapler"));
         assert!(help.contains("--emit <llvm|object|exe>"));
+        assert!(help.contains("stapler run"));
+    }
+
+    #[test]
+    fn prints_run_help_without_an_input() {
+        let Outcome::Completed(Some(help)) =
+            run(["run".into(), "--help".into()]).expect("run help should succeed")
+        else {
+            panic!("run help should be printed");
+        };
+
+        assert!(help.starts_with("usage: stapler run"));
+        assert!(help.contains("pass remaining arguments to the program"));
+    }
+
+    #[test]
+    fn parses_run_options_and_program_arguments() {
+        let options = parse_options([
+            "run".into(),
+            "--stdlib=vendor/stdlib".into(),
+            "--linker".into(),
+            "clang".into(),
+            "-Lvendor/lib".into(),
+            "-lm".into(),
+            "examples/hello_world.sta".into(),
+            "--".into(),
+            "first".into(),
+            "--second".into(),
+        ])
+        .expect("run options should parse");
+
+        assert_eq!(options.mode, Mode::Run);
+        assert_eq!(options.input, "examples/hello_world.sta");
+        assert_eq!(options.linker.as_deref(), Some(OsStr::new("clang")));
+        assert_eq!(options.library_paths[0].to_string_lossy(), "vendor/lib");
+        assert_eq!(options.libraries[0].to_string_lossy(), "m");
+        assert_eq!(
+            options.program_arguments,
+            [OsString::from("first"), OsString::from("--second")]
+        );
+    }
+
+    #[test]
+    fn rejects_build_only_run_options() {
+        for arguments in [
+            vec!["run", "-o", "output", "input.sta"],
+            vec!["run", "--emit=exe", "input.sta"],
+            vec!["run", "--target=native", "input.sta"],
+        ] {
+            let error = parse_options(arguments.into_iter().map(OsString::from))
+                .expect_err("build-only option should be rejected in run mode");
+            assert!(error.contains("not supported by `stapler run`"));
+        }
+    }
+
+    #[test]
+    fn requires_program_argument_separator() {
+        let error = parse_options(["run".into(), "input.sta".into(), "argument".into()])
+            .expect_err("program arguments without `--` should be rejected");
+
+        assert!(error.starts_with("program arguments require `--`"));
+    }
+
+    #[test]
+    fn removes_temporary_artifacts_when_dropped() {
+        let path = {
+            let artifact = TemporaryArtifact::new("cleanup-test", "tmp");
+            std::fs::write(artifact.path(), "temporary")
+                .expect("temporary artifact should be writable");
+            artifact.path().to_owned()
+        };
+
+        assert!(!path.exists());
     }
 
     #[test]
@@ -390,6 +592,83 @@ mod tests {
             parse_options(["examples/hello_world.sta".into()]).expect("the input should parse");
 
         assert_eq!(options.emit, EmitKind::Executable);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runs_source_directly_and_propagates_its_exit_status() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-run-{nonce}.sta"));
+        std::fs::write(
+            &source,
+            "extern \"c\" { let exit: I32 -> () }\ndef main = () => exit 7\n",
+        )
+        .expect("temporary run source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let outcome = run([
+            "run".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            source.clone().into_os_string(),
+            "--".into(),
+            "ignored-for-now".into(),
+        ])
+        .expect("source should run directly");
+        let _ = std::fs::remove_file(source);
+
+        let Outcome::Executed(status) = outcome else {
+            panic!("run mode should return a process status");
+        };
+        assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    fn run_reports_compiler_errors() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-run-error-{nonce}.sta"));
+        std::fs::write(&source, "def main = () => missing\n")
+            .expect("temporary invalid source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let error = run([
+            "run".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect_err("invalid source should not execute");
+        let _ = std::fs::remove_file(source);
+
+        assert!(error.contains("unknown name `missing`"));
+    }
+
+    #[test]
+    fn run_reports_linker_launch_errors() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-run-linker-{nonce}.sta"));
+        std::fs::write(&source, "def main = () => ()\n")
+            .expect("temporary source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let error = run([
+            "run".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--linker".into(),
+            format!("stapler-missing-linker-{nonce}").into(),
+            source.clone().into_os_string(),
+        ])
+        .expect_err("a missing linker should be reported");
+        let _ = std::fs::remove_file(source);
+
+        assert!(error.contains("could not run linker"));
     }
 
     #[test]
