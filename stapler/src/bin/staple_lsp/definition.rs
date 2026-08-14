@@ -298,6 +298,22 @@ impl Collector<'_> {
         match item {
             Item::Modified(value) => {
                 for modifier in &value.modifiers {
+                    if let Some(definitions) = self.macro_invocation_definitions(modifier.syntax.id)
+                    {
+                        self.add(&modifier.syntax, &modifier.name, &definitions, true);
+                        if let Some(namespace) = &modifier.namespace
+                            && let Some(module) = definitions
+                                .iter()
+                                .find_map(|definition| self.resolved.definition_module(*definition))
+                        {
+                            self.add(
+                                &modifier.syntax,
+                                namespace,
+                                &[DefinitionId::Module(module)],
+                                false,
+                            );
+                        }
+                    }
                     if let Some(expression) = modifier
                         .argument
                         .as_ref()
@@ -454,6 +470,33 @@ impl Collector<'_> {
     }
 
     fn expression(&mut self, expression: &Expression) {
+        if let Some(definitions) = self.macro_invocation_definitions(expression.syntax().id) {
+            match expression {
+                Expression::Name(value) => {
+                    self.add(&value.syntax, &value.name, &definitions, true);
+                    return;
+                }
+                Expression::Access(value) => {
+                    if let Accessor::Name(name) = &value.accessor {
+                        self.add(&value.syntax, name, &definitions, true);
+                    }
+                    if let Expression::Name(namespace) = value.value.as_ref()
+                        && let Some(module) = definitions
+                            .iter()
+                            .find_map(|definition| self.resolved.definition_module(*definition))
+                    {
+                        self.add(
+                            &namespace.syntax,
+                            &namespace.name,
+                            &[DefinitionId::Module(module)],
+                            false,
+                        );
+                    }
+                    return;
+                }
+                _ => {}
+            }
+        }
         match expression {
             Expression::Function(value) => {
                 self.pattern(&value.pattern);
@@ -649,6 +692,11 @@ impl Collector<'_> {
         definitions
     }
 
+    fn macro_invocation_definitions(&self, syntax: SyntaxId) -> Option<Vec<DefinitionId>> {
+        let declaration = self.resolved.macro_invocation_for(syntax)?.declaration;
+        Some(self.resolved.definitions_for(declaration))
+    }
+
     fn add(&mut self, syntax: &Syntax, name: &str, definitions: &[DefinitionId], last: bool) {
         let Some(range) = token_range(syntax, name, last) else {
             return;
@@ -768,6 +816,29 @@ mod tests {
                     .iter()
                     .any(|target| &source[target.selection_range.clone()] == "inner")
         }));
+    }
+
+    #[test]
+    fn indexes_function_and_modifier_macro_invocations() {
+        let source = concat!(
+            "use std.syntax quote\n",
+            "macro identity: Expr -> Expr = value => quote { $value }\n",
+            "macro @keep: Item -> Item = item => item\n",
+            "let answer = identity 42\n",
+            "@keep\n",
+            "let kept = answer\n",
+        );
+        let path = std::env::temp_dir().join("staple-definition-macro-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &resolved, None);
+
+        assert_target(source, &entries, "identity", "identity");
+        assert_target(source, &entries, "keep", "keep");
     }
 
     #[test]
