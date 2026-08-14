@@ -30,9 +30,12 @@ let singleton_value = switch_number Enabled
 
 def main = () => {
     println "Nominal patterns, generic constructors, and singleton matches evaluated successfully."
-    if (same_switch (Enabled, Disabled)) {
-        println "same"
-    } else {
-        println "different"
+    if {
+        (same_switch (Enabled, Disabled)) => {
+            println "same"
+        },
+        else => {
+            println "different"
+        },
     }
 }

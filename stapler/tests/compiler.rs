@@ -3264,17 +3264,38 @@ fn rejects_malformed_separated_syntax() {
 }
 
 #[test]
-fn expands_standard_if_overloads_and_nested_forms() {
+fn expands_standard_braced_if_clauses() {
     let module = type_check(concat!(
         "let condition: Bool = True\n",
-        "let without_else = if condition ()\n",
-        "let with_else: I32 = if condition 2 else 3\n",
-        "let nested: I32 = if condition (if condition 4 else 5) else 6\n",
+        "let clauses: I32 = if {\n",
+        "  False => 7,\n",
+        "  condition => 8,\n",
+        "  else => 9,\n",
+        "}\n",
+        "let clauses_without_else = if { False => () }\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("standard if overloads should expand and generate code");
+        .expect("standard braced if should expand and generate code");
+}
+
+#[test]
+fn requires_else_to_be_the_last_braced_if_clause() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "let invalid = if { else => (), True => () }\n",
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("a non-final else clause should be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "compile-time match was not exhaustive"
+    }));
 }
 
 #[test]
@@ -3313,24 +3334,22 @@ fn macro_overloads_choose_longest_then_most_specific() {
 }
 
 #[test]
-fn incomplete_longer_macro_overloads_fall_back_to_shorter_forms() {
+fn rejects_legacy_standard_if_syntax() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("let condition: Bool = True\nif condition 1 else\n", root)
+        .load_source(
+            "let condition: Bool = True\nlet invalid = if condition 1 else 2\n",
+            root,
+        )
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("leftover else should be resolved as ordinary syntax");
+        .expect_err("legacy if syntax should be rejected");
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("unknown name `else`"))
-    );
-    assert!(
-        !diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("matching overloads require 4") })
+            .any(|diagnostic| diagnostic.message.contains("argument 1 of macro `if` must be `Braced"))
     );
 }
 
@@ -4010,7 +4029,7 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
 fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
     let module = type_check(concat!(
         "trait Same = T => Eq T => { same: (T, T) -> Bool = (left, right) => Eq.equal left right }\n",
-        "trait Select = Value => { select: (Bool, Value, Value) -> Value = (condition, left, right) => if condition left else right }\n",
+        "trait Select = Value => { select: (Bool, Value, Value) -> Value = (condition, left, right) => if { condition => left, else => right } }\n",
         "trait First = (Left, Right) => { first: (Left, Right) -> Left = (left, right) => left }\n",
         "impl Same I32 {}\n",
         "impl Select I32 {}\n",

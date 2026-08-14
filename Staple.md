@@ -366,16 +366,23 @@ An incomplete longer overload does not prevent a shorter complete overload
 from matching. Any syntax left after the shorter expansion is applied to its
 result as an ordinary call. Imports, renames, namespaces, and re-exports carry
 the whole overload set, but overload sets from unrelated imports do not merge.
-The standard prelude supplies two `if` forms:
+The standard prelude supplies a braced, clause-oriented `if` form:
 
 ```staple
-if condition then_branch
-if condition then_branch else else_branch
+if {
+    first_condition => first_branch,
+    second_condition => second_branch,
+    else => fallback,
+}
 ```
 
-The first form is intended for a unit-valued branch; the second joins the types
-of both branches normally. It also supplies a `while` form implemented in
-`std.core.flow` using `loop`, `break`, and a boolean match:
+It evaluates conditions from top to bottom and evaluates only the branch
+belonging to the first true condition. Its optional final `else` clause supplies
+the fallback; without one, the fallback is `()`. An `else` clause must be last,
+and branch types join normally.
+
+The prelude also supplies a `while` form implemented in `std.core.flow` using
+`loop`, `break`, and a boolean match:
 
 ```staple
 while condition body

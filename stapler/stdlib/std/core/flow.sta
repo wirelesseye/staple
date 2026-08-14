@@ -1,26 +1,33 @@
 use std.core.boolean (True, False)
 use std.syntax *
 
-pub macro if =
-    condition: Expr =>
-    then_branch: Expr =>
-    quote {
-        match $condition satisfies Bool {
-            True() => $then_branch,
-            False() => (),
-        }
-    }
+def if_clauses:
+    Sequence (Expr, FatArrow, Expr) ->
+    Expr =
+clauses => match clauses {
+    Sequence () => quote { () },
+    Sequence (
+        first: (Expr, FatArrow, Expr),
+        rest: Sequence (Expr, FatArrow, Expr),
+    ) => match first {
+        (condition: Ident "else", _, fallback) => match rest {
+            Sequence () => fallback,
+        },
+        (condition, _, branch) => {
+            let otherwise = if_clauses rest
+            quote {
+                match $condition satisfies Bool {
+                    True() => $branch,
+                    False() => $otherwise,
+                }
+            }
+        },
+    },
+}
 
 pub macro if =
-    condition: Expr =>
-    then_branch: Expr =>
-    _: Ident "else" =>
-    else_branch: Expr =>
-    quote {
-        match $condition satisfies Bool {
-            True() => $then_branch,
-            False() => $else_branch,
-        }
+    body: Braced (Separated (Expr, FatArrow, Expr) Comma) => match body {
+        Braced (Separated (_, clauses, _)) => if_clauses clauses,
     }
 
 pub macro while =
