@@ -60,14 +60,22 @@ being reduced immediately to semantic values. Metaprograms should be able to
 work with structured syntax instead of assembling source-code strings.
 
 Expression macros transform compiler-owned syntax values before ordinary name
-resolution and type checking. `Syntax` is the permissive sum of `Expr`, `Type`,
-`Pattern`, `Item`, `Visibility`, `Comma`, and the three delimited syntax types.
-`Expr` is currently the sum of `Ident String`, `CallExpr`, and `UnstructuredExpr`.
+resolution and type checking. The syntax API is declared by `std.syntax` and is
+not part of the `std.core` prelude, so modules using it must import the required
+names explicitly, for example `use std.syntax (quote, Expr, SyntaxNode)`.
+Examples below assume the syntax names they use have been imported.
+
+`Syntax` is an opaque, arbitrary lossless syntax fragment. It preserves source
+text, trivia, spans, and hygiene without requiring its contents to form one
+structural or grammatical node. `SyntaxNode` is the structural sum of `Expr`,
+`Type`, `Pattern`, `Item`, `Visibility`, punctuation nodes such as `Comma`, and
+the three delimited syntax types. `Expr` is currently the sum of `Ident String`,
+`CallExpr`, and `UnstructuredExpr`.
 `CallExpr` exposes `callee: Expr` and
 `argument: Expr`; `UnstructuredExpr` preserves every other expression form
 without exposing its fields yet. A macro body is a curried compile-time Staple
 function. Every parameter consumes one atomic syntax unit; an omitted parameter
-type means `Syntax`:
+type means `SyntaxNode`, not opaque `Syntax`:
 
 ```staple
 macro choose = condition => then => else => quote {
@@ -109,9 +117,11 @@ instead contain `Sequence T`, which accepts zero or more consecutive values of
 two]`. As a source matcher, `Sequence` is valid only as the entire contents of
 one of these three delimiter types and never changes a macro's top-level arity.
 Captured sequences may be passed through compile-time helpers and destructured
-as `Sequence ()` or `Sequence (first: T, rest: Sequence T)`. `Sequence Syntax`
-uses shortest structural atoms, treating a nested balanced delimiter as one
-atom.
+as `Sequence ()` or `Sequence (first: T, rest: Sequence T)`. `Sequence
+SyntaxNode` uses shortest structural atoms, treating a nested balanced delimiter
+as one atom. In contrast, `Parenthesized Syntax`, `Bracketed Syntax`, and
+`Braced Syntax` capture their entire contents as one opaque fragment, including
+trivia and syntax that is not yet structurally supported.
 
 `Comma` is singleton syntax and may be matched explicitly, as in
 `Parenthesized (Ident String, Comma, Ident String)`. A homogeneous sequence
@@ -152,16 +162,35 @@ type annotation and `$pattern` may appear as a binding, function, or match
 pattern. A category-mismatched splice is rejected during expansion.
 
 When overloads from expression and type or pattern grammars accept the same
-source syntax, the invocation is ambiguous. `Type` and `Pattern` are narrower
-than `Syntax`, but are incomparable with `Expr` and with each other.
+source syntax, the invocation is ambiguous. Specialized syntax categories are
+narrower than `SyntaxNode`, and `SyntaxNode` is narrower than opaque `Syntax`.
+`Type`, `Pattern`, and `Expr` remain mutually incomparable where their source
+grammars overlap.
 
-The braces in `quote { syntax }` delimit one syntax value and are not part of
-the result. A quotation is parsed as one expression when the whole body can be
-consumed as an expression; otherwise it is parsed as exactly one item, with an
-optional trailing semicolon. Thus `quote { foo }` remains an expression, while
-item-specific forms such as `let`, `def`, `type`, `extern`, `trait`, `impl`, or
-`pub` produce an `Item`. `$name` splices an expression supplied by the caller.
-`$names...` is reserved for future syntax sequences and is currently rejected.
+The braces in `quote { syntax }` delimit an opaque source fragment and are not
+part of the result. `quote` substitutes splices first, then interprets the whole
+fragment according to its expected result type. Its compiler-provided contract
+is:
+
+```staple
+pub macro quote: T => QuoteResult T => Braced Syntax -> T
+```
+
+`QuoteResult` is a sealed compiler capability implemented only for `Syntax`,
+`SyntaxNode`, `Expr`, `Type`, `Pattern`, `Item`, and `Sequence Item`. An expected
+`Syntax` returns the substituted fragment without parsing it. `SyntaxNode`
+requires exactly one shortest structural node. The grammatical categories parse
+the complete fragment in their respective contexts, while `Sequence Item`
+parses zero or more complete items in source order. An unconstrained quotation
+defaults to `Syntax`; annotations, `satisfies`, declared helper or macro result
+types, and other typed compile-time boundaries provide contextual result types.
+
+Opaque fragments may contain empty input, punctuation, comments, or temporarily
+malformed grammar and may be spliced into a later quotation for contextual
+interpretation. A raw `Syntax` result entering ordinary expression or item
+source is reparsed for that placement. `$name` splices a captured value while
+preserving its hygiene. `$items...` splices a `Sequence Item` in an item-list
+position.
 
 Identifiers and calls may also be inspected, constructed, and changed as
 compile-time values:
@@ -225,8 +254,8 @@ A modifier has signature `Item -> Item`, or accepts one optional explicit
 `Expr`, `Type`, or `Pattern` argument before the compiler-supplied item. The
 explicit argument is always delimited by parentheses, including an expression
 argument. `Ident`, `CallExpr`, and `UnstructuredExpr` may be used as narrower
-expression parameter types. `Syntax` and `Item` are not valid explicit
-modifier arguments. The modifier must return exactly one `Item`.
+expression parameter types. `SyntaxNode`, opaque `Syntax`, and `Item` are not
+valid explicit modifier arguments. The modifier must return exactly one `Item`.
 
 Modifier lists are part of item syntax. The closest modifier runs first, so
 `@outer @inner def ...` expands as `outer(inner(def ...))`. A modifier may
@@ -322,16 +351,16 @@ variants, and `pub(repr)` groups expose their representations.
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while
 spliced expressions retain their caller environment. A macro consumes the
-number of arguments described by its curried `Syntax` type; further call
-arguments apply to the expanded expression.
+number of arguments described by its curried syntax-node parameter types;
+further call arguments apply to the expanded expression.
 
 Macros may be overloaded by declaring the same name more than once in one
 module. An invocation selects the complete matching overload that consumes the
 most syntax atoms. Same-length matches use pattern specificity: a literal
 identifier is narrower than `Ident String`, `Ident String` is narrower than
-`Expr`, and category types are narrower than `Syntax`. Specificity must hold at
-every parameter; incomparable matches are ambiguous. Exact duplicate patterns
-are rejected.
+`Expr`, specialized categories are narrower than `SyntaxNode`, and `SyntaxNode`
+is narrower than opaque `Syntax`. Specificity must hold at every parameter;
+incomparable matches are ambiguous. Exact duplicate patterns are rejected.
 
 An incomplete longer overload does not prevent a shorter complete overload
 from matching. Any syntax left after the shorter expansion is applied to its
@@ -359,17 +388,18 @@ Compile-time evaluation supports pure functions, bindings, mutable local cells,
 products, matches, literals, recursion, and pure integer operations. It rejects
 external or runtime-only effects. Expansion is limited to 128 nested macros and
 each top-level invocation is limited to 1,000,000 evaluation steps. Syntax
-values are compile-time-only. This release supports expression results, one
-top-level item result, opaque type and pattern inputs with contextual scalar
-splices, scalar expression splices inside generated items, and structured
-identifier and call expressions. It also supports opaque item input through
-modifier macros and atomic visibility syntax. Repeated splices, item sequences, function-style item input,
-item inspection, structured access to other expression forms, standalone type
-or pattern quotation, and type or pattern output placement remain future work.
+values are compile-time-only. This release supports contextual expression,
+type, pattern, item, and item-sequence quotation; opaque fragments; structured
+identifier and call expressions; scalar splices; and repeated item splices.
+It also supports opaque item input through modifier macros and atomic visibility
+syntax. General repeated expression, type, and pattern splices,
+function-style item input, item inspection, and structured access to other
+expression forms remain future work.
 
-Compiler-provided macros use typed bodyless contracts. `std.core` declares
-`pub macro quote: Syntax -> Syntax`, and `std.cinterop` declares
-`pub macro c_string: Expr -> Expr`.
+Compiler-provided macros use typed bodyless contracts. `std.syntax` declares
+`pub macro quote: T => QuoteResult T => Braced Syntax -> T`, and
+`std.cinterop` declares `pub macro c_string: Expr -> Expr`. Neither module is
+re-exported by `std.core`; their APIs require explicit imports.
 
 ## Source files
 
