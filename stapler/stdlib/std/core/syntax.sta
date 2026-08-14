@@ -42,4 +42,10 @@ pub type MacroCallVisibility = opaque
 // satisfy it. It has no runtime methods or user implementations.
 pub trait StringType = T => {}
 
-pub type alias Syntax = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
+// An arbitrary lossless syntax fragment. SyntaxNode is exactly one structural
+// node; delimiter nodes retain their complete, opaque contents.
+pub type Syntax = opaque
+pub type alias SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
+
+// A sealed compiler-defined marker for the contextual result of `quote`.
+pub trait QuoteResult = T => {}

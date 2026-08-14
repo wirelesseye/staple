@@ -922,6 +922,7 @@ impl NameResolver {
             "Pattern",
             "Item",
             "Syntax",
+            "SyntaxNode",
         ] {
             self.register_builtin_type(core, "std.core", name, BuiltinType::Syntax);
         }

@@ -13,6 +13,7 @@ impl Module {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Item {
     Modified(ModifiedItem),
     VisibilityMacroInvocation(VisibilityMacroInvocation),
@@ -200,6 +201,8 @@ pub struct MacroDeclaration {
     pub visibility: Visibility,
     pub name: String,
     pub modifier: bool,
+    pub type_parameters: Vec<TypeParameterPattern>,
+    pub trait_bounds: Vec<TraitBound>,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
 }

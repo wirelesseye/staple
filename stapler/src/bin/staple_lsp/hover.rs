@@ -909,7 +909,7 @@ mod tests {
         assert!(signatures.contains(&("choose", "macro choose: Expr -> Expr")));
         assert!(signatures.contains(&("choose", "macro choose: CallExpr -> Expr")));
         assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
-        assert!(signatures.contains(&("inferred", "macro inferred: Syntax -> Syntax")));
+        assert!(signatures.contains(&("inferred", "macro inferred: SyntaxNode -> Expr")));
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
         assert!(
             signatures
@@ -1042,7 +1042,7 @@ mod tests {
             ("value", "let value: I32"),
             ("Number", "type alias Number = I32"),
             ("Printable", "trait Printable"),
-            ("identity", "macro identity: Syntax -> Syntax"),
+            ("identity", "macro identity: SyntaxNode -> Expr"),
             ("callable", "def callable: () -> I32"),
             ("invoke", "def callable: () -> I32"),
         ] {

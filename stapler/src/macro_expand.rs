@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
@@ -51,6 +51,7 @@ struct SelectedMacro {
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum MetaType {
     Syntax,
+    SyntaxNode,
     Expr,
     Ident(Option<String>),
     CallExpr,
@@ -115,6 +116,7 @@ struct HelperDefinition {
 
 #[derive(Clone)]
 enum SyntaxValue {
+    Raw(Syntax),
     Ident(crate::NameExpression),
     Call(crate::CallExpression),
     Unstructured(Expression),
@@ -165,6 +167,7 @@ impl SyntaxValue {
 
     fn into_expression(self) -> Option<Expression> {
         match self {
+            Self::Raw(_) => None,
             Self::Ident(name) => Some(Expression::Name(name)),
             Self::Call(call) => Some(Expression::Call(call)),
             Self::Unstructured(expression) => Some(expression),
@@ -177,6 +180,24 @@ impl SyntaxValue {
             | Self::Comma(_)
             | Self::Equals(_)
             | Self::FatArrow(_) => None,
+        }
+    }
+
+    fn syntax(&self) -> Option<&Syntax> {
+        match self {
+            Self::Raw(syntax)
+            | Self::Comma(syntax)
+            | Self::Equals(syntax)
+            | Self::FatArrow(syntax) => Some(syntax),
+            Self::Ident(value) => Some(&value.syntax),
+            Self::Call(value) => Some(&value.syntax),
+            Self::Unstructured(value) => Some(value.syntax()),
+            Self::Type(value) => Some(value.syntax()),
+            Self::Pattern(value) => Some(value.syntax()),
+            Self::Item(value) => Some(item_syntax(value)),
+            Self::Visibility(value) => Some(&value.syntax),
+            Self::Delimited(value) => Some(&value.syntax),
+            Self::Items(_) => None,
         }
     }
 }
@@ -257,6 +278,7 @@ impl DelimitedSyntaxValue {
 
 fn syntax_category(value: &SyntaxValue) -> &'static str {
     match value {
+        SyntaxValue::Raw(_) => "syntax fragment",
         SyntaxValue::Ident(_) | SyntaxValue::Call(_) | SyntaxValue::Unstructured(_) => "expression",
         SyntaxValue::Type(_) => "type",
         SyntaxValue::Pattern(_) => "pattern",
@@ -290,6 +312,7 @@ enum Value {
         module: ModuleId,
         function: crate::FunctionExpression,
         environment: Environment,
+        quote_result: Option<MetaType>,
     },
     Helper(ModuleId, Binding),
     Product(Vec<(Option<String>, Value)>),
@@ -347,6 +370,18 @@ impl EnvironmentBinding {
 }
 
 type Environment = HashMap<String, EnvironmentBinding>;
+
+fn quote_contains_raw_splice(contents: &Syntax, environment: &Environment) -> bool {
+    let tokens = contents.tokens();
+    tokens.windows(2).any(|pair| {
+        pair[0].kind == crate::TokenKind::Dollar
+            && pair[1].kind == crate::TokenKind::Identifier
+            && environment
+                .get(&pair[1].text)
+                .map(EnvironmentBinding::get)
+                .is_some_and(|value| matches!(value, Value::Syntax(SyntaxValue::Raw(_))))
+    })
+}
 
 pub(crate) struct MacroAnalysis {
     pub definitions: HashMap<SyntaxId, ResolvedMacro>,
@@ -448,6 +483,7 @@ struct MacroExpander {
     expansion_stack: Vec<MacroKey>,
     emitted_items: Option<Vec<Item>>,
     invocations: HashMap<SyntaxId, ResolvedMacro>,
+    quote_context: Option<MetaType>,
 }
 
 impl MacroExpander {
@@ -479,26 +515,39 @@ impl MacroExpander {
                         } else {
                             MacroKind::User(Expression::Product(crate::ProductExpression::empty()))
                         };
-                        let arity = declaration
-                            .annotation
-                            .as_ref()
-                            .map(macro_annotation_arity)
-                            .unwrap_or_else(|| {
-                                declaration
-                                    .value
+                        let (arity, mut parameters, mut result) =
+                            if matches!(kind, MacroKind::Quote) {
+                                (
+                                    1,
+                                    vec![MetaType::Delimited(
+                                        DelimiterKind::Braced,
+                                        DelimitedMetaContents::Fixed(vec![MetaType::Syntax]),
+                                    )],
+                                    MetaType::Syntax,
+                                )
+                            } else {
+                                let arity = declaration
+                                    .annotation
                                     .as_ref()
-                                    .map(expression_arity)
-                                    .unwrap_or(0)
-                            });
-                        let (mut parameters, mut result) = declaration
-                            .annotation
-                            .as_ref()
-                            .and_then(macro_signature)
-                            .unwrap_or_else(|| {
-                                inferred_macro_signature(declaration.value.as_ref())
-                            });
+                                    .map(macro_annotation_arity)
+                                    .unwrap_or_else(|| {
+                                        declaration
+                                            .value
+                                            .as_ref()
+                                            .map(expression_arity)
+                                            .unwrap_or(0)
+                                    });
+                                let (parameters, result) = declaration
+                                    .annotation
+                                    .as_ref()
+                                    .and_then(macro_signature)
+                                    .unwrap_or_else(|| {
+                                        inferred_macro_signature(declaration.value.as_ref())
+                                    });
+                                (arity, parameters, result)
+                            };
                         if declaration.modifier && declaration.annotation.is_none() {
-                            if parameters.len() == 2 && parameters[0] == MetaType::Syntax {
+                            if parameters.len() == 2 && parameters[0] == MetaType::SyntaxNode {
                                 parameters[0] = MetaType::Expr;
                             }
                             if let Some(last) = parameters.last_mut() {
@@ -781,6 +830,7 @@ impl MacroExpander {
             expansion_stack: Vec::new(),
             emitted_items: None,
             invocations: HashMap::new(),
+            quote_context: None,
         }
     }
 
@@ -830,6 +880,14 @@ impl MacroExpander {
     fn validate_definitions(&mut self) {
         let mut groups = HashMap::<(ModuleId, String, bool), Vec<MacroDefinition>>::new();
         for definition in self.definitions.values() {
+            if !definition.declaration.type_parameters.is_empty()
+                && !matches!(definition.kind, MacroKind::Quote)
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    "generic user-defined macros are not supported",
+                ));
+            }
             groups
                 .entry((
                     definition.key.module,
@@ -876,6 +934,7 @@ impl MacroExpander {
                 ));
             }
             if let Some(annotation) = &definition.declaration.annotation
+                && !matches!(definition.kind, MacroKind::Quote)
                 && !valid_macro_annotation(annotation)
             {
                 self.diagnostics.push(Diagnostic::new(
@@ -909,6 +968,12 @@ impl MacroExpander {
                     "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`",
                 ));
             }
+            if definition.parameters.iter().any(invalid_raw_syntax_shape) {
+                self.diagnostics.push(Diagnostic::new(
+                    definition.declaration.syntax.span.clone(),
+                    "opaque `Syntax` may be a top-level argument or the entire contents of a delimiter, but cannot be partitioned by `Sequence`, `Separated`, `Optional`, or product shapes",
+                ));
+            }
             if let (Some(annotation), Some(body)) = (
                 definition.declaration.annotation.as_ref(),
                 definition.declaration.value.as_ref(),
@@ -922,7 +987,7 @@ impl MacroExpander {
                     let implicit_modifier_item = definition.key.modifier
                         && index + 1 == parameters.len()
                         && *declared == MetaType::Item
-                        && body_parameter == Some(MetaType::Syntax);
+                        && body_parameter == Some(MetaType::SyntaxNode);
                     if !implicit_modifier_item
                         && body_parameter.is_some_and(|body_parameter| body_parameter != *declared)
                     {
@@ -1016,13 +1081,10 @@ impl MacroExpander {
                         "compiler-provided macro `c_string` must have signature `Expr -> Expr`",
                     ));
                 }
-                MacroKind::Quote
-                    if definition.parameters != [MetaType::Syntax]
-                        || definition.result != MetaType::Syntax =>
-                {
+                MacroKind::Quote if !valid_quote_declaration(&definition.declaration) => {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
-                        "compiler-provided macro `quote` must have signature `Syntax -> Syntax`",
+                        "compiler-provided macro `quote` must have signature `T => QuoteResult T => Braced Syntax -> T`",
                     ));
                 }
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
@@ -1535,16 +1597,21 @@ impl MacroExpander {
         let MacroKind::User(body) = &definition.kind else {
             unreachable!("compiler-provided macros cannot be modifiers")
         };
-        let mut value =
-            self.eval_expression(definition.key.module, body, &mut Environment::new())?;
-        if let Some(argument) = argument {
-            value = self.apply_value(value, Value::Syntax(argument), call_span.clone())?;
-        }
-        value = self.apply_value(
-            value,
-            Value::Syntax(SyntaxValue::Item(Box::new(item))),
-            call_span,
-        )?;
+        let previous_context = self.quote_context.replace(MetaType::Item);
+        let evaluated = (|| {
+            let mut value =
+                self.eval_expression(definition.key.module, body, &mut Environment::new())?;
+            if let Some(argument) = argument {
+                value = self.apply_value(value, Value::Syntax(argument), call_span.clone())?;
+            }
+            self.apply_value(
+                value,
+                Value::Syntax(SyntaxValue::Item(Box::new(item))),
+                call_span,
+            )
+        })();
+        self.quote_context = previous_context;
+        let value = evaluated?;
         match value {
             Value::Syntax(SyntaxValue::Item(item)) => Some(*item),
             Value::Syntax(syntax) => {
@@ -1592,7 +1659,7 @@ impl MacroExpander {
         let consumed_count = selected.consumed;
         if !matches!(
             definition.result,
-            MetaType::Syntax | MetaType::Item | MetaType::Sequence(_)
+            MetaType::Syntax | MetaType::SyntaxNode | MetaType::Item | MetaType::Sequence(_)
         ) {
             return false;
         }
@@ -1633,6 +1700,33 @@ impl MacroExpander {
         };
 
         match result {
+            SyntaxValue::Raw(raw) => {
+                let parsed =
+                    crate::parser::parse_item_list_fragment(&raw, &mut self.next_syntax_id);
+                let Ok(mut items) = parsed else {
+                    self.diagnostics.push(Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        format!(
+                            "macro `{}` produced a syntax fragment that is not valid in item position",
+                            key.name
+                        ),
+                    ));
+                    self.expansion_stack.pop();
+                    return true;
+                };
+                let mark = self.next_mark;
+                self.next_mark += 1;
+                for generated in &mut items {
+                    alpha_rename_item(generated, mark);
+                    freshen_item(self, generated, module, mark);
+                }
+                if items.len() == 1 {
+                    *item = items.remove(0);
+                    self.expand_item(module, item, depth + 1);
+                } else {
+                    self.emitted_items = Some(items);
+                }
+            }
             SyntaxValue::Items(items) => {
                 if !arguments[consumed_count..].is_empty() {
                     self.diagnostics.push(Diagnostic::new(
@@ -1761,7 +1855,8 @@ impl MacroExpander {
                 ));
                 return expression;
             }
-            if !matches!(definition.result, MetaType::Syntax) && !definition.result.is_expression()
+            if !matches!(definition.result, MetaType::Syntax | MetaType::SyntaxNode)
+                && !definition.result.is_expression()
             {
                 self.diagnostics.push(Diagnostic::new(
                     expression.syntax().span.clone(),
@@ -1795,6 +1890,30 @@ impl MacroExpander {
                     ));
                 }
                 return expression;
+            };
+            let result = if let SyntaxValue::Raw(raw) = result {
+                match crate::parser::parse_expression_fragment(&raw, &mut self.next_syntax_id) {
+                    Ok(mut parsed) => {
+                        let mark = self.next_mark;
+                        self.next_mark += 1;
+                        alpha_rename_expression(&mut parsed, mark, &mut Vec::new());
+                        self.freshen_expression(&mut parsed, module, mark);
+                        SyntaxValue::from_expression(parsed)
+                    }
+                    Err(error) => {
+                        self.diagnostics.push(Diagnostic::new(
+                            expression.syntax().span.clone(),
+                            format!(
+                                "macro `{}` produced a syntax fragment that is not valid in expression position: {}",
+                                key.name, error.message
+                            ),
+                        ));
+                        self.expansion_stack.pop();
+                        return expression;
+                    }
+                }
+            } else {
+                result
             };
             let category = syntax_category(&result);
             let Some(mut result) = result.into_expression() else {
@@ -2137,20 +2256,30 @@ impl MacroExpander {
                 None
             }
             MacroKind::User(body) => {
-                let mut value =
-                    self.eval_expression(definition.key.module, body, &mut Environment::new())?;
-                for (expected, argument) in definition.parameters.iter().zip(arguments) {
-                    let argument = match argument {
-                        MacroArgument::Expression(argument) => {
-                            self.meta_argument_value(expected, &argument)?
-                        }
-                        MacroArgument::Visibility(visibility) => {
-                            SyntaxValue::Visibility(visibility)
-                        }
-                    };
-                    value = self.apply_value(value, Value::Syntax(argument), call_span.clone())?;
-                }
-                match value {
+                let previous_context = if quote_result_type(&definition.result) {
+                    self.quote_context.replace(definition.result.clone())
+                } else {
+                    self.quote_context.take()
+                };
+                let evaluated = (|| {
+                    let mut value =
+                        self.eval_expression(definition.key.module, body, &mut Environment::new())?;
+                    for (expected, argument) in definition.parameters.iter().zip(arguments) {
+                        let argument = match argument {
+                            MacroArgument::Expression(argument) => {
+                                self.meta_argument_value(expected, &argument)?
+                            }
+                            MacroArgument::Visibility(visibility) => {
+                                SyntaxValue::Visibility(visibility)
+                            }
+                        };
+                        value =
+                            self.apply_value(value, Value::Syntax(argument), call_span.clone())?;
+                    }
+                    Some(value)
+                })();
+                self.quote_context = previous_context;
+                match evaluated? {
                     Value::Syntax(syntax) => Some(syntax),
                     Value::Sequence(values)
                         if matches!(definition.result, MetaType::Sequence(_)) =>
@@ -2202,7 +2331,10 @@ impl MacroExpander {
         if let Expression::VisibilityArgument(visibility) = argument {
             return matches!(
                 expected,
-                MetaType::Syntax | MetaType::Visibility | MetaType::MacroCallVisibility
+                MetaType::Syntax
+                    | MetaType::SyntaxNode
+                    | MetaType::Visibility
+                    | MetaType::MacroCallVisibility
             )
             .then(|| SyntaxValue::Visibility(visibility.clone()));
         }
@@ -2266,7 +2398,9 @@ impl MacroExpander {
                     MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
                         format!("`{}` syntax", format_meta_type(expected))
                     }
-                    MetaType::Syntax | MetaType::Expr => "an expression".to_owned(),
+                    MetaType::Syntax | MetaType::SyntaxNode | MetaType::Expr => {
+                        "an expression".to_owned()
+                    }
                     MetaType::Delimited(_, _) => format!("`{}` syntax", format_meta_type(expected)),
                 };
                 self.diagnostics.push(Diagnostic::new(
@@ -2317,20 +2451,34 @@ impl MacroExpander {
                 module,
                 function: function.as_ref().clone(),
                 environment: environment.clone(),
+                quote_result: self.quote_context.clone(),
             }),
             Expression::Satisfies(satisfies) => {
-                if matches!(meta_type(&satisfies.ty), Some(MetaType::Type))
+                if let Some(expected) = meta_type(&satisfies.ty)
                     && let Expression::Quote(quote) = satisfies.value.as_ref()
                 {
-                    return self.instantiate_type_quote(module, quote, environment);
+                    if !quote_result_type(&expected) {
+                        self.diagnostics.push(Diagnostic::new(
+                            satisfies.ty.syntax().span.clone(),
+                            format!(
+                                "{} does not satisfy `QuoteResult`",
+                                format_meta_type(&expected)
+                            ),
+                        ));
+                        return None;
+                    }
+                    return self.instantiate_contextual_quote(
+                        module,
+                        quote,
+                        environment,
+                        &expected,
+                    );
                 }
                 self.eval_expression(module, &satisfies.value, environment)
             }
             Expression::Quote(quote) => {
-                let mark = self.next_mark;
-                self.next_mark += 1;
-                self.instantiate_quote(module, &quote.template, environment, mark)
-                    .map(Value::Syntax)
+                let expected = self.quote_context.clone().unwrap_or(MetaType::Syntax);
+                self.instantiate_contextual_quote(module, quote, environment, &expected)
             }
             Expression::Splice(splice) => {
                 self.diagnostics.push(Diagnostic::new(
@@ -2406,7 +2554,17 @@ impl MacroExpander {
             Expression::Product(product) => {
                 let mut values = Vec::new();
                 for element in &product.elements {
-                    let value = self.eval_expression(module, &element.value, environment)?;
+                    let sequence_element = match self.quote_context.clone() {
+                        Some(MetaType::Sequence(expected)) => Some(*expected),
+                        _ => None,
+                    };
+                    let value = if let Expression::Quote(quote) = &element.value
+                        && let Some(expected) = sequence_element
+                    {
+                        self.instantiate_contextual_quote(module, quote, environment, &expected)?
+                    } else {
+                        self.eval_expression(module, &element.value, environment)?
+                    };
                     if element.spread {
                         let Value::Product(elements) = value else {
                             self.diagnostics.push(Diagnostic::new(
@@ -2448,6 +2606,30 @@ impl MacroExpander {
                         selected.arguments,
                         expression.syntax().span.clone(),
                     );
+                    if let Some(SyntaxValue::Raw(raw)) = result.take() {
+                        result = match crate::parser::parse_expression_fragment(
+                            &raw,
+                            &mut self.next_syntax_id,
+                        ) {
+                            Ok(mut parsed) => {
+                                let mark = self.next_mark;
+                                self.next_mark += 1;
+                                alpha_rename_expression(&mut parsed, mark, &mut Vec::new());
+                                self.freshen_expression(&mut parsed, module, mark);
+                                Some(SyntaxValue::from_expression(parsed))
+                            }
+                            Err(error) => {
+                                self.diagnostics.push(Diagnostic::new(
+                                    expression.syntax().span.clone(),
+                                    format!(
+                                        "macro `{}` produced a syntax fragment that is not valid in expression position: {}",
+                                        key.name, error.message
+                                    ),
+                                ));
+                                None
+                            }
+                        };
+                    }
                     if !arguments[consumed_count..].is_empty()
                         && result
                             .as_ref()
@@ -2623,13 +2805,21 @@ impl MacroExpander {
                                 ));
                                 return None;
                             };
-                            let value = if binding
-                                .annotation
-                                .as_ref()
-                                .is_some_and(|ty| matches!(meta_type(ty), Some(MetaType::Type)))
+                            let value = if let Some(expected) =
+                                binding.annotation.as_ref().and_then(meta_type)
                                 && let Expression::Quote(quote) = value
                             {
-                                self.instantiate_type_quote(module, quote, &local)?
+                                if !quote_result_type(&expected) {
+                                    self.diagnostics.push(Diagnostic::new(
+                                        binding.syntax.span.clone(),
+                                        format!(
+                                            "{} does not satisfy `QuoteResult`",
+                                            format_meta_type(&expected)
+                                        ),
+                                    ));
+                                    return None;
+                                }
+                                self.instantiate_contextual_quote(module, quote, &local, &expected)?
                             } else {
                                 self.eval_expression(module, value, &mut local)?
                             };
@@ -2645,8 +2835,21 @@ impl MacroExpander {
                             }
                         }
                         Statement::Assignment(assignment) => {
-                            let value =
-                                self.eval_expression(module, &assignment.value, &mut local)?;
+                            let value = if let Expression::Quote(quote) = &assignment.value
+                                && matches!(
+                                    &assignment.target,
+                                    Expression::Access(access)
+                                        if matches!(access.accessor, Accessor::Name(ref name) if name == "callee" || name == "argument")
+                                ) {
+                                self.instantiate_contextual_quote(
+                                    module,
+                                    quote,
+                                    &local,
+                                    &MetaType::Expr,
+                                )?
+                            } else {
+                                self.eval_expression(module, &assignment.value, &mut local)?
+                            };
                             if !self.assign_compile_time(
                                 module,
                                 &assignment.target,
@@ -2882,66 +3085,71 @@ impl MacroExpander {
             }
             "Parenthesized" | "Bracketed" | "Braced" => {
                 let kind = delimiter_kind(constructor).expect("matched delimiter constructor");
-                let contents = match argument {
-                    Value::Product(mut values)
-                        if values.len() == 1 && matches!(values[0].1, Value::Sequence(_)) =>
-                    {
-                        let (_, Value::Sequence(values)) = values.remove(0) else {
-                            unreachable!("guarded sequence contents")
-                        };
-                        DelimitedValueContents::Sequence(values)
-                    }
-                    Value::Product(mut values)
-                        if values.len() == 1 && matches!(values[0].1, Value::Separated { .. }) =>
-                    {
-                        let (
-                            _,
-                            Value::Separated {
+                let contents =
+                    match argument {
+                        Value::Syntax(SyntaxValue::Raw(syntax)) => DelimitedValueContents::Fixed(
+                            vec![(None, Value::Syntax(SyntaxValue::Raw(syntax)))],
+                        ),
+                        Value::Product(mut values)
+                            if values.len() == 1 && matches!(values[0].1, Value::Sequence(_)) =>
+                        {
+                            let (_, Value::Sequence(values)) = values.remove(0) else {
+                                unreachable!("guarded sequence contents")
+                            };
+                            DelimitedValueContents::Sequence(values)
+                        }
+                        Value::Product(mut values)
+                            if values.len() == 1
+                                && matches!(values[0].1, Value::Separated { .. }) =>
+                        {
+                            let (
+                                _,
+                                Value::Separated {
+                                    elements,
+                                    separator,
+                                    trailing,
+                                },
+                            ) = values.remove(0)
+                            else {
+                                unreachable!("guarded separated contents")
+                            };
+                            DelimitedValueContents::Separated {
                                 elements,
                                 separator,
                                 trailing,
-                            },
-                        ) = values.remove(0)
-                        else {
-                            unreachable!("guarded separated contents")
-                        };
-                        DelimitedValueContents::Separated {
+                            }
+                        }
+                        Value::Product(values) => {
+                            if !values
+                                .iter()
+                                .all(|(_, value)| matches!(value, Value::Syntax(_)))
+                            {
+                                self.diagnostics.push(Diagnostic::new(
+                                    span,
+                                    format!("`{constructor}` contents must contain `Syntax`"),
+                                ));
+                                return None;
+                            }
+                            DelimitedValueContents::Fixed(values)
+                        }
+                        Value::Sequence(values) => DelimitedValueContents::Sequence(values),
+                        Value::Separated {
                             elements,
                             separator,
                             trailing,
-                        }
-                    }
-                    Value::Product(values) => {
-                        if !values
-                            .iter()
-                            .all(|(_, value)| matches!(value, Value::Syntax(_)))
-                        {
+                        } => DelimitedValueContents::Separated {
+                            elements,
+                            separator,
+                            trailing,
+                        },
+                        _ => {
                             self.diagnostics.push(Diagnostic::new(
                                 span,
-                                format!("`{constructor}` contents must contain `Syntax`"),
+                                format!("`{constructor}` requires product or sequence contents"),
                             ));
                             return None;
                         }
-                        DelimitedValueContents::Fixed(values)
-                    }
-                    Value::Sequence(values) => DelimitedValueContents::Sequence(values),
-                    Value::Separated {
-                        elements,
-                        separator,
-                        trailing,
-                    } => DelimitedValueContents::Separated {
-                        elements,
-                        separator,
-                        trailing,
-                    },
-                    _ => {
-                        self.diagnostics.push(Diagnostic::new(
-                            span,
-                            format!("`{constructor}` requires product or sequence contents"),
-                        ));
-                        return None;
-                    }
-                };
+                    };
                 let generated_count = match &contents {
                     DelimitedValueContents::Fixed(values) => values.len(),
                     DelimitedValueContents::Sequence(values) => values.len(),
@@ -3109,6 +3317,7 @@ impl MacroExpander {
                 module,
                 function,
                 mut environment,
+                quote_result,
             } => {
                 if !bind_pattern(&function.pattern, argument, &mut environment) {
                     self.diagnostics.push(Diagnostic::new(
@@ -3117,12 +3326,25 @@ impl MacroExpander {
                     ));
                     return None;
                 }
-                self.eval_expression(module, &function.body, &mut environment)
+                let previous_context = match quote_result {
+                    Some(expected) => self.quote_context.replace(expected),
+                    None => self.quote_context.take(),
+                };
+                let result = self.eval_expression(module, &function.body, &mut environment);
+                self.quote_context = previous_context;
+                result
             }
             Value::Helper(module, binding) => {
                 let value = binding.value?;
-                let function = self.eval_expression(module, &value, &mut Environment::new())?;
-                self.apply_value(function, argument, span)
+                let previous_context = binding
+                    .annotation
+                    .as_ref()
+                    .and_then(function_result_meta_type)
+                    .map(|expected| self.quote_context.replace(expected))
+                    .unwrap_or_else(|| self.quote_context.take());
+                let function = self.eval_expression(module, &value, &mut Environment::new());
+                self.quote_context = previous_context;
+                self.apply_value(function?, argument, span)
             }
             _ => {
                 self.diagnostics
@@ -3232,6 +3454,271 @@ impl MacroExpander {
                 None
             }
         }
+    }
+
+    fn instantiate_contextual_quote(
+        &mut self,
+        module: ModuleId,
+        quote: &crate::QuoteExpression,
+        environment: &Environment,
+        expected: &MetaType,
+    ) -> Option<Value> {
+        if *expected == MetaType::Syntax {
+            let syntax = self.substitute_raw_quote(module, &quote.contents, environment)?;
+            return Some(Value::Syntax(SyntaxValue::Raw(syntax)));
+        }
+        if quote_contains_raw_splice(&quote.contents, environment) {
+            let syntax = self.substitute_raw_quote(module, &quote.contents, environment)?;
+            return self.instantiate_substituted_fragment(module, &syntax, expected);
+        }
+        if *expected == MetaType::Type {
+            return self.instantiate_type_quote(module, quote, environment);
+        }
+        if *expected == MetaType::Pattern {
+            let mark = self.next_mark;
+            self.next_mark += 1;
+            let mut pattern = crate::parser::parse_pattern_template_fragment(
+                &quote.contents,
+                &mut self.next_syntax_id,
+            )
+            .map_err(|error| {
+                self.diagnostics
+                    .push(Diagnostic::new(quote.contents.span.clone(), error.message));
+            })
+            .ok()?;
+            freshen_pattern(self, &mut pattern, module, mark);
+            substitute_pattern(&mut pattern, environment, &mut self.diagnostics)?;
+            return Some(Value::Syntax(SyntaxValue::Pattern(pattern)));
+        }
+
+        if matches!(expected, MetaType::Sequence(element) if **element == MetaType::Item)
+            && quote
+                .contents
+                .tokens()
+                .iter()
+                .all(|token| token.kind.is_trivia())
+        {
+            return Some(Value::Syntax(SyntaxValue::Items(Vec::new())));
+        }
+
+        if *expected == MetaType::SyntaxNode
+            && !quote
+                .contents
+                .tokens()
+                .iter()
+                .any(|token| token.kind == crate::TokenKind::Dollar)
+        {
+            let values = match_sequence_contents(
+                &quote.contents,
+                0,
+                quote.contents.tokens().len(),
+                &MetaType::SyntaxNode,
+                &mut self.next_syntax_id,
+            );
+            let Some(mut values) = values else {
+                self.diagnostics.push(Diagnostic::new(
+                    quote.contents.span.clone(),
+                    "quotation does not contain exactly one structural syntax node",
+                ));
+                return None;
+            };
+            if values.len() != 1 {
+                self.diagnostics.push(Diagnostic::new(
+                    quote.contents.span.clone(),
+                    "quotation does not contain exactly one structural syntax node",
+                ));
+                return None;
+            }
+            return Some(values.remove(0));
+        }
+
+        let mark = self.next_mark;
+        self.next_mark += 1;
+        let value = self.instantiate_quote(module, &quote.template, environment, mark)?;
+        let valid = match expected {
+            MetaType::SyntaxNode => !matches!(value, SyntaxValue::Items(_) | SyntaxValue::Raw(_)),
+            MetaType::Expr => value.to_expression().is_some(),
+            MetaType::Item => matches!(value, SyntaxValue::Item(_)),
+            MetaType::Sequence(element) if **element == MetaType::Item => {
+                matches!(value, SyntaxValue::Item(_) | SyntaxValue::Items(_))
+            }
+            _ => false,
+        };
+        if !valid {
+            self.diagnostics.push(Diagnostic::new(
+                quote.contents.span.clone(),
+                format!(
+                    "quotation cannot be interpreted as {}",
+                    format_meta_type(expected)
+                ),
+            ));
+            return None;
+        }
+        let value = if matches!(expected, MetaType::Sequence(element) if **element == MetaType::Item)
+            && let SyntaxValue::Item(item) = value
+        {
+            SyntaxValue::Items(vec![*item])
+        } else {
+            value
+        };
+        Some(Value::Syntax(value))
+    }
+
+    fn instantiate_substituted_fragment(
+        &mut self,
+        module: ModuleId,
+        syntax: &Syntax,
+        expected: &MetaType,
+    ) -> Option<Value> {
+        let mark = self.next_mark;
+        self.next_mark += 1;
+        let value = match expected {
+            MetaType::SyntaxNode => structural_syntax_value(syntax, &mut self.next_syntax_id)?,
+            MetaType::Expr => {
+                let mut expression =
+                    crate::parser::parse_expression_fragment(syntax, &mut self.next_syntax_id)
+                        .ok()?;
+                alpha_rename_expression(&mut expression, mark, &mut Vec::new());
+                self.freshen_expression(&mut expression, module, mark);
+                SyntaxValue::from_expression(expression)
+            }
+            MetaType::Type => {
+                let mut ty =
+                    crate::parser::parse_type_fragment(syntax, false, &mut self.next_syntax_id)
+                        .ok()?;
+                freshen_type(self, &mut ty, module, mark);
+                SyntaxValue::Type(ty)
+            }
+            MetaType::Pattern => {
+                let mut pattern =
+                    crate::parser::parse_pattern_fragment(syntax, false, &mut self.next_syntax_id)
+                        .ok()?;
+                freshen_pattern(self, &mut pattern, module, mark);
+                SyntaxValue::Pattern(pattern)
+            }
+            MetaType::Item => {
+                let mut item =
+                    crate::parser::parse_item_fragment(syntax, &mut self.next_syntax_id).ok()?;
+                alpha_rename_item(&mut item, mark);
+                freshen_item(self, &mut item, module, mark);
+                SyntaxValue::Item(Box::new(item))
+            }
+            MetaType::Sequence(element) if **element == MetaType::Item => {
+                let mut items =
+                    crate::parser::parse_item_list_fragment(syntax, &mut self.next_syntax_id)
+                        .ok()?;
+                for item in &mut items {
+                    alpha_rename_item(item, mark);
+                    freshen_item(self, item, module, mark);
+                }
+                SyntaxValue::Items(items)
+            }
+            _ => return None,
+        };
+        Some(Value::Syntax(value))
+    }
+
+    fn substitute_raw_quote(
+        &mut self,
+        module: ModuleId,
+        contents: &Syntax,
+        environment: &Environment,
+    ) -> Option<Syntax> {
+        let input = contents.tokens();
+        let mut output = Vec::new();
+        let mut cursor = 0;
+        while cursor < input.len() {
+            if input[cursor].kind != crate::TokenKind::Dollar {
+                output.push(input[cursor].clone());
+                cursor += 1;
+                continue;
+            }
+            let mut name_at = cursor + 1;
+            while name_at < input.len() && input[name_at].kind.is_trivia() {
+                name_at += 1;
+            }
+            if name_at == input.len() || input[name_at].kind != crate::TokenKind::Identifier {
+                output.push(input[cursor].clone());
+                cursor += 1;
+                continue;
+            }
+            let mut end = name_at + 1;
+            let repeated = end < input.len() && input[end].kind == crate::TokenKind::Ellipsis;
+            if repeated {
+                end += 1;
+            }
+            let name = &input[name_at].text;
+            let Some(value) = environment.get(name).map(EnvironmentBinding::get) else {
+                self.diagnostics.push(Diagnostic::new(
+                    contents.span.clone(),
+                    format!("unknown syntax splice `${name}`"),
+                ));
+                return None;
+            };
+            match value {
+                Value::Syntax(SyntaxValue::Items(items)) if repeated => {
+                    for item in items {
+                        output.extend_from_slice(item_syntax(&item).tokens());
+                    }
+                }
+                Value::Sequence(values) if repeated => {
+                    for value in values {
+                        let Value::Syntax(value) = value else {
+                            self.diagnostics.push(Diagnostic::new(
+                                contents.span.clone(),
+                                format!("repeated splice `${name}...` requires `Sequence Item`"),
+                            ));
+                            return None;
+                        };
+                        let syntax = value.syntax()?;
+                        output.extend_from_slice(syntax.tokens());
+                    }
+                }
+                Value::Syntax(value) if !repeated => {
+                    let Some(syntax) = value.syntax() else {
+                        self.diagnostics.push(Diagnostic::new(
+                            contents.span.clone(),
+                            format!("splice `${name}` contains an item sequence"),
+                        ));
+                        return None;
+                    };
+                    output.extend_from_slice(syntax.tokens());
+                }
+                _ => {
+                    self.diagnostics.push(Diagnostic::new(
+                        contents.span.clone(),
+                        if repeated {
+                            format!("repeated splice `${name}...` requires `Sequence Item`")
+                        } else {
+                            format!("splice `${name}` does not contain syntax")
+                        },
+                    ));
+                    return None;
+                }
+            }
+            cursor = end;
+        }
+        let mut offset = 0;
+        let mut source = String::new();
+        for token in &mut output {
+            let start = offset;
+            source.push_str(&token.text);
+            offset += token.text.len();
+            token.span = start..offset;
+        }
+        let source: Arc<str> = Arc::from(source);
+        let mut syntax = contents.clone();
+        syntax.id = self.fresh_id();
+        syntax.tokens = Arc::from(output);
+        syntax.token_range = 0..syntax.tokens.len();
+        syntax.span = Span::User {
+            source: Some(source),
+            range: 0..offset,
+            location: None,
+        };
+        let mark = self.next_mark;
+        self.next_mark += 1;
+        Some(syntax.generated(module.0, mark))
     }
 
     fn instantiate_type_quote(
@@ -3385,10 +3872,18 @@ fn macro_annotation_arity(annotation: &Type) -> usize {
     }
 }
 
+fn function_result_meta_type(mut annotation: &Type) -> Option<MetaType> {
+    while let Type::Function(function) = annotation {
+        annotation = &function.result;
+    }
+    meta_type(annotation).filter(quote_result_type)
+}
+
 fn meta_type(ty: &Type) -> Option<MetaType> {
     match ty {
         Type::Named(named) if named.namespace.is_none() => match named.name.as_str() {
             "Syntax" => Some(MetaType::Syntax),
+            "SyntaxNode" => Some(MetaType::SyntaxNode),
             "Expr" => Some(MetaType::Expr),
             "Ident" => Some(MetaType::Ident(None)),
             "CallExpr" => Some(MetaType::CallExpr),
@@ -3474,6 +3969,9 @@ fn delimiter_kind(name: &str) -> Option<DelimiterKind> {
 }
 
 fn delimiter_contents_meta(ty: &Type) -> Option<DelimitedMetaContents> {
+    if meta_type(ty) == Some(MetaType::Syntax) {
+        return Some(DelimitedMetaContents::Fixed(vec![MetaType::Syntax]));
+    }
     let Type::Product(product) = ty else {
         return None;
     };
@@ -3585,7 +4083,8 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
         }),
         MetaType::Visibility => matches!(argument, Expression::VisibilityArgument(_)),
         MetaType::MacroCallVisibility => false,
-        MetaType::Syntax => !matches!(argument, Expression::SyntaxArgument(_)),
+        MetaType::Syntax => true,
+        MetaType::SyntaxNode => !matches!(argument, Expression::SyntaxArgument(_)),
         MetaType::Expr => !matches!(
             argument,
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_)
@@ -3635,6 +4134,12 @@ fn delimiter_argument_value(
         return None;
     }
     let contents = match expected_contents {
+        DelimitedMetaContents::Fixed(elements) if elements.as_slice() == [MetaType::Syntax] => {
+            Some(DelimitedValueContents::Fixed(vec![(
+                None,
+                Value::Syntax(SyntaxValue::Raw(syntax_slice(syntax, first + 1, last))),
+            )]))
+        }
         DelimitedMetaContents::Fixed(elements) => {
             match_fixed_contents(syntax, first + 1, last, elements, next_syntax_id)
                 .map(DelimitedValueContents::Fixed)
@@ -3914,7 +4419,8 @@ fn match_syntax_fragment(
             *next_syntax_id = ids;
             SyntaxValue::Visibility(value)
         }
-        MetaType::Syntax => structural_syntax_value(syntax, next_syntax_id)?,
+        MetaType::Syntax => SyntaxValue::Raw(syntax.clone()),
+        MetaType::SyntaxNode => structural_syntax_value(syntax, next_syntax_id)?,
         MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => unreachable!(),
     };
     Some(Value::Syntax(syntax_value))
@@ -3977,7 +4483,7 @@ fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Optio
         let _ = (open, close);
         let expected = MetaType::Delimited(
             kind,
-            DelimitedMetaContents::Sequence(Box::new(MetaType::Syntax)),
+            DelimitedMetaContents::Sequence(Box::new(MetaType::SyntaxNode)),
         );
         return delimiter_argument_value(&expected, syntax, next_syntax_id);
     }
@@ -4080,6 +4586,7 @@ fn modifier_argument_matches(expected: &MetaType, argument: &ModifierArgument) -
         }
         MetaType::Item
         | MetaType::Syntax
+        | MetaType::SyntaxNode
         | MetaType::Visibility
         | MetaType::MacroCallVisibility => false,
         _ => argument
@@ -4101,7 +4608,10 @@ fn category_argument_syntax(argument: &Expression) -> Option<(&Syntax, bool)> {
 }
 
 fn meta_argument_expression<'a>(expected: &MetaType, argument: &'a Expression) -> &'a Expression {
-    if matches!(expected, MetaType::Syntax | MetaType::Expr) {
+    if matches!(
+        expected,
+        MetaType::Syntax | MetaType::SyntaxNode | MetaType::Expr
+    ) {
         return argument;
     }
     let mut argument = argument;
@@ -4118,6 +4628,7 @@ fn meta_argument_expression<'a>(expected: &MetaType, argument: &'a Expression) -
 fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
     left == right
         || matches!(right, MetaType::Syntax)
+        || matches!(right, MetaType::SyntaxNode) && !matches!(left, MetaType::Syntax)
         || matches!(left, MetaType::Delimited(_, _))
             && matches!(right, MetaType::Expr | MetaType::Type | MetaType::Pattern)
         || match (left, right) {
@@ -4218,6 +4729,7 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
         .iter()
         .map(|parameter| match parameter {
             MetaType::Syntax => "Syntax".to_owned(),
+            MetaType::SyntaxNode => "SyntaxNode".to_owned(),
             MetaType::Expr => "Expr".to_owned(),
             MetaType::Ident(None) => "Ident String".to_owned(),
             MetaType::Ident(Some(spelling)) => format!("Ident {spelling:?}"),
@@ -4241,6 +4753,14 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
 }
 
 fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
+    if matches!(definition.kind, MacroKind::Quote) {
+        return ResolvedMacro {
+            declaration: definition.declaration.syntax.id,
+            name: definition.key.name.clone(),
+            modifier: false,
+            signature: "T => QuoteResult T => Braced Syntax -> T".to_owned(),
+        };
+    }
     let parameters = format_meta_signature(&definition.parameters);
     let result = format_meta_type(&definition.result);
     let signature = if parameters.is_empty() {
@@ -4259,6 +4779,7 @@ fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
 fn format_meta_type(meta: &MetaType) -> String {
     match meta {
         MetaType::Syntax => "Syntax".to_owned(),
+        MetaType::SyntaxNode => "SyntaxNode".to_owned(),
         MetaType::Expr => "Expr".to_owned(),
         MetaType::Ident(None) => "Ident String".to_owned(),
         MetaType::Ident(Some(spelling)) => format!("Ident {spelling:?}"),
@@ -4326,10 +4847,41 @@ fn inferred_macro_signature(value: Option<&Expression>) -> (Vec<MetaType>, MetaT
     let mut parameters = Vec::new();
     let mut current = value;
     while let Some(Expression::Function(function)) = current {
-        parameters.push(pattern_meta_type(&function.pattern).unwrap_or(MetaType::Syntax));
+        parameters.push(pattern_meta_type(&function.pattern).unwrap_or(MetaType::SyntaxNode));
         current = Some(&function.body);
     }
-    (parameters, MetaType::Syntax)
+    (
+        parameters,
+        current
+            .map(inferred_result_meta_type)
+            .unwrap_or(MetaType::Syntax),
+    )
+}
+
+fn inferred_result_meta_type(expression: &Expression) -> MetaType {
+    match expression {
+        Expression::Quote(quote) => match &quote.template {
+            crate::QuoteTemplate::Expression(_) => MetaType::Expr,
+            crate::QuoteTemplate::Item(_) => MetaType::Item,
+            crate::QuoteTemplate::Items(_) => MetaType::Sequence(Box::new(MetaType::Item)),
+            crate::QuoteTemplate::Raw => MetaType::Syntax,
+        },
+        Expression::Block(block) => block
+            .statements
+            .last()
+            .and_then(|statement| match statement {
+                Statement::Expression(expression) => Some(inferred_result_meta_type(expression)),
+                Statement::Return(return_) => Some(inferred_result_meta_type(&return_.value)),
+                _ => None,
+            })
+            .unwrap_or(MetaType::SyntaxNode),
+        Expression::Match(match_) => match_
+            .arms
+            .first()
+            .map(|arm| inferred_result_meta_type(&arm.body))
+            .unwrap_or(MetaType::SyntaxNode),
+        _ => MetaType::SyntaxNode,
+    }
 }
 
 fn macro_body_parameter_types(expression: &Expression) -> Vec<Option<MetaType>> {
@@ -4348,11 +4900,11 @@ fn macro_body_parameter_types(expression: &Expression) -> Vec<Option<MetaType>> 
 fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
     match pattern {
         Pattern::Binding(binding) => match &binding.ty {
-            Type::Inferred(_) => Some(MetaType::Syntax),
+            Type::Inferred(_) => Some(MetaType::SyntaxNode),
             ty => meta_type(ty),
         },
         Pattern::Wildcard(wildcard) => match &wildcard.ty {
-            Type::Inferred(_) => Some(MetaType::Syntax),
+            Type::Inferred(_) => Some(MetaType::SyntaxNode),
             ty => meta_type(ty),
         },
         Pattern::Product(_)
@@ -4367,6 +4919,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
         Type::Named(named) => matches!(
             named.name.as_str(),
             "Syntax"
+                | "SyntaxNode"
                 | "Expr"
                 | "Ident"
                 | "CallExpr"
@@ -4608,6 +5161,76 @@ fn valid_macro_annotation(annotation: &Type) -> bool {
     macro_signature(annotation).is_some()
 }
 
+fn invalid_raw_syntax_shape(meta: &MetaType) -> bool {
+    match meta {
+        MetaType::Delimited(_, DelimitedMetaContents::Fixed(elements))
+            if elements.as_slice() == [MetaType::Syntax] =>
+        {
+            false
+        }
+        MetaType::Delimited(_, DelimitedMetaContents::Fixed(elements))
+        | MetaType::Product(elements) => elements.iter().any(|element| {
+            matches!(element, MetaType::Syntax) || invalid_raw_syntax_shape(element)
+        }),
+        MetaType::Delimited(_, DelimitedMetaContents::Sequence(element))
+        | MetaType::Sequence(element)
+        | MetaType::Optional(element) => {
+            matches!(element.as_ref(), MetaType::Syntax) || invalid_raw_syntax_shape(element)
+        }
+        MetaType::Delimited(_, DelimitedMetaContents::Separated { element, separator }) => {
+            matches!(element.as_ref(), MetaType::Syntax)
+                || matches!(separator.as_ref(), MetaType::Syntax)
+                || invalid_raw_syntax_shape(element)
+                || invalid_raw_syntax_shape(separator)
+        }
+        _ => false,
+    }
+}
+
+fn quote_result_type(meta: &MetaType) -> bool {
+    match meta {
+        MetaType::Syntax
+        | MetaType::SyntaxNode
+        | MetaType::Expr
+        | MetaType::Type
+        | MetaType::Pattern
+        | MetaType::Item => true,
+        MetaType::Sequence(element) => **element == MetaType::Item,
+        _ => false,
+    }
+}
+
+fn valid_quote_declaration(declaration: &MacroDeclaration) -> bool {
+    let [crate::TypeParameterPattern::Binding(parameter)] = declaration.type_parameters.as_slice()
+    else {
+        return false;
+    };
+    if parameter.name != "T" || !parameter.sized {
+        return false;
+    }
+    let [bound] = declaration.trait_bounds.as_slice() else {
+        return false;
+    };
+    if bound.trait_name.namespace.is_some()
+        || bound.trait_name.name != "QuoteResult"
+        || !matches!(bound.arguments.as_slice(), [Type::Named(argument)] if argument.namespace.is_none() && argument.name == "T")
+    {
+        return false;
+    }
+    let Some(Type::Function(function)) = declaration.annotation.as_ref() else {
+        return false;
+    };
+    matches!(
+        function.parameter.as_ref(),
+        Type::Application(application)
+            if matches!(application.callee.as_ref(), Type::Named(name) if name.namespace.is_none() && name.name == "Braced")
+                && matches!(unwrap_singleton_product(&application.argument), Type::Named(name) if name.namespace.is_none() && name.name == "Syntax")
+    ) && matches!(
+        function.result.as_ref(),
+        Type::Named(result) if result.namespace.is_none() && result.name == "T"
+    )
+}
+
 fn valid_macro_parameter_patterns(expression: &Expression, arity: usize) -> bool {
     if arity == 0 {
         return true;
@@ -4740,6 +5363,14 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 && delimited.kind == kind
             {
                 let contents = match &delimited.contents {
+                    DelimitedValueContents::Fixed(values)
+                        if matches!(
+                            values.as_slice(),
+                            [(None, Value::Syntax(SyntaxValue::Raw(_)))]
+                        ) =>
+                    {
+                        values[0].1.clone()
+                    }
                     DelimitedValueContents::Fixed(values) => Value::Product(values.clone()),
                     DelimitedValueContents::Sequence(values) => Value::Sequence(values.clone()),
                     DelimitedValueContents::Separated {
@@ -4858,7 +5489,8 @@ fn matches_pattern_type(ty: &Type, value: &Value) -> bool {
 
 fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
     match (expected, value) {
-        (MetaType::Syntax, Value::Syntax(_)) => true,
+        (MetaType::Syntax, Value::Syntax(SyntaxValue::Raw(_))) => true,
+        (MetaType::SyntaxNode, Value::Syntax(value)) => !matches!(value, SyntaxValue::Raw(_)),
         (MetaType::Expr, Value::Syntax(syntax)) => syntax.to_expression().is_some(),
         (MetaType::Ident(spelling), Value::Syntax(SyntaxValue::Ident(name))) => spelling
             .as_ref()

@@ -760,6 +760,7 @@ pub struct TypeChecker {
     copy_trait: Option<TraitId>,
     sized_trait: Option<TraitId>,
     string_type_trait: Option<TraitId>,
+    quote_result_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
@@ -796,6 +797,7 @@ impl TypeChecker {
         self.copy_trait = module.standard_trait("Copy");
         self.sized_trait = module.standard_trait("Sized");
         self.string_type_trait = module.standard_trait("StringType");
+        self.quote_result_trait = module.standard_trait("QuoteResult");
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
         self.collect_type_declarations(&module);
@@ -939,6 +941,20 @@ impl TypeChecker {
                 "standard library must declare public empty trait `StringType`",
             )),
         }
+        match self
+            .quote_result_trait
+            .and_then(|id| module.traits().get(&id))
+        {
+            Some(quote_result)
+                if quote_result.declaration.visibility == crate::Visibility::Public
+                    && quote_result.declaration.type_parameters.len() == 1
+                    && quote_result.parameters.len() == 1
+                    && quote_result.declaration.members.is_empty() => {}
+            _ => self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "standard library must declare public empty trait `QuoteResult`",
+            )),
+        }
         match self.drop_trait.and_then(|id| module.traits().get(&id)) {
             Some(drop)
                 if drop.declaration.visibility == crate::Visibility::Public
@@ -1051,6 +1067,13 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     "`StringType` is compiler-defined and cannot be implemented explicitly",
+                ));
+                continue;
+            }
+            if Some(implementation.trait_id) == self.quote_result_trait {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "`QuoteResult` is compiler-defined and cannot be implemented explicitly",
                 ));
                 continue;
             }

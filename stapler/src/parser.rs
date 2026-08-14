@@ -62,6 +62,17 @@ pub(crate) fn parse_pattern_fragment(
     })
 }
 
+/// Reinterprets quotation contents as a pattern template, permitting splices.
+pub(crate) fn parse_pattern_template_fragment(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<Pattern, ParseError> {
+    parse_fragment(syntax, false, next_syntax_id, |grammar| {
+        grammar.quote_depth += 1;
+        grammar.parse_pattern()
+    })
+}
+
 /// Reinterprets original tokens as exactly one expression.
 pub(crate) fn parse_expression_fragment(
     syntax: &Syntax,
@@ -79,6 +90,21 @@ pub(crate) fn parse_item_fragment(
 ) -> Result<Item, ParseError> {
     parse_fragment(syntax, false, next_syntax_id, |grammar| {
         grammar.parse_item()
+    })
+}
+
+/// Reinterprets original tokens as a complete list of zero or more items.
+pub(crate) fn parse_item_list_fragment(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<Vec<Item>, ParseError> {
+    parse_fragment(syntax, false, next_syntax_id, |grammar| {
+        let mut items = Vec::new();
+        while grammar.peek().is_some() {
+            items.push(grammar.parse_item()?);
+            grammar.eat(TokenKind::Semicolon);
+        }
+        Ok(items)
     })
 }
 
@@ -411,9 +437,16 @@ impl Grammar {
         let name = self
             .expect(TokenKind::Identifier, "expected macro name")?
             .text;
+        let mut type_parameters = Vec::new();
+        let mut trait_bounds = Vec::new();
         let annotation = if self.eat(TokenKind::Colon) {
             let previous = self.newline_terminates_type;
             self.newline_terminates_type = true;
+            type_parameters = self.parse_type_parameters()?;
+            if !type_parameters.is_empty() {
+                self.parse_sized_relaxations(&mut type_parameters)?;
+                trait_bounds = self.parse_trait_bounds()?;
+            }
             let annotation = self.parse_type();
             self.newline_terminates_type = previous;
             Some(annotation?)
@@ -430,6 +463,8 @@ impl Grammar {
             visibility,
             name,
             modifier,
+            type_parameters,
+            trait_bounds,
             annotation,
             value,
         })
