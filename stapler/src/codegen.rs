@@ -22,7 +22,7 @@ use crate::typecheck::{
 use crate::{
     CallExpression, CheckedFunctionType, CheckedProductType, CheckedResource, CheckedResourceSet,
     CheckedType, Diagnostic, Expression, FloatType, FunctionId, IntegerBinaryOperation,
-    IntegerCompareOperation, IntegerType, IntrinsicFunction, Item, ModuleId, Pattern,
+    IntegerCompareOperation, IntegerType, IntrinsicFunction, Item, ModuleId, NumericType, Pattern,
     PatternBindingKind, ProductExpression, ResolvedFunction, Span, Statement, SymbolId,
     TypeParameterId, TypedModule,
 };
@@ -4596,6 +4596,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         intrinsic: IntrinsicFunction,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         match intrinsic {
+            IntrinsicFunction::ToString { value } => {
+                return self.compile_numeric_to_string(environment, call, value);
+            }
             IntrinsicFunction::StringFromCString => {
                 return self.compile_string_from_c_string(environment, call);
             }
@@ -4814,6 +4817,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             IntrinsicFunction::StringFromCString
             | IntrinsicFunction::StringToCString
+            | IntrinsicFunction::ToString { .. }
             | IntrinsicFunction::FloatBinary { .. }
             | IntrinsicFunction::FloatCompare { .. }
             | IntrinsicFunction::ErasedProductLength
@@ -4824,6 +4828,117 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
         .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
         Ok(value.as_any_value_enum())
+    }
+
+    fn compile_numeric_to_string(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+        numeric: NumericType,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let argument = self.compile_expression(environment, &call.argument)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
+        let capacity = self.context.i32_type().const_int(128, false);
+        let buffer = self
+            .builder
+            .build_array_alloca(self.context.i8_type(), capacity, "to_string.buffer")
+            .map_err(compiler_diagnostic)?;
+        let format = match numeric {
+            NumericType::Integer(integer) if integer.is_signed() => "%lld",
+            NumericType::Integer(_) => "%llu",
+            NumericType::Float(FloatType::F32) => "%.9g",
+            NumericType::Float(FloatType::F64) => "%.17g",
+        };
+        let format = self
+            .builder
+            .build_global_string_ptr(format, "to_string.format")
+            .map_err(compiler_diagnostic)?
+            .as_pointer_value();
+        let formatted = match (numeric, value_as_basic(argument)) {
+            (NumericType::Integer(integer), Some(BasicValueEnum::IntValue(value))) => {
+                let bits = value.get_type().get_bit_width();
+                let wide = if bits < 64 {
+                    if integer.is_signed() {
+                        self.builder.build_int_s_extend(
+                            value,
+                            self.context.i64_type(),
+                            "to_string.integer",
+                        )
+                    } else {
+                        self.builder.build_int_z_extend(
+                            value,
+                            self.context.i64_type(),
+                            "to_string.integer",
+                        )
+                    }
+                    .map_err(compiler_diagnostic)?
+                } else {
+                    value
+                };
+                BasicValueEnum::IntValue(wide)
+            }
+            (NumericType::Float(FloatType::F32), Some(BasicValueEnum::FloatValue(value))) => {
+                BasicValueEnum::FloatValue(
+                    self.builder
+                        .build_float_ext(value, self.context.f64_type(), "to_string.float")
+                        .map_err(compiler_diagnostic)?,
+                )
+            }
+            (NumericType::Float(FloatType::F64), Some(BasicValueEnum::FloatValue(value))) => {
+                BasicValueEnum::FloatValue(value)
+            }
+            _ => {
+                return Err(Diagnostic::new(
+                    call.syntax.span.clone(),
+                    "numeric conversion requires a numeric value",
+                ));
+            }
+        };
+        let snprintf_type = self.context.i32_type().fn_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.size_type.into(),
+                self.context.ptr_type(AddressSpace::default()).into(),
+            ],
+            true,
+        );
+        let snprintf = self
+            .llvm_module
+            .get_function("snprintf")
+            .unwrap_or_else(|| {
+                self.llvm_module
+                    .add_function("snprintf", snprintf_type, None)
+            });
+        let length = self
+            .builder
+            .build_direct_call(
+                snprintf,
+                &[
+                    buffer.into(),
+                    self.size_type.const_int(128, false).into(),
+                    format.into(),
+                    formatted.into(),
+                ],
+                "to_string.length",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let length = self
+            .builder
+            .build_int_z_extend(length, self.size_type, "to_string.size")
+            .map_err(compiler_diagnostic)?;
+        let pointer =
+            self.build_gc_allocation(length, "to_string.data", call.syntax.span.clone())?;
+        self.builder
+            .build_memcpy(pointer, 1, buffer, 1, length)
+            .map_err(compiler_diagnostic)?;
+        Ok(self
+            .build_string_value(pointer, length, call.syntax.span.clone())?
+            .as_any_value_enum())
     }
 
     fn compile_bool(

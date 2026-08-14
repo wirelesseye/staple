@@ -1,1 +1,9 @@
 pub type String = Ref U8[]
+
+pub trait ToString = T => {
+    to_string: T -> String
+}
+
+impl ToString String {
+    def to_string = value => value
+}

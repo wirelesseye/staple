@@ -214,6 +214,9 @@ pub struct ResolvedMacro {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IntrinsicFunction {
+    ToString {
+        value: NumericType,
+    },
     IntegerBinary {
         integer: IntegerType,
         operation: IntegerBinaryOperation,
@@ -235,6 +238,12 @@ pub enum IntrinsicFunction {
     ErasedProductLength,
     RefReplace,
     Drop,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NumericType {
+    Integer(IntegerType),
+    Float(FloatType),
 }
 
 #[derive(Debug, Clone)]
@@ -956,6 +965,12 @@ impl NameResolver {
 
         let mut expected = Vec::new();
         for integer in IntegerType::ALL {
+            expected.push((
+                format!("__{}_to_string", integer.intrinsic_name()),
+                IntrinsicFunction::ToString {
+                    value: NumericType::Integer(integer),
+                },
+            ));
             for (suffix, operation) in [
                 ("add", IntegerBinaryOperation::Add),
                 ("subtract", IntegerBinaryOperation::Subtract),
@@ -980,6 +995,12 @@ impl NameResolver {
             }
         }
         for float in FloatType::ALL {
+            expected.push((
+                format!("__{}_to_string", float.intrinsic_name()),
+                IntrinsicFunction::ToString {
+                    value: NumericType::Float(float),
+                },
+            ));
             for (suffix, operation) in [
                 ("add", IntegerBinaryOperation::Add),
                 ("subtract", IntegerBinaryOperation::Subtract),

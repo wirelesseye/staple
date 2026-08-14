@@ -1389,12 +1389,17 @@ Ordering
 Option T
 ```
 
-The numeric types, `Bool`, `String`, arithmetic and ordering traits, and their functions
+The numeric types, `Bool`, `String`, arithmetic and ordering traits, `ToString`, and their functions
 from `std.core` are imported implicitly into every source module. These are
 ordinary type names rather than keywords, so a local declaration or explicit
 import can shadow a prelude name. Integer literals use an expected integer type
 when one is available and otherwise default to `I32`. Mixed-type arithmetic is
 not implicit.
+
+`ToString` has the member `to_string: T -> String` and is implemented for all
+integer and floating-point types, `Bool`, and `String`. Integers use decimal
+notation, booleans produce `"True"` or `"False"`, and converting a `String`
+returns it unchanged. Floating-point values use round-trip decimal notation.
 
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation

@@ -1327,4 +1327,65 @@ mod tests {
         let _ = std::fs::remove_file(output);
         assert!(status.success(), "float executable returned {status}");
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn runs_to_string_for_prelude_scalar_types() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-to-string-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-to-string-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "def classify: String -> I32 = value => match value {\n",
+                "  \"-42\" => 1, \"42\" => 2, \"1.5\" => 3,\n",
+                "  \"True\" => 4, \"False\" => 5, \"hé\" => 6, _ => 100,\n",
+                "}\n",
+                "let integer = 42\n",
+                "let integer_i8: I8 = 42\nlet integer_i16: I16 = 42\n",
+                "let integer_i64: I64 = 42\nlet integer_isize: ISize = 42\n",
+                "let boolean_true: Bool = True\nlet boolean_false: Bool = False\n",
+                "let text: String = \"hé\"\n",
+                "let score =\n",
+                "  (classify (to_string integer_i8) - 2) +\n",
+                "  (classify (to_string integer_i16) - 2) +\n",
+                "  (classify (to_string integer) - 2) +\n",
+                "  (classify (to_string integer_i64) - 2) +\n",
+                "  (classify (to_string (42 satisfies U8)) - 2) +\n",
+                "  (classify (to_string (42 satisfies U16)) - 2) +\n",
+                "  (classify (to_string (42 satisfies U32)) - 2) +\n",
+                "  (classify (to_string (42 satisfies U64)) - 2) +\n",
+                "  (classify (to_string integer_isize) - 2) +\n",
+                "  (classify (to_string (42 satisfies USize)) - 2) +\n",
+                "  (classify (to_string (1.5 satisfies F32)) - 3) +\n",
+                "  (classify (to_string (1.5 satisfies F64)) - 3) +\n",
+                "  (classify (to_string boolean_true) - 4) +\n",
+                "  (classify (to_string boolean_false) - 5) +\n",
+                "  (classify (to_string text) - 6)\n",
+                "exit score\n",
+            ),
+        )
+        .expect("temporary ToString source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("ToString executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("ToString executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "ToString executable returned {status}");
+    }
 }

@@ -4,6 +4,13 @@ pub typegroup Bool = {
 }
 pub use Bool *
 
+impl ToString Bool {
+    def to_string = value => match value {
+        True() => "True",
+        False() => "False",
+    }
+}
+
 impl Eq Bool {
     def equal = left => right => match (left, right) {
         (True(), True()) => True,

@@ -1439,6 +1439,17 @@ impl TypeChecker {
     fn validate_intrinsics(&mut self, module: &ResolvedModule) {
         for (symbol, intrinsic) in module.intrinsic_functions() {
             let expected = match intrinsic {
+                crate::IntrinsicFunction::ToString { value } => {
+                    let parameter = match value {
+                        crate::NumericType::Integer(integer) => CheckedType::integer(*integer),
+                        crate::NumericType::Float(float) => CheckedType::float(*float),
+                    };
+                    CheckedType::Function(CheckedFunctionType {
+                        parameter: Box::new(parameter),
+                        resources: CheckedResourceSet::default(),
+                        result: Box::new(CheckedType::String),
+                    })
+                }
                 crate::IntrinsicFunction::IntegerBinary { integer, .. } => {
                     let integer = CheckedType::integer(*integer);
                     CheckedType::Function(CheckedFunctionType {

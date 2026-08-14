@@ -1,6 +1,18 @@
 pub use std.core.number.types *
 
 extern "staple-intrinsic" {
+    let __i8_to_string: I8 -> String
+    let __i16_to_string: I16 -> String
+    let __i32_to_string: I32 -> String
+    let __i64_to_string: I64 -> String
+    let __u8_to_string: U8 -> String
+    let __u16_to_string: U16 -> String
+    let __u32_to_string: U32 -> String
+    let __u64_to_string: U64 -> String
+    let __isize_to_string: ISize -> String
+    let __usize_to_string: USize -> String
+    let __f32_to_string: F32 -> String
+    let __f64_to_string: F64 -> String
     let __i8_add: (I8, I8) -> I8
     let __i8_subtract: (I8, I8) -> I8
     let __i8_multiply: (I8, I8) -> I8
@@ -98,6 +110,19 @@ extern "staple-intrinsic" {
     let __f64_lt: (F64, F64) -> Bool
     let __f64_gt: (F64, F64) -> Bool
 }
+
+impl ToString I8 { def to_string = value => __i8_to_string value }
+impl ToString I16 { def to_string = value => __i16_to_string value }
+impl ToString I32 { def to_string = value => __i32_to_string value }
+impl ToString I64 { def to_string = value => __i64_to_string value }
+impl ToString U8 { def to_string = value => __u8_to_string value }
+impl ToString U16 { def to_string = value => __u16_to_string value }
+impl ToString U32 { def to_string = value => __u32_to_string value }
+impl ToString U64 { def to_string = value => __u64_to_string value }
+impl ToString ISize { def to_string = value => __isize_to_string value }
+impl ToString USize { def to_string = value => __usize_to_string value }
+impl ToString F32 { def to_string = value => __f32_to_string value }
+impl ToString F64 { def to_string = value => __f64_to_string value }
 
 impl Add I8 {
     def add = left => right => __i8_add (left, right)

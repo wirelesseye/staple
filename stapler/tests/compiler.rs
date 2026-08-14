@@ -396,7 +396,12 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
         std::process::id()
     ));
     copy_directory(&root.join("stdlib"), &temporary);
-    std::fs::write(temporary.join("std/core/string.sta"), declaration)
+    std::fs::write(
+        temporary.join("std/core/string.sta"),
+        format!(
+            "{declaration}\npub trait ToString = T => {{ to_string: T -> String }}\nimpl ToString String {{ def to_string = value => value }}\n"
+        ),
+    )
         .expect("test String declaration should be written");
 
     let messages = match ProgramLoader::new()
@@ -3945,6 +3950,25 @@ fn type_checks_static_traits_and_bounded_generic_functions() {
         .compile_module(&module)
         .expect("static trait calls should compile");
     assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn provides_to_string_for_prelude_scalar_types() {
+    let module = type_check(concat!(
+        "def render: T => ToString T => T -> String = value => to_string value\n",
+        "let a = render (1 satisfies I8)\nlet b = render (1 satisfies I16)\n",
+        "let c = render (1 satisfies I32)\nlet d = render (1 satisfies I64)\n",
+        "let e = render (1 satisfies U8)\nlet f = render (1 satisfies U16)\n",
+        "let g = render (1 satisfies U32)\nlet h = render (1 satisfies U64)\n",
+        "let i = render (1 satisfies ISize)\nlet j = render (1 satisfies USize)\n",
+        "let k = render (1.5 satisfies F32)\nlet l = render (1.5 satisfies F64)\n",
+        "let boolean: Bool = True\nlet m = render boolean\n",
+        "let string: String = \"text\"\nlet n = render string\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("ToString implementations should generate LLVM");
 }
 
 #[test]
