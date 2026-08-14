@@ -4,7 +4,7 @@ pub macro if =
     condition: Expr =>
     then_branch: Expr =>
     quote {
-        match $condition {
+        match $condition satisfies Bool {
             True() => $then_branch,
             False() => (),
         }
@@ -16,7 +16,7 @@ pub macro if =
     _: Ident "else" =>
     else_branch: Expr =>
     quote {
-        match $condition {
+        match $condition satisfies Bool {
             True() => $then_branch,
             False() => $else_branch,
         }
@@ -27,7 +27,7 @@ pub macro while =
     body: Expr =>
     quote {
         loop {
-            match $condition {
+            match $condition satisfies Bool {
                 True() => $body,
                 False() => { break },
             }
