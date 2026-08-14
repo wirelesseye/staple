@@ -1115,6 +1115,48 @@ trait Increment = T => {
 }
 ```
 
+A trait may declare functional dependencies after its compile-time parameter
+binders. A dependency states that the parameters on the left uniquely determine
+the parameter on the right:
+
+```staple
+trait Iterator = Iter => Item => Iter ~> Item => {
+    next: Iter -> Item
+}
+
+trait Add = Left => Right => Output => {Left, Right} ~> Output => {
+    add: Left -> Right -> Output
+}
+```
+
+The left side is either one parameter or a non-empty comma-separated set in
+braces. The right side is one parameter. A trait may declare multiple
+dependencies, including chains such as `A ~> B => B ~> C =>`. Dependencies
+precede any prerequisite trait bounds in the declaration header.
+
+A dependent argument may be written as `_` when all of its determinants are
+known. If every remaining argument is inferable, the trailing arguments may be
+omitted entirely. These forms are equivalent:
+
+```staple
+Iterator Iter Item
+Iterator Iter _
+Iterator Iter
+
+Add I32 I32 I32
+Add I32 I32 _
+Add I32 I32
+```
+
+An underscore in a non-dependent position is an error. Product binders may
+infer individual elements, as in `Convert (From, _)`, when the corresponding
+parameter is functionally dependent. Trait implementation headers remain
+fully explicit and concrete.
+
+Functional dependencies are global coherence promises. Two implementations
+cannot agree on every determinant while choosing different dependent types;
+contradictory generic bounds are rejected for the same reason.
+
 Trait members must have function types, must mention every trait parameter, and
 cannot contain inferred types. Traits may be exported with `pub trait` and are
 imported with the same namespace, selected, renamed, and glob forms as other

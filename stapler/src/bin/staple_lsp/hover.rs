@@ -306,6 +306,12 @@ impl Collector<'_> {
                 for parameter in &declaration.type_parameters {
                     self.type_parameter(parameter);
                 }
+                for dependency in &declaration.functional_dependencies {
+                    for determinant in &dependency.determinants {
+                        self.ty(&Type::Named(determinant.clone()));
+                    }
+                    self.ty(&Type::Named(dependency.dependent.clone()));
+                }
                 for prerequisite in &declaration.prerequisites {
                     self.trait_bound(prerequisite);
                 }
@@ -717,10 +723,18 @@ impl Collector<'_> {
     }
 
     fn type_parameter(&mut self, parameter: &TypeParameterPattern) {
-        if let TypeParameterPattern::Product(product) = parameter {
-            for element in &product.elements {
-                self.type_parameter(element);
+        match parameter {
+            TypeParameterPattern::Binding(binding) => self.named(
+                &binding.syntax,
+                &binding.name,
+                format!("<type parameter> {}", binding.name),
+            ),
+            TypeParameterPattern::Product(product) => {
+                for element in &product.elements {
+                    self.type_parameter(element);
+                }
             }
+            TypeParameterPattern::Splice(_) => {}
         }
     }
 
@@ -737,6 +751,17 @@ impl Collector<'_> {
                     && let Some(signature) = self.type_signature(id, named.syntax.id)
                 {
                     self.named(&named.syntax, &named.name, signature);
+                } else if self
+                    .typed
+                    .resolved()
+                    .type_parameter_for(named.syntax.id)
+                    .is_some()
+                {
+                    self.named(
+                        &named.syntax,
+                        &named.name,
+                        format!("<type parameter> {}", named.name),
+                    );
                 }
             }
             Type::Product(product) => {

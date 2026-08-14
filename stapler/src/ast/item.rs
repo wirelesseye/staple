@@ -213,8 +213,16 @@ pub struct TraitDeclaration {
     pub visibility: Visibility,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
+    pub functional_dependencies: Vec<FunctionalDependency>,
     pub prerequisites: Vec<TraitBound>,
     pub members: Vec<TraitMember>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionalDependency {
+    pub syntax: Syntax,
+    pub determinants: Vec<NamedType>,
+    pub dependent: NamedType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

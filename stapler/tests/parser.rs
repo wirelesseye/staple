@@ -266,6 +266,44 @@ fn parses_trait_prerequisites_losslessly() {
 }
 
 #[test]
+fn parses_trait_functional_dependencies_losslessly() {
+    let source = concat!(
+        "trait Iterator = Iter => Item => Iter ~> Item => { next: Iter -> Item }\n",
+        "trait Add = Left => Right => Output => {Left, Right} ~> Output => Eq Output => { add: Left -> Right -> Output }\n",
+        "def iterate: Iter => Iterator Iter => Iter -> () = value => ()\n",
+        "def add: T => Add T T _ => T -> T = value => value\n",
+    );
+    let root = parse(source).expect("functional dependency syntax should parse");
+    assert_eq!(root.text(), source);
+
+    let Item::TraitDeclaration(iterator) = &root.items[0] else {
+        panic!("expected Iterator trait");
+    };
+    assert_eq!(iterator.functional_dependencies.len(), 1);
+    assert_eq!(
+        iterator.functional_dependencies[0].determinants[0].name,
+        "Iter"
+    );
+    assert_eq!(iterator.functional_dependencies[0].dependent.name, "Item");
+
+    let Item::TraitDeclaration(add) = &root.items[1] else {
+        panic!("expected Add trait");
+    };
+    assert_eq!(add.functional_dependencies[0].determinants.len(), 2);
+    assert_eq!(add.functional_dependencies[0].dependent.name, "Output");
+    assert_eq!(add.prerequisites.len(), 1);
+
+    let Statement::Binding(iterate) = statement(&root.items[2]) else {
+        panic!("expected iterate binding");
+    };
+    assert_eq!(iterate.trait_bounds[0].arguments.len(), 1);
+    let Statement::Binding(add_use) = statement(&root.items[3]) else {
+        panic!("expected add binding");
+    };
+    assert_eq!(add_use.trait_bounds[0].arguments.len(), 3);
+}
+
+#[test]
 fn parses_default_trait_members_losslessly() {
     let source = concat!(
         "trait Increment = T => {\n",

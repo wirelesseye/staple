@@ -2170,22 +2170,31 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .trait_dispatch_for(expression.syntax().id)
             .cloned()
         {
+            let trait_id = self
+                .typed_module
+                .resolved()
+                .trait_for_method(dispatch.method)
+                .expect("trait method owner");
             let arguments = dispatch
                 .arguments
                 .into_iter()
                 .map(|argument| substitute_type(argument, &self.active_type_substitutions))
                 .collect::<Vec<_>>();
+            let arguments = self
+                .typed_module
+                .complete_trait_arguments(trait_id, &arguments)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        "could not infer functional dependency arguments",
+                    )
+                })?;
             if arguments.iter().any(contains_type_parameter) {
                 return Err(Diagnostic::new(
                     expression.syntax().span.clone(),
                     "trait method arguments are not fully specialized",
                 ));
             }
-            let trait_id = self
-                .typed_module
-                .resolved()
-                .trait_for_method(dispatch.method)
-                .expect("trait method owner");
             let function_id = self
                 .typed_module
                 .trait_impl_method(trait_id, &arguments, dispatch.method)
@@ -4285,17 +4294,26 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .trait_dispatch_for(call.callee.syntax().id)
             .cloned()
         {
-            let arguments = dispatch
-                .arguments
-                .into_iter()
-                .map(|argument| substitute_type(argument, &self.active_type_substitutions))
-                .collect::<Vec<_>>();
-            let target = &arguments[0];
             let trait_id = self
                 .typed_module
                 .resolved()
                 .trait_for_method(dispatch.method)
                 .expect("trait method owner");
+            let arguments = dispatch
+                .arguments
+                .into_iter()
+                .map(|argument| substitute_type(argument, &self.active_type_substitutions))
+                .collect::<Vec<_>>();
+            let arguments = self
+                .typed_module
+                .complete_trait_arguments(trait_id, &arguments)
+                .ok_or_else(|| {
+                    Diagnostic::new(
+                        call.callee.syntax().span.clone(),
+                        "could not infer functional dependency arguments",
+                    )
+                })?;
+            let target = &arguments[0];
             if self.typed_module.is_default_trait(trait_id)
                 && matches!(target, CheckedType::Product(_))
             {

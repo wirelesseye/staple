@@ -546,6 +546,34 @@ fn preserves_trait_prerequisites_across_modules() {
 }
 
 #[test]
+fn preserves_trait_functional_dependencies_across_modules() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "traits.sta",
+        "pub trait Iterator = Iter => Item => Iter ~> Item => { next: Iter -> Item }\n",
+    );
+    fixture.write(
+        "implementations.sta",
+        concat!(
+            "use traits\n",
+            "impl traits.Iterator I32 String { def next = value => \"next\" }\n",
+        ),
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use traits Iterator\n",
+            "use implementations\n",
+            "let result = Iterator.next 1\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("imported trait functional dependencies should remain available");
+}
+
+#[test]
 fn imports_and_specializes_default_trait_members() {
     let fixture = Fixture::new();
     fixture.write(

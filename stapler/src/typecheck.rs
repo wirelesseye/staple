@@ -23,6 +23,12 @@ pub struct CheckedTraitDispatch {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckedFunctionalDependency {
+    determinants: Vec<TypeParameterId>,
+    dependent: TypeParameterId,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedCoercion {
     pub source: CheckedType,
     pub target: CheckedType,
@@ -509,6 +515,7 @@ pub struct TypedModule {
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
+    trait_functional_dependencies: HashMap<TraitId, Vec<CheckedFunctionalDependency>>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
     trait_implementations: Vec<CheckedTraitImplementation>,
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
@@ -704,6 +711,40 @@ impl TypedModule {
             .and_then(|implementation| implementation.methods.get(&method).copied())
     }
 
+    pub(crate) fn complete_trait_arguments(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Option<Vec<CheckedType>> {
+        if !arguments.iter().any(contains_inferred_type) {
+            return Some(arguments.to_vec());
+        }
+        let parameters = self.trait_parameter_arguments.get(&trait_id)?;
+        let dependencies = self.trait_functional_dependencies.get(&trait_id)?;
+        if dependencies.is_empty() {
+            return None;
+        }
+        let query = trait_parameter_values(parameters, arguments);
+        let mut matches = self
+            .trait_implementations
+            .iter()
+            .filter(|implementation| implementation.trait_id == trait_id)
+            .filter(|implementation| {
+                let candidate = trait_parameter_values(parameters, &implementation.arguments);
+                query.iter().all(|(parameter, value)| {
+                    contains_inferred_type(value)
+                        || candidate
+                            .get(parameter)
+                            .is_some_and(|candidate| candidate == value)
+                })
+            });
+        let mut completed = matches.next()?.arguments.clone();
+        for candidate in matches {
+            completed = merge_trait_arguments(&completed, &candidate.arguments)?;
+        }
+        Some(completed)
+    }
+
     pub(crate) fn instantiated_trait_method_type(
         &self,
         trait_id: TraitId,
@@ -745,6 +786,7 @@ pub struct TypeChecker {
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
+    trait_functional_dependencies: HashMap<TraitId, Vec<CheckedFunctionalDependency>>,
     trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
     default_function_traits: HashMap<FunctionId, TraitId>,
     trait_dispatches: HashMap<SyntaxId, CheckedTraitDispatch>,
@@ -850,6 +892,7 @@ impl TypeChecker {
             function_bounds: self.function_bounds,
             trait_method_types: self.trait_method_types,
             trait_parameter_arguments: self.trait_parameter_arguments,
+            trait_functional_dependencies: self.trait_functional_dependencies,
             trait_dispatches: self.trait_dispatches,
             trait_implementations: self.trait_implementations,
             expression_coercions: self.expression_coercions,
@@ -988,6 +1031,17 @@ impl TypeChecker {
                 .collect::<Vec<_>>();
             self.trait_parameter_arguments
                 .insert(resolved_trait.id, parameter_arguments);
+            self.trait_functional_dependencies.insert(
+                resolved_trait.id,
+                resolved_trait
+                    .functional_dependencies
+                    .iter()
+                    .map(|dependency| CheckedFunctionalDependency {
+                        determinants: dependency.determinants.clone(),
+                        dependent: dependency.dependent,
+                    })
+                    .collect(),
+            );
             let mut prerequisites = Vec::new();
             for prerequisite in &resolved_trait.declaration.prerequisites {
                 if let Some(prerequisite) = self.resolve_trait_bound(module, prerequisite) {
@@ -996,6 +1050,20 @@ impl TypeChecker {
             }
             self.trait_prerequisites
                 .insert(resolved_trait.id, prerequisites);
+        }
+        for resolved_trait in module.traits().values() {
+            let prerequisites = self.expand_trait_bounds(
+                self.trait_prerequisites
+                    .get(&resolved_trait.id)
+                    .cloned()
+                    .unwrap_or_default(),
+            );
+            if self.bounds_violate_functional_dependencies(&prerequisites) {
+                self.diagnostics.push(Diagnostic::new(
+                    resolved_trait.declaration.syntax.span.clone(),
+                    "trait prerequisites conflict with a functional dependency",
+                ));
+            }
         }
         for resolved_trait in module.traits().values() {
             for method in &resolved_trait.methods {
@@ -1082,6 +1150,7 @@ impl TypeChecker {
                 implementation.trait_id,
                 &implementation.arguments,
                 span.clone(),
+                false,
             ) else {
                 continue;
             };
@@ -1125,6 +1194,32 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     "duplicate trait implementation for these arguments",
+                ));
+                continue;
+            }
+            let dependencies = self
+                .trait_functional_dependencies
+                .get(&implementation.trait_id)
+                .cloned()
+                .unwrap_or_default();
+            let parameters = &self.trait_parameter_arguments[&implementation.trait_id];
+            let new_values = trait_parameter_values(parameters, &arguments);
+            let conflict = self.trait_implementations.iter().any(|existing| {
+                if existing.trait_id != implementation.trait_id {
+                    return false;
+                }
+                let existing_values = trait_parameter_values(parameters, &existing.arguments);
+                dependencies.iter().any(|dependency| {
+                    dependency.determinants.iter().all(|determinant| {
+                        new_values.get(determinant) == existing_values.get(determinant)
+                    }) && new_values.get(&dependency.dependent)
+                        != existing_values.get(&dependency.dependent)
+                })
+            });
+            if conflict {
+                self.diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    "conflicting trait implementations violate a functional dependency",
                 ));
                 continue;
             }
@@ -1191,6 +1286,7 @@ impl TypeChecker {
         trait_id: TraitId,
         source_arguments: &[Type],
         span: Span,
+        allow_inference: bool,
     ) -> Option<(Vec<CheckedType>, HashMap<TypeParameterId, CheckedType>)> {
         let resolved_trait = &module.traits()[&trait_id];
         // Before traits had arity, a unary trait target such as `Box I32` was
@@ -1213,18 +1309,17 @@ impl TypeChecker {
         } else {
             source_arguments
         };
-        if source_arguments.len() != resolved_trait.declaration.type_parameters.len() {
+        let expected_arity = resolved_trait.declaration.type_parameters.len();
+        if source_arguments.len() > expected_arity
+            || (!allow_inference && source_arguments.len() != expected_arity)
+        {
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!(
                     "trait `{}` expects {} compile-time argument{}, found {}",
                     resolved_trait.declaration.name,
-                    resolved_trait.declaration.type_parameters.len(),
-                    if resolved_trait.declaration.type_parameters.len() == 1 {
-                        ""
-                    } else {
-                        "s"
-                    },
+                    expected_arity,
+                    if expected_arity == 1 { "" } else { "s" },
                     source_arguments.len()
                 ),
             ));
@@ -1233,6 +1328,10 @@ impl TypeChecker {
         let arguments = source_arguments
             .iter()
             .map(|argument| self.resolve_source_type(module, argument))
+            .chain(
+                std::iter::repeat(CheckedType::Inferred)
+                    .take(expected_arity.saturating_sub(source_arguments.len())),
+            )
             .collect::<Vec<_>>();
         let mut substitutions = HashMap::new();
         // `Sized T` must be expressible while `T` is unsized: the obligation
@@ -1250,6 +1349,55 @@ impl TypeChecker {
                 return None;
             }
         }
+        if allow_inference {
+            let mut known = substitutions
+                .iter()
+                .filter_map(|(parameter, argument)| {
+                    (!contains_inferred_type(argument)).then_some(*parameter)
+                })
+                .collect::<HashSet<_>>();
+            loop {
+                let before = known.len();
+                for dependency in &resolved_trait.functional_dependencies {
+                    if dependency
+                        .determinants
+                        .iter()
+                        .all(|determinant| known.contains(determinant))
+                    {
+                        known.insert(dependency.dependent);
+                    }
+                }
+                if known.len() == before {
+                    break;
+                }
+            }
+            let uninferable = substitutions.iter().find_map(|(parameter, argument)| {
+                (contains_inferred_type(argument) && !known.contains(parameter))
+                    .then_some(*parameter)
+            });
+            if let Some(parameter) = uninferable {
+                let name = resolved_trait
+                    .parameters
+                    .iter()
+                    .position(|candidate| *candidate == parameter)
+                    .and_then(|index| {
+                        resolved_trait
+                            .declaration
+                            .type_parameters
+                            .iter()
+                            .flat_map(TypeParameterPattern::names)
+                            .nth(index)
+                    })
+                    .unwrap_or("_");
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "trait argument for `{name}` cannot be inferred from functional dependencies"
+                    ),
+                ));
+                return None;
+            }
+        }
         Some((arguments, substitutions))
     }
 
@@ -1264,6 +1412,7 @@ impl TypeChecker {
             trait_id,
             &bound.arguments,
             bound.syntax.span.clone(),
+            true,
         )?;
         Some(CheckedTraitBound {
             trait_id,
@@ -1287,17 +1436,10 @@ impl TypeChecker {
         let Some(parameters) = self.trait_parameter_arguments.get(&bound.trait_id) else {
             return;
         };
-        let mut substitutions = HashMap::new();
-        if parameters.len() != bound.arguments.len()
-            || !parameters
-                .iter()
-                .zip(&bound.arguments)
-                .all(|(parameter, argument)| {
-                    infer_type_parameters(parameter, argument, &mut substitutions)
-                })
-        {
+        if parameters.len() != bound.arguments.len() {
             return;
         }
+        let substitutions = trait_parameter_values(parameters, &bound.arguments);
         for prerequisite in self
             .trait_prerequisites
             .get(&bound.trait_id)
@@ -1315,6 +1457,45 @@ impl TypeChecker {
             };
             self.expand_trait_bound(prerequisite, expanded);
         }
+    }
+
+    fn bounds_violate_functional_dependencies(&self, bounds: &[CheckedTraitBound]) -> bool {
+        for (index, left) in bounds.iter().enumerate() {
+            let Some(parameters) = self.trait_parameter_arguments.get(&left.trait_id) else {
+                continue;
+            };
+            let left_values = trait_parameter_values(parameters, &left.arguments);
+            for right in &bounds[index + 1..] {
+                if right.trait_id != left.trait_id {
+                    continue;
+                }
+                let right_values = trait_parameter_values(parameters, &right.arguments);
+                if self
+                    .trait_functional_dependencies
+                    .get(&left.trait_id)
+                    .into_iter()
+                    .flatten()
+                    .any(|dependency| {
+                        dependency.determinants.iter().all(|determinant| {
+                            let left = left_values.get(determinant);
+                            let right = right_values.get(determinant);
+                            left == right
+                                && left.is_some_and(|value| !contains_inferred_type(value))
+                        }) && left_values
+                            .get(&dependency.dependent)
+                            .zip(right_values.get(&dependency.dependent))
+                            .is_some_and(|(left, right)| {
+                                !contains_inferred_type(left)
+                                    && !contains_inferred_type(right)
+                                    && left != right
+                            })
+                    })
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn seed_constructors(&mut self, module: &ResolvedModule) {
@@ -1708,6 +1889,12 @@ impl TypeChecker {
                 }
             }
             let bounds = self.expand_trait_bounds(bounds);
+            if self.bounds_violate_functional_dependencies(&bounds) {
+                self.diagnostics.push(Diagnostic::new(
+                    function.pattern.syntax().span.clone(),
+                    "trait bounds conflict with a functional dependency",
+                ));
+            }
             if !bounds.is_empty() {
                 self.function_bounds.insert(function.id, bounds);
             }
@@ -4522,14 +4709,12 @@ impl TypeChecker {
                 .trait_for_method(*method)
                 .expect("trait method owner");
             let resolved_trait = &module.traits()[&trait_id];
-            if !resolved_trait
-                .parameters
-                .iter()
-                .all(|parameter| substitutions.contains_key(parameter))
-            {
-                continue;
+            for parameter in &resolved_trait.parameters {
+                substitutions
+                    .entry(*parameter)
+                    .or_insert(CheckedType::Inferred);
             }
-            let arguments = resolved_trait
+            let partial_arguments = resolved_trait
                 .declaration
                 .type_parameters
                 .iter()
@@ -4540,15 +4725,14 @@ impl TypeChecker {
                     )
                 })
                 .collect::<Vec<_>>();
-            if !self.trait_obligation_available(trait_id, &arguments) {
+            let Some(arguments) = self.resolve_trait_obligation(trait_id, &partial_arguments)
+            else {
                 unavailable = true;
                 continue;
-            }
-            matches.push((
-                *method,
-                arguments,
-                substitute_type(template, &substitutions),
-            ));
+            };
+            let completed =
+                trait_parameter_values(&self.trait_parameter_arguments[&trait_id], &arguments);
+            matches.push((*method, arguments, substitute_type(template, &completed)));
         }
         if matches.len() == 1 {
             let (method, arguments, value_type) = matches.pop().expect("one method match");
@@ -4570,6 +4754,53 @@ impl TypeChecker {
     }
 
     fn trait_obligation_available(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
+        self.resolve_trait_obligation(trait_id, arguments).is_some()
+    }
+
+    fn resolve_trait_obligation(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Option<Vec<CheckedType>> {
+        if arguments.iter().any(contains_inferred_type) {
+            let parameters = self.trait_parameter_arguments.get(&trait_id)?;
+            let query = trait_parameter_values(parameters, arguments);
+            let mut matches = self
+                .active_function_bounds
+                .iter()
+                .flatten()
+                .filter(|bound| bound.trait_id == trait_id)
+                .map(|bound| bound.arguments.as_slice())
+                .chain(
+                    self.trait_implementations
+                        .iter()
+                        .filter(|implementation| implementation.trait_id == trait_id)
+                        .map(|implementation| implementation.arguments.as_slice()),
+                )
+                .filter(|candidate| {
+                    let candidate = trait_parameter_values(parameters, candidate);
+                    query.iter().all(|(parameter, value)| {
+                        contains_inferred_type(value)
+                            || candidate.get(parameter).is_some_and(|candidate| {
+                                !contains_inferred_type(candidate) && candidate == value
+                            })
+                    })
+                });
+            let mut completed = matches.next()?.to_vec();
+            for candidate in matches {
+                completed = merge_trait_arguments(&completed, candidate)?;
+            }
+            return Some(completed);
+        }
+        self.trait_obligation_available_exact(trait_id, arguments)
+            .then(|| arguments.to_vec())
+    }
+
+    fn trait_obligation_available_exact(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> bool {
         let [target] = arguments else {
             return self.active_function_bounds.iter().rev().any(|bounds| {
                 bounds
@@ -5155,6 +5386,12 @@ impl TypeChecker {
             }
         }
         let declaration_bounds = self.expand_trait_bounds(declaration_bounds);
+        if self.bounds_violate_functional_dependencies(&declaration_bounds) {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                "type declaration bounds conflict with a functional dependency",
+            ));
+        }
         self.active_function_bounds.push(declaration_bounds);
         let template = self.resolve_source_type(
             module,
@@ -5190,6 +5427,22 @@ impl TypeChecker {
         argument: &CheckedType,
         substitutions: &mut HashMap<TypeParameterId, CheckedType>,
     ) -> bool {
+        if *argument == CheckedType::Inferred {
+            match pattern {
+                TypeParameterPattern::Binding(binding) => {
+                    if let Some(parameter) = module.type_parameter_for(binding.syntax.id) {
+                        substitutions.insert(parameter, CheckedType::Inferred);
+                    }
+                }
+                TypeParameterPattern::Product(product) => {
+                    for element in &product.elements {
+                        self.bind_type_argument(module, element, argument, substitutions);
+                    }
+                }
+                TypeParameterPattern::Splice(_) => {}
+            }
+            return true;
+        }
         match pattern {
             TypeParameterPattern::Binding(binding) => {
                 let Some(id) = module.type_parameter_for(binding.syntax.id) else {
@@ -6114,6 +6367,34 @@ pub(crate) fn infer_type_parameters(
         }
         _ => template == actual || *actual == CheckedType::Inferred,
     }
+}
+
+fn trait_parameter_values(
+    parameters: &[CheckedType],
+    arguments: &[CheckedType],
+) -> HashMap<TypeParameterId, CheckedType> {
+    let mut substitutions = HashMap::new();
+    for (parameter, argument) in parameters.iter().zip(arguments) {
+        if *argument == CheckedType::Inferred {
+            for id in type_parameter_ids(parameter) {
+                substitutions.insert(id, CheckedType::Inferred);
+            }
+        } else {
+            infer_type_parameters(parameter, argument, &mut substitutions);
+        }
+    }
+    substitutions
+}
+
+fn merge_trait_arguments(left: &[CheckedType], right: &[CheckedType]) -> Option<Vec<CheckedType>> {
+    if left.len() != right.len() {
+        return None;
+    }
+    left.iter()
+        .cloned()
+        .zip(right.iter().cloned())
+        .map(|(left, right)| merge_types(left, right))
+        .collect()
 }
 
 fn clear_function_resources(value_type: &mut CheckedType) {

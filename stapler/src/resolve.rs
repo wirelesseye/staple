@@ -44,8 +44,15 @@ pub struct ResolvedTrait {
     pub id: TraitId,
     pub declaration: crate::TraitDeclaration,
     pub parameters: Vec<TypeParameterId>,
+    pub functional_dependencies: Vec<ResolvedFunctionalDependency>,
     pub methods: Vec<TraitMethodId>,
     pub default_methods: HashMap<TraitMethodId, FunctionId>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedFunctionalDependency {
+    pub determinants: Vec<TypeParameterId>,
+    pub dependent: TypeParameterId,
 }
 
 #[derive(Debug, Clone)]
@@ -1431,6 +1438,7 @@ impl NameResolver {
                                 id,
                                 declaration: declaration.clone(),
                                 parameters,
+                                functional_dependencies: Vec::new(),
                                 methods,
                                 default_methods: HashMap::new(),
                             },
@@ -2072,6 +2080,67 @@ impl NameResolver {
                 for parameter in &declaration.type_parameters {
                     self.scope_allocated_type_parameter_pattern(parameter);
                 }
+                let mut functional_dependencies = Vec::new();
+                for dependency in &declaration.functional_dependencies {
+                    let mut determinants = Vec::new();
+                    let mut seen = HashSet::new();
+                    for determinant in &dependency.determinants {
+                        let Some(parameter) = self.lookup_type_parameter(&determinant.name) else {
+                            self.diagnostics.push(Diagnostic::new(
+                                determinant.syntax.span.clone(),
+                                format!(
+                                    "unknown trait type parameter `{}` in functional dependency",
+                                    determinant.name
+                                ),
+                            ));
+                            continue;
+                        };
+                        self.type_parameters
+                            .insert(determinant.syntax.id, parameter);
+                        if !seen.insert(parameter) {
+                            self.diagnostics.push(Diagnostic::new(
+                                determinant.syntax.span.clone(),
+                                format!(
+                                    "duplicate functional dependency determinant `{}`",
+                                    determinant.name
+                                ),
+                            ));
+                            continue;
+                        }
+                        determinants.push(parameter);
+                    }
+                    let Some(dependent) = self.lookup_type_parameter(&dependency.dependent.name)
+                    else {
+                        self.diagnostics.push(Diagnostic::new(
+                            dependency.dependent.syntax.span.clone(),
+                            format!(
+                                "unknown trait type parameter `{}` in functional dependency",
+                                dependency.dependent.name
+                            ),
+                        ));
+                        continue;
+                    };
+                    self.type_parameters
+                        .insert(dependency.dependent.syntax.id, dependent);
+                    if seen.contains(&dependent) {
+                        self.diagnostics.push(Diagnostic::new(
+                            dependency.dependent.syntax.span.clone(),
+                            "functional dependency cannot determine one of its determinants",
+                        ));
+                        continue;
+                    }
+                    if determinants.is_empty() {
+                        continue;
+                    }
+                    functional_dependencies.push(ResolvedFunctionalDependency {
+                        determinants,
+                        dependent,
+                    });
+                }
+                self.traits
+                    .get_mut(&trait_id)
+                    .expect("resolved trait")
+                    .functional_dependencies = functional_dependencies;
                 for prerequisite in &declaration.prerequisites {
                     if let Some(trait_id) = self.resolve_trait_name(&prerequisite.trait_name) {
                         self.trait_references

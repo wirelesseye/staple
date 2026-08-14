@@ -6121,6 +6121,12 @@ fn substitute_item(
             }
         }
         Item::TraitDeclaration(declaration) => {
+            for dependency in &mut declaration.functional_dependencies {
+                substitute_identifier(&mut dependency.dependent.name, environment, diagnostics)?;
+                for determinant in &mut dependency.determinants {
+                    substitute_identifier(&mut determinant.name, environment, diagnostics)?;
+                }
+            }
             for prerequisite in &mut declaration.prerequisites {
                 substitute_trait_bound(prerequisite, environment, diagnostics)?;
             }
@@ -6773,6 +6779,13 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             expander.freshen_syntax(&mut declaration.syntax, module, mark);
             for parameter in &mut declaration.type_parameters {
                 freshen_type_parameter(expander, parameter, module, mark);
+            }
+            for dependency in &mut declaration.functional_dependencies {
+                expander.freshen_syntax(&mut dependency.syntax, module, mark);
+                for determinant in &mut dependency.determinants {
+                    expander.freshen_syntax(&mut determinant.syntax, module, mark);
+                }
+                expander.freshen_syntax(&mut dependency.dependent.syntax, module, mark);
             }
             for prerequisite in &mut declaration.prerequisites {
                 freshen_trait_bound(expander, prerequisite, module, mark);

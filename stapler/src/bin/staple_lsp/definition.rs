@@ -353,6 +353,12 @@ impl Collector<'_> {
                 for parameter in &value.type_parameters {
                     self.type_parameter(parameter);
                 }
+                for dependency in &value.functional_dependencies {
+                    for determinant in &dependency.determinants {
+                        self.named_type(determinant);
+                    }
+                    self.named_type(&dependency.dependent);
+                }
                 for bound in &value.prerequisites {
                     self.trait_bound(bound);
                 }

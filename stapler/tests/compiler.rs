@@ -2951,6 +2951,22 @@ fn generates_extern_trait_and_implementation_items() {
 }
 
 #[test]
+fn generates_traits_with_functional_dependencies() {
+    let module = type_check(concat!(
+        "macro define_trait = _: Expr => quote {\n",
+        "    trait Generated = Input => Output => Input ~> Output => { generate: Input -> Output }\n",
+        "}\n",
+        "define_trait ()\n",
+        "impl Generated I32 String { def generate = value => \"generated\" }\n",
+        "let generated = Generated.generate 1\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generated functional dependencies should resolve and specialize");
+}
+
+#[test]
 fn diagnoses_invalid_item_macro_outputs_and_placements() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for (source, expected) in [
@@ -4079,6 +4095,122 @@ fn type_checks_product_and_curried_multi_parameter_traits() {
         .compile_module(&module)
         .expect("multi-parameter trait calls should compile");
     assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn infers_trait_functional_dependency_arguments() {
+    let module = type_check(concat!(
+        "trait Iterator = Iter => Item => Iter ~> Item => { next: Iter -> Item }\n",
+        "impl Iterator I32 String { def next = value => \"next\" }\n",
+        "trait AddTo = Left => Right => Output => {Left, Right} ~> Output => { add_to: Left -> Right -> Output }\n",
+        "impl AddTo I32 I32 I32 { def add_to = left => right => left + right }\n",
+        "trait Chain = A => B => C => A ~> B => B ~> C => { chained: A -> (B, C) }\n",
+        "impl Chain I32 String U8 { def chained = value => (\"chain\", 7) }\n",
+        "trait ConvertPair = (From, To) => From ~> To => { convert_pair: From -> To }\n",
+        "impl ConvertPair (I32, String) { def convert_pair = value => \"pair\" }\n",
+        "def requires_iterator: T => Iterator T => T -> () = value => ()\n",
+        "def requires_iterator_explicit: T => Iterator T _ => T -> () = value => ()\n",
+        "def requires_add: T => AddTo T T => T -> T = value => value\n",
+        "def requires_pair: T => ConvertPair (T, _) => T -> () = value => ()\n",
+        "trait UsesIterator = Iter => Iterator Iter => { use_iterator: Iter -> Iter }\n",
+        "impl UsesIterator I32 { def use_iterator = value => value }\n",
+        "let next_value = Iterator.next 1\n",
+        "let next_string: String = next_value\n",
+        "let sum: I32 = AddTo.add_to 20 22\n",
+        "let chained = Chain.chained 1\n",
+        "let _: () = requires_iterator 1\n",
+        "let _: () = requires_iterator_explicit 1\n",
+        "let _: I32 = requires_add 1\n",
+        "let _: () = requires_pair 1\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("functional dependency dispatch should compile");
+}
+
+#[test]
+fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Convert = From => To => From ~> To => { convert: From -> To }\n",
+            "impl Convert I32 String { def convert = value => \"one\" }\n",
+            "impl Convert I32 I32 { def convert = value => value }\n",
+        )))
+        .expect_err("functional dependencies must make implementations coherent");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("violate a functional dependency")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait AddTo = Left => Right => Output => {Left, Right} ~> Output => { add_to: Left -> Right -> Output }\n",
+            "def invalid: T => AddTo T _ T => T -> T = value => value\n",
+        )))
+        .expect_err("non-dependent arguments cannot be inferred");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot be inferred from functional dependencies")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Convert = From => To => From ~> To => { convert: From -> To }\n",
+            "impl Convert I32 { def convert = value => value }\n",
+        )))
+        .expect_err("implementation headers remain exact-arity");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expects 2 compile-time arguments, found 1")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Iterator = Iter => Item => Iter ~> Item => { next: Iter -> Item }\n",
+            "def invalid: (Iter, Item) => Iterator Iter Item => Iterator Iter String => Iter -> Iter = value => value\n",
+        )))
+        .expect_err("active bounds must respect functional dependencies");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("trait bounds conflict with a functional dependency")
+    }));
+}
+
+#[test]
+fn rejects_invalid_functional_dependency_declarations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (source, expected) in [
+        (
+            "trait Invalid = A => B => Missing ~> B => { convert: A -> B }\n",
+            "unknown trait type parameter `Missing` in functional dependency",
+        ),
+        (
+            "trait Invalid = A => B => {A, A} ~> B => { convert: A -> B }\n",
+            "duplicate functional dependency determinant `A`",
+        ),
+        (
+            "trait Invalid = A => A ~> A => { convert: A -> A }\n",
+            "functional dependency cannot determine one of its determinants",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("invalid dependency source should load");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("invalid functional dependency must not resolve");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected))
+        );
+    }
 }
 
 #[test]

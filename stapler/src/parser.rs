@@ -484,6 +484,10 @@ impl Grammar {
         if type_parameters.is_empty() {
             return Err(self.error("expected trait type parameter followed by `=>`"));
         }
+        let mut functional_dependencies = Vec::new();
+        while let Some(dependency) = self.parse_functional_dependency()? {
+            functional_dependencies.push(dependency);
+        }
         let prerequisites = self.parse_trait_bounds()?;
         self.expect(TokenKind::LBrace, "expected `{` before trait members")?;
         let mut members = Vec::new();
@@ -520,9 +524,82 @@ impl Grammar {
             visibility,
             name,
             type_parameters,
+            functional_dependencies,
             prerequisites,
             members,
         })
+    }
+
+    fn parse_functional_dependency(&mut self) -> Result<Option<FunctionalDependency>, ParseError> {
+        let checkpoint = self.position;
+        let start = self.position;
+        let mut determinants = Vec::new();
+        if self.eat(TokenKind::LBrace) {
+            if self.at(TokenKind::RBrace) {
+                self.bump_token();
+                if self.eat_operator("~>") {
+                    return Err(self.error("functional dependency determinant set cannot be empty"));
+                }
+                self.position = checkpoint;
+                return Ok(None);
+            }
+            loop {
+                let determinant_start = self.position;
+                let Some(token) = (self.peek() == Some(TokenKind::Identifier))
+                    .then(|| self.bump_token().expect("peeked identifier"))
+                else {
+                    self.position = checkpoint;
+                    return Ok(None);
+                };
+                let name = token.text;
+                determinants.push(NamedType {
+                    syntax: self.syntax(determinant_start),
+                    namespace: None,
+                    name,
+                });
+                if !self.eat(TokenKind::Comma) {
+                    break;
+                }
+            }
+            if !self.eat(TokenKind::RBrace) {
+                self.position = checkpoint;
+                return Ok(None);
+            }
+        } else if self.peek() == Some(TokenKind::Identifier) {
+            let determinant_start = self.position;
+            let name = self.bump_token().expect("peeked identifier").text;
+            determinants.push(NamedType {
+                syntax: self.syntax(determinant_start),
+                namespace: None,
+                name,
+            });
+        } else {
+            return Ok(None);
+        }
+        if !self.eat_operator("~>") {
+            self.position = checkpoint;
+            return Ok(None);
+        }
+        let dependent_start = self.position;
+        let dependent = self
+            .expect(
+                TokenKind::Identifier,
+                "expected dependent type parameter after `~>`",
+            )?
+            .text;
+        self.expect(
+            TokenKind::FatArrow,
+            "expected `=>` after functional dependency",
+        )?;
+        Ok(Some(FunctionalDependency {
+            syntax: self.syntax(start),
+            determinants,
+            dependent: NamedType {
+                syntax: self.syntax(dependent_start),
+                namespace: None,
+                name: dependent,
+            },
+        }))
     }
 
     fn parse_trait_implementation(
