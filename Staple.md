@@ -438,13 +438,28 @@ use package.models User
 ```
 
 Here `models` loads `<module-root>/models.sta`. A bare `use package` refers to
-the entry module. `package` is contextual only in the first component of a
-`use` path and remains available as an ordinary identifier elsewhere. A file
-named `package.sta` is addressed as `use package.package`.
+the entry module. A file named `package.sta` is addressed as
+`use package.package`.
 
-Only modules reachable from the entry module are compiled. A source file is
-loaded once even when several modules use it, and mutually recursive module
-dependencies are allowed.
+Public items may also be used through a root-qualified name without a `use`
+declaration:
+
+```staple
+std.io.println "Hello"
+let user: package.models.User = package.models.default_user
+```
+
+The prefix before the item is resolved as a module path using the same
+longest-file-prefix and public-inline-submodule rules as `use`. Such a reference
+loads the target module and establishes an initialization dependency. Only the
+explicit roots `std` and `package` receive this treatment; other dotted
+expressions remain namespace or product access. `use` remains useful for short
+local names and is required for re-exporting.
+
+Only modules reachable from the entry module through `use` declarations or
+root-qualified references are compiled. A source file is loaded once even when
+several modules refer to it, and mutually recursive module dependencies are
+allowed.
 
 A module can be brought into scope as a namespace. The namespace name is the
 last component of its path:

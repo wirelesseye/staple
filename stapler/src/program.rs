@@ -4,7 +4,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use crate::parser::parse_with_syntax_ids;
-use crate::{Item, Module, SourceLocation, Span, SyntaxId, UseDeclaration, Visibility};
+use crate::{
+    Item, Module, SourceLocation, Span, Syntax, SyntaxId, TokenKind, UseDeclaration, UseKind,
+    Visibility,
+};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ModuleId(pub usize);
@@ -83,6 +86,7 @@ pub struct Program {
     standard_library_io: Option<ModuleId>,
     modules: Vec<SourceModule>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
+    root_qualified_modules: HashMap<(ModuleId, String), ModuleId>,
     child_modules: HashMap<SyntaxId, ModuleId>,
     children: Vec<HashMap<String, ModuleId>>,
     initialization_order: Vec<ModuleId>,
@@ -105,14 +109,18 @@ impl Program {
                 qualified_name: "<memory>".to_owned(),
             }],
             imported_modules: HashMap::new(),
+            root_qualified_modules: HashMap::new(),
             child_modules: HashMap::new(),
             children: vec![HashMap::new()],
             initialization_order: vec![ModuleId(0)],
         };
         program.collect_single_submodules(ModuleId(0));
         program.resolve_single_inline_imports();
-        program.initialization_order =
-            initialization_order(&program.modules, &program.imported_modules);
+        program.initialization_order = initialization_order(
+            &program.modules,
+            &program.imported_modules,
+            &program.root_qualified_modules,
+        );
         program
     }
 
@@ -239,7 +247,11 @@ impl Program {
             parent += 1;
         }
         self.resolve_single_inline_imports();
-        self.initialization_order = initialization_order(&self.modules, &self.imported_modules);
+        self.initialization_order = initialization_order(
+            &self.modules,
+            &self.imported_modules,
+            &self.root_qualified_modules,
+        );
     }
 
     pub fn entry(&self) -> ModuleId {
@@ -270,6 +282,17 @@ impl Program {
         self.imported_modules.get(&use_syntax).copied()
     }
 
+    pub(crate) fn root_qualified_modules(
+        &self,
+        module: ModuleId,
+    ) -> impl Iterator<Item = (&str, ModuleId)> {
+        self.root_qualified_modules
+            .iter()
+            .filter_map(move |((source, namespace), target)| {
+                (*source == module).then_some((namespace.as_str(), *target))
+            })
+    }
+
     pub fn child_module(&self, submodule_syntax: SyntaxId) -> Option<ModuleId> {
         self.child_modules.get(&submodule_syntax).copied()
     }
@@ -296,6 +319,7 @@ pub struct ProgramLoader {
     modules: Vec<SourceModule>,
     paths: HashMap<PathBuf, ModuleId>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
+    root_qualified_modules: HashMap<(ModuleId, String), ModuleId>,
     child_modules: HashMap<SyntaxId, ModuleId>,
     children: Vec<HashMap<String, ModuleId>>,
     loaded_imports: HashSet<ModuleId>,
@@ -540,6 +564,7 @@ impl ProgramLoader {
                 Err(error) => return Err(error),
             }
         }
+        self.load_root_qualified_references(module, root)?;
         let children = self.children[module.0]
             .values()
             .copied()
@@ -548,6 +573,122 @@ impl ProgramLoader {
             self.load_imports(child, root)?;
         }
         Ok(())
+    }
+
+    fn load_root_qualified_references(
+        &mut self,
+        module: ModuleId,
+        root: &Path,
+    ) -> Result<(), LoadDiagnostic> {
+        let mut ignored = Vec::new();
+        for item in &self.modules[module.0].syntax.items {
+            root_scan_ignored_ranges(item, &mut ignored);
+        }
+        let tokens = self.modules[module.0]
+            .syntax
+            .syntax
+            .tokens()
+            .iter()
+            .filter(|token| {
+                !token.kind.is_trivia()
+                    && !ignored
+                        .iter()
+                        .any(|range| range.contains(&token.span.start))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut index = 0;
+        while index < tokens.len() {
+            let token = &tokens[index];
+            // Binder dependency aliases can become additional recognized roots
+            // here once the loader receives a per-package alias-to-root table.
+            // Keep aliases logical: do not merge dependency files into `root`.
+            if token.kind != TokenKind::Identifier
+                || !matches!(token.text.as_str(), "std" | "package")
+            {
+                index += 1;
+                continue;
+            }
+            let mut parts = vec![token.text.clone()];
+            let mut end = index + 1;
+            while tokens
+                .get(end)
+                .is_some_and(|token| token.kind == TokenKind::Dot)
+                && tokens
+                    .get(end + 1)
+                    .is_some_and(|token| token.kind == TokenKind::Identifier)
+            {
+                parts.push(tokens[end + 1].text.clone());
+                end += 2;
+            }
+            if tokens
+                .get(end)
+                .is_some_and(|token| token.kind == TokenKind::Dot)
+                && tokens.get(end + 1).is_some_and(|token| {
+                    matches!(
+                        token.kind,
+                        TokenKind::Operator
+                            | TokenKind::Colon
+                            | TokenKind::Equals
+                            | TokenKind::Star
+                            | TokenKind::Plus
+                            | TokenKind::Minus
+                            | TokenKind::Slash
+                    )
+                })
+            {
+                parts.push(tokens[end + 1].text.clone());
+                end += 2;
+            }
+            if parts.len() >= 2 {
+                let span = root_reference_span(
+                    &self.modules[module.0].syntax.syntax.span,
+                    token.span.start..tokens[end - 1].span.end,
+                );
+                let (namespace, target) =
+                    self.resolve_root_qualified_reference(module, &parts, root, span)?;
+                self.root_qualified_modules
+                    .insert((module, namespace), target);
+            }
+            index = end;
+        }
+        Ok(())
+    }
+
+    fn resolve_root_qualified_reference(
+        &mut self,
+        module: ModuleId,
+        parts: &[String],
+        root: &Path,
+        span: Span,
+    ) -> Result<(String, ModuleId), LoadDiagnostic> {
+        let minimum = if parts.first().is_some_and(|part| part == "std") {
+            2
+        } else {
+            1
+        };
+        let mut last_error = None;
+        for prefix_len in (minimum..parts.len()).rev() {
+            let declaration = UseDeclaration {
+                syntax: Syntax::synthetic(SyntaxId::COMPILER, span.clone()),
+                visibility: Visibility::Private,
+                path: parts[..prefix_len].to_vec(),
+                kind: UseKind::Namespace,
+            };
+            match self.resolve_import(module, &declaration, root) {
+                Ok(target) => return Ok((parts[..prefix_len].join("."), target)),
+                Err(error) => last_error = Some(error),
+            }
+        }
+        Err(last_error.unwrap_or_else(|| {
+            load_diagnostic_at(
+                &span,
+                format!(
+                    "could not resolve root-qualified item `{}`",
+                    parts.join(".")
+                ),
+            )
+        }))
     }
 
     fn can_defer_inline_import(&self, module: ModuleId, declaration: &UseDeclaration) -> bool {
@@ -605,6 +746,11 @@ impl ProgramLoader {
             }
             return self.resolve_file_import(&parts[1..], root, declaration);
         }
+
+        // A future Binder dependency root should be dispatched here, before
+        // inline-child and package-file lookup, using the current package's
+        // dependency alias map. The resulting ModuleId keeps versioned package
+        // identities separate even when their internal module paths coincide.
 
         if let Some(first) = parts.first()
             && let Some(child) = self.children[module.0].get(first).copied()
@@ -734,7 +880,11 @@ impl ProgramLoader {
     }
 
     fn finish(self, entry: ModuleId) -> Program {
-        let initialization_order = initialization_order(&self.modules, &self.imported_modules);
+        let initialization_order = initialization_order(
+            &self.modules,
+            &self.imported_modules,
+            &self.root_qualified_modules,
+        );
         Program {
             entry,
             standard_library_core: self.standard_library_core,
@@ -742,6 +892,7 @@ impl ProgramLoader {
             standard_library_io: self.standard_library_io,
             modules: self.modules,
             imported_modules: self.imported_modules,
+            root_qualified_modules: self.root_qualified_modules,
             child_modules: self.child_modules,
             children: self.children,
             initialization_order,
@@ -797,9 +948,31 @@ fn load_diagnostic_at(span: &Span, message: impl Into<String>) -> LoadDiagnostic
     }
 }
 
+fn root_reference_span(source_span: &Span, range: Range<usize>) -> Span {
+    match source_span {
+        Span::User { source, .. } => Span::User {
+            source: source.clone(),
+            range,
+            location: None,
+        },
+        Span::Compiler => Span::Compiler,
+    }
+}
+
+fn root_scan_ignored_ranges(item: &Item, ranges: &mut Vec<Range<usize>>) {
+    match item {
+        Item::UseDeclaration(declaration) => ranges.push(declaration.syntax.span.to_range()),
+        Item::Submodule(declaration) => ranges.push(declaration.syntax.span.to_range()),
+        Item::Modified(modified) => root_scan_ignored_ranges(&modified.item, ranges),
+        Item::VisibilitySplice(splice) => root_scan_ignored_ranges(&splice.item, ranges),
+        _ => {}
+    }
+}
+
 fn initialization_order(
     modules: &[SourceModule],
     imports: &HashMap<SyntaxId, ModuleId>,
+    root_qualified_modules: &HashMap<(ModuleId, String), ModuleId>,
 ) -> Vec<ModuleId> {
     let mut edges = vec![Vec::new(); modules.len()];
     for module in modules {
@@ -812,6 +985,14 @@ fn initialization_order(
         }
         edges[module.id.0].sort();
         edges[module.id.0].dedup();
+    }
+    // Binder dependency aliases can feed this same logical-root map in the
+    // future; initialization should depend on resolved package identities, not
+    // on how their source directories happen to be laid out.
+    for ((source, _), target) in root_qualified_modules {
+        edges[source.0].push(*target);
+        edges[source.0].sort();
+        edges[source.0].dedup();
     }
 
     fn visit(node: usize, edges: &[Vec<ModuleId>], seen: &mut [bool], order: &mut Vec<usize>) {

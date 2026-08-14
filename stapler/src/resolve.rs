@@ -803,6 +803,7 @@ impl NameResolver {
             self.prelude_macros.clear();
             self.prelude_traits.clear();
             self.push_scope();
+            self.install_root_namespaces(&program, source_module.id);
             self.install_child_namespaces(&program, source_module.id);
             self.install_prelude(&program, source_module.id);
             self.install_imports(&program, source_module.id);
@@ -1458,6 +1459,10 @@ impl NameResolver {
             .map(|_| HashMap::new())
             .collect();
         for module in program.modules() {
+            for (namespace, target) in program.root_qualified_modules(module.id) {
+                self.definition_context_namespaces[module.id.0]
+                    .insert(namespace.to_owned(), target);
+            }
             for item in &module.syntax.items {
                 if let Item::Submodule(submodule) = item
                     && let Some(child) = program.child_module(submodule.syntax.id)
@@ -1729,6 +1734,12 @@ impl NameResolver {
             {
                 self.duplicate_import(&submodule.name, submodule.syntax.span.clone());
             }
+        }
+    }
+
+    fn install_root_namespaces(&mut self, program: &Program, module: ModuleId) {
+        for (namespace, target) in program.root_qualified_modules(module) {
+            self.namespaces.insert(namespace.to_owned(), target);
         }
     }
 
@@ -2529,22 +2540,20 @@ impl NameResolver {
                             format!("trait has no member named `{member_name}`"),
                         ));
                     }
-                } else if let Expression::Name(namespace) = access.value.as_ref()
-                    && let crate::Accessor::Name(item) = &access.accessor
-                    && let Some(module) = namespace
-                        .syntax
-                        .definition_module()
+                } else if let Some((namespace, item, definition_module)) =
+                    qualified_access_path(access)
+                    && let Some(module) = definition_module
                         .and_then(|context| {
                             self.definition_context_namespaces
                                 .get(context)
-                                .and_then(|namespaces| namespaces.get(&namespace.name))
+                                .and_then(|namespaces| namespaces.get(&namespace))
                                 .copied()
                         })
-                        .or_else(|| self.namespaces.get(&namespace.name).copied())
+                        .or_else(|| self.namespaces.get(&namespace).copied())
                 {
-                    if let Some(symbol) = self.interfaces[module.0].values.get(item).copied() {
+                    if let Some(symbol) = self.interfaces[module.0].values.get(&item).copied() {
                         self.symbols.insert(access.syntax.id, symbol);
-                    } else if self.interfaces[module.0].macros.contains_key(item) {
+                    } else if self.interfaces[module.0].macros.contains_key(&item) {
                         self.diagnostics.push(Diagnostic::new(
                             access.syntax.span.clone(),
                             format!("macro `{item}` must be invoked"),
@@ -2552,10 +2561,7 @@ impl NameResolver {
                     } else {
                         self.diagnostics.push(Diagnostic::new(
                             access.syntax.span.clone(),
-                            format!(
-                                "module `{}` has no public value named `{item}`",
-                                namespace.name
-                            ),
+                            format!("module `{}` has no public value named `{item}`", namespace),
                         ));
                     }
                 } else {
@@ -2755,15 +2761,10 @@ impl NameResolver {
                 .or_else(|| self.imported_traits.get(&name.name).copied())
                 .or_else(|| self.prelude_traits.get(&name.name).copied()),
             Expression::Access(access) => {
-                let Expression::Name(namespace) = access.value.as_ref() else {
-                    return None;
-                };
-                let Accessor::Name(name) = &access.accessor else {
-                    return None;
-                };
+                let (namespace, name, _) = qualified_access_path(access)?;
                 self.namespaces
-                    .get(&namespace.name)
-                    .and_then(|module| self.interfaces[module.0].traits.get(name))
+                    .get(&namespace)
+                    .and_then(|module| self.interfaces[module.0].traits.get(&name))
                     .copied()
             }
             _ => None,
@@ -3141,15 +3142,16 @@ impl NameResolver {
         let ids = match callee {
             Expression::Name(name) => self.lookup_macro(&name.name),
             Expression::Access(access) => {
-                let Expression::Name(namespace) = access.value.as_ref() else {
-                    return None;
-                };
-                let Accessor::Name(item) = &access.accessor else {
-                    return None;
-                };
-                self.namespaces
-                    .get(&namespace.name)
-                    .and_then(|module| self.interfaces[module.0].macros.get(item))
+                let (namespace, item, definition_module) = qualified_access_path(access)?;
+                definition_module
+                    .and_then(|context| {
+                        self.definition_context_namespaces
+                            .get(context)
+                            .and_then(|namespaces| namespaces.get(&namespace))
+                            .copied()
+                    })
+                    .or_else(|| self.namespaces.get(&namespace).copied())
+                    .and_then(|module| self.interfaces[module.0].macros.get(&item))
                     .cloned()
             }
             _ => None,
@@ -3477,6 +3479,37 @@ impl<'a> InitializationAnalyzer<'a> {
             Pattern::Nominal(pattern) => self.set_pattern_state(&pattern.argument, state, states),
         }
     }
+}
+
+fn qualified_access_path(
+    access: &crate::AccessExpression,
+) -> Option<(String, String, Option<usize>)> {
+    fn collect(expression: &Expression, parts: &mut Vec<String>) -> Option<Option<usize>> {
+        match expression {
+            Expression::Name(name) => {
+                parts.push(name.name.clone());
+                Some(name.syntax.definition_module())
+            }
+            Expression::Access(access) => {
+                let definition_module = collect(&access.value, parts)?;
+                let Accessor::Name(name) = &access.accessor else {
+                    return None;
+                };
+                parts.push(name.clone());
+                Some(definition_module)
+            }
+            _ => None,
+        }
+    }
+
+    let mut parts = Vec::new();
+    let definition_module = collect(&access.value, &mut parts)?;
+    let Accessor::Name(item) = &access.accessor else {
+        return None;
+    };
+    parts.push(item.clone());
+    let item = parts.pop()?;
+    (!parts.is_empty()).then(|| (parts.join("."), item, definition_module))
 }
 
 fn mangle_function_name(name: &str) -> String {

@@ -681,6 +681,11 @@ impl MacroExpander {
                     }
                 }
             }
+            for (namespace, target) in program.root_qualified_modules(source_module.id) {
+                scopes[source_module.id.0]
+                    .namespaces
+                    .insert(namespace.to_owned(), target);
+            }
             for item in &source_module.syntax.items {
                 if let Item::Submodule(submodule) = item
                     && let Some(child) = program.child_module(submodule.syntax.id)
@@ -1945,19 +1950,10 @@ impl MacroExpander {
                 }
             }
             Expression::Access(access) => {
-                let Expression::Name(namespace) = access.value.as_ref() else {
-                    return None;
-                };
-                let Accessor::Name(item) = &access.accessor else {
-                    return None;
-                };
-                let context = namespace
-                    .syntax
-                    .definition_module()
-                    .map(ModuleId)
-                    .unwrap_or(module);
-                let target = self.scopes[context.0].namespaces.get(&namespace.name)?;
-                self.scopes[target.0].macros.get(item).map(|keys| {
+                let (namespace, item, definition_module) = qualified_macro_access_path(access)?;
+                let context = definition_module.map(ModuleId).unwrap_or(module);
+                let target = self.scopes[context.0].namespaces.get(&namespace)?;
+                self.scopes[target.0].macros.get(&item).map(|keys| {
                     keys.iter()
                         .filter(|key| {
                             self.definitions[key].declaration.visibility == Visibility::Public
@@ -2517,13 +2513,11 @@ impl MacroExpander {
                 self.apply_value(callee, argument, call.syntax.span.clone())
             }
             Expression::Access(access) => {
-                if let Expression::Name(namespace) = access.value.as_ref()
-                    && let Accessor::Name(item) = &access.accessor
-                    && let Some(target) = self.scopes[module.0]
-                        .namespaces
-                        .get(&namespace.name)
-                        .copied()
-                    && let Some(helper) = self.scopes[target.0].helpers.get(item).cloned()
+                if let Some((namespace, item, definition_module)) =
+                    qualified_macro_access_path(access)
+                    && let context = definition_module.map(ModuleId).unwrap_or(module)
+                    && let Some(target) = self.scopes[context.0].namespaces.get(&namespace).copied()
+                    && let Some(helper) = self.scopes[target.0].helpers.get(&item).cloned()
                     && helper.binding.visibility == Visibility::Public
                 {
                     return Some(Value::Helper(helper.module, helper.binding));
@@ -5180,6 +5174,37 @@ fn substitute_trait_bound(
         substitute_type(argument, environment, diagnostics)?;
     }
     Some(())
+}
+
+fn qualified_macro_access_path(
+    access: &crate::AccessExpression,
+) -> Option<(String, String, Option<usize>)> {
+    fn collect(expression: &Expression, parts: &mut Vec<String>) -> Option<Option<usize>> {
+        match expression {
+            Expression::Name(name) => {
+                parts.push(name.name.clone());
+                Some(name.syntax.definition_module())
+            }
+            Expression::Access(access) => {
+                let definition_module = collect(&access.value, parts)?;
+                let Accessor::Name(name) = &access.accessor else {
+                    return None;
+                };
+                parts.push(name.clone());
+                Some(definition_module)
+            }
+            _ => None,
+        }
+    }
+
+    let mut parts = Vec::new();
+    let definition_module = collect(&access.value, &mut parts)?;
+    let Accessor::Name(item) = &access.accessor else {
+        return None;
+    };
+    parts.push(item.clone());
+    let item = parts.pop()?;
+    (!parts.is_empty()).then(|| (parts.join("."), item, definition_module))
 }
 
 fn substitute_type(

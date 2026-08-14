@@ -103,6 +103,39 @@ fn imports_standard_io_print_functions() {
 }
 
 #[test]
+fn uses_root_qualified_standard_library_items_without_imports() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let printer: String ->{std.io.IO} () = std.io.println\n",
+            "def message: () -> std.cinterop.CString = () => std.cinterop.c_string \"hello\"\n",
+            "def main = () => { message (); printer \"hello\" }\n",
+        ),
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("root-qualified standard-library values and types should compile");
+    assert!(llvm.contains("__staple_m1_println"));
+    assert!(llvm.contains("c\"hello\\00\""));
+}
+
+#[test]
+fn uses_root_qualified_operators_without_imports() {
+    let fixture = Fixture::new();
+    fixture.write("main.sta", "let answer: I32 = 20 package.ops.<> 22\n");
+    fixture.write(
+        "ops.sta",
+        "pub def infixl 6 <>: I32 -> I32 -> I32 = left => right => left + right\n",
+    );
+
+    fixture
+        .compile()
+        .expect("root-qualified operators should retain their exported fixity");
+}
+
+#[test]
 fn only_the_declaring_module_can_assign_a_public_mutable_global() {
     let fixture = Fixture::new();
     fixture.write(
@@ -776,6 +809,45 @@ fn resolves_package_paths_from_an_explicit_module_root() {
     fixture
         .check_at("src/bin/main.sta", "src")
         .expect("package-qualified import should use the configured module root");
+}
+
+#[test]
+fn uses_root_qualified_package_items_without_imports() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/bin/main.sta",
+        concat!(
+            "let result: package.models.Answer = package.models.answer\n",
+            "result\n",
+        ),
+    );
+    fixture.write(
+        "src/models.sta",
+        "pub type alias Answer = I32\npub let answer: Answer = 42\n",
+    );
+
+    fixture
+        .check_at("src/bin/main.sta", "src")
+        .expect("root-qualified package values and types should use the module root");
+}
+
+#[test]
+fn root_qualified_items_establish_initialization_dependencies() {
+    let fixture = Fixture::new();
+    fixture.write("main.sta", "dependency.value\n");
+    fixture.write("dependency.sta", "pub let value = 1\n");
+
+    let error = fixture
+        .compile()
+        .expect_err("ordinary names must not become implicit package roots");
+    assert!(error.contains("unknown name `dependency`"));
+
+    fixture.write("main.sta", "package.dependency.value\n");
+    let llvm = fixture
+        .compile()
+        .expect("root-qualified access should load and initialize its module");
+    let main = llvm.split("define i32 @main()").nth(1).unwrap();
+    assert!(main.find("@__staple_init_m1").unwrap() < main.find("@__staple_init_m0").unwrap());
 }
 
 #[test]

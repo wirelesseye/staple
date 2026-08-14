@@ -332,17 +332,8 @@ impl Grammar {
                 "expected modifier macro name after `@`",
             )?
             .text;
-        let (namespace, name) = if self.eat(TokenKind::Dot) {
-            let name = self
-                .expect(
-                    TokenKind::Identifier,
-                    "expected modifier name after namespace",
-                )?
-                .text;
-            (Some(first), name)
-        } else {
-            (None, first)
-        };
+        let (namespace, name) =
+            self.parse_qualified_name_from(first, "expected modifier name after namespace")?;
         let argument = self
             .at(TokenKind::LParen)
             .then(|| self.parse_modifier_argument())
@@ -508,14 +499,8 @@ impl Grammar {
         let first = self
             .expect(TokenKind::Identifier, "expected trait name")?
             .text;
-        let (namespace, name) = if self.eat(TokenKind::Dot) {
-            let name = self
-                .expect(TokenKind::Identifier, "expected trait name after namespace")?
-                .text;
-            (Some(first), name)
-        } else {
-            (None, first)
-        };
+        let (namespace, name) =
+            self.parse_qualified_name_from(first, "expected trait name after namespace")?;
         let trait_name = NamedType {
             syntax: self.syntax(trait_start),
             namespace,
@@ -962,15 +947,14 @@ impl Grammar {
                     break;
                 }
             };
-            let (namespace, name) = if self.eat(TokenKind::Dot) {
-                let Ok(token) = self.expect(TokenKind::Identifier, "expected trait name") else {
-                    self.position = checkpoint;
-                    break;
+            let (namespace, name) =
+                match self.parse_qualified_name_from(first, "expected trait name") {
+                    Ok(name) => name,
+                    Err(_) => {
+                        self.position = checkpoint;
+                        break;
+                    }
                 };
-                (Some(first), token.text)
-            } else {
-                (None, first)
-            };
             if !self.starts_type_atom() {
                 self.position = checkpoint;
                 break;
@@ -1191,14 +1175,8 @@ impl Grammar {
             Some(TokenKind::Identifier) => self.bump_token().expect("peeked pattern").text,
             _ => return Err(self.error("expected pattern")),
         };
-        let (namespace, name) = if self.eat(TokenKind::Dot) {
-            let name = self
-                .expect(TokenKind::Identifier, "expected type name after namespace")?
-                .text;
-            (Some(first), name)
-        } else {
-            (None, first)
-        };
+        let (namespace, name) =
+            self.parse_qualified_name_from(first, "expected type name after namespace")?;
         let adjacent_argument = !(self.newline_terminates_expression
             && self.has_newline_before_next_token())
             && matches!(
@@ -1458,14 +1436,8 @@ impl Grammar {
             }));
         }
         let first = self.expect(TokenKind::Identifier, "expected type")?.text;
-        let (namespace, name) = if self.eat(TokenKind::Dot) {
-            let name = self
-                .expect(TokenKind::Identifier, "expected type name after namespace")?
-                .text;
-            (Some(first), name)
-        } else {
-            (None, first)
-        };
+        let (namespace, name) =
+            self.parse_qualified_name_from(first, "expected type name after namespace")?;
         Ok(Type::Named(NamedType {
             syntax: self.syntax(start),
             namespace,
@@ -1508,14 +1480,8 @@ impl Grammar {
                     "expected function name after backtick",
                 )?
                 .text;
-            let (namespace, name) = if self.eat(TokenKind::Dot) {
-                let name = self
-                    .expect(TokenKind::Identifier, "expected qualified function name")?
-                    .text;
-                (Some(first), name)
-            } else {
-                (None, first)
-            };
+            let (namespace, name) =
+                self.parse_qualified_name_from(first, "expected qualified function name")?;
             self.expect(TokenKind::Backtick, "expected closing backtick")?;
             return Ok(Some(InfixOperator {
                 syntax: self.syntax(start),
@@ -1523,16 +1489,21 @@ impl Grammar {
                 name,
             }));
         }
-        if self.peek() == Some(TokenKind::Identifier)
-            && self.peek_n(1) == Some(TokenKind::Dot)
-            && self.peek_n(2).is_some_and(is_symbol_kind)
-        {
-            let namespace = self.bump_token().expect("peeked namespace").text;
+        if let Some(operator_offset) = self.qualified_symbol_offset(0) {
+            let mut namespace = Vec::new();
+            while self.peek_n(1) == Some(TokenKind::Dot)
+                && self.peek_n(2) == Some(TokenKind::Identifier)
+            {
+                namespace.push(self.bump_token().expect("peeked namespace").text);
+                self.expect(TokenKind::Dot, "expected `.`")?;
+            }
+            namespace.push(self.bump_token().expect("peeked namespace").text);
             self.expect(TokenKind::Dot, "expected `.`")?;
+            debug_assert!(operator_offset >= 2);
             let name = self.bump_token().expect("peeked operator").text;
             return Ok(Some(InfixOperator {
                 syntax: self.syntax(start),
-                namespace: Some(namespace),
+                namespace: Some(namespace.join(".")),
                 name,
             }));
         }
@@ -1551,7 +1522,7 @@ impl Grammar {
     fn parse_call_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_access_expression()?;
-        while self.starts_atom() {
+        while self.starts_atom() && self.qualified_symbol_offset(0).is_none() {
             let checkpoint = self.position;
             let next_syntax_id = self.next_syntax_id;
             let argument = match self.parse_access_expression() {
@@ -2076,34 +2047,42 @@ impl Grammar {
         self.peek() == Some(TokenKind::LParen)
             && (self.peek_n(1).is_some_and(is_symbol_kind)
                 && self.peek_n(2) == Some(TokenKind::RParen)
-                || self.peek_n(1) == Some(TokenKind::Identifier)
-                    && self.peek_n(2) == Some(TokenKind::Dot)
-                    && self.peek_n(3).is_some_and(is_symbol_kind)
-                    && self.peek_n(4) == Some(TokenKind::RParen))
+                || self
+                    .qualified_symbol_offset(1)
+                    .is_some_and(|operator| self.peek_n(operator + 1) == Some(TokenKind::RParen)))
     }
 
     fn parse_operator_value(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LParen, "expected `(`")?;
         let first = self.bump_token().expect("peeked operator value");
-        let qualified_operator = if first.kind == TokenKind::Identifier {
+        let mut qualified_parts = Vec::new();
+        if first.kind == TokenKind::Identifier {
+            qualified_parts.push(first.text.clone());
+            while self.peek_n(1) == Some(TokenKind::Dot)
+                && self.peek_n(2) == Some(TokenKind::Identifier)
+            {
+                self.expect(TokenKind::Dot, "expected `.`")?;
+                qualified_parts.push(self.bump_token().expect("peeked namespace").text);
+            }
             self.expect(TokenKind::Dot, "expected `.`")?;
-            let operator = self.bump_token().expect("peeked qualified operator");
-            Some(operator.text)
-        } else {
-            None
-        };
+            qualified_parts.push(self.bump_token().expect("peeked qualified operator").text);
+        }
         self.expect(TokenKind::RParen, "expected `)` after operator")?;
-        let expression = if let Some(operator) = qualified_operator {
-            let namespace = Expression::Name(NameExpression {
+        let expression = if !qualified_parts.is_empty() {
+            let mut parts = qualified_parts.into_iter();
+            let mut expression = Expression::Name(NameExpression {
                 syntax: self.syntax(start),
-                name: first.text,
+                name: parts.next().expect("qualified operator has a namespace"),
             });
-            Expression::Access(AccessExpression {
-                syntax: self.syntax(start),
-                value: Box::new(namespace),
-                accessor: Accessor::Name(operator),
-            })
+            for part in parts {
+                expression = Expression::Access(AccessExpression {
+                    syntax: self.syntax(start),
+                    value: Box::new(expression),
+                    accessor: Accessor::Name(part),
+                });
+            }
+            expression
         } else {
             Expression::Name(NameExpression {
                 syntax: self.syntax(start),
@@ -2118,6 +2097,37 @@ impl Grammar {
             Ok(self.bump_token().expect("peeked value name").text)
         } else {
             Err(self.error(message))
+        }
+    }
+
+    fn parse_qualified_name_from(
+        &mut self,
+        first: String,
+        message: &'static str,
+    ) -> Result<(Option<String>, String), ParseError> {
+        let mut parts = vec![first];
+        while self.peek() == Some(TokenKind::Dot) && self.peek_n(1) == Some(TokenKind::Identifier) {
+            self.eat(TokenKind::Dot);
+            parts.push(self.expect(TokenKind::Identifier, message)?.text);
+        }
+        let name = parts.pop().expect("qualified name has a first component");
+        Ok(((!parts.is_empty()).then(|| parts.join(".")), name))
+    }
+
+    fn qualified_symbol_offset(&self, start: usize) -> Option<usize> {
+        if self.peek_n(start) != Some(TokenKind::Identifier) {
+            return None;
+        }
+        let mut offset = start + 1;
+        loop {
+            if self.peek_n(offset) != Some(TokenKind::Dot) {
+                return None;
+            }
+            match self.peek_n(offset + 1) {
+                Some(TokenKind::Identifier) => offset += 2,
+                Some(kind) if is_symbol_kind(kind) => return Some(offset + 1),
+                _ => return None,
+            }
         }
     }
 
