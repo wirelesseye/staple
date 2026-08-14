@@ -420,6 +420,14 @@ impl Collector<'_> {
         candidates: &mut Vec<Candidate>,
     ) {
         match pattern {
+            Pattern::At(at) => {
+                self.pattern_candidates(
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    available_from,
+                    candidates,
+                );
+                self.pattern_candidates(&at.pattern, available_from, candidates);
+            }
             Pattern::Binding(value) => {
                 if let Some(symbol) = self.typed.symbol_for(value.syntax.id)
                     && let Some(mut candidate) =
@@ -643,6 +651,33 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(values.len(), 1, "items: {items:?}");
         assert_eq!(values[0].detail.as_deref(), Some("value: I32"));
+    }
+
+    #[test]
+    fn completes_at_pattern_aliases_and_nested_bindings() {
+        let source = concat!(
+            "def sum = pair@(left: I32, right: I32) => {\n",
+            "    left + right\n",
+            "}\n",
+        );
+        let path = std::env::temp_dir().join("staple-completion-at-patterns.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let index = index(&module, &typed);
+        let offset = source.find("    left +").unwrap() + 4;
+        let items = index.items(offset);
+
+        for expected in ["pair", "left", "right"] {
+            assert!(
+                items.iter().any(|item| item.label == expected),
+                "missing {expected} in {items:?}"
+            );
+        }
     }
 
     #[test]

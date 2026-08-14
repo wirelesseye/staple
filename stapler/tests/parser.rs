@@ -916,6 +916,37 @@ fn parses_nested_product_patterns_losslessly() {
 }
 
 #[test]
+fn parses_at_patterns_losslessly_and_right_associatively() {
+    let source = concat!(
+        "let point@(x, y) = (1, 2)\n",
+        "def copy = mut outer: (I32, I32)@inner@(left, right) => outer\n",
+    );
+    let root = parse(source).expect("at-patterns should parse");
+    assert_eq!(root.text(), source);
+
+    let Statement::PatternBinding(point) = statement(&root.items[0]) else {
+        panic!("expected destructuring binding");
+    };
+    assert!(matches!(point.pattern, Pattern::At(_)));
+
+    let Statement::Binding(copy) = statement(&root.items[1]) else {
+        panic!("expected function binding");
+    };
+    let Some(Expression::Function(function)) = &copy.value else {
+        panic!("expected function");
+    };
+    let Pattern::At(outer) = &function.pattern else {
+        panic!("expected outer at-pattern");
+    };
+    assert!(outer.binding.mutable);
+    assert!(matches!(outer.pattern.as_ref(), Pattern::At(_)));
+
+    assert!(parse("let _@(x, y) = (1, 2)\n").is_err());
+    assert!(parse("let (x, y)@point = (1, 2)\n").is_err());
+    assert!(parse("let point@ = (1, 2)\n").is_err());
+}
+
+#[test]
 fn comments_and_crlf_are_preserved() {
     let source = "// entry\r\ndef main: _ -> String = () => {\r\n  \"ok\"\r\n}\r\n";
     let root = parse(source).expect("source should parse");

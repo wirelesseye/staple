@@ -204,6 +204,14 @@ impl<'a> Classifier<'a> {
 
     fn collect_pattern_symbols(&mut self, pattern: &Pattern, kind: u32, resolved: &ResolvedModule) {
         match pattern {
+            Pattern::At(at) => {
+                self.collect_pattern_symbols(
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    kind,
+                    resolved,
+                );
+                self.collect_pattern_symbols(&at.pattern, kind, resolved);
+            }
             Pattern::Binding(binding) => {
                 if let Some(symbol) = resolved.symbol_for(binding.syntax.id) {
                     self.symbols.insert(symbol, kind);
@@ -633,6 +641,14 @@ impl<'a> Classifier<'a> {
 
     fn pattern(&mut self, pattern: &Pattern, kind: u32, resolved: Option<&ResolvedModule>) {
         match pattern {
+            Pattern::At(at) => {
+                self.pattern(
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    kind,
+                    resolved,
+                );
+                self.pattern(&at.pattern, kind, resolved);
+            }
             Pattern::Binding(value) => {
                 if resolved
                     .and_then(|module| module.type_for_pattern(value.syntax.id))
@@ -1145,6 +1161,30 @@ mod tests {
                 .count()
                 >= 2
         );
+    }
+
+    #[test]
+    fn classifies_at_pattern_aliases_and_nested_bindings() {
+        let source = concat!(
+            "def sum = pair@(left: I32, right: I32) => pair.0 + left + right\n",
+            "sum (20, 22)\n",
+        );
+        let path = std::env::temp_dir().join("staple-semantic-at-patterns.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let labels = labels(
+            source,
+            &tokens(source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
+
+        for name in ["pair", "left", "right"] {
+            assert!(labels.contains(&(name, PARAMETER)), "labels: {labels:?}");
+        }
     }
 
     #[test]

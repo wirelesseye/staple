@@ -3,6 +3,7 @@ use super::{ProductType, SpliceExpression, Syntax, Type, TypeElement};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Pattern {
     Binding(BindingPattern),
+    At(AtPattern),
     Wildcard(WildcardPattern),
     StringLiteral(StringLiteralPattern),
     Product(ProductPattern),
@@ -14,6 +15,7 @@ impl Pattern {
     pub fn syntax(&self) -> &Syntax {
         match self {
             Self::Binding(pattern) => &pattern.syntax,
+            Self::At(pattern) => &pattern.syntax,
             Self::Wildcard(pattern) => &pattern.syntax,
             Self::StringLiteral(pattern) => &pattern.syntax,
             Self::Product(pattern) => &pattern.syntax,
@@ -25,6 +27,13 @@ impl Pattern {
     pub fn ty(&self) -> Type {
         match self {
             Self::Binding(pattern) => pattern.ty.clone(),
+            Self::At(pattern) => {
+                if matches!(pattern.binding.ty, Type::Inferred(_)) {
+                    pattern.pattern.ty()
+                } else {
+                    pattern.binding.ty.clone()
+                }
+            }
             Self::Wildcard(pattern) => pattern.ty.clone(),
             Self::StringLiteral(pattern) => Type::StringLiteral(super::StringLiteralType {
                 syntax: pattern.syntax.clone(),
@@ -54,6 +63,7 @@ impl Pattern {
             syntax: self.syntax().clone(),
             name: match self {
                 Self::Binding(pattern) => Some(pattern.name.clone()),
+                Self::At(pattern) => Some(pattern.binding.name.clone()),
                 Self::Wildcard(_) => None,
                 Self::StringLiteral(_) => None,
                 Self::Product(_) => None,
@@ -64,6 +74,13 @@ impl Pattern {
             spread: false,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AtPattern {
+    pub syntax: Syntax,
+    pub binding: Box<BindingPattern>,
+    pub pattern: Box<Pattern>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

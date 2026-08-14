@@ -1652,6 +1652,20 @@ impl NameResolver {
                     self.mutable_symbols.insert(symbol);
                 }
             }
+            Pattern::At(at) => {
+                let binding = &at.binding;
+                let symbol = SymbolId(self.next_symbol_id);
+                self.next_symbol_id += 1;
+                self.declared_symbols.insert(binding.syntax.id, symbol);
+                self.symbol_declarations.insert(symbol, binding.syntax.id);
+                self.symbols.insert(binding.syntax.id, symbol);
+                self.symbol_owners.insert(symbol, None);
+                self.symbol_modules.insert(symbol, self.current_module);
+                if binding.mutable {
+                    self.mutable_symbols.insert(symbol);
+                }
+                self.allocate_pattern_symbols(&at.pattern);
+            }
             Pattern::Product(product) => {
                 for element in &product.elements {
                     self.allocate_pattern_symbols(element);
@@ -2324,7 +2338,11 @@ impl NameResolver {
                             "propagating bindings are only allowed inside a function",
                         ));
                     }
-                    if !matches!(binding.pattern, Pattern::Nominal(_)) {
+                    let mut root = &binding.pattern;
+                    while let Pattern::At(at) = root {
+                        root = &at.pattern;
+                    }
+                    if !matches!(root, Pattern::Nominal(_)) {
                         self.diagnostics.push(Diagnostic::new(
                             binding.pattern.syntax().span.clone(),
                             "a propagating binding requires a nominal pattern",
@@ -2970,6 +2988,10 @@ impl NameResolver {
                     self.resolve_type(&binding.ty);
                 }
             }
+            Pattern::At(at) => {
+                self.resolve_type(&at.binding.ty);
+                self.resolve_pattern_types(&at.pattern);
+            }
             Pattern::Product(product) => {
                 for element in &product.elements {
                     self.resolve_pattern_types(element);
@@ -3185,6 +3207,29 @@ impl NameResolver {
                 {
                     self.mutable_symbols.insert(symbol);
                 }
+            }
+            Pattern::At(at) => {
+                let binding = &at.binding;
+                if let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied() {
+                    self.declare_symbol(
+                        &binding.name,
+                        binding.syntax.id,
+                        binding.syntax.span.clone(),
+                        symbol,
+                    );
+                } else {
+                    self.declare_fresh_name(
+                        &binding.name,
+                        binding.syntax.id,
+                        binding.syntax.span.clone(),
+                    );
+                }
+                if binding.mutable
+                    && let Some(symbol) = self.symbols.get(&binding.syntax.id).copied()
+                {
+                    self.mutable_symbols.insert(symbol);
+                }
+                self.declare_pattern(&at.pattern);
             }
             Pattern::Product(product) => {
                 for element in &product.elements {
@@ -3645,6 +3690,12 @@ impl<'a> InitializationAnalyzer<'a> {
                 if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
                     states.insert(symbol, state);
                 }
+            }
+            Pattern::At(at) => {
+                if let Some(symbol) = self.module.symbol_for(at.binding.syntax.id) {
+                    states.insert(symbol, state);
+                }
+                self.set_pattern_state(&at.pattern, state, states);
             }
             Pattern::Product(product) => {
                 for element in &product.elements {

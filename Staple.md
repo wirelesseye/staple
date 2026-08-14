@@ -955,6 +955,33 @@ Patterns may be nested:
 (x: I32, (y: I32, z: I32)) => x + y + z
 ```
 
+An at-pattern binds the complete value and also matches it with a nested
+pattern. `@` associates to the right:
+
+```staple
+let point@(x, y) = get_point ()
+
+let make_point = args@(_: I32, _: I32) => {
+    args
+}
+
+let first@second@(left, right) = (1, 2)
+```
+
+The name before `@` is always a binding, even when capitalized, and may use
+the usual `mut` modifier or type annotation. An annotation constrains the
+complete value at that pattern position; it does not select a sum alternative
+independently of the nested pattern. At-patterns are available in `let`
+bindings, function parameters, match arms, propagating bindings, and quoted or
+spliced patterns.
+
+At runtime, the complete value must be `Copy`, because the alias and nested
+bindings receive independent copies. This also means mutating a `mut` alias
+does not change its nested bindings. Compile-time syntax patterns use the
+compile-time evaluator's ordinary value-copying behavior instead. Product
+function parameters retain their flattened calling convention; the callee
+reconstructs the complete product when the alias is used.
+
 Nominal patterns use the generated constructor name followed by a nested
 pattern. They are irrefutable and add no runtime check or wrapper:
 

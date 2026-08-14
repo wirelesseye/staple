@@ -3848,6 +3848,7 @@ fn invalid_delimited_collection_parameter(expression: &Expression) -> bool {
     while let Expression::Function(function) = current {
         let ty = match &function.pattern {
             Pattern::Binding(binding) => Some(&binding.ty),
+            Pattern::At(at) => Some(&at.binding.ty),
             Pattern::Wildcard(wildcard) => Some(&wildcard.ty),
             _ => None,
         };
@@ -4942,6 +4943,10 @@ fn macro_body_parameter_types(expression: &Expression) -> Vec<Option<MetaType>> 
 
 fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
     match pattern {
+        Pattern::At(at) => match &at.binding.ty {
+            Type::Inferred(_) => pattern_meta_type(&at.pattern),
+            ty => meta_type(ty),
+        },
         Pattern::Binding(binding) => match &binding.ty {
             Type::Inferred(_) => Some(MetaType::SyntaxNode),
             ty => meta_type(ty),
@@ -5125,6 +5130,9 @@ fn expression_parameter_contains_syntax(expression: &Expression) -> bool {
 
 fn pattern_contains_syntax(pattern: &Pattern) -> bool {
     match pattern {
+        Pattern::At(at) => {
+            type_contains_syntax(&at.binding.ty) || pattern_contains_syntax(&at.pattern)
+        }
         Pattern::Binding(binding) => type_contains_syntax(&binding.ty),
         Pattern::Product(product) => product.elements.iter().any(pattern_contains_syntax),
         Pattern::Nominal(pattern) => pattern_contains_syntax(&pattern.argument),
@@ -5318,6 +5326,16 @@ fn bool_value(value: bool) -> Value {
 
 fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) -> bool {
     match pattern {
+        Pattern::At(at) => {
+            if !matches_pattern_type(&at.binding.ty, &value) {
+                return false;
+            }
+            environment.insert(
+                at.binding.name.clone(),
+                EnvironmentBinding::new(value.clone(), at.binding.mutable),
+            );
+            bind_pattern(&at.pattern, value, environment)
+        }
         Pattern::Wildcard(pattern) => matches_pattern_type(&pattern.ty, &value),
         Pattern::StringLiteral(pattern) => {
             let Value::String(value) = value else {
@@ -6069,6 +6087,10 @@ fn substitute_pattern(
         };
     }
     match pattern {
+        Pattern::At(at) => {
+            substitute_type(&mut at.binding.ty, environment, diagnostics)?;
+            substitute_pattern(&mut at.pattern, environment, diagnostics)?;
+        }
         Pattern::Binding(binding) => substitute_type(&mut binding.ty, environment, diagnostics)?,
         Pattern::Wildcard(wildcard) => substitute_type(&mut wildcard.ty, environment, diagnostics)?,
         Pattern::Product(product) => {
@@ -6474,6 +6496,15 @@ fn hygienic_name(name: &str, mark: u64) -> String {
 
 fn alpha_rename_pattern(pattern: &mut Pattern, mark: u64, names: &mut HashMap<String, String>) {
     match pattern {
+        Pattern::At(at) => {
+            at.binding
+                .resolution_name
+                .get_or_insert_with(|| at.binding.name.clone());
+            let renamed = hygienic_name(&at.binding.name, mark);
+            names.insert(at.binding.name.clone(), renamed.clone());
+            at.binding.name = renamed;
+            alpha_rename_pattern(&mut at.pattern, mark, names);
+        }
         Pattern::Binding(binding) => {
             binding
                 .resolution_name
@@ -6637,6 +6668,12 @@ fn freshen_pattern(
     mark: u64,
 ) {
     match pattern {
+        Pattern::At(at) => {
+            expander.freshen_syntax(&mut at.syntax, module, mark);
+            expander.freshen_syntax(&mut at.binding.syntax, module, mark);
+            freshen_type(expander, &mut at.binding.ty, module, mark);
+            freshen_pattern(expander, &mut at.pattern, module, mark);
+        }
         Pattern::Binding(binding) => {
             expander.freshen_syntax(&mut binding.syntax, module, mark);
             freshen_type(expander, &mut binding.ty, module, mark);

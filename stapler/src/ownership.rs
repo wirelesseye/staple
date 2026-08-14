@@ -115,6 +115,10 @@ impl<'a> OwnershipChecker<'a> {
                     ));
                 }
             }
+            Pattern::At(at) => {
+                self.check_global_pattern(&Pattern::Binding(at.binding.as_ref().clone()));
+                self.check_global_pattern(&at.pattern);
+            }
             Pattern::Product(product) => {
                 for element in &product.elements {
                     self.check_global_pattern(element);
@@ -387,6 +391,10 @@ impl<'a> OwnershipChecker<'a> {
                 if frozen {
                     self.info.non_owning_symbols.insert(symbol);
                 }
+            }
+            Pattern::At(at) => {
+                self.bind_pattern(&Pattern::Binding(at.binding.as_ref().clone()), freeze);
+                self.bind_pattern(&at.pattern, freeze);
             }
             Pattern::Product(value) => {
                 for element in &value.elements {

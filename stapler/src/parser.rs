@@ -1232,10 +1232,9 @@ impl Grammar {
             }));
         }
         let mutable = self.eat(TokenKind::Mut);
-        if mutable {
-            return self.parse_named_pattern_from(start, true);
-        }
-        if self.eat(TokenKind::Underscore) {
+        let mut pattern = if mutable {
+            self.parse_named_pattern_from(start, true)?
+        } else if self.eat(TokenKind::Underscore) {
             let ty = if self.eat(TokenKind::Colon) {
                 self.parse_type_union()?
             } else {
@@ -1243,16 +1242,16 @@ impl Grammar {
                     syntax: self.syntax(start),
                 })
             };
-            Ok(Pattern::Wildcard(WildcardPattern {
+            Pattern::Wildcard(WildcardPattern {
                 syntax: self.syntax(start),
                 ty,
-            }))
+            })
         } else if self.peek() == Some(TokenKind::String) {
             let literal = self.bump_token().expect("peeked string").text;
-            Ok(Pattern::StringLiteral(crate::StringLiteralPattern {
+            Pattern::StringLiteral(crate::StringLiteralPattern {
                 syntax: self.syntax(start),
                 literal,
-            }))
+            })
         } else if self.eat(TokenKind::LParen) {
             let mut elements = Vec::new();
             if !self.at(TokenKind::RParen) {
@@ -1264,13 +1263,25 @@ impl Grammar {
                 }
             }
             self.expect(TokenKind::RParen, "expected `)` after parameter")?;
-            Ok(Pattern::Product(ProductPattern {
+            Pattern::Product(ProductPattern {
                 syntax: self.syntax(start),
                 elements,
-            }))
+            })
         } else {
-            self.parse_named_pattern()
+            self.parse_named_pattern()?
+        };
+        if self.eat(TokenKind::At) {
+            let Pattern::Binding(binding) = pattern else {
+                return Err(self.error("the left side of `@` must be a binding pattern"));
+            };
+            let nested = Box::new(self.parse_pattern()?);
+            pattern = Pattern::At(crate::AtPattern {
+                syntax: self.syntax(start),
+                binding: Box::new(binding),
+                pattern: nested,
+            });
         }
+        Ok(pattern)
     }
 
     fn parse_named_pattern(&mut self) -> Result<Pattern, ParseError> {

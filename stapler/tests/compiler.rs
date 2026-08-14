@@ -1502,6 +1502,87 @@ fn binds_a_product_without_destructuring_it() {
 }
 
 #[test]
+fn binds_whole_copy_values_while_destructuring_them() {
+    let module = type_check(concat!(
+        "def local = () => { let mut point: (I32, I32)@(x, y) = (20, 22); point.0 = 21; point.0 + y }\n",
+        "def parameter = args@(_: I32, _: I32) => args.0 + args.1\n",
+        "def chained = outer@inner@(left: I32, right: I32) => outer.0 + inner.1 + left + right\n",
+        "def captured = pair@(left: I32, right: I32) => { let read = () => pair.0; read() + left + right }\n",
+        "local()\n",
+        "parameter (20, 22)\n",
+        "chained (1, 2)\n",
+        "captured (10, 16)\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("at-patterns over Copy products should compile");
+
+    assert!(llvm.contains("define i32 @parameter(ptr %0, i32 %1, i32 %2)"));
+    assert!(!llvm.contains("define i32 @parameter(ptr %0, <{ i32, i32 }>"));
+    assert!(llvm.contains("%args"));
+}
+
+#[test]
+fn at_patterns_are_structural_in_matches_and_propagation() {
+    let module = type_check(concat!(
+        "pub(repr) type IOError = String\n",
+        "def read: () -> Ok I32 | IOError = () => Ok(42)\n",
+        "def choose = pair: (Bool, I32) => match pair {\n",
+        "  whole@(True(), value) => whole.1 + value,\n",
+        "  _ => 0,\n",
+        "}\n",
+        "def parse = () => { let result@Ok(value)? = read(); result }\n",
+        "choose (True, 1)\n",
+        "parse()\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("at-patterns should preserve match and propagation lowering");
+    assert!(llvm.contains("match.tag"));
+    assert!(llvm.contains("propagate.ok"));
+}
+
+#[test]
+fn at_patterns_require_copy_runtime_values_and_honor_copy_bounds() {
+    type_check("def retain: T => Copy T => T -> T = value@_ => value\n");
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def invalid: T => T -> T = value@_ => value\n"))
+        .expect_err("an unconstrained generic at-pattern should not be Copy");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("an `@` pattern requires a Copy value")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop CString\n",
+            "def invalid = value: CString => { let whole@_ = value; () }\n",
+        )))
+        .expect_err("a move-only concrete at-pattern should be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("an `@` pattern requires a Copy value")
+    }));
+}
+
+#[test]
+fn compile_time_at_patterns_bind_whole_syntax_values() {
+    let module = type_check(concat!(
+        "macro keep = whole@value: Expr => whole\n",
+        "let answer: I32 = keep 42\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("compile-time at-patterns should clone syntax values");
+}
+
+#[test]
 fn type_checks_transparent_aliases() {
     type_check("type alias number = I32\nlet answer: number = 42\n");
 }

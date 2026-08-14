@@ -213,6 +213,13 @@ impl Collector<'_> {
 
     fn collect_pattern_declarations(&mut self, pattern: &Pattern, prefix: Option<&'static str>) {
         match pattern {
+            Pattern::At(at) => {
+                self.collect_pattern_declarations(
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    prefix,
+                );
+                self.collect_pattern_declarations(&at.pattern, prefix);
+            }
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.typed.symbol_for(binding.syntax.id) {
                     self.declarations.insert(
@@ -703,6 +710,10 @@ impl Collector<'_> {
             }
         }
         match pattern {
+            Pattern::At(at) => {
+                self.pattern(&Pattern::Binding(at.binding.as_ref().clone()));
+                self.pattern(&at.pattern);
+            }
             Pattern::Product(product) => {
                 for element in &product.elements {
                     self.pattern(element);
@@ -875,6 +886,34 @@ mod tests {
                 .iter()
                 .all(|entry| entry.signature == "let answer: I32")
         );
+    }
+
+    #[test]
+    fn indexes_at_pattern_aliases_and_nested_bindings() {
+        let source =
+            "def sum = pair@(left: I32, right: I32) => pair.0 + left + right\nsum (20, 22)\n";
+        let path = std::env::temp_dir().join("staple-hover-at-patterns.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        for (name, signature) in [
+            ("pair", "pair: (left: I32, right: I32)"),
+            ("left", "left: I32"),
+            ("right", "right: I32"),
+        ] {
+            assert!(
+                entries.iter().any(|entry| {
+                    &source[entry.range.clone()] == name && entry.signature == signature
+                }),
+                "missing {name}: {signature} in {entries:?}"
+            );
+        }
     }
 
     #[test]

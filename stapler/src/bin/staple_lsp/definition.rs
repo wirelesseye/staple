@@ -235,6 +235,10 @@ impl DeclarationCollector<'_> {
 
     fn pattern(&mut self, pattern: &Pattern) {
         match pattern {
+            Pattern::At(at) => {
+                self.pattern(&Pattern::Binding(at.binding.as_ref().clone()));
+                self.pattern(&at.pattern);
+            }
             Pattern::Binding(value) => self.declaration(&value.syntax, &value.name),
             Pattern::Product(value) => {
                 for element in &value.elements {
@@ -590,6 +594,10 @@ impl Collector<'_> {
 
     fn pattern(&mut self, pattern: &Pattern) {
         match pattern {
+            Pattern::At(at) => {
+                self.pattern(&Pattern::Binding(at.binding.as_ref().clone()));
+                self.pattern(&at.pattern);
+            }
             Pattern::Binding(value) => {
                 self.add_resolved(&value.syntax, &value.name, true);
                 self.ty(&value.ty);

@@ -2654,6 +2654,28 @@ impl TypeChecker {
         }
     }
 
+    fn require_copy_at_pattern(&mut self, pattern: &crate::AtPattern, value_type: &CheckedType) {
+        let bounds = self
+            .active_function_bounds
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        if !is_copy_type(
+            value_type,
+            self.copy_trait,
+            self.drop_trait,
+            self.io_type,
+            &self.trait_implementations,
+            &bounds,
+        ) {
+            self.diagnostics.push(Diagnostic::new(
+                pattern.syntax.span.clone(),
+                format!("an `@` pattern requires a Copy value, found `{value_type}`"),
+            ));
+        }
+    }
+
     fn bind_pattern_types(
         &mut self,
         module: &ResolvedModule,
@@ -2663,6 +2685,15 @@ impl TypeChecker {
         self.pattern_types
             .insert(pattern.syntax().id, value_type.clone());
         match pattern {
+            Pattern::At(at) => {
+                self.bind_pattern_types(
+                    module,
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    value_type,
+                );
+                self.require_copy_at_pattern(at, value_type);
+                self.bind_pattern_types(module, &at.pattern, value_type);
+            }
             Pattern::Wildcard(wildcard) => {
                 if !matches!(wildcard.ty, Type::Inferred(_)) {
                     let declared = self.resolve_source_type(module, &wildcard.ty);
@@ -3011,7 +3042,18 @@ impl TypeChecker {
         binding: &crate::PatternBinding,
         value_type: &CheckedType,
     ) {
-        let Pattern::Nominal(pattern) = &binding.pattern else {
+        let mut root = &binding.pattern;
+        while let Pattern::At(at) = root {
+            self.pattern_types.insert(at.syntax.id, value_type.clone());
+            self.bind_pattern_types(
+                module,
+                &Pattern::Binding(at.binding.as_ref().clone()),
+                value_type,
+            );
+            self.require_copy_at_pattern(at, value_type);
+            root = &at.pattern;
+        }
+        let Pattern::Nominal(pattern) = root else {
             return;
         };
         let CheckedType::Sum(sum) = value_type else {
@@ -3985,6 +4027,15 @@ impl TypeChecker {
         self.pattern_types
             .insert(pattern.syntax().id, value_type.clone());
         match pattern {
+            Pattern::At(at) => {
+                self.bind_pattern_types(
+                    module,
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    value_type,
+                );
+                self.require_copy_at_pattern(at, value_type);
+                self.check_match_pattern(module, &at.pattern, value_type);
+            }
             Pattern::Binding(binding) if module.type_for_pattern(binding.syntax.id).is_some() => {
                 let expected_id = module
                     .type_for_pattern(binding.syntax.id)
@@ -4202,7 +4253,7 @@ impl TypeChecker {
         let first = Self::canonical_coverage_pattern(candidate[0]);
         match &types[0] {
             CheckedType::Sum(sum) => {
-                let alternatives = match candidate[0] {
+                let alternatives = match Self::structural_coverage_pattern(candidate[0]) {
                     CoveragePattern::Pattern(Pattern::Binding(binding))
                         if module.type_for_pattern(binding.syntax.id).is_some() =>
                     {
@@ -4443,12 +4494,21 @@ impl TypeChecker {
     }
 
     fn canonical_coverage_pattern(pattern: CoveragePattern<'_>) -> CoveragePattern<'_> {
-        match pattern {
+        match Self::structural_coverage_pattern(pattern) {
             CoveragePattern::Pattern(Pattern::Binding(_) | Pattern::Wildcard(_)) => {
                 CoveragePattern::Any
             }
             CoveragePattern::Pattern(Pattern::Product(product)) if product.elements.len() == 1 => {
                 Self::canonical_coverage_pattern(CoveragePattern::Pattern(&product.elements[0]))
+            }
+            other => other,
+        }
+    }
+
+    fn structural_coverage_pattern(pattern: CoveragePattern<'_>) -> CoveragePattern<'_> {
+        match pattern {
+            CoveragePattern::Pattern(Pattern::At(at)) => {
+                Self::structural_coverage_pattern(CoveragePattern::Pattern(&at.pattern))
             }
             other => other,
         }
@@ -4461,7 +4521,8 @@ impl TypeChecker {
         index: usize,
         sum: &CheckedSumType,
     ) -> Option<Vec<CoveragePattern<'a>>> {
-        if let CoveragePattern::Pattern(Pattern::Binding(binding)) = row[0]
+        let structural = Self::structural_coverage_pattern(row[0]);
+        if let CoveragePattern::Pattern(Pattern::Binding(binding)) = structural
             && let Some(selected_id) = module.type_for_pattern(binding.syntax.id)
         {
             if !matches!(&sum.alternatives[index], CheckedType::Distinct { id, .. } if *id == selected_id)
@@ -4472,7 +4533,7 @@ impl TypeChecker {
             result.extend_from_slice(&row[1..]);
             return Some(result);
         }
-        if let CoveragePattern::Pattern(Pattern::Binding(binding)) = row[0]
+        if let CoveragePattern::Pattern(Pattern::Binding(binding)) = structural
             && !matches!(binding.ty, Type::Inferred(_))
         {
             let selected = self.pattern_types.get(&binding.syntax.id)?;
@@ -4546,7 +4607,8 @@ impl TypeChecker {
         row: &[CoveragePattern<'a>],
         id: TypeId,
     ) -> Option<Vec<CoveragePattern<'a>>> {
-        if let CoveragePattern::Pattern(Pattern::Binding(binding)) = row[0]
+        let structural = Self::structural_coverage_pattern(row[0]);
+        if let CoveragePattern::Pattern(Pattern::Binding(binding)) = structural
             && let Some(selected_id) = module.type_for_pattern(binding.syntax.id)
         {
             if selected_id != id {
@@ -5903,6 +5965,9 @@ fn literal_is_admitted(value_type: &CheckedType, value: &str) -> bool {
 
 fn coverage_pattern_matches_literal(pattern: CoveragePattern<'_>, literal: &str) -> bool {
     match pattern {
+        CoveragePattern::Pattern(Pattern::At(at)) => {
+            coverage_pattern_matches_literal(CoveragePattern::Pattern(&at.pattern), literal)
+        }
         CoveragePattern::Any
         | CoveragePattern::Pattern(Pattern::Binding(_) | Pattern::Wildcard(_)) => true,
         CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
@@ -5921,8 +5986,11 @@ fn coverage_pattern_matches_literal(pattern: CoveragePattern<'_>, literal: &str)
 
 fn coverage_pattern_is_string_catch_all(
     module: &ResolvedModule,
-    pattern: CoveragePattern<'_>,
+    mut pattern: CoveragePattern<'_>,
 ) -> bool {
+    while let CoveragePattern::Pattern(Pattern::At(at)) = pattern {
+        pattern = CoveragePattern::Pattern(&at.pattern);
+    }
     let CoveragePattern::Pattern(Pattern::Nominal(pattern)) = pattern else {
         return false;
     };

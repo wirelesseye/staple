@@ -421,6 +421,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 global.set_linkage(inkwell::module::Linkage::Internal);
                 self.storage.insert(symbol, global);
             }
+            Pattern::At(at) => {
+                self.declare_pattern_storage(
+                    module,
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                )?;
+                self.declare_pattern_storage(module, &at.pattern)?;
+            }
             Pattern::Product(product) => {
                 for element in &product.elements {
                     self.declare_pattern_storage(module, element)?;
@@ -760,7 +767,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         values: &[BasicValueEnum<'context>],
     ) -> CodeGenerationResult<()> {
         match pattern {
-            Pattern::Binding(_) | Pattern::Wildcard(_) | Pattern::Nominal(_) => {
+            Pattern::Binding(_) | Pattern::At(_) | Pattern::Wildcard(_) | Pattern::Nominal(_) => {
                 let value = self.build_product_value(values, pattern.syntax().span.clone())?;
                 self.bind_pattern_value(environment, pattern, value)
             }
@@ -842,6 +849,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 environment.locals.insert(symbol, value.as_any_value_enum());
                 self.track_symbol_ownership(environment, symbol)?;
                 Ok(())
+            }
+            Pattern::At(at) => {
+                self.bind_pattern_value(
+                    environment,
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    value,
+                )?;
+                self.bind_pattern_value(environment, &at.pattern, value)
             }
             Pattern::Product(product) if product.elements.len() == 1 => {
                 self.bind_pattern_value(environment, &product.elements[0], value)
@@ -1347,6 +1362,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .build_store(global.as_pointer_value(), value)
                     .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
             }
+            Pattern::At(at) => {
+                self.store_pattern_globals(
+                    environment,
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                )?;
+                self.store_pattern_globals(environment, &at.pattern)?;
+            }
             Pattern::Product(product) => {
                 for element in &product.elements {
                     self.store_pattern_globals(environment, element)?;
@@ -1375,6 +1397,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     )?;
                 }
                 Ok(())
+            }
+            Pattern::At(at) => {
+                self.store_pattern_initialization_state(
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    state,
+                )?;
+                self.store_pattern_initialization_state(&at.pattern, state)
             }
             Pattern::Product(product) => {
                 for element in &product.elements {
@@ -2129,7 +2158,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             propagation.success_index,
             binding.syntax.span.clone(),
         )?;
-        let Pattern::Nominal(pattern) = &binding.pattern else {
+        let mut root = &binding.pattern;
+        while let Pattern::At(at) = root {
+            self.bind_pattern_value(
+                environment,
+                &Pattern::Binding(at.binding.as_ref().clone()),
+                sum_value.as_basic_value_enum(),
+            )?;
+            root = &at.pattern;
+        }
+        let Pattern::Nominal(pattern) = root else {
             unreachable!("checked propagating pattern is nominal");
         };
         self.bind_pattern_value(environment, &pattern.argument, success_value)
@@ -2914,6 +2952,21 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         failure: inkwell::basic_block::BasicBlock<'context>,
     ) -> CodeGenerationResult<()> {
         match pattern {
+            Pattern::At(at) => {
+                self.bind_pattern_value(
+                    environment,
+                    &Pattern::Binding(at.binding.as_ref().clone()),
+                    value,
+                )?;
+                self.compile_match_pattern_branch(
+                    environment,
+                    &at.pattern,
+                    value,
+                    value_type,
+                    success,
+                    failure,
+                )?;
+            }
             Pattern::Binding(binding)
                 if self
                     .typed_module
