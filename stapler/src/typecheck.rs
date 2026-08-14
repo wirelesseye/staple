@@ -22,6 +22,13 @@ pub struct CheckedTraitDispatch {
     pub arguments: Vec<CheckedType>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum StructuralTraitMethod {
+    Index,
+    UpdateIndex,
+    MutateIndex,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct CheckedFunctionalDependency {
     determinants: Vec<TypeParameterId>,
@@ -52,19 +59,6 @@ pub struct CheckedAccess {
     pub dereference: Option<CheckedType>,
     pub erased: bool,
     pub scalar: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CheckedIndexKind {
-    Value { length: usize },
-    Ref { length: usize },
-    ErasedRef,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckedIndex {
-    pub element: CheckedType,
-    pub kind: CheckedIndexKind,
 }
 
 #[derive(Clone, Copy)]
@@ -522,13 +516,15 @@ pub struct TypedModule {
     propagations: HashMap<SyntaxId, CheckedPropagation>,
     matches: HashMap<SyntaxId, CheckedMatch>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
-    indices: HashMap<SyntaxId, CheckedIndex>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
     string_representation: Option<CheckedType>,
     ownership: crate::ownership::OwnershipInfo,
     copy_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
+    index_trait: Option<TraitId>,
+    update_index_trait: Option<TraitId>,
+    mutate_index_trait: Option<TraitId>,
     io_type: Option<TypeId>,
     entry_function: Option<FunctionId>,
 }
@@ -580,10 +576,6 @@ impl TypedModule {
 
     pub fn access_for(&self, syntax_id: SyntaxId) -> Option<&CheckedAccess> {
         self.accesses.get(&syntax_id)
-    }
-
-    pub fn index_for(&self, syntax_id: SyntaxId) -> Option<&CheckedIndex> {
-        self.indices.get(&syntax_id)
     }
 
     pub fn type_of_pattern(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
@@ -670,6 +662,22 @@ impl TypedModule {
         self.default_trait == Some(trait_id)
     }
 
+    pub(crate) fn structural_trait_method(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Option<StructuralTraitMethod> {
+        structural_trait_arguments(
+            trait_id,
+            arguments,
+            self.index_trait,
+            self.update_index_trait,
+            self.mutate_index_trait,
+            |value_type| self.is_copy_type(value_type),
+        )
+        .map(|(_, method)| method)
+    }
+
     pub(crate) fn moved_symbols(&self, syntax: SyntaxId) -> impl Iterator<Item = SymbolId> + '_ {
         self.ownership.moved_symbols(syntax)
     }
@@ -716,6 +724,16 @@ impl TypedModule {
         trait_id: TraitId,
         arguments: &[CheckedType],
     ) -> Option<Vec<CheckedType>> {
+        if let Some((arguments, _)) = structural_trait_arguments(
+            trait_id,
+            arguments,
+            self.index_trait,
+            self.update_index_trait,
+            self.mutate_index_trait,
+            |value_type| self.is_copy_type(value_type),
+        ) {
+            return Some(arguments);
+        }
         if !arguments.iter().any(contains_inferred_type) {
             return Some(arguments.to_vec());
         }
@@ -796,7 +814,6 @@ pub struct TypeChecker {
     propagations: HashMap<SyntaxId, CheckedPropagation>,
     matches: HashMap<SyntaxId, CheckedMatch>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
-    indices: HashMap<SyntaxId, CheckedIndex>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
     string_representation: Option<CheckedType>,
     copy_trait: Option<TraitId>,
@@ -805,6 +822,9 @@ pub struct TypeChecker {
     quote_result_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
+    index_trait: Option<TraitId>,
+    update_index_trait: Option<TraitId>,
+    mutate_index_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     top_level_bindings: HashMap<SymbolId, Binding>,
@@ -842,9 +862,13 @@ impl TypeChecker {
         self.quote_result_trait = module.standard_trait("QuoteResult");
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
+        self.index_trait = module.standard_trait("Index");
+        self.update_index_trait = module.standard_trait("UpdateIndex");
+        self.mutate_index_trait = module.standard_trait("MutateIndex");
         self.collect_type_declarations(&module);
         self.collect_string_representation(&module);
         self.collect_traits(&module);
+        self.validate_indexing_trait_method_types(&module);
         self.collect_trait_implementations(&module);
         self.validate_trait_implementation_prerequisites(&module);
         self.seed_constructors(&module);
@@ -899,13 +923,15 @@ impl TypeChecker {
             propagations: self.propagations,
             matches: self.matches,
             accesses: self.accesses,
-            indices: self.indices,
             pattern_types: self.pattern_types,
             string_representation: self.string_representation,
             ownership: crate::ownership::OwnershipInfo::default(),
             copy_trait: self.copy_trait,
             drop_trait: self.drop_trait,
             default_trait: self.default_trait,
+            index_trait: self.index_trait,
+            update_index_trait: self.update_index_trait,
+            mutate_index_trait: self.mutate_index_trait,
             io_type: self.io_type,
             entry_function,
         };
@@ -1021,6 +1047,32 @@ impl TypeChecker {
                 Span::Compiler,
                 "standard library must declare public trait `Default` with one `default` member",
             )),
+        }
+        for (trait_id, trait_name, member_name) in [
+            (self.index_trait, "Index", "index"),
+            (self.update_index_trait, "UpdateIndex", "update_index"),
+            (self.mutate_index_trait, "MutateIndex", "mutate_index"),
+        ] {
+            let valid = trait_id
+                .and_then(|id| module.traits().get(&id))
+                .is_some_and(|resolved| {
+                    resolved.declaration.visibility == crate::Visibility::Public
+                        && resolved.parameters.len() == 3
+                        && resolved.declaration.members.len() == 1
+                        && resolved.declaration.members[0].name == member_name
+                        && resolved.functional_dependencies.len() == 1
+                        && resolved.functional_dependencies[0].determinants
+                            == resolved.parameters[..2]
+                        && resolved.functional_dependencies[0].dependent == resolved.parameters[2]
+                });
+            if !valid {
+                self.diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!(
+                        "standard library must declare public trait `{trait_name}` with three parameters, the required functional dependency, and one `{member_name}` member"
+                    ),
+                ));
+            }
         }
         for resolved_trait in module.traits().values() {
             let parameter_arguments = resolved_trait
@@ -1164,6 +1216,31 @@ impl TypeChecker {
                 ));
                 continue;
             }
+            if structural_trait_arguments(
+                implementation.trait_id,
+                &arguments,
+                self.index_trait,
+                self.update_index_trait,
+                self.mutate_index_trait,
+                |value_type| {
+                    is_copy_type(
+                        value_type,
+                        self.copy_trait,
+                        self.drop_trait,
+                        self.io_type,
+                        &self.trait_implementations,
+                        &[],
+                    )
+                },
+            )
+            .is_some()
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "indexing traits are derived structurally for this product type and cannot be implemented explicitly",
+                ));
+                continue;
+            }
             if arguments.iter().any(|argument| {
                 contains_type_parameter(argument)
                     || contains_inferred_type(argument)
@@ -1250,6 +1327,55 @@ impl TypeChecker {
                 arguments,
                 methods,
             });
+        }
+    }
+
+    fn validate_indexing_trait_method_types(&mut self, module: &ResolvedModule) {
+        for (trait_id, trait_name, arity, result_parameter) in [
+            (self.index_trait, "Index", 2, Some(2usize)),
+            (self.update_index_trait, "UpdateIndex", 3, Some(0usize)),
+            (self.mutate_index_trait, "MutateIndex", 3, None),
+        ] {
+            let Some(trait_id) = trait_id else {
+                continue;
+            };
+            let Some(resolved) = module.traits().get(&trait_id) else {
+                continue;
+            };
+            let Some(method) = resolved.methods.first() else {
+                continue;
+            };
+            let Some(parameters) = self.trait_parameter_arguments.get(&trait_id) else {
+                continue;
+            };
+            if parameters.len() != 3 {
+                continue;
+            }
+            let expected = CheckedType::Function(CheckedFunctionType {
+                parameter: Box::new(CheckedType::Product(CheckedProductType {
+                    elements: parameters[..arity]
+                        .iter()
+                        .cloned()
+                        .map(|value_type| CheckedTypeElement {
+                            name: None,
+                            value_type,
+                        })
+                        .collect(),
+                    variadic: false,
+                })),
+                resources: CheckedResourceSet::default(),
+                result: Box::new(
+                    result_parameter.map_or_else(CheckedType::empty_product, |index| {
+                        parameters[index].clone()
+                    }),
+                ),
+            });
+            if self.trait_method_types.get(method) != Some(&expected) {
+                self.diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!("standard-library trait `{trait_name}` has an invalid member type"),
+                ));
+            }
         }
     }
 
@@ -2906,6 +3032,68 @@ impl TypeChecker {
                 CheckedType::empty_product()
             }
             Statement::Assignment(assignment) => {
+                if let Expression::Index(index) = &assignment.target {
+                    let target_type = self.check_expression(module, &index.value);
+                    let mut position_type = self.check_expression(module, &index.index);
+                    let Some(trait_id) = self.mutate_index_trait else {
+                        self.diagnostics.push(Diagnostic::new(
+                            assignment.syntax.span.clone(),
+                            "standard-library trait `MutateIndex` is unavailable",
+                        ));
+                        return CheckedType::empty_product();
+                    };
+                    let mut partial =
+                        vec![target_type, position_type.clone(), CheckedType::Inferred];
+                    let mut resolved = self.resolve_trait_obligation(trait_id, &partial);
+                    if resolved.is_none()
+                        && matches!(index.index.as_ref(), Expression::Integer(_))
+                        && position_type != CheckedType::USize
+                    {
+                        position_type = self.check_expression_expected(
+                            module,
+                            &index.index,
+                            Some(&CheckedType::USize),
+                        );
+                        partial[1] = position_type;
+                        resolved = self.resolve_trait_obligation(trait_id, &partial);
+                    }
+                    let Some(arguments) = resolved else {
+                        self.diagnostics.push(Diagnostic::new(
+                            assignment.target.syntax().span.clone(),
+                            "indexed assignment requires a `MutateIndex` implementation",
+                        ));
+                        self.check_expression(module, &assignment.value);
+                        return CheckedType::empty_product();
+                    };
+                    if let Expression::Integer(literal) = index.index.as_ref()
+                        && literal
+                            .literal
+                            .parse::<usize>()
+                            .ok()
+                            .is_some_and(|position| {
+                                structural_index_length(&arguments[0])
+                                    .is_some_and(|length| position >= length)
+                            })
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            literal.syntax.span.clone(),
+                            format!("product index `{}` is out of bounds", literal.literal),
+                        ));
+                    }
+                    self.check_expression_expected(module, &assignment.value, Some(&arguments[2]));
+                    if let Some(method) = module
+                        .traits()
+                        .get(&trait_id)
+                        .and_then(|resolved| resolved.methods.first())
+                        .copied()
+                    {
+                        self.trait_dispatches.insert(
+                            assignment.syntax.id,
+                            CheckedTraitDispatch { method, arguments },
+                        );
+                    }
+                    return CheckedType::empty_product();
+                }
                 let target_type = self.check_expression(module, &assignment.target);
                 if !self.did_return {
                     self.check_assignment_place(module, assignment);
@@ -3667,82 +3855,75 @@ impl TypeChecker {
                 }
             }
             Expression::Index(index) => {
-                let value_type = self.check_expression(module, &index.value);
+                let target_type = self.check_expression(module, &index.value);
                 if self.did_return {
                     return CheckedType::empty_product();
                 }
-                let index_type =
-                    self.check_expression_expected(module, &index.index, Some(&CheckedType::USize));
-                if index_type != CheckedType::USize && index_type != CheckedType::Error {
+                let mut position_type = self.check_expression(module, &index.index);
+                let Some(trait_id) = self.index_trait else {
                     self.diagnostics.push(Diagnostic::new(
-                        index.index.syntax().span.clone(),
-                        format!("product index must be `USize`, found `{index_type}`"),
+                        index.syntax.span.clone(),
+                        "standard-library trait `Index` is unavailable",
+                    ));
+                    return CheckedType::Error;
+                };
+                let mut partial = vec![
+                    target_type.clone(),
+                    position_type.clone(),
+                    CheckedType::Inferred,
+                ];
+                let mut resolved = self.resolve_trait_obligation(trait_id, &partial);
+                if resolved.is_none()
+                    && matches!(index.index.as_ref(), Expression::Integer(_))
+                    && position_type != CheckedType::USize
+                {
+                    position_type = self.check_expression_expected(
+                        module,
+                        &index.index,
+                        Some(&CheckedType::USize),
+                    );
+                    partial[1] = position_type;
+                    resolved = self.resolve_trait_obligation(trait_id, &partial);
+                }
+                let Some(arguments) = resolved else {
+                    self.diagnostics.push(Diagnostic::new(
+                        index.syntax.span.clone(),
+                        format!("no `Index` implementation is available for `{target_type}`"),
+                    ));
+                    return CheckedType::Error;
+                };
+                if structural_index_length(&arguments[0]).is_some()
+                    && let Expression::Integer(literal) = index.index.as_ref()
+                    && literal
+                        .literal
+                        .parse::<usize>()
+                        .ok()
+                        .is_some_and(|position| {
+                            structural_index_length(&arguments[0])
+                                .is_some_and(|length| position >= length)
+                        })
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        literal.syntax.span.clone(),
+                        format!("product index `{}` is out of bounds", literal.literal),
                     ));
                 }
-                let mut accessible = value_type;
-                let mut referenced = false;
-                accessible = loop {
-                    match accessible {
-                        CheckedType::Distinct { representation, .. } => {
-                            accessible = *representation;
-                        }
-                        CheckedType::Ref(payload) if !referenced => {
-                            referenced = true;
-                            accessible = *payload;
-                        }
-                        other => break other,
-                    }
+                let Some(method) = module
+                    .traits()
+                    .get(&trait_id)
+                    .and_then(|resolved| resolved.methods.first())
+                    .copied()
+                else {
+                    return CheckedType::Error;
                 };
-                let checked = match accessible {
-                    CheckedType::ErasedProduct(element) if referenced => CheckedIndex {
-                        element: *element,
-                        kind: CheckedIndexKind::ErasedRef,
+                self.trait_dispatches.insert(
+                    index.syntax.id,
+                    CheckedTraitDispatch {
+                        method,
+                        arguments: arguments.clone(),
                     },
-                    CheckedType::Product(product) => {
-                        let Some(element) = product.homogeneous_element().cloned() else {
-                            self.diagnostics.push(Diagnostic::new(
-                                index.value.syntax().span.clone(),
-                                "variable indexing requires a non-empty homogeneous product",
-                            ));
-                            return CheckedType::Error;
-                        };
-                        if let Expression::Integer(literal) = index.index.as_ref()
-                            && literal
-                                .literal
-                                .parse::<usize>()
-                                .ok()
-                                .is_some_and(|position| position >= product.elements.len())
-                        {
-                            self.diagnostics.push(Diagnostic::new(
-                                literal.syntax.span.clone(),
-                                format!("product index `{}` is out of bounds", literal.literal),
-                            ));
-                        }
-                        CheckedIndex {
-                            element,
-                            kind: if referenced {
-                                CheckedIndexKind::Ref {
-                                    length: product.elements.len(),
-                                }
-                            } else {
-                                CheckedIndexKind::Value {
-                                    length: product.elements.len(),
-                                }
-                            },
-                        }
-                    }
-                    CheckedType::Error => return CheckedType::Error,
-                    other => {
-                        self.diagnostics.push(Diagnostic::new(
-                            index.value.syntax().span.clone(),
-                            format!("cannot index value of type `{other}`"),
-                        ));
-                        return CheckedType::Error;
-                    }
-                };
-                let result = checked.element.clone();
-                self.indices.insert(index.syntax.id, checked);
-                result
+                );
+                arguments[2].clone()
             }
             Expression::Infix(infix) => module
                 .lowered_infix(infix.syntax.id)
@@ -4824,6 +5005,31 @@ impl TypeChecker {
         trait_id: TraitId,
         arguments: &[CheckedType],
     ) -> Option<Vec<CheckedType>> {
+        let bounds = self
+            .active_function_bounds
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        if let Some((arguments, _)) = structural_trait_arguments(
+            trait_id,
+            arguments,
+            self.index_trait,
+            self.update_index_trait,
+            self.mutate_index_trait,
+            |value_type| {
+                is_copy_type(
+                    value_type,
+                    self.copy_trait,
+                    self.drop_trait,
+                    self.io_type,
+                    &self.trait_implementations,
+                    &bounds,
+                )
+            },
+        ) {
+            return Some(arguments);
+        }
         if arguments.iter().any(contains_inferred_type) {
             let parameters = self.trait_parameter_arguments.get(&trait_id)?;
             let query = trait_parameter_values(parameters, arguments);
@@ -4863,6 +5069,33 @@ impl TypeChecker {
         trait_id: TraitId,
         arguments: &[CheckedType],
     ) -> bool {
+        let bounds = self
+            .active_function_bounds
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        if structural_trait_arguments(
+            trait_id,
+            arguments,
+            self.index_trait,
+            self.update_index_trait,
+            self.mutate_index_trait,
+            |value_type| {
+                is_copy_type(
+                    value_type,
+                    self.copy_trait,
+                    self.drop_trait,
+                    self.io_type,
+                    &self.trait_implementations,
+                    &bounds,
+                )
+            },
+        )
+        .is_some()
+        {
+            return true;
+        }
         let [target] = arguments else {
             return self.active_function_bounds.iter().rev().any(|bounds| {
                 bounds
@@ -5312,10 +5545,10 @@ impl TypeChecker {
         flattened.sort_by_key(checked_type_sort_key);
         flattened.dedup();
         for alternative in &flattened {
-            if !alternative.is_fully_known() || !alternative.is_sized() {
+            if !alternative.is_sized() || contains_inferred_type(alternative) {
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
-                    format!("sum alternative `{alternative}` must be a fully known sized type"),
+                    format!("sum alternative `{alternative}` must be a sized type"),
                 ));
                 return CheckedType::Error;
             }
@@ -6408,7 +6641,16 @@ pub(crate) fn infer_type_parameters(
         }
         CheckedType::Sum(template) => {
             let CheckedType::Sum(actual) = actual else {
-                return false;
+                let normalized = normalize_substituted_sum(
+                    template
+                        .alternatives
+                        .iter()
+                        .cloned()
+                        .map(|alternative| substitute_type(alternative, substitutions))
+                        .collect(),
+                );
+                return !matches!(normalized, CheckedType::Sum(_))
+                    && infer_type_parameters(&normalized, actual, substitutions);
             };
             template.alternatives.len() == actual.alternatives.len()
                 && template.alternatives.iter().zip(&actual.alternatives).all(
@@ -6544,6 +6786,114 @@ fn normalize_product_type(elements: Vec<CheckedTypeElement>, variadic: bool) -> 
         elements.into_iter().next().unwrap().value_type
     } else {
         CheckedType::Product(CheckedProductType { elements, variadic })
+    }
+}
+
+fn structural_trait_arguments(
+    trait_id: TraitId,
+    arguments: &[CheckedType],
+    index_trait: Option<TraitId>,
+    update_index_trait: Option<TraitId>,
+    mutate_index_trait: Option<TraitId>,
+    is_copy: impl Fn(&CheckedType) -> bool,
+) -> Option<(Vec<CheckedType>, StructuralTraitMethod)> {
+    let [target, position, dependent] = arguments else {
+        return None;
+    };
+    if *position != CheckedType::USize && *position != CheckedType::Inferred {
+        return None;
+    }
+    let accepts = |actual: &CheckedType| *dependent == CheckedType::Inferred || dependent == actual;
+
+    if Some(trait_id) == index_trait {
+        let output = match target {
+            CheckedType::Product(product)
+                if !product.variadic
+                    && !product.elements.is_empty()
+                    && product
+                        .elements
+                        .iter()
+                        .all(|element| is_copy(&element.value_type)) =>
+            {
+                normalize_substituted_sum(
+                    product
+                        .elements
+                        .iter()
+                        .map(|element| element.value_type.clone())
+                        .collect(),
+                )
+            }
+            CheckedType::Ref(payload) => match payload.as_ref() {
+                CheckedType::Product(product) if !product.variadic => {
+                    let element = product.homogeneous_element()?.clone();
+                    is_copy(&element).then_some(element)?
+                }
+                CheckedType::ErasedProduct(element) => {
+                    is_copy(element).then(|| element.as_ref().clone())?
+                }
+                _ => return None,
+            },
+            _ => return None,
+        };
+        if accepts(&output) {
+            return Some((
+                vec![target.clone(), CheckedType::USize, output],
+                StructuralTraitMethod::Index,
+            ));
+        }
+        return None;
+    }
+
+    if Some(trait_id) == update_index_trait {
+        let CheckedType::Product(product) = target else {
+            return None;
+        };
+        if product.variadic {
+            return None;
+        }
+        let element = product.homogeneous_element()?.clone();
+        if accepts(&element) {
+            return Some((
+                vec![target.clone(), CheckedType::USize, element],
+                StructuralTraitMethod::UpdateIndex,
+            ));
+        }
+        return None;
+    }
+
+    if Some(trait_id) == mutate_index_trait {
+        let CheckedType::Ref(payload) = target else {
+            return None;
+        };
+        let element = match payload.as_ref() {
+            CheckedType::Product(product) if !product.variadic => {
+                product.homogeneous_element()?.clone()
+            }
+            CheckedType::ErasedProduct(element) => element.as_ref().clone(),
+            _ => return None,
+        };
+        if accepts(&element) {
+            return Some((
+                vec![target.clone(), CheckedType::USize, element],
+                StructuralTraitMethod::MutateIndex,
+            ));
+        }
+    }
+    None
+}
+
+fn structural_index_length(target: &CheckedType) -> Option<usize> {
+    match target {
+        CheckedType::Product(product) if !product.variadic && !product.elements.is_empty() => {
+            Some(product.elements.len())
+        }
+        CheckedType::Ref(payload) => match payload.as_ref() {
+            CheckedType::Product(product) if !product.variadic && !product.elements.is_empty() => {
+                Some(product.elements.len())
+            }
+            _ => None,
+        },
+        _ => None,
     }
 }
 

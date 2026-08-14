@@ -606,15 +606,121 @@ fn rejects_invalid_product_spreads_and_indices() {
     }));
 
     let diagnostics = TypeChecker::new()
-        .check(resolve(
-            "let pair = (1, \"two\")\nlet index: USize = 0\nlet invalid = pair[index]\n",
-        ))
-        .expect_err("a heterogeneous product cannot be indexed dynamically");
+        .check(resolve(concat!(
+            "use std.cinterop CString\n",
+            "def invalid = (pair: (CString, I32), position: USize) => pair[position]\n",
+        )))
+        .expect_err("a product containing a move-only element cannot derive Index");
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| { diagnostic.message.contains("homogeneous product") })
+            .any(|diagnostic| { diagnostic.message.contains("no `Index` implementation") })
     );
+}
+
+#[test]
+fn derives_trait_delegated_product_indexing() {
+    let source = concat!(
+        "def select: (A, B) => Copy A => Copy B => ((A, B), USize) -> A | B = (pair, position) => pair[position]\n",
+        "let pair = (1, \"two\")\n",
+        "let position: USize = 1\n",
+        "let generic_selected: I32 | String = select (pair, position)\n",
+        "let collapsed = select ((1, 2), position)\n",
+        "let selected: I32 | String = pair[position]\n",
+        "let operation: ((I32, String), USize) -> I32 | String = Index.index\n",
+        "let selected_again: I32 | String = operation (pair, position)\n",
+        "let updated: I32[3] = UpdateIndex.update_index ((1, 2, 3), position, 9)\n",
+        "let update_operation: (I32[3], USize, I32) -> I32[3] = UpdateIndex.update_index\n",
+        "let updated_again: I32[3] = update_operation (updated, position, 10)\n",
+        "let fixed: Ref I32[3] = Ref updated_again\n",
+        "let mutate_operation: (Ref I32[3], USize, I32) -> () = MutateIndex.mutate_index\n",
+        "mutate_operation (fixed, position, 6)\n",
+        "fixed[position] = 7\n",
+        "let erased: Ref I32[] = fixed\n",
+        "erased[position] = 8\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("derived indexing traits should generate LLVM");
+    assert!(llvm.contains("structural_Index"));
+    assert!(llvm.contains("structural_UpdateIndex"));
+    assert!(llvm.contains("structural_MutateIndex"));
+    assert!(llvm.contains("index.case"));
+}
+
+#[test]
+fn delegates_brackets_to_explicit_indexing_implementations() {
+    let source = concat!(
+        "impl Index I32 String I32 { def index = (target, position) => target }\n",
+        "impl MutateIndex I32 String I32 { def mutate_index = (target, position, value) => () }\n",
+        "let selected: I32 = 4[\"key\"]\n",
+        "4[\"key\"] = 5\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("custom indexing traits should generate LLVM");
+}
+
+#[test]
+fn rejects_by_value_indexed_assignment() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "let mut values: I32[2] = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n",
+        ))
+        .expect_err("by-value product assignment requires MutateIndex");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("indexed assignment requires a `MutateIndex` implementation")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "let values: Ref I32[2] = Ref (1, 2)\nvalues[2] = 3\n",
+        ))
+        .expect_err("known out-of-bounds MutateIndex must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("out of bounds"))
+    );
+}
+
+#[test]
+fn updates_and_mutates_move_only_homogeneous_products() {
+    let source = concat!(
+        "use std.cinterop CString\n",
+        "def update = (values: CString[2], position: USize, replacement: CString) => ",
+        "UpdateIndex.update_index (values, position, replacement)\n",
+        "def mutate = (values: Ref CString[2], position: USize, replacement: CString) => { ",
+        "values[position] = replacement; () }\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("move-only indexed replacement should generate LLVM");
+    assert!(llvm.contains("index.old"));
+}
+
+#[test]
+fn rejects_overlapping_structural_indexing_implementations() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "impl Index I32[2] USize I32 {\n",
+            "  def index = (values, position) => values.0\n",
+            "}\n",
+        )))
+        .expect_err("structural product Index cannot be overridden");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("derived structurally for this product type")
+    }));
 }
 
 #[test]
@@ -1226,10 +1332,7 @@ fn supports_arbitrary_sized_sum_alternatives_and_typed_matches() {
 #[test]
 fn rejects_unsized_sum_alternatives_and_ambiguous_nominal_patterns() {
     for (source, expected) in [
-        (
-            "let value: I32[] | String\n",
-            "must be a fully known sized type",
-        ),
+        ("let value: I32[] | String\n", "must be a sized type"),
         (
             concat!(
                 "def inspect = value: Ok I32 | Ok String => match value {\n",

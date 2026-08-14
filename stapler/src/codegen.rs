@@ -39,6 +39,8 @@ struct ModuleEmitter<'module, 'context> {
     functions: HashMap<FunctionId, inkwell::values::FunctionValue<'context>>,
     specialized_functions: HashMap<(FunctionId, String), inkwell::values::FunctionValue<'context>>,
     constructor_codes: HashMap<(SymbolId, String), inkwell::values::FunctionValue<'context>>,
+    structural_trait_codes:
+        HashMap<(crate::StructuralTraitMethod, String), inkwell::values::FunctionValue<'context>>,
     specialization_queue: Vec<(
         FunctionId,
         CheckedFunctionType,
@@ -129,6 +131,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             functions: HashMap::new(),
             specialized_functions: HashMap::new(),
             constructor_codes: HashMap::new(),
+            structural_trait_codes: HashMap::new(),
             specialization_queue: Vec::new(),
             active_type_substitutions: HashMap::new(),
             function_symbols: HashMap::new(),
@@ -562,7 +565,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         {
             return Err(Diagnostic::new(
                 Span::Compiler,
-                "generic function use is not fully specialized",
+                format!(
+                    "generic function use is not fully specialized: {}",
+                    CheckedType::Function(function_type.clone())
+                ),
             ));
         }
         for value_type in substitutions.values_mut() {
@@ -1788,6 +1794,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         assignment: &crate::Assignment,
     ) -> CodeGenerationResult<()> {
+        if let Expression::Index(index) = &assignment.target {
+            return self.compile_mutate_index_assignment(environment, assignment, index);
+        }
         let (pointer, value_type, symbol) =
             self.compile_place_pointer(environment, &assignment.target)?;
         let value = self.compile_expression(environment, &assignment.value)?;
@@ -1831,6 +1840,96 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )?;
             self.store_global_initialization_state(symbol, 2, assignment.syntax.span.clone())?;
         }
+        Ok(())
+    }
+
+    fn compile_mutate_index_assignment(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        assignment: &crate::Assignment,
+        index: &crate::IndexExpression,
+    ) -> CodeGenerationResult<()> {
+        let dispatch = self
+            .typed_module
+            .trait_dispatch_for(assignment.syntax.id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    assignment.syntax.span.clone(),
+                    "missing MutateIndex dispatch",
+                )
+            })?;
+        let trait_id = self
+            .typed_module
+            .resolved()
+            .trait_for_method(dispatch.method)
+            .expect("MutateIndex method owner");
+        let arguments = dispatch
+            .arguments
+            .into_iter()
+            .map(|argument| substitute_type(argument, &self.active_type_substitutions))
+            .collect::<Vec<_>>();
+        let arguments = self
+            .typed_module
+            .complete_trait_arguments(trait_id, &arguments)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    assignment.syntax.span.clone(),
+                    "incomplete MutateIndex dispatch",
+                )
+            })?;
+        let function = self.trait_method_code(
+            trait_id,
+            &arguments,
+            dispatch.method,
+            assignment.syntax.span.clone(),
+        )?;
+        let function_type = self
+            .typed_module
+            .instantiated_trait_method_type(trait_id, &arguments, dispatch.method)
+            .ok_or_else(|| {
+                Diagnostic::new(assignment.syntax.span.clone(), "unchecked MutateIndex call")
+            })?;
+        let target = self.compile_expression(environment, &index.value)?;
+        if environment.did_return {
+            return Ok(());
+        }
+        let position = self.compile_expression(environment, &index.index)?;
+        if environment.did_return {
+            return Ok(());
+        }
+        let replacement = self.compile_expression(environment, &assignment.value)?;
+        if environment.did_return {
+            return Ok(());
+        }
+        let mut call_arguments = self.compile_resource_arguments(
+            environment,
+            &function_type.resources,
+            assignment.syntax.span.clone(),
+        )?;
+        call_arguments.insert(
+            0,
+            self.context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+        );
+        for (value, span) in [
+            (target, index.value.syntax().span.clone()),
+            (position, index.index.syntax().span.clone()),
+            (replacement, assignment.value.syntax().span.clone()),
+        ] {
+            call_arguments.push(
+                value_as_basic(value)
+                    .ok_or_else(|| {
+                        Diagnostic::new(span, "MutateIndex argument is not first-class")
+                    })?
+                    .into(),
+            );
+        }
+        self.builder
+            .build_direct_call(function, &call_arguments, "mutate_index.call")
+            .map_err(|error| Diagnostic::new(assignment.syntax.span.clone(), error.to_string()))?;
         Ok(())
     }
 
@@ -1964,90 +2063,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map_err(compiler_diagnostic)?;
                 Ok((pointer, result_type, None))
             }
-            Expression::Index(index) => {
-                let checked = self
-                    .typed_module
-                    .index_for(index.syntax.id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        Diagnostic::new(index.syntax.span.clone(), "missing checked index")
-                    })?;
-                let position = self.compile_expression(environment, &index.index)?;
-                let Some(BasicValueEnum::IntValue(position)) = value_as_basic(position) else {
-                    return Err(Diagnostic::new(
-                        index.index.syntax().span.clone(),
-                        "place index is not an integer",
-                    ));
-                };
-                let (base, length) = match checked.kind {
-                    crate::CheckedIndexKind::Value { length } => {
-                        if let Some(symbol) = self.typed_module.symbol_for(index.value.syntax().id)
-                            && self.typed_module.resolved().is_mutable_symbol(symbol)
-                        {
-                            self.check_symbol_initialization(
-                                environment,
-                                symbol,
-                                index.value.syntax().span.clone(),
-                            )?;
-                        }
-                        let (pointer, _, _) =
-                            self.compile_place_pointer(environment, &index.value)?;
-                        (pointer, self.size_type.const_int(length as u64, false))
-                    }
-                    crate::CheckedIndexKind::Ref { length } => {
-                        let reference = self.compile_expression(environment, &index.value)?;
-                        let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(reference)
-                        else {
-                            return Err(Diagnostic::new(
-                                index.syntax.span.clone(),
-                                "invalid Ref place",
-                            ));
-                        };
-                        (pointer, self.size_type.const_int(length as u64, false))
-                    }
-                    crate::CheckedIndexKind::ErasedRef => {
-                        let reference = self.compile_expression(environment, &index.value)?;
-                        let Some(BasicValueEnum::StructValue(reference)) =
-                            value_as_basic(reference)
-                        else {
-                            return Err(Diagnostic::new(
-                                index.syntax.span.clone(),
-                                "invalid erased Ref place",
-                            ));
-                        };
-                        let pointer = self
-                            .builder
-                            .build_extract_value(reference, 0, "place.pointer")
-                            .map_err(compiler_diagnostic)?
-                            .into_pointer_value();
-                        let length = self
-                            .builder
-                            .build_extract_value(reference, 1, "place.length")
-                            .map_err(compiler_diagnostic)?
-                            .into_int_value();
-                        (pointer, length)
-                    }
-                };
-                let out = self
-                    .builder
-                    .build_int_compare(
-                        inkwell::IntPredicate::UGE,
-                        position,
-                        length,
-                        "place.out_of_bounds",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                self.build_trap_if(out, index.syntax.span.clone())?;
-                let element_type =
-                    substitute_type(checked.element.clone(), &self.active_type_substitutions);
-                let llvm_type = self.compile_type(&element_type)?;
-                let pointer = unsafe {
-                    self.builder
-                        .build_gep(llvm_type, base, &[position], "place.element")
-                }
-                .map_err(compiler_diagnostic)?;
-                Ok((pointer, element_type, None))
-            }
+            Expression::Index(index) => Err(Diagnostic::new(
+                index.syntax.span.clone(),
+                "indexed values are updated through `MutateIndex`, not as places",
+            )),
             _ => Err(Diagnostic::new(
                 expression.syntax().span.clone(),
                 "assignment target is not a place",
@@ -2203,10 +2222,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         expression: &Expression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        if let Some(dispatch) = self
-            .typed_module
-            .trait_dispatch_for(expression.syntax().id)
-            .cloned()
+        if !matches!(expression, Expression::Index(_))
+            && let Some(dispatch) = self
+                .typed_module
+                .trait_dispatch_for(expression.syntax().id)
+                .cloned()
         {
             let trait_id = self
                 .typed_module
@@ -2233,29 +2253,29 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     "trait method arguments are not fully specialized",
                 ));
             }
-            let function_id = self
-                .typed_module
-                .trait_impl_method(trait_id, &arguments, dispatch.method)
-                .ok_or_else(|| {
-                    Diagnostic::new(
-                        expression.syntax().span.clone(),
-                        "no trait implementation is available for these arguments",
-                    )
-                })?;
             let function = self.trait_method_code(
                 trait_id,
                 &arguments,
                 dispatch.method,
                 expression.syntax().span.clone(),
             )?;
-            return self
-                .build_closure_with_code(
+            let closure = if let Some(function_id) =
+                self.typed_module
+                    .trait_impl_method(trait_id, &arguments, dispatch.method)
+            {
+                self.build_closure_with_code(
                     environment,
                     function_id,
                     function,
                     expression.syntax().span.clone(),
-                )
-                .map(|closure| closure.as_any_value_enum());
+                )?
+            } else {
+                self.build_closure_value(
+                    function,
+                    self.context.ptr_type(AddressSpace::default()).const_null(),
+                )?
+            };
+            return Ok(closure.as_any_value_enum());
         }
         match expression {
             Expression::Function(function) => {
@@ -2677,18 +2697,346 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         method: crate::TraitMethodId,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
-        let function_id = self
-            .typed_module
-            .trait_impl_method(trait_id, arguments, method)
-            .ok_or_else(|| Diagnostic::new(span.clone(), "no trait implementation is available"))?;
-        if let Some(function) = self.functions.get(&function_id).copied() {
-            return Ok(function);
-        }
         let function_type = self
             .typed_module
             .instantiated_trait_method_type(trait_id, arguments, method)
-            .ok_or_else(|| Diagnostic::new(span, "trait method has no concrete function type"))?;
-        self.ensure_function_specialization(function_id, &function_type)
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "trait method has no concrete function type")
+            })?;
+        if let Some(function_id) = self
+            .typed_module
+            .trait_impl_method(trait_id, arguments, method)
+        {
+            if let Some(function) = self.functions.get(&function_id).copied() {
+                return Ok(function);
+            }
+            return self.ensure_function_specialization(function_id, &function_type);
+        }
+        let structural = self
+            .typed_module
+            .structural_trait_method(trait_id, arguments)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "no trait implementation is available"))?;
+        self.structural_trait_method_code(structural, arguments, &function_type, span)
+    }
+
+    fn structural_trait_method_code(
+        &mut self,
+        structural: crate::StructuralTraitMethod,
+        arguments: &[CheckedType],
+        function_type: &CheckedFunctionType,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
+        let key = (structural, format!("{arguments:?}"));
+        if let Some(function) = self.structural_trait_codes.get(&key).copied() {
+            return Ok(function);
+        }
+        let llvm_type = self.compile_closure_function_type(function_type)?;
+        let name = format!(
+            "__staple_structural_{:?}_{}",
+            structural,
+            self.structural_trait_codes.len()
+        );
+        let function = self.llvm_module.add_function(&name, llvm_type, None);
+        self.structural_trait_codes.insert(key, function);
+        let previous = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(function, "entry");
+        self.builder.position_at_end(entry);
+        let parameters = function.get_params();
+        let values = &parameters[1..];
+        let result = match structural {
+            crate::StructuralTraitMethod::Index => self.compile_structural_index_body(
+                values,
+                &arguments[0],
+                &arguments[2],
+                span.clone(),
+            )?,
+            crate::StructuralTraitMethod::UpdateIndex => self.compile_structural_update_body(
+                values,
+                &arguments[0],
+                &arguments[2],
+                span.clone(),
+            )?,
+            crate::StructuralTraitMethod::MutateIndex => self.compile_structural_mutate_body(
+                values,
+                &arguments[0],
+                &arguments[2],
+                span.clone(),
+            )?,
+        };
+        self.builder
+            .build_return(Some(&result))
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        if let Some(block) = previous {
+            self.builder.position_at_end(block);
+        }
+        Ok(function)
+    }
+
+    fn compile_structural_index_body(
+        &mut self,
+        values: &[BasicValueEnum<'context>],
+        target: &CheckedType,
+        output: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let [value, BasicValueEnum::IntValue(position)] = values else {
+            return Err(Diagnostic::new(span, "invalid structural Index arguments"));
+        };
+        if let CheckedType::Product(product) = target
+            && product.homogeneous_element().is_none()
+        {
+            let BasicValueEnum::StructValue(product_value) = value else {
+                return Err(Diagnostic::new(
+                    span,
+                    "heterogeneous product has an invalid representation",
+                ));
+            };
+            let length = self
+                .size_type
+                .const_int(product.elements.len() as u64, false);
+            let out = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::UGE,
+                    *position,
+                    length,
+                    "index.out_of_bounds",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.build_trap_if(out, span.clone())?;
+            let output_type = self.compile_type(output)?;
+            let output_slot = self
+                .builder
+                .build_alloca(output_type, "index.result")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_store(output_slot, output_type.const_zero())
+                .map_err(compiler_diagnostic)?;
+            let function = self
+                .builder
+                .get_insert_block()
+                .and_then(|block| block.get_parent())
+                .expect("structural index is in a function");
+            let merge = self.context.append_basic_block(function, "index.done");
+            let cases = product
+                .elements
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    (
+                        self.size_type.const_int(index as u64, false),
+                        self.context.append_basic_block(function, "index.case"),
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.builder
+                .build_switch(*position, merge, &cases)
+                .map_err(compiler_diagnostic)?;
+            for (index, element) in product.elements.iter().enumerate() {
+                self.builder.position_at_end(cases[index].1);
+                let field = self
+                    .builder
+                    .build_extract_value(*product_value, index as u32, "index.field")
+                    .map_err(compiler_diagnostic)?;
+                let field = self.coerce_value(
+                    field.as_any_value_enum(),
+                    &element.value_type,
+                    output,
+                    span.clone(),
+                )?;
+                let field = value_as_basic(field).ok_or_else(|| {
+                    Diagnostic::new(span.clone(), "indexed field is not first-class")
+                })?;
+                self.builder
+                    .build_store(output_slot, field)
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_unconditional_branch(merge)
+                    .map_err(compiler_diagnostic)?;
+            }
+            self.builder.position_at_end(merge);
+            return self
+                .builder
+                .build_load(output_type, output_slot, "index.value")
+                .map_err(|error| Diagnostic::new(span, error.to_string()));
+        }
+
+        let (pointer, length) = self.structural_index_storage(*value, target, span.clone())?;
+        self.compile_index_load(pointer, *position, length, output.clone(), span)
+    }
+
+    fn structural_index_storage(
+        &mut self,
+        value: BasicValueEnum<'context>,
+        target: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<(
+        inkwell::values::PointerValue<'context>,
+        inkwell::values::IntValue<'context>,
+    )> {
+        match target {
+            CheckedType::Product(product) => {
+                let llvm_type = self.compile_type(target)?;
+                let pointer = self
+                    .builder
+                    .build_alloca(llvm_type, "index.product")
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_store(pointer, value)
+                    .map_err(compiler_diagnostic)?;
+                Ok((
+                    pointer,
+                    self.size_type
+                        .const_int(product.elements.len() as u64, false),
+                ))
+            }
+            CheckedType::Ref(payload) => match payload.as_ref() {
+                CheckedType::Product(product) => {
+                    let BasicValueEnum::PointerValue(pointer) = value else {
+                        return Err(Diagnostic::new(
+                            span,
+                            "reference has an invalid representation",
+                        ));
+                    };
+                    Ok((
+                        pointer,
+                        self.size_type
+                            .const_int(product.elements.len() as u64, false),
+                    ))
+                }
+                CheckedType::ErasedProduct(_) => {
+                    let BasicValueEnum::StructValue(reference) = value else {
+                        return Err(Diagnostic::new(
+                            span,
+                            "erased reference has an invalid representation",
+                        ));
+                    };
+                    let pointer = self
+                        .builder
+                        .build_extract_value(reference, 0, "index.pointer")
+                        .map_err(compiler_diagnostic)?
+                        .into_pointer_value();
+                    let length = self
+                        .builder
+                        .build_extract_value(reference, 1, "index.length")
+                        .map_err(compiler_diagnostic)?
+                        .into_int_value();
+                    Ok((pointer, length))
+                }
+                _ => Err(Diagnostic::new(span, "invalid structural Index target")),
+            },
+            _ => Err(Diagnostic::new(span, "invalid structural Index target")),
+        }
+    }
+
+    fn compile_structural_update_body(
+        &mut self,
+        values: &[BasicValueEnum<'context>],
+        target: &CheckedType,
+        element: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let [
+            product_value,
+            BasicValueEnum::IntValue(position),
+            replacement,
+        ] = values
+        else {
+            return Err(Diagnostic::new(
+                span,
+                "invalid structural UpdateIndex arguments",
+            ));
+        };
+        let CheckedType::Product(product) = target else {
+            return Err(Diagnostic::new(
+                span,
+                "invalid structural UpdateIndex target",
+            ));
+        };
+        let llvm_type = self.compile_type(target)?;
+        let pointer = self
+            .builder
+            .build_alloca(llvm_type, "update.product")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(pointer, *product_value)
+            .map_err(compiler_diagnostic)?;
+        self.compile_structural_replace(
+            pointer,
+            *position,
+            self.size_type
+                .const_int(product.elements.len() as u64, false),
+            *replacement,
+            element,
+            span.clone(),
+        )?;
+        self.builder
+            .build_load(llvm_type, pointer, "update.value")
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    fn compile_structural_mutate_body(
+        &mut self,
+        values: &[BasicValueEnum<'context>],
+        target: &CheckedType,
+        element: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let [reference, BasicValueEnum::IntValue(position), replacement] = values else {
+            return Err(Diagnostic::new(
+                span,
+                "invalid structural MutateIndex arguments",
+            ));
+        };
+        let (pointer, length) = self.structural_index_storage(*reference, target, span.clone())?;
+        self.compile_structural_replace(
+            pointer,
+            *position,
+            length,
+            *replacement,
+            element,
+            span.clone(),
+        )?;
+        value_as_basic(self.unit_value())
+            .ok_or_else(|| Diagnostic::new(span, "unit is not first-class"))
+    }
+
+    fn compile_structural_replace(
+        &mut self,
+        pointer: inkwell::values::PointerValue<'context>,
+        position: inkwell::values::IntValue<'context>,
+        length: inkwell::values::IntValue<'context>,
+        replacement: BasicValueEnum<'context>,
+        element: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let out = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::UGE,
+                position,
+                length,
+                "index.out_of_bounds",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(out, span.clone())?;
+        let llvm_type = self.compile_type(element)?;
+        let slot = unsafe {
+            self.builder
+                .build_gep(llvm_type, pointer, &[position], "index.element")
+        }
+        .map_err(compiler_diagnostic)?;
+        if self.typed_module.type_needs_drop(element) {
+            let old = self
+                .builder
+                .build_load(llvm_type, slot, "index.old")
+                .map_err(compiler_diagnostic)?;
+            self.compile_drop_value(old, element, span.clone())?;
+        }
+        self.builder
+            .build_store(slot, replacement)
+            .map(|_| ())
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
     fn compile_default_value(
@@ -4101,7 +4449,38 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         index: &crate::IndexExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let value = self.compile_expression(environment, &index.value)?;
+        let dispatch = self
+            .typed_module
+            .trait_dispatch_for(index.syntax.id)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(index.syntax.span.clone(), "missing Index dispatch"))?;
+        let trait_id = self
+            .typed_module
+            .resolved()
+            .trait_for_method(dispatch.method)
+            .expect("Index method owner");
+        let arguments = dispatch
+            .arguments
+            .into_iter()
+            .map(|argument| substitute_type(argument, &self.active_type_substitutions))
+            .collect::<Vec<_>>();
+        let arguments = self
+            .typed_module
+            .complete_trait_arguments(trait_id, &arguments)
+            .ok_or_else(|| {
+                Diagnostic::new(index.syntax.span.clone(), "incomplete Index dispatch")
+            })?;
+        let function = self.trait_method_code(
+            trait_id,
+            &arguments,
+            dispatch.method,
+            index.syntax.span.clone(),
+        )?;
+        let function_type = self
+            .typed_module
+            .instantiated_trait_method_type(trait_id, &arguments, dispatch.method)
+            .ok_or_else(|| Diagnostic::new(index.syntax.span.clone(), "unchecked Index call"))?;
+        let target = self.compile_expression(environment, &index.value)?;
         if environment.did_return {
             return Ok(self.unit_value());
         }
@@ -4109,78 +4488,41 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if environment.did_return {
             return Ok(self.unit_value());
         }
-        let value = value_as_basic(value).ok_or_else(|| {
+        let target = value_as_basic(target).ok_or_else(|| {
             Diagnostic::new(
                 index.value.syntax().span.clone(),
                 "indexed value is not first-class",
             )
         })?;
-        let BasicValueEnum::IntValue(position) = value_as_basic(position).ok_or_else(|| {
+        let position = value_as_basic(position).ok_or_else(|| {
             Diagnostic::new(
                 index.index.syntax().span.clone(),
-                "product index is not an integer",
+                "index is not first-class",
             )
-        })?
-        else {
-            return Err(Diagnostic::new(
-                index.index.syntax().span.clone(),
-                "product index is not an integer",
-            ));
-        };
-        let checked = self
-            .typed_module
-            .index_for(index.syntax.id)
-            .cloned()
-            .ok_or_else(|| Diagnostic::new(index.syntax.span.clone(), "missing checked index"))?;
-        let (pointer, length) = match checked.kind {
-            crate::CheckedIndexKind::ErasedRef => {
-                let BasicValueEnum::StructValue(reference) = value else {
-                    return Err(Diagnostic::new(
-                        index.value.syntax().span.clone(),
-                        "erased reference has an invalid representation",
-                    ));
-                };
-                let pointer = self
-                    .builder
-                    .build_extract_value(reference, 0, "index.pointer")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let length = self
-                    .builder
-                    .build_extract_value(reference, 1, "index.length")
-                    .map_err(compiler_diagnostic)?
-                    .into_int_value();
-                (pointer, length)
-            }
-            crate::CheckedIndexKind::Ref { length } => {
-                let BasicValueEnum::PointerValue(pointer) = value else {
-                    return Err(Diagnostic::new(
-                        index.value.syntax().span.clone(),
-                        "reference has an invalid representation",
-                    ));
-                };
-                (pointer, self.size_type.const_int(length as u64, false))
-            }
-            crate::CheckedIndexKind::Value { length } => {
-                let value_type = value.get_type();
-                let pointer = self
-                    .builder
-                    .build_alloca(value_type, "index.product")
-                    .map_err(compiler_diagnostic)?;
-                self.builder
-                    .build_store(pointer, value)
-                    .map_err(compiler_diagnostic)?;
-                (pointer, self.size_type.const_int(length as u64, false))
-            }
-        };
-        self.compile_index_load(
-            pointer,
-            position,
-            length,
-            checked.element,
+        })?;
+        let mut call_arguments = self.compile_resource_arguments(
+            environment,
+            &function_type.resources,
             index.syntax.span.clone(),
-        )
-        .map(|value| value.as_any_value_enum())
+        )?;
+        call_arguments.insert(
+            0,
+            self.context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+        );
+        call_arguments.push(target.into());
+        call_arguments.push(position.into());
+        self.builder
+            .build_direct_call(function, &call_arguments, "index.call")
+            .map_err(|error| Diagnostic::new(index.syntax.span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .basic()
+            .map(AnyValueEnum::from)
+            .ok_or_else(|| {
+                Diagnostic::new(index.syntax.span.clone(), "Index result is not first-class")
+            })
     }
 
     fn compile_index_load(

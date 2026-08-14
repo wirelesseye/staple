@@ -472,7 +472,7 @@ use tools.format
 Paths beginning with `std` resolve from the standard-library module root rather
 than the package module root. `std.core` is the stable prelude interface and
 provides core numbers, booleans, strings, references, results, syntax,
-equality, copying, dropping, and defaults. Interoperability features are
+equality, copying, dropping, defaults, and indexing traits. Interoperability features are
 available through `std.cinterop`.
 
 The contextual leading component `package` always selects the current package
@@ -640,8 +640,10 @@ def increment = (mut value: I32) => {
 }
 ```
 
-Fields and indices of a by-value product are writable when the product is rooted
-in a mutable binding. Mutable locals captured by functions are shared cells, so
+Fields of a by-value product are writable when the product is rooted in a
+mutable binding. Bracket assignment is instead delegated to `MutateIndex`;
+homogeneous values use `UpdateIndex` to produce a replacement product. Mutable
+locals captured by functions are shared cells, so
 the defining scope and all closures observe subsequent assignments. Public
 mutable module bindings remain assignable only from their declaring module.
 
@@ -856,15 +858,43 @@ references, and scalar values cannot be spread. Names belonging to the spread
 product's elements are preserved. Spreads are also allowed when constructing a
 product used as a function argument.
 
-Homogeneous products support variable indexing with a `USize` expression:
+Bracket indexing is delegated to the prelude `Index` trait:
 
 ```staple
 let index: USize = 1
 let value = values[index]
 ```
 
-The index is checked against the fixed product length. A statically known bad
-index is rejected; a dynamically out-of-bounds index traps.
+`Index` has target, position, and output parameters, with the target and
+position determining the output. User-defined implementations may use any
+position type. The compiler derives `Index P USize Output` for every non-empty
+fixed product whose elements are all `Copy`; `Output` is the duplicate-free sum
+of its element types. Thus indexing `(I32, String, I32)` produces
+`I32 | String`, while indexing `I32[N]` produces `I32`. It also derives `Index`
+for fixed and erased homogeneous references when their element type is `Copy`.
+Known bad fixed-product indices are rejected and dynamic out-of-bounds indices
+trap.
+
+Two related traits provide replacement operations. `UpdateIndex` consumes a
+homogeneous fixed product and returns a product with one element replaced:
+
+```staple
+let updated = UpdateIndex.update_index (values, index, replacement)
+```
+
+`MutateIndex` replaces through a target in place. Indexed assignment delegates
+only to this trait:
+
+```staple
+reference[index] = replacement
+// Equivalent to MutateIndex.mutate_index (reference, index, replacement)
+```
+
+The compiler derives `UpdateIndex` for non-empty homogeneous fixed products and
+`MutateIndex` for fixed and erased homogeneous references. By-value products do
+not receive `MutateIndex`; use `UpdateIndex` instead. These structural
+implementations cannot be overridden. Other types may define ordinary explicit
+implementations of all three traits.
 
 Products have a structural `Default` implementation when every element type
 implements `Default`. The expected type determines the result of `default ()`:
@@ -1914,11 +1944,16 @@ public represented type from `std.core`:
 pub(repr) type Ok = T => T
 ```
 
-Every alternative must be a fully known, sized value type. Primitive, product,
+Every alternative must be a sized value type. Primitive, product,
 function, opaque, reference, and fully applied nominal types may all be
 alternatives. Unsized and partially applied types cannot be alternatives. A
 transparent alias may name a sum or alternative, but does not introduce another
 variant identity.
+
+Sized compile-time parameters may be alternatives in generic code. Their sum
+representation is specialized and canonicalized for each concrete use, so
+`A | B` collapses to one alternative when `A` and `B` specialize to the same
+type.
 
 Sums are unordered, flattened, and duplicate-free. Consequently `A | B` and
 `B | A` are the same type, nested sums are flattened, and `A | A` is `A`.

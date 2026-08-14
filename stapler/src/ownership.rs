@@ -264,17 +264,7 @@ impl<'a> OwnershipChecker<'a> {
                 true
             }
             Expression::Index(value) => {
-                let result_is_copy = self
-                    .module
-                    .type_of_expression(value.syntax.id)
-                    .is_none_or(|ty| self.module.is_copy_in_function(ty, self.function));
-                if consume && !result_is_copy {
-                    self.diagnostics.push(Diagnostic::new(
-                        value.syntax.span.clone(),
-                        "cannot move an element out through an index; destructure the whole value",
-                    ));
-                }
-                self.check_expression(&value.value, false);
+                self.check_expression(&value.value, true);
                 self.check_expression(&value.index, true);
                 true
             }
@@ -333,6 +323,12 @@ impl<'a> OwnershipChecker<'a> {
                 true
             }
             Statement::Assignment(assignment) => {
+                if let Expression::Index(index) = &assignment.target {
+                    self.check_expression(&index.value, true);
+                    self.check_expression(&index.index, true);
+                    self.check_expression(&assignment.value, true);
+                    return true;
+                }
                 self.check_assignment_target(&assignment.target);
                 self.check_expression(&assignment.value, true);
                 if let Some(symbol) = self.module.symbol_for(assignment.target.syntax().id) {
