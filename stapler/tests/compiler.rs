@@ -399,7 +399,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
     std::fs::write(
         temporary.join("std/core/string.sta"),
         format!(
-            "{declaration}\npub trait ToString = T => {{ to_string: T -> String }}\nimpl ToString String {{ def to_string = value => value }}\n"
+            "{declaration}\nextern \"staple-intrinsic\" {{ let __string_add: (String, String) -> String }}\npub trait ToString = T => {{ to_string: T -> String }}\nimpl ToString String {{ def to_string = value => value }}\nimpl Add String {{ def add = left => right => __string_add (left, right) }}\n"
         ),
     )
         .expect("test String declaration should be written");

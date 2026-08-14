@@ -1388,4 +1388,46 @@ mod tests {
         let _ = std::fs::remove_file(output);
         assert!(status.success(), "ToString executable returned {status}");
     }
+
+    #[test]
+    #[cfg(unix)]
+    fn concatenates_strings_with_add() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-string-add-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-string-add-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "def score: String -> I32 = value => match value {\n",
+                "  \"hello world\" => 0, \"héllo 🌏\" => 0, \"\" => 0, _ => 1,\n",
+                "}\n",
+                "let greeting = \"hello \" + \"world\"\n",
+                "let unicode = \"héllo \" + \"🌏\"\n",
+                "let empty = \"\" + \"\"\n",
+                "exit (score greeting + score unicode + score empty)\n",
+            ),
+        )
+        .expect("temporary string-add source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("string-add executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("string-add executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "string-add executable returned {status}");
+    }
 }

@@ -235,6 +235,7 @@ pub enum IntrinsicFunction {
     },
     StringFromCString,
     StringToCString,
+    StringAdd,
     ErasedProductLength,
     RefReplace,
     Drop,
@@ -1032,6 +1033,7 @@ impl NameResolver {
             "__string_to_c_string".to_owned(),
             IntrinsicFunction::StringToCString,
         ));
+        expected.push(("__string_add".to_owned(), IntrinsicFunction::StringAdd));
         let mut found = HashMap::new();
         let standard_library_directory = program
             .module(core)

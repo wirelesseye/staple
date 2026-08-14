@@ -4605,6 +4605,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             IntrinsicFunction::StringToCString => {
                 return self.compile_string_to_c_string(environment, call);
             }
+            IntrinsicFunction::StringAdd => {
+                return self.compile_string_add(environment, call);
+            }
             IntrinsicFunction::Drop => {
                 let value_type = self
                     .concrete_expression_type(&call.argument)
@@ -4817,6 +4820,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             IntrinsicFunction::StringFromCString
             | IntrinsicFunction::StringToCString
+            | IntrinsicFunction::StringAdd
             | IntrinsicFunction::ToString { .. }
             | IntrinsicFunction::FloatBinary { .. }
             | IntrinsicFunction::FloatCompare { .. }
@@ -4935,6 +4939,81 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.build_gc_allocation(length, "to_string.data", call.syntax.span.clone())?;
         self.builder
             .build_memcpy(pointer, 1, buffer, 1, length)
+            .map_err(compiler_diagnostic)?;
+        Ok(self
+            .build_string_value(pointer, length, call.syntax.span.clone())?
+            .as_any_value_enum())
+    }
+
+    fn compile_string_add(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
+        let [
+            inkwell::values::BasicMetadataValueEnum::StructValue(left),
+            inkwell::values::BasicMetadataValueEnum::StructValue(right),
+        ] = arguments.as_slice()
+        else {
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "string concatenation requires two String values",
+            ));
+        };
+        let left_pointer = self
+            .builder
+            .build_extract_value(*left, 0, "string.add.left.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let left_length = self
+            .builder
+            .build_extract_value(*left, 1, "string.add.left.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let right_pointer = self
+            .builder
+            .build_extract_value(*right, 0, "string.add.right.pointer")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let right_length = self
+            .builder
+            .build_extract_value(*right, 1, "string.add.right.length")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let length = self
+            .builder
+            .build_int_add(left_length, right_length, "string.add.length")
+            .map_err(compiler_diagnostic)?;
+        let overflow = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                length,
+                left_length,
+                "string.add.overflow",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(overflow, call.syntax.span.clone())?;
+        let pointer =
+            self.build_gc_allocation(length, "string.add.data", call.syntax.span.clone())?;
+        self.builder
+            .build_memcpy(pointer, 1, left_pointer, 1, left_length)
+            .map_err(compiler_diagnostic)?;
+        let right_target = unsafe {
+            self.builder.build_gep(
+                self.context.i8_type(),
+                pointer,
+                &[left_length],
+                "string.add.right.target",
+            )
+        }
+        .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_memcpy(right_target, 1, right_pointer, 1, right_length)
             .map_err(compiler_diagnostic)?;
         Ok(self
             .build_string_value(pointer, length, call.syntax.span.clone())?

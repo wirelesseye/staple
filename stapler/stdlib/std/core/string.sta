@@ -1,9 +1,17 @@
 pub type String = Ref U8[]
 
+extern "staple-intrinsic" {
+    let __string_add: (String, String) -> String
+}
+
 pub trait ToString = T => {
     to_string: T -> String
 }
 
 impl ToString String {
     def to_string = value => value
+}
+
+impl Add String {
+    def add = left => right => __string_add (left, right)
 }

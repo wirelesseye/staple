@@ -1548,6 +1548,17 @@ impl TypeChecker {
                         result: Box::new(CheckedType::CString),
                     })
                 }
+                crate::IntrinsicFunction::StringAdd => CheckedType::Function(CheckedFunctionType {
+                    parameter: Box::new(CheckedType::Product(CheckedProductType {
+                        elements: vec![
+                            CheckedTypeElement { name: None, value_type: CheckedType::String },
+                            CheckedTypeElement { name: None, value_type: CheckedType::String },
+                        ],
+                        variadic: false,
+                    })),
+                    resources: CheckedResourceSet::default(),
+                    result: Box::new(CheckedType::String),
+                }),
                 crate::IntrinsicFunction::ErasedProductLength => self
                     .symbol_types
                     .get(symbol)

@@ -1406,6 +1406,8 @@ library declares it as a nominal type with the private representation
 `Ref U8[]`. At runtime it contains a managed byte pointer and a byte length; it
 has no capacity field or separate descriptor allocation. Copying a `String`
 copies those two words and keeps the managed byte storage shared.
+Two strings can be concatenated with `+`; this dispatches through the standard
+`Add String` implementation and returns a newly allocated `String`.
 
 `Ref T` is a garbage-collected reference to a value of type `T`. Its standard
 declaration is `pub(repr) type Ref = T => ?Sized T => T`, so its payload may be
