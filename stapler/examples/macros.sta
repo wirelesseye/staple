@@ -1,9 +1,30 @@
-// Typed macro parameters, literal identifiers, overloads, and hygiene.
+// A tour of Staple's current macro system.
+//
+// Macro APIs are compile-time-only and are not part of the standard prelude,
+// so every syntax type used below is imported explicitly.
 use std.io println
+use std.syntax (
+    quote,
+    Expr,
+    Type,
+    Pattern,
+    Item,
+    Ident,
+    CallExpr,
+    SyntaxNode,
+    Sequence,
+    Separated,
+    Comma,
+    Parenthesized,
+    Bracketed,
+    Braced,
+    MacroCallVisibility,
+)
 
-// Typed parameters require expressions, so invalid calls are rejected during
-// macro expansion rather than later during type checking.
-macro select =
+// Parameters consume syntax rather than evaluated runtime values. Expr rejects
+// non-expression input during expansion, and a literal Ident matches a keyword-
+// like word without making it part of the runtime language.
+macro choose =
     condition: Expr =>
     when_true: Expr =>
     quote {
@@ -13,10 +34,9 @@ macro select =
         }
     }
 
-// A longer overload accepts `else` as syntax, not as a runtime value. When
-// both overloads match, Staple selects the complete overload that consumes the
-// most syntax atoms.
-macro select =
+// Macros may be overloaded. Complete matches that consume more syntax win, so
+// this form is selected when an `else` branch is present.
+macro choose =
     condition: Expr =>
     when_true: Expr =>
     _: Ident "else" =>
@@ -28,33 +48,121 @@ macro select =
         }
     }
 
-let true_condition: Bool = True
-let false_condition: Bool = False
+// Balanced delimiters are one macro argument. Their contents can have a fixed
+// shape, a Sequence, or a comma-separated shape with an optional trailing comma.
+// Specialized shapes outrank the general SyntaxNode fallback.
+macro describe = _: SyntaxNode => quote { "one syntax node" }
+macro describe = _: Parenthesized (Ident String, Ident String) => quote { "a pair" }
+macro describe = _: Bracketed (Sequence Ident String) => quote { "a name sequence" }
+macro describe =
+    _: Braced (Separated (Ident String) Comma) =>
+    quote { "comma-separated names" }
 
+// Type and Pattern are opaque grammatical syntax values. Compound values use
+// an outer pair of invocation parentheses; the captured value itself does not
+// include that pair. Contextual quotation then accepts each splice in its
+// corresponding grammatical position. This macro returns one complete item.
+macro bind =
+    pattern: Pattern =>
+    ty: Type =>
+    value: Expr => {
+        quote { let $pattern: $ty = $value }
+    }
+
+macro destructure = pattern: Pattern => value: Expr => quote {
+    let $pattern = $value
+}
+
+bind generated I32 40
+bind pair ((I32, I32)) (20, 22)
+destructure ((left, right)) pair
+
+// Ident and CallExpr are the currently structured expression syntax. They can
+// be inspected, copied, constructed, and mutated with ordinary Staple code.
+// Mutation follows value semantics: changing `changed` leaves `original` alone.
+macro replace_argument = value: CallExpr => replacement: Expr => {
+    let original = value
+    let mut changed = value
+    changed.argument = replacement
+    quote { ($original, $changed) }
+}
+
+macro call_increment = value: Expr => {
+    let callee = Ident "increment"
+    CallExpr (callee: callee, argument: value)
+}
+
+def increment: I32 -> I32 = value => value + 1
+let (before, after) = replace_argument (increment 1) 41
+let constructed: I32 = call_increment 41
+
+// A top-level macro can generate several items in source order. Sequence Item
+// is also the type used by repeated `$items...` splices inside item lists.
+macro generate_pair: Expr -> Sequence Item = value => quote {
+    let first_generated: I32 = $value
+    let second_generated: I32 = first_generated + 1
+}
+
+generate_pair 41
+
+// Modifier macros receive one opaque Item from the compiler. An optional
+// explicit Expr, Type, or Pattern argument is always written in parentheses.
+// The closest modifier runs first; here @replace discards the definition and
+// @identity passes its generated replacement through unchanged.
+macro @identity: Item -> Item = item => item
+macro @replace: Expr -> Item -> Item = value => item => quote {
+    let replaced: I32 = $value
+}
+
+@identity
+@replace(42)
+def discarded = () => 0
+
+// MacroCallVisibility receives Private, Public, or PublicRepr from the call
+// prefix. Identifier and type syntax can be spliced into declaration positions.
+macro define_alias: MacroCallVisibility -> Ident String -> Type -> Item =
+    visibility =>
+    name =>
+    ty =>
+    quote { $visibility type alias $name = $ty }
+
+pub define_alias PublicAnswer I32
+let public_answer: PublicAnswer = 42
+
+// Quoted identifiers are hygienic: names written by a macro resolve where the
+// macro is defined, while spliced syntax retains the caller's environment.
 def definition_site_identity: I32 -> I32 = value => value
 
-// Names written directly in a quote resolve where the macro is defined, while
-// `$value` keeps the caller's environment.
 macro hygienic_identity = value: Expr => quote {
     definition_site_identity $value
 }
 
-let answer: I32 = {
+let hygienic_answer: I32 = {
     let definition_site_identity: I32 -> I32 = _ => 0
     hygienic_identity 42
 }
 
-// Giving the result an explicit type also shows that the generated call
-// returned the spliced caller value, despite the shadowing binding above.
-let checked_answer: I32 = answer
-
-// Arguments left after expansion are applied to the generated expression as
-// ordinary calls.
+// Arguments left after expansion are ordinary call arguments.
 macro identity = value: Expr => quote { $value }
 
+let true_condition: Bool = True
+let false_condition: Bool = False
+
 def main = () => {
-    select true_condition (println "the short macro form ran")
-    select false_condition (println "the true branch ran") else (println "the else branch ran")
-    println "macro hygiene kept the definition-site binding"
-    identity println "arguments can follow a macro expansion"
+    choose true_condition (println "short form")
+    choose false_condition (println "not selected") else (println "else form")
+
+    println (describe (left right))
+    println (describe [one two three])
+    println (describe {one, two, three,})
+    println (describe anything)
+
+    let total: I32 = generated + left + right + before + after + constructed +
+        first_generated + second_generated + replaced + public_answer + hygienic_answer
+    match total == 377 {
+        True => println "generated values are correct",
+        False => println "unexpected generated values",
+    }
+
+    identity println "excess arguments follow the expansion"
 }
