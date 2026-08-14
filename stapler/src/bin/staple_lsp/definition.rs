@@ -131,8 +131,11 @@ impl DeclarationCollector<'_> {
                     self.declaration(&member.syntax, &member.name);
                 }
             }
+            Item::MacroDeclaration(value) => {
+                self.declaration(&value.syntax, &value.name);
+            }
             Item::Statement(value) => self.statement(value),
-            Item::UseDeclaration(_) | Item::MacroDeclaration(_) | Item::TraitImplementation(_) => {}
+            Item::UseDeclaration(_) | Item::TraitImplementation(_) => {}
         }
     }
 

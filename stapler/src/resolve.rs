@@ -35,6 +35,7 @@ pub enum DefinitionId {
     TypeParameter(TypeParameterId),
     Trait(TraitId),
     TraitMethod(TraitMethodId),
+    Macro(MacroId),
     Module(ModuleId),
 }
 
@@ -273,6 +274,8 @@ pub struct ResolvedModule {
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     macro_definitions: HashMap<SyntaxId, ResolvedMacro>,
     macro_invocations: HashMap<SyntaxId, ResolvedMacro>,
+    macro_declarations: HashMap<MacroId, SyntaxId>,
+    macro_modules: HashMap<MacroId, ModuleId>,
     constructors: HashMap<SymbolId, TypeId>,
     singleton_values: HashMap<SymbolId, TypeId>,
     type_modules: HashMap<TypeId, ModuleId>,
@@ -315,6 +318,12 @@ impl ResolvedModule {
 
     pub fn macro_invocation_for(&self, syntax_id: SyntaxId) -> Option<&ResolvedMacro> {
         self.macro_invocations.get(&syntax_id)
+    }
+
+    pub fn macro_for(&self, id: MacroId) -> Option<&ResolvedMacro> {
+        self.macro_declarations
+            .get(&id)
+            .and_then(|syntax| self.macro_definitions.get(syntax))
     }
 
     pub fn definitions_for(&self, syntax_id: SyntaxId) -> Vec<DefinitionId> {
@@ -362,6 +371,11 @@ impl ResolvedModule {
                 definitions.push(DefinitionId::TraitMethod(*id));
             }
         }
+        for (id, declaration) in &self.macro_declarations {
+            if *declaration == syntax_id {
+                definitions.push(DefinitionId::Macro(*id));
+            }
+        }
         let mut seen = HashSet::new();
         definitions.retain(|definition| seen.insert(*definition));
         definitions
@@ -386,6 +400,7 @@ impl ResolvedModule {
             DefinitionId::TraitMethod(id) => {
                 self.trait_methods.get(&id).map(|value| value.syntax.id)
             }
+            DefinitionId::Macro(id) => self.macro_declarations.get(&id).copied(),
             DefinitionId::Module(id) => self.program.modules().iter().find_map(|module| {
                 module.syntax.items.iter().find_map(|item| {
                     let Item::Submodule(submodule) = item else {
@@ -407,6 +422,7 @@ impl ResolvedModule {
             DefinitionId::TraitMethod(id) => self
                 .trait_for_method(id)
                 .and_then(|trait_id| self.trait_modules.get(&trait_id).copied()),
+            DefinitionId::Macro(id) => self.macro_modules.get(&id).copied(),
             DefinitionId::Module(id) => Some(id),
         }
     }
@@ -668,6 +684,8 @@ pub struct NameResolver {
     intrinsic_functions: HashMap<SymbolId, IntrinsicFunction>,
     primitive_macros: HashMap<MacroId, PrimitiveMacro>,
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
+    macro_declarations: HashMap<MacroId, SyntaxId>,
+    macro_modules: HashMap<MacroId, ModuleId>,
     constructors: HashMap<SymbolId, TypeId>,
     singleton_values: HashMap<SymbolId, TypeId>,
     nominal_patterns: HashMap<SyntaxId, TypeId>,
@@ -829,6 +847,8 @@ impl NameResolver {
             macro_calls: self.macro_calls,
             macro_definitions: macro_analysis.definitions,
             macro_invocations: macro_analysis.invocations,
+            macro_declarations: self.macro_declarations,
+            macro_modules: self.macro_modules,
             constructors: self.constructors,
             singleton_values: self.singleton_values,
             type_modules: self.type_modules,
@@ -1311,6 +1331,8 @@ impl NameResolver {
                     Item::MacroDeclaration(declaration) => {
                         let id = MacroId(self.next_macro_id);
                         self.next_macro_id += 1;
+                        self.macro_declarations.insert(id, declaration.syntax.id);
+                        self.macro_modules.insert(id, source_module.id);
                         self.declared_macros[source_module.id.0]
                             .entry(declaration.name.clone())
                             .or_default()
@@ -1666,6 +1688,9 @@ impl NameResolver {
         }
         if let Some(trait_id) = interface.traits.get(item).copied() {
             definitions.push(DefinitionId::Trait(trait_id));
+        }
+        if let Some(macros) = interface.macros.get(item) {
+            definitions.extend(macros.iter().copied().map(DefinitionId::Macro));
         }
         let mut seen = HashSet::new();
         definitions.retain(|definition| seen.insert(*definition));

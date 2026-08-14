@@ -255,12 +255,15 @@ impl<'a> Classifier<'a> {
                     self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
                 }
                 match &value.kind {
-                    UseKind::Renamed { alias, .. } => {
-                        self.mark_last(&value.syntax, alias, VARIABLE, DECLARATION, 1)
+                    UseKind::Renamed { item, alias } => {
+                        let kind = self.import_kind(value, item, resolved);
+                        self.mark_first(&value.syntax, item, kind, 0, 1);
+                        self.mark_last(&value.syntax, alias, kind, DECLARATION, 1);
                     }
                     UseKind::Selected(names) => {
                         for name in names {
-                            self.mark_last(&value.syntax, name, VARIABLE, 0, 1);
+                            let kind = self.import_kind(value, name, resolved);
+                            self.mark_last(&value.syntax, name, kind, 0, 1);
                         }
                     }
                     _ => {}
@@ -381,6 +384,60 @@ impl<'a> Classifier<'a> {
             }
             Statement::Continue(_) => {}
             Statement::Expression(value) => self.expression(value, resolved),
+        }
+    }
+
+    fn import_kind(
+        &self,
+        declaration: &UseDeclaration,
+        name: &str,
+        resolved: Option<&ResolvedModule>,
+    ) -> u32 {
+        if declaration
+            .syntax
+            .tokens()
+            .iter()
+            .any(|token| token.text == name && token.kind != TokenKind::Identifier)
+        {
+            return OPERATOR;
+        }
+        let definitions = resolved
+            .map(|resolved| resolved.import_definitions(declaration.syntax.id, name))
+            .unwrap_or_default();
+        if definitions
+            .iter()
+            .any(|definition| matches!(definition, DefinitionId::Macro(_)))
+        {
+            MACRO
+        } else if definitions
+            .iter()
+            .any(|definition| matches!(definition, DefinitionId::Trait(_)))
+        {
+            INTERFACE
+        } else if definitions.iter().any(|definition| {
+            matches!(
+                definition,
+                DefinitionId::Type(_) | DefinitionId::TypeParameter(_)
+            )
+        }) {
+            TYPE
+        } else if definitions
+            .iter()
+            .any(|definition| matches!(definition, DefinitionId::TraitMethod(_)))
+        {
+            FUNCTION
+        } else if let Some(symbol) = definitions.iter().find_map(|definition| match definition {
+            DefinitionId::Symbol(symbol) => Some(*symbol),
+            _ => None,
+        }) {
+            self.value_symbol_kind(symbol)
+        } else if definitions
+            .iter()
+            .any(|definition| matches!(definition, DefinitionId::Module(_)))
+        {
+            NAMESPACE
+        } else {
+            VARIABLE
         }
     }
 
@@ -1121,6 +1178,56 @@ mod tests {
 
         assert!(labels.contains(&("imported_function", FUNCTION)));
         assert!(labels.contains(&("imported_value", VARIABLE)));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn imported_items_are_classified_in_use_declarations() {
+        let root =
+            std::env::temp_dir().join(format!("staple-semantic-use-items-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("dependency.sta"),
+            concat!(
+                "pub let value = 1\n",
+                "pub def callable = () => 1\n",
+                "pub type alias Number = I32\n",
+                "pub trait Printable = T => {}\n",
+                "pub macro identity = value => quote { $value }\n",
+            ),
+        )
+        .unwrap();
+        let source = concat!(
+            "use dependency (value, Number, Printable, identity)\n",
+            "use dependency callable as invoke\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let classified = entries(source, Some(&module), Some(typed.resolved()), Some(&typed))
+            .into_iter()
+            .map(|entry| (&source[entry.start..entry.end], entry.token_type))
+            .collect::<Vec<_>>();
+
+        for expected in [
+            ("value", VARIABLE),
+            ("Number", TYPE),
+            ("Printable", INTERFACE),
+            ("identity", MACRO),
+            ("callable", FUNCTION),
+            ("invoke", FUNCTION),
+        ] {
+            assert!(
+                classified.contains(&expected),
+                "missing {expected:?} in {classified:?}"
+            );
+        }
 
         std::fs::remove_dir_all(root).unwrap();
     }

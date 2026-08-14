@@ -327,7 +327,80 @@ impl Collector<'_> {
             }
             Item::TypeDeclaration(declaration) => self.type_declaration(declaration),
             Item::Statement(statement) => self.statement(statement),
-            Item::UseDeclaration(_) => {}
+            Item::UseDeclaration(declaration) => self.use_declaration(declaration),
+        }
+    }
+
+    fn use_declaration(&mut self, declaration: &UseDeclaration) {
+        match &declaration.kind {
+            UseKind::Selected(names) => {
+                for name in names {
+                    self.imported_name(declaration, name, name, false);
+                }
+            }
+            UseKind::Renamed { item, alias } => {
+                self.imported_name(declaration, item, item, false);
+                self.imported_name(declaration, alias, item, true);
+            }
+            UseKind::Namespace | UseKind::Glob => {}
+        }
+    }
+
+    fn imported_name(
+        &mut self,
+        declaration: &UseDeclaration,
+        token_name: &str,
+        imported_name: &str,
+        last: bool,
+    ) {
+        let signature = self
+            .typed
+            .resolved()
+            .import_definitions(declaration.syntax.id, imported_name)
+            .iter()
+            .find_map(|definition| self.definition_signature(*definition, declaration.syntax.id));
+        if let Some(signature) = signature {
+            if last {
+                self.named_last(&declaration.syntax, token_name, signature);
+            } else {
+                self.named(&declaration.syntax, token_name, signature);
+            }
+        }
+    }
+
+    fn definition_signature(
+        &self,
+        definition: DefinitionId,
+        from_syntax: SyntaxId,
+    ) -> Option<String> {
+        let resolved = self.typed.resolved();
+        match definition {
+            DefinitionId::Symbol(symbol) => {
+                let value_type = self
+                    .typed
+                    .type_of_symbol(symbol)
+                    .map(|ty| self.display_type(ty))?;
+                Some(
+                    self.declarations
+                        .get(&symbol)
+                        .map(|declaration| declaration.signature(&value_type))
+                        .unwrap_or(value_type),
+                )
+            }
+            DefinitionId::Type(id) => self.type_signature(id, from_syntax),
+            DefinitionId::Trait(id) => resolved
+                .traits()
+                .get(&id)
+                .map(|resolved| format!("trait {}", resolved.declaration.name)),
+            DefinitionId::TraitMethod(id) => resolved.trait_method(id).map(|member| {
+                format!(
+                    "<trait member> {}: {}",
+                    member.name,
+                    member.annotation.syntax().text().trim()
+                )
+            }),
+            DefinitionId::Macro(id) => resolved.macro_for(id).map(macro_signature),
+            DefinitionId::TypeParameter(_) | DefinitionId::Module(_) => None,
         }
     }
 
@@ -928,6 +1001,58 @@ mod tests {
             &source[entry.range.clone()] == "dependency.imported_value"
                 && entry.signature == "let imported_value: I32"
         }));
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn describes_imported_items_in_use_declarations() {
+        let root =
+            std::env::temp_dir().join(format!("staple-hover-use-items-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("dependency.sta"),
+            concat!(
+                "pub let value = 1\n",
+                "pub def callable = () => 1\n",
+                "pub type alias Number = I32\n",
+                "pub trait Printable = T => {}\n",
+                "pub macro identity = value => quote { $value }\n",
+            ),
+        )
+        .unwrap();
+        let source = concat!(
+            "use dependency (value, Number, Printable, identity)\n",
+            "use dependency callable as invoke\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed)
+            .into_iter()
+            .map(|entry| (&source[entry.range], entry.signature))
+            .collect::<Vec<_>>();
+
+        for expected in [
+            ("value", "let value: I32"),
+            ("Number", "type alias Number = I32"),
+            ("Printable", "trait Printable"),
+            ("identity", "macro identity: Syntax -> Syntax"),
+            ("callable", "def callable: () -> I32"),
+            ("invoke", "def callable: () -> I32"),
+        ] {
+            assert!(
+                entries
+                    .iter()
+                    .any(|entry| entry.0 == expected.0 && entry.1 == expected.1),
+                "missing {expected:?} in {entries:?}"
+            );
+        }
 
         std::fs::remove_dir_all(root).unwrap();
     }
