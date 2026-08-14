@@ -36,7 +36,6 @@ pub fn entries(
         targets,
         entries: Vec::new(),
     };
-    collector.module(resolved.syntax());
     collector.module(module);
     collector.entries.sort_by(|left, right| {
         left.range
@@ -813,6 +812,70 @@ mod tests {
         }));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn does_not_project_macro_definition_ranges_onto_call_site_tokens() {
+        let source = concat!(
+            "use std.io println\n",
+            "\n",
+            "typegroup A = {\n",
+            "    Hello\n",
+            "}\n",
+            "\n",
+            "macro what = x => quote {$x}\n",
+            "\n",
+            "def main = () => {\n",
+            "    let x = 3\n",
+            "    let y: I32 = x + 30\n",
+            "    if True {\n",
+            "        println \"123\"\n",
+            "    }\n",
+            "    println \"Hello, world!\"\n",
+            "}\n",
+        );
+        let path = std::env::temp_dir().join("staple-definition-if-macro-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, typed.resolved(), Some(&typed));
+
+        let tokens = lex(source);
+        for entry in &entries {
+            assert!(
+                tokens.iter().any(|token| token.span == entry.range),
+                "definition range {:?} ({:?}) does not match a source token",
+                entry.range,
+                &source[entry.range.clone()]
+            );
+        }
+        for token in tokens.iter().filter(|token| {
+            matches!(
+                token.kind,
+                TokenKind::String | TokenKind::Integer | TokenKind::LBrace | TokenKind::RBrace
+            )
+        }) {
+            assert!(
+                entries.iter().all(|entry| {
+                    entry.range.end <= token.span.start || token.span.end <= entry.range.start
+                }),
+                "literal or brace {:?} received a definition entry",
+                token.text
+            );
+        }
+        for (origin, target_path) in [("True", "boolean.sta"), ("println", "io.sta")] {
+            assert!(entries.iter().any(|entry| {
+                &source[entry.range.clone()] == origin
+                    && entry
+                        .targets
+                        .iter()
+                        .any(|target| target.path.ends_with(target_path))
+            }));
+        }
     }
 
     fn assert_target(source: &str, entries: &[DefinitionEntry], origin: &str, target: &str) {

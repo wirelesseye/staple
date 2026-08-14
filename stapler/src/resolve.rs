@@ -293,6 +293,7 @@ pub struct ResolvedModule {
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
     trait_modules: HashMap<TraitId, ModuleId>,
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
+    visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
 }
 
 impl ResolvedModule {
@@ -386,6 +387,13 @@ impl ResolvedModule {
             .get(&(syntax, name.to_owned()))
             .map(Vec::as_slice)
             .unwrap_or(&[])
+    }
+
+    pub fn visible_definitions(
+        &self,
+        module: ModuleId,
+    ) -> Option<&HashMap<String, Vec<DefinitionId>>> {
+        self.visible_module_definitions.get(module.0)
     }
 
     pub fn declaration_syntax(&self, definition: DefinitionId) -> Option<SyntaxId> {
@@ -711,6 +719,7 @@ pub struct NameResolver {
     mutable_symbols: HashSet<SymbolId>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
+    visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
     interfaces: Vec<Interface>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
@@ -773,6 +782,7 @@ impl NameResolver {
             .unwrap_or(0)
             + 1;
         self.collect_interfaces(&program);
+        self.visible_module_definitions = vec![HashMap::new(); program.modules().len()];
         self.build_definition_context_values(&program);
         self.collect_standard_library_contract(&program);
         for source_module in program.modules() {
@@ -798,6 +808,7 @@ impl NameResolver {
             self.install_imports(&program, source_module.id);
             self.install_local_traits(source_module.id);
             self.predeclare_items(&source_module.syntax.items);
+            self.record_visible_module_definitions(source_module.id);
             for item in &source_module.syntax.items {
                 self.resolve_item(item);
             }
@@ -866,6 +877,7 @@ impl NameResolver {
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
             import_definitions: self.import_definitions,
+            visible_module_definitions: self.visible_module_definitions,
         };
         let analysis = InitializationAnalyzer::new(&resolved).analyze();
         if !analysis.diagnostics.is_empty() {
@@ -1919,6 +1931,52 @@ impl NameResolver {
                     .insert(declaration.name.clone(), symbol);
             }
         }
+    }
+
+    fn record_visible_module_definitions(&mut self, module: ModuleId) {
+        let mut visible = HashMap::<String, Vec<DefinitionId>>::new();
+        let mut insert = |name: &str, definition: DefinitionId| {
+            let definitions = visible.entry(name.to_owned()).or_default();
+            if !definitions.contains(&definition) {
+                definitions.push(definition);
+            }
+        };
+        for (name, symbol) in self.current_scope() {
+            insert(name, DefinitionId::Symbol(*symbol));
+        }
+        for names in [
+            &self.declared_types[module.0],
+            &self.imported_types,
+            &self.prelude_types,
+        ] {
+            for (name, id) in names {
+                insert(name, DefinitionId::Type(*id));
+            }
+        }
+        for names in [
+            &self.declared_traits[module.0],
+            &self.imported_traits,
+            &self.prelude_traits,
+        ] {
+            for (name, id) in names {
+                insert(name, DefinitionId::Trait(*id));
+            }
+        }
+        for names in [
+            &self.declared_macros[module.0],
+            &self.imported_macros,
+            &self.prelude_macros,
+        ] {
+            for (name, ids) in names {
+                for id in ids {
+                    insert(name, DefinitionId::Macro(*id));
+                }
+            }
+        }
+        for (name, id) in &self.namespaces {
+            insert(name, DefinitionId::Module(*id));
+        }
+        self.visible_module_definitions[module.0] = visible;
     }
 
     fn resolve_item(&mut self, item: &Item) {

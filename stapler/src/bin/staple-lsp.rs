@@ -1,4 +1,5 @@
 mod staple_lsp {
+    pub mod completion;
     pub mod definition;
     pub mod hover;
     pub mod semantic;
@@ -12,8 +13,11 @@ use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
     PublishDiagnostics,
 };
-use lsp_types::request::{GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest};
+use lsp_types::request::{
+    Completion, GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest,
+};
 use lsp_types::*;
+use staple_lsp::completion::CompletionIndex;
 use staple_lsp::definition::{self, DefinitionEntry};
 use staple_lsp::hover::{self, HoverEntry};
 use staple_lsp::semantic::{self, SemanticEntry};
@@ -33,6 +37,7 @@ struct Document {
 #[derive(Clone)]
 struct SuccessfulAnalysis {
     source: String,
+    completion_index: CompletionIndex,
     semantic_entries: Vec<SemanticEntry>,
     hover_entries: Vec<HoverEntry>,
 }
@@ -94,6 +99,13 @@ fn initialize(connection: &Connection) -> Result<(), String> {
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        completion_provider: Some(CompletionOptions {
+            resolve_provider: Some(false),
+            trigger_characters: None,
+            all_commit_characters: None,
+            work_done_progress_options: WorkDoneProgressOptions::default(),
+            completion_item: None,
+        }),
         ..ServerCapabilities::default()
     };
     let result = InitializeResult {
@@ -168,6 +180,30 @@ impl Server {
                 result_id: None,
                 data,
             });
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(
+                    request.id,
+                    serde_json::to_value(result).unwrap(),
+                )))
+                .map_err(|error| error.to_string())?;
+        } else if request.method == Completion::METHOD {
+            let params: CompletionParams =
+                serde_json::from_value(request.params).map_err(|error| error.to_string())?;
+            let uri = &params.text_document_position.text_document.uri;
+            let requested_position = params.text_document_position.position;
+            let items = self
+                .documents
+                .get(uri)
+                .and_then(|document| {
+                    let offset = semantic::offset(&document.text, requested_position)?;
+                    let successful = document.last_successful.as_ref()?;
+                    let previous_offset =
+                        TextChange::between(&successful.source, &document.text).old_offset(offset);
+                    Some(successful.completion_index.items(previous_offset))
+                })
+                .unwrap_or_else(staple_lsp::completion::keywords);
+            let result = CompletionResponse::Array(items);
             self.connection
                 .sender
                 .send(Message::Response(Response::new_ok(
@@ -348,6 +384,7 @@ impl Server {
         let mut resolved_for_tokens = None;
         let mut typed_for_tokens = None;
         let mut hover_entries = Vec::new();
+        let mut document_completion = None;
         let mut definition_entries = None;
         let mut definition_path = path.clone();
         let mut analysis_succeeded = false;
@@ -393,7 +430,10 @@ impl Server {
                                     Some(&typed),
                                 ));
                                 hover_entries = hover::entries(module, &typed);
+                                let completion_index =
+                                    staple_lsp::completion::index(module, &typed);
                                 typed_for_tokens = Some(typed);
+                                document_completion = Some(completion_index);
                                 analysis_succeeded = true;
                             }
                             Err(diagnostics) => {
@@ -435,6 +475,8 @@ impl Server {
             document.hover_entries = hover_entries.clone();
             document.last_successful = Some(SuccessfulAnalysis {
                 source: text.clone(),
+                completion_index: document_completion
+                    .expect("successful analysis builds completion data"),
                 semantic_entries: current_semantic,
                 hover_entries,
             });
@@ -622,6 +664,16 @@ impl TextChange {
         }
     }
 
+    fn old_offset(self, new_offset: usize) -> usize {
+        if new_offset <= self.unchanged_prefix {
+            new_offset
+        } else if new_offset >= self.new_suffix_start {
+            self.old_suffix_start + (new_offset - self.new_suffix_start)
+        } else {
+            self.unchanged_prefix
+        }
+    }
+
     fn remap(self, start: usize, end: usize) -> Option<(usize, usize)> {
         if end <= self.unchanged_prefix {
             Some((start, end))
@@ -779,6 +831,7 @@ mod tests {
         let reference = old.rfind("good").unwrap();
         let successful = SuccessfulAnalysis {
             source: old.to_owned(),
+            completion_index: CompletionIndex::default(),
             semantic_entries: vec![
                 SemanticEntry {
                     start: declaration,
@@ -874,6 +927,7 @@ mod tests {
             result.capabilities.definition_provider,
             Some(OneOf::Left(true))
         );
+        assert!(result.capabilities.completion_provider.is_some());
         client
             .sender
             .send(Message::Notification(Notification::new(
@@ -968,6 +1022,35 @@ mod tests {
         assert!(
             matches!(hover, Some(Hover { contents: HoverContents::Markup(content), .. }) if content.value.contains("I32"))
         );
+
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: 8.into(),
+                method: Completion::METHOD.to_owned(),
+                params: serde_json::to_value(CompletionParams {
+                    text_document_position: TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(uri.clone()),
+                        Position::new(1, 1),
+                    ),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                    context: None,
+                })
+                .unwrap(),
+            }))
+            .unwrap();
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected completion response")
+        };
+        let completion: CompletionResponse =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(matches!(
+            completion,
+            CompletionResponse::Array(items)
+                if items.iter().any(|item| item.label == "okay")
+                    && items.iter().any(|item| item.label == "def")
+        ));
 
         client
             .sender
@@ -1074,6 +1157,33 @@ mod tests {
             ),
             "definition: {definition:?}"
         );
+
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: 9.into(),
+                method: Completion::METHOD.to_owned(),
+                params: serde_json::to_value(CompletionParams {
+                    text_document_position: TextDocumentPositionParams::new(
+                        TextDocumentIdentifier::new(uri.clone()),
+                        Position::new(2, 1),
+                    ),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                    context: None,
+                })
+                .unwrap(),
+            }))
+            .unwrap();
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected preserved completion response")
+        };
+        let completion: CompletionResponse =
+            serde_json::from_value(response.result.unwrap()).unwrap();
+        assert!(matches!(
+            completion,
+            CompletionResponse::Array(items) if items.iter().any(|item| item.label == "okay")
+        ));
 
         client
             .sender

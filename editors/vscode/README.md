@@ -14,8 +14,11 @@ Basic Visual Studio Code support for the Staple programming language.
   the current edit contains compiler errors
 - Live parse, import, name-resolution, type, and ownership diagnostics
 - Hover information for inferred expression, binding, and parameter types
+- Basic completion for keywords and visible values, functions, types, traits,
+  macros, modules, imports, and prelude names
 
-Completion, formatting, navigation, and rename are not yet provided.
+Namespace-member completion, snippets, formatting, and rename are not yet
+provided.
 
 ## Language server
 
