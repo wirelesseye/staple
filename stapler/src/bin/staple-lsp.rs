@@ -720,6 +720,9 @@ fn lsp_diagnostic(
 ) -> lsp_types::Diagnostic {
     let start = range.start.min(source.len());
     let end = range.end.min(source.len()).max(start);
+    let range = trim_diagnostic_range(source, start..end);
+    let start = range.start;
+    let end = range.end;
     let (start_line, start_character) = semantic::position(source, start);
     let (end_line, end_character) = semantic::position(source, end);
     lsp_types::Diagnostic {
@@ -731,6 +734,19 @@ fn lsp_diagnostic(
         source: Some("staple".to_owned()),
         message,
         ..lsp_types::Diagnostic::default()
+    }
+}
+
+fn trim_diagnostic_range(source: &str, range: std::ops::Range<usize>) -> std::ops::Range<usize> {
+    let Some(text) = source.get(range.clone()) else {
+        return range;
+    };
+    let leading = text.len() - text.trim_start_matches(char::is_whitespace).len();
+    let trailing = text.len() - text.trim_end_matches(char::is_whitespace).len();
+    if leading + trailing >= text.len() {
+        range
+    } else {
+        range.start + leading..range.end - trailing
     }
 }
 
@@ -883,6 +899,38 @@ mod tests {
         assert_eq!(
             lsp_range(source, reference..reference + "café".len()),
             Range::new(Position::new(2, 0), Position::new(2, 4))
+        );
+    }
+
+    #[test]
+    fn diagnostics_do_not_include_preceding_blank_lines() {
+        let source = concat!(
+            "macro what = x => quote {$x}\n",
+            "\n",
+            "\n",
+            "missing\n",
+            "\n",
+            "def main = () => ()\n",
+        );
+        let path = std::env::temp_dir().join("staple-diagnostic-leading-trivia.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let diagnostics = NameResolver::new().resolve_program(program).unwrap_err();
+        let diagnostic = diagnostics
+            .into_iter()
+            .find(|diagnostic| diagnostic.message.contains("missing"))
+            .expect("missing name diagnostic");
+        let Span::User { range, .. } = diagnostic.span else {
+            panic!("expected a source diagnostic")
+        };
+        assert!(range.start < source.find("missing").unwrap());
+        let diagnostic = lsp_diagnostic(source, range, diagnostic.message);
+
+        assert_eq!(
+            diagnostic.range,
+            Range::new(Position::new(3, 0), Position::new(3, 7))
         );
     }
 
