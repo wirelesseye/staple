@@ -2342,16 +2342,10 @@ impl MacroExpander {
         }
         match expected {
             MetaType::Type => {
-                let (syntax, grouped) = category_argument_syntax(argument)?;
-                crate::parser::parse_type_fragment(syntax, grouped, &mut self.next_syntax_id)
-                    .ok()
-                    .map(SyntaxValue::Type)
+                parse_type_argument(argument, &mut self.next_syntax_id).map(SyntaxValue::Type)
             }
             MetaType::Pattern => {
-                let (syntax, grouped) = category_argument_syntax(argument)?;
-                crate::parser::parse_pattern_fragment(syntax, grouped, &mut self.next_syntax_id)
-                    .ok()
-                    .map(SyntaxValue::Pattern)
+                parse_pattern_argument(argument, &mut self.next_syntax_id).map(SyntaxValue::Pattern)
             }
             MetaType::Visibility | MetaType::MacroCallVisibility => {
                 let Expression::VisibilityArgument(visibility) = argument else {
@@ -4093,14 +4087,14 @@ fn sequence_meta_type(ty: &Type) -> Option<MetaType> {
 fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
     let expression_argument = meta_argument_expression(expected, argument);
     match expected {
-        MetaType::Type => category_argument_syntax(argument).is_some_and(|(syntax, grouped)| {
+        MetaType::Type => {
             let mut next_syntax_id = 0;
-            crate::parser::parse_type_fragment(syntax, grouped, &mut next_syntax_id).is_ok()
-        }),
-        MetaType::Pattern => category_argument_syntax(argument).is_some_and(|(syntax, grouped)| {
+            parse_type_argument(argument, &mut next_syntax_id).is_some()
+        }
+        MetaType::Pattern => {
             let mut next_syntax_id = 0;
-            crate::parser::parse_pattern_fragment(syntax, grouped, &mut next_syntax_id).is_ok()
-        }),
+            parse_pattern_argument(argument, &mut next_syntax_id).is_some()
+        }
         MetaType::Visibility => matches!(argument, Expression::VisibilityArgument(_)),
         MetaType::MacroCallVisibility => false,
         MetaType::Syntax => true,
@@ -4625,6 +4619,35 @@ fn category_argument_syntax(argument: &Expression) -> Option<(&Syntax, bool)> {
         Expression::String(string) => Some((&string.syntax, false)),
         _ => None,
     }
+}
+
+/// Reinterprets an expression-shaped macro argument as type syntax.
+///
+/// Parentheses normally delimit a compound category argument and are removed.
+/// If their contents are not a complete type, retry with the parentheses as
+/// part of the type so product types can use their natural spelling.
+fn parse_type_argument(argument: &Expression, next_syntax_id: &mut usize) -> Option<Type> {
+    let (syntax, grouped) = category_argument_syntax(argument)?;
+    if grouped && let Ok(ty) = crate::parser::parse_type_fragment(syntax, true, next_syntax_id) {
+        return Some(ty);
+    }
+    crate::parser::parse_type_fragment(syntax, false, next_syntax_id).ok()
+}
+
+/// Reinterprets an expression-shaped macro argument as pattern syntax.
+///
+/// As with types, preserve the existing grouping interpretation when it is
+/// valid, then retain the parentheses when they form the pattern itself. This
+/// lets `(left, right)` be captured directly as a product pattern while keeping
+/// `((left, right))` and `(Some value)` compatible with existing macros.
+fn parse_pattern_argument(argument: &Expression, next_syntax_id: &mut usize) -> Option<Pattern> {
+    let (syntax, grouped) = category_argument_syntax(argument)?;
+    if grouped
+        && let Ok(pattern) = crate::parser::parse_pattern_fragment(syntax, true, next_syntax_id)
+    {
+        return Some(pattern);
+    }
+    crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id).ok()
 }
 
 fn meta_argument_expression<'a>(expected: &MetaType, argument: &'a Expression) -> &'a Expression {

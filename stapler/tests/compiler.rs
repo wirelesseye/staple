@@ -2663,6 +2663,24 @@ fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
 }
 
 #[test]
+fn accepts_product_type_and_pattern_macro_inputs_without_extra_grouping() {
+    let module = type_check(concat!(
+        "macro for = pattern: Pattern => _: Ident \"in\" => value: Expr => body: Expr => quote {\n",
+        "    { let $pattern = $value; $body }\n",
+        "}\n",
+        "macro ascribe = ty: Type => value: Expr => quote { $value satisfies $ty }\n",
+        "let direct: I32 = for (left, right) in (40, 2) { left + right }\n",
+        "let legacy: I32 = for ((left, right)) in (40, 2) { left + right }\n",
+        "let empty: () = for () in () { () }\n",
+        "let pair: (I32, String) = ascribe (I32, String) (1, \"value\")\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("product category arguments should not require extra grouping");
+}
+
+#[test]
 fn splices_types_and_patterns_through_expression_quotation_contexts() {
     let module = type_check(concat!(
         "macro typed_identity = ty: Type => quote { (value => value) satisfies ($ty -> $ty) }\n",

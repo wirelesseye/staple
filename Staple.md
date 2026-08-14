@@ -140,19 +140,27 @@ captures `None` or `Some value`, so
 `Literal String` and `Wildcard` entries.
 
 `Type` and `Pattern` parameters accept opaque type and pattern syntax. One
-atomic name may be passed directly; compound syntax uses an outer pair of
-parentheses that delimits the macro argument and is not part of its value:
+atomic name may be passed directly. Compound syntax uses an outer pair of
+parentheses to delimit the macro argument. When those parentheses are required
+by the type or pattern itself, as for a product, the same pair serves both
+purposes:
 
 ```staple
 inspect_type I32
 inspect_type (I32 -> I32)
 inspect_type (Result I32 Error)
-inspect_type ((I32, String))
+inspect_type (I32, String)
 
 inspect_pattern name
 inspect_pattern (Some value)
-inspect_pattern ((left, right))
+inspect_pattern (left, right)
 ```
+
+An additional grouping pair remains accepted, so
+`inspect_type ((I32, String))` and `inspect_pattern ((left, right))` capture the
+same product syntax. The matcher first interprets an outer pair as an argument
+delimiter, preserving existing calls such as `(Some value)`, then retains that
+pair when its contents alone are not a complete type or pattern.
 
 Consequently, `inspect_type Result I32` is an invocation with separate
 arguments, not one applied type. Type and pattern values have no structural
