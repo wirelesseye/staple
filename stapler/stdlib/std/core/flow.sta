@@ -1,4 +1,6 @@
 use std.core.boolean (True, False)
+use std.core.iterator (IntoIterator, Iterator)
+use std.core.iterator.IterStep (Done, Yield)
 use std.syntax *
 
 def if_clauses:
@@ -38,6 +40,27 @@ pub macro while =
             match $condition satisfies Bool {
                 True() => $body,
                 False() => { break },
+            }
+        }
+    }
+
+pub macro for =
+    pattern: Pattern =>
+    _: Ident "in" =>
+    source: Expr =>
+    body: Expr =>
+    quote {
+        {
+            let mut iterator = IntoIterator.into_iterator $source
+            loop {
+                match Iterator.next iterator {
+                    Done _ => { break },
+                    Yield (item, next_iterator) => {
+                        iterator = next_iterator
+                        let $pattern = item
+                        $body
+                    },
+                }
             }
         }
     }

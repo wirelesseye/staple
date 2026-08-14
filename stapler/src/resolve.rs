@@ -589,6 +589,7 @@ struct Interface {
     types: HashMap<String, TypeId>,
     macros: HashMap<String, Vec<MacroId>>,
     traits: HashMap<String, TraitId>,
+    namespaces: HashMap<String, ModuleId>,
 }
 
 fn is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId) -> bool {
@@ -643,6 +644,9 @@ fn extend_interface(exported: &mut Interface, imported: &Interface) -> bool {
     for name in imported.traits.keys() {
         changed |= export_interface_item(exported, imported, name, name);
     }
+    for name in imported.namespaces.keys() {
+        changed |= export_interface_item(exported, imported, name, name);
+    }
     changed
 }
 
@@ -674,6 +678,12 @@ fn export_interface_item(
             .insert(alias.to_owned(), *trait_id)
             .is_none();
     }
+    if let Some(module) = imported.namespaces.get(item) {
+        changed |= exported
+            .namespaces
+            .insert(alias.to_owned(), *module)
+            .is_none();
+    }
     changed
 }
 
@@ -695,6 +705,7 @@ pub struct NameResolver {
     prelude_fixities: HashMap<String, Fixity>,
     prelude_macros: HashMap<String, Vec<MacroId>>,
     prelude_traits: HashMap<String, TraitId>,
+    prelude_namespaces: HashMap<String, ModuleId>,
     symbols: HashMap<SyntaxId, SymbolId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
@@ -821,6 +832,7 @@ impl NameResolver {
             self.prelude_fixities.clear();
             self.prelude_macros.clear();
             self.prelude_traits.clear();
+            self.prelude_namespaces.clear();
             self.push_scope();
             self.install_root_namespaces(&program, source_module.id);
             self.install_child_namespaces(&program, source_module.id);
@@ -1479,12 +1491,20 @@ impl NameResolver {
                         | Statement::Continue(_)
                         | Statement::Expression(_) => {}
                     },
+                    Item::Submodule(submodule) => {
+                        if submodule.visibility == Visibility::Public
+                            && let Some(child) = program.child_module(submodule.syntax.id)
+                        {
+                            self.interfaces[source_module.id.0]
+                                .namespaces
+                                .insert(submodule.name.clone(), child);
+                        }
+                    }
                     Item::Modified(_)
                     | Item::VisibilityMacroInvocation(_)
                     | Item::VisibilitySplice(_)
                     | Item::RepeatedItemSplice(_)
-                    | Item::UseDeclaration(_)
-                    | Item::Submodule(_) => {}
+                    | Item::UseDeclaration(_) => {}
                 }
             }
         }
@@ -1521,6 +1541,8 @@ impl NameResolver {
                         .extend(self.interfaces[core.0].types.clone());
                     self.definition_context_fixities[module.id.0]
                         .extend(self.interfaces[core.0].fixities.clone());
+                    self.definition_context_namespaces[module.id.0]
+                        .extend(self.interfaces[core.0].namespaces.clone());
                 }
             }
         }
@@ -1546,6 +1568,8 @@ impl NameResolver {
                         self.definition_context_types[module.id.0].extend(interface.types.clone());
                         self.definition_context_fixities[module.id.0]
                             .extend(interface.fixities.clone());
+                        self.definition_context_namespaces[module.id.0]
+                            .extend(interface.namespaces.clone());
                     }
                     UseKind::Selected(names) => {
                         for name in names {
@@ -1561,6 +1585,10 @@ impl NameResolver {
                                 self.definition_context_fixities[module.id.0]
                                     .insert(name.clone(), *fixity);
                             }
+                            if let Some(namespace) = interface.namespaces.get(name) {
+                                self.definition_context_namespaces[module.id.0]
+                                    .insert(name.clone(), *namespace);
+                            }
                         }
                     }
                     UseKind::Renamed { item, alias } => {
@@ -1574,6 +1602,10 @@ impl NameResolver {
                         if let Some(fixity) = interface.fixities.get(item) {
                             self.definition_context_fixities[module.id.0]
                                 .insert(alias.clone(), *fixity);
+                        }
+                        if let Some(namespace) = interface.namespaces.get(item) {
+                            self.definition_context_namespaces[module.id.0]
+                                .insert(alias.clone(), *namespace);
                         }
                     }
                     UseKind::Namespace => {
@@ -1695,6 +1727,13 @@ impl NameResolver {
                     for (name, trait_id) in interface.traits.clone() {
                         self.insert_imported_trait(name, trait_id, declaration.syntax.span.clone());
                     }
+                    for (name, namespace) in interface.namespaces.clone() {
+                        self.insert_imported_namespace(
+                            name,
+                            namespace,
+                            declaration.syntax.span.clone(),
+                        );
+                    }
                 }
                 UseKind::Selected(names) => {
                     for name in names {
@@ -1749,6 +1788,9 @@ impl NameResolver {
         if let Some(macros) = interface.macros.get(item) {
             definitions.extend(macros.iter().copied().map(DefinitionId::Macro));
         }
+        if let Some(module) = interface.namespaces.get(item).copied() {
+            definitions.push(DefinitionId::Module(module));
+        }
         let mut seen = HashSet::new();
         definitions.retain(|definition| seen.insert(*definition));
         for name in [item, alias] {
@@ -1790,6 +1832,7 @@ impl NameResolver {
             types: self.declared_types[module.0].clone(),
             macros: self.declared_macros[module.0].clone(),
             traits: self.declared_traits[module.0].clone(),
+            namespaces: self.interfaces[module.0].namespaces.clone(),
         }
     }
 
@@ -1835,6 +1878,7 @@ impl NameResolver {
         self.prelude_fixities = self.interfaces[core.0].fixities.clone();
         self.prelude_macros = self.interfaces[core.0].macros.clone();
         self.prelude_traits = self.interfaces[core.0].traits.clone();
+        self.prelude_namespaces = self.interfaces[core.0].namespaces.clone();
         for trait_id in self.prelude_traits.values().copied().collect::<Vec<_>>() {
             self.add_visible_trait_methods(trait_id);
         }
@@ -1860,6 +1904,10 @@ impl NameResolver {
         if let Some(trait_id) = interface.traits.get(item).copied() {
             found = true;
             self.insert_imported_trait(local.to_owned(), trait_id, span.clone());
+        }
+        if let Some(namespace) = interface.namespaces.get(item).copied() {
+            found = true;
+            self.insert_imported_namespace(local.to_owned(), namespace, span.clone());
         }
         if !found {
             self.diagnostics.push(Diagnostic::new(
@@ -1901,6 +1949,14 @@ impl NameResolver {
             self.duplicate_import(&name, span);
         } else {
             self.add_visible_trait_methods(id);
+        }
+    }
+
+    fn insert_imported_namespace(&mut self, name: String, module: ModuleId, span: Span) {
+        if self.namespaces.insert(name.clone(), module).is_some()
+            || self.current_scope().contains_key(&name)
+        {
+            self.duplicate_import(&name, span);
         }
     }
 
@@ -2023,6 +2079,9 @@ impl NameResolver {
                     insert(name, DefinitionId::Macro(*id));
                 }
             }
+        }
+        for (name, id) in &self.prelude_namespaces {
+            insert(name, DefinitionId::Module(*id));
         }
         for (name, id) in &self.namespaces {
             insert(name, DefinitionId::Module(*id));
@@ -2651,7 +2710,7 @@ impl NameResolver {
                                 .and_then(|namespaces| namespaces.get(&namespace))
                                 .copied()
                         })
-                        .or_else(|| self.namespaces.get(&namespace).copied())
+                        .or_else(|| self.lookup_namespace(&namespace))
                 {
                     if let Some(symbol) = self.interfaces[module.0].values.get(&item).copied() {
                         self.symbols.insert(access.syntax.id, symbol);
@@ -2696,6 +2755,13 @@ impl NameResolver {
             ) {
                 (Some(symbol), methods)
                     if !methods.is_empty()
+                        && self.symbol_owners.get(&symbol).is_some_and(Option::is_some) =>
+                {
+                    self.symbols.insert(name.syntax.id, symbol);
+                    self.record_capture(symbol);
+                }
+                (Some(symbol), methods)
+                    if !methods.is_empty()
                         && self.intrinsic_functions.get(&symbol)
                             != Some(&IntrinsicFunction::Drop) =>
                 {
@@ -2711,7 +2777,7 @@ impl NameResolver {
                 (None, methods) if !methods.is_empty() => {
                     self.trait_method_references.insert(name.syntax.id, methods);
                 }
-                (None, _) if self.namespaces.contains_key(&name.name) => {
+                (None, _) if self.lookup_namespace(&name.name).is_some() => {
                     self.diagnostics.push(Diagnostic::new(
                         name.syntax.span.clone(),
                         format!("module namespace `{}` is not a value", name.name),
@@ -2772,7 +2838,7 @@ impl NameResolver {
                                 .and_then(|namespaces| namespaces.get(namespace))
                                 .copied()
                         })
-                        .or_else(|| self.namespaces.get(namespace).copied())
+                        .or_else(|| self.lookup_namespace(namespace))
                         .and_then(|module| self.interfaces[module.0].types.get(&named.name))
                         .copied()
                 } else {
@@ -2834,8 +2900,8 @@ impl NameResolver {
 
     fn resolve_trait_name(&mut self, name: &crate::NamedType) -> Option<TraitId> {
         let resolved = if let Some(namespace) = &name.namespace {
-            self.namespaces
-                .get(namespace)
+            self.lookup_namespace(namespace)
+                .as_ref()
                 .and_then(|module| self.interfaces[module.0].traits.get(&name.name))
                 .copied()
         } else {
@@ -2864,8 +2930,8 @@ impl NameResolver {
                 .or_else(|| self.prelude_traits.get(&name.name).copied()),
             Expression::Access(access) => {
                 let (namespace, name, _) = qualified_access_path(access)?;
-                self.namespaces
-                    .get(&namespace)
+                self.lookup_namespace(&namespace)
+                    .as_ref()
                     .and_then(|module| self.interfaces[module.0].traits.get(&name))
                     .copied()
             }
@@ -3035,7 +3101,7 @@ impl NameResolver {
                 )
                 .and_then(|namespaces| namespaces.get(namespace))
                 .copied()
-                .or_else(|| self.namespaces.get(namespace).copied())
+                .or_else(|| self.lookup_namespace(namespace))
                 .and_then(|module| self.interfaces[module.0].fixities.get(&operator.name))
                 .copied()
                 .unwrap_or_default();
@@ -3229,6 +3295,13 @@ impl NameResolver {
             .or_else(|| self.prelude_values.get(name).copied())
     }
 
+    fn lookup_namespace(&self, name: &str) -> Option<ModuleId> {
+        self.namespaces
+            .get(name)
+            .copied()
+            .or_else(|| self.prelude_namespaces.get(name).copied())
+    }
+
     fn lookup_macro(&self, name: &str) -> Option<Vec<MacroId>> {
         if self.lookup(name).is_some() {
             return None;
@@ -3252,7 +3325,7 @@ impl NameResolver {
                             .and_then(|namespaces| namespaces.get(&namespace))
                             .copied()
                     })
-                    .or_else(|| self.namespaces.get(&namespace).copied())
+                    .or_else(|| self.lookup_namespace(&namespace))
                     .and_then(|module| self.interfaces[module.0].macros.get(&item))
                     .cloned()
             }

@@ -1799,7 +1799,7 @@ impl Grammar {
             Some(TokenKind::LBracket) => self.parse_syntax_argument(),
             Some(TokenKind::LParen) if self.parenthesized_operator() => self.parse_operator_value(),
             Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
-            Some(TokenKind::Identifier) => {
+            Some(TokenKind::Identifier | TokenKind::Underscore) => {
                 let start = self.position;
                 let name = self.bump_token().expect("peeked name").text;
                 Ok(Expression::Name(NameExpression {
@@ -2117,6 +2117,7 @@ impl Grammar {
                     | TokenKind::Loop
                     | TokenKind::Pub
                     | TokenKind::Identifier
+                    | TokenKind::Underscore
                     | TokenKind::Dollar
                     | TokenKind::String
                     | TokenKind::Integer

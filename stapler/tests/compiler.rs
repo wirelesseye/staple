@@ -3303,17 +3303,16 @@ fn requires_else_to_be_the_last_braced_if_clause() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source(
-            "let invalid = if { else => (), True => () }\n",
-            root,
-        )
+        .load_source("let invalid = if { else => (), True => () }\n", root)
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err("a non-final else clause should be rejected");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message == "compile-time match was not exhaustive"
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message == "compile-time match was not exhaustive" })
+    );
 }
 
 #[test]
@@ -3331,6 +3330,55 @@ fn expands_standard_while_with_loop_control() {
         .expect("standard while should expand and generate valid LLVM");
     assert!(llvm.contains("loop.body"));
     assert!(llvm.contains("loop.exit"));
+}
+
+#[test]
+fn expands_standard_for_over_ranges_and_product_iterators() {
+    let module = type_check(concat!(
+        "pub(repr) type PairIterator = (current: I32, end: I32)\n",
+        "impl Iterator PairIterator (I32, I32) {\n",
+        "  def next = PairIterator (current, end) => match current < end {\n",
+        "    True() => IterStep.Yield ((current, current + 10), PairIterator (current + 1, end)),\n",
+        "    False() => IterStep.Done (PairIterator (current, end)),\n",
+        "  }\n",
+        "}\n",
+        "impl IntoIterator PairIterator PairIterator { def into_iterator = iterator => iterator }\n",
+        "def run = () => {\n",
+        "  let mut total = 0\n",
+        "  for value in (0 ..= 4) {\n",
+        "    match value == 2 { True() => { continue }, False() => () }\n",
+        "    total = total + value\n",
+        "  }\n",
+        "  for (left, right) in (PairIterator (0, 2)) {\n",
+        "    total = total + left + right\n",
+        "  }\n",
+        "  total\n",
+        "}\n",
+        "let result: I32 = run ()\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("for loops over ranges and custom iterators should generate LLVM");
+    assert!(llvm.contains("loop.body"));
+    assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn provides_integer_range_iterator_implementations() {
+    type_check(concat!(
+        "let i8: IterStep (Range I8, I8) = Iterator.next ((0 satisfies I8) .. (1 satisfies I8))\n",
+        "let i16: IterStep (Range I16, I16) = Iterator.next ((0 satisfies I16) .. (1 satisfies I16))\n",
+        "let i32: IterStep (Range I32, I32) = Iterator.next (0 .. 1)\n",
+        "let i64: IterStep (Range I64, I64) = Iterator.next ((0 satisfies I64) .. (1 satisfies I64))\n",
+        "let u8: IterStep (Range U8, U8) = Iterator.next ((0 satisfies U8) .. (1 satisfies U8))\n",
+        "let u16: IterStep (Range U16, U16) = Iterator.next ((0 satisfies U16) .. (1 satisfies U16))\n",
+        "let u32: IterStep (Range U32, U32) = Iterator.next ((0 satisfies U32) .. (1 satisfies U32))\n",
+        "let u64: IterStep (Range U64, U64) = Iterator.next ((0 satisfies U64) .. (1 satisfies U64))\n",
+        "let isize: IterStep (Range ISize, ISize) = Iterator.next ((0 satisfies ISize) .. (1 satisfies ISize))\n",
+        "let usize: IterStep (Range USize, USize) = Iterator.next ((0 satisfies USize) .. (1 satisfies USize))\n",
+        "let inclusive: IterStep (RangeInclusive U8, U8) = Iterator.next ((255 satisfies U8) ..= (255 satisfies U8))\n",
+    ));
 }
 
 #[test]
@@ -3364,11 +3412,11 @@ fn rejects_legacy_standard_if_syntax() {
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err("legacy if syntax should be rejected");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("argument 1 of macro `if` must be `Braced"))
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("argument 1 of macro `if` must be `Braced")
+    }));
 }
 
 #[test]

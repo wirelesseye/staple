@@ -381,6 +381,7 @@ fn inline_glob_reexports_types_traits_and_macros() {
             "    pub type alias Number = I32\n",
             "    pub trait Identity = T => { identity: T -> T }\n",
             "    pub macro reveal = item => quote { $item }\n",
+            "    pub mod Variant { pub type Ready }\n",
             "}\n",
             "pub use child *\n",
         ),
@@ -391,11 +392,12 @@ fn inline_glob_reexports_types_traits_and_macros() {
             "use library *\n",
             "impl Identity I32 { def identity = value => value }\n",
             "let answer: Number = identity (reveal 42)\n",
+            "let ready: Variant.Ready = Variant.Ready\n",
         ),
     );
     fixture
         .compile()
-        .expect("glob re-exports should preserve every named item kind");
+        .expect("glob re-exports should preserve every named item kind and namespace");
 }
 
 #[test]

@@ -1,0 +1,21 @@
+pub mod IterStep {
+    pub(repr) type Done = Iter => Iter
+    pub(repr) type Yield = (Item, Iter) => (Item, Iter)
+}
+
+pub type alias IterStep = (Iter, Item) =>
+    IterStep.Done Iter |
+    IterStep.Yield (Item, Iter)
+
+pub trait Iterator = Iter => Item => Iter ~> Item => {
+    next: Iter -> IterStep (Iter, Item)
+}
+
+pub trait IntoIterator =
+    Source =>
+    Iter =>
+    Source ~> Iter =>
+    Iterator Iter =>
+{
+    into_iterator: Source -> Iter
+}

@@ -1287,6 +1287,54 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_for_loops_and_integer_ranges() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-for-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-for-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "def run = () => {\n",
+                "let mut total: I32 = 0\n",
+                "for value in ((0 satisfies I32) ..= (4 satisfies I32)) {\n",
+                "  match value == 2 { True() => { continue }, False() => () }\n",
+                "  total = total + value\n",
+                "}\n",
+                "let mut maximum_count: I32 = 0\n",
+                "for _ in (2147483647 ..= 2147483647) {\n",
+                "  maximum_count = maximum_count + 1\n",
+                "}\n",
+                "(total - 8) + (maximum_count - 1)\n",
+                "}\n",
+                "exit (run ())\n",
+            ),
+        )
+        .expect("temporary for-loop source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("for-loop executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("for-loop executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "for-loop executable returned {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_float_arithmetic_and_partial_ordering() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

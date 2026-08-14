@@ -4,7 +4,9 @@ pub use std.core.default *
 pub use std.core.drop *
 pub use std.core.equality *
 pub use std.core.flow *
+pub use std.core.iterator *
 pub use std.core.number *
+pub use std.core.range *
 pub use std.core.reference *
 pub use std.core.result *
 pub use std.core.sized *

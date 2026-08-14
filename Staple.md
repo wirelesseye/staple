@@ -581,8 +581,8 @@ pub use implementation *
 ```
 
 Selected, renamed, glob, and chained re-exports preserve values, types,
-constructors, traits, macros, and operator fixities. A public `use` cannot
-re-export a private item.
+constructors, traits, macros, public inline-module namespaces, and operator
+fixities. A public `use` cannot re-export a private item.
 
 Top-level declarations are private by default. `pub` exports a binding or type:
 
@@ -1166,7 +1166,7 @@ the parameter on the right:
 
 ```staple
 trait Iterator = Iter => Item => Iter ~> Item => {
-    next: Iter -> Item
+    next: Iter -> IterStep (Iter, Item)
 }
 
 trait Add = Left => Right => Output => {Left, Right} ~> Output => {
@@ -1448,6 +1448,72 @@ reachable break diverges and may be used wherever an expected type is available.
 not supported. Values owned by an iteration are dropped before a break,
 continue, or implicit next iteration; a value moved out by `break` becomes the
 loop result and is preserved.
+
+## Iteration and ranges
+
+The prelude's consuming iterator protocol returns the successor iterator state
+with every step. `Iter` functionally determines `Item`:
+
+```staple
+pub mod IterStep {
+    pub(repr) type Done = Iter => Iter
+    pub(repr) type Yield = (Item, Iter) => (Item, Iter)
+}
+
+pub type alias IterStep = (Iter, Item) =>
+    IterStep.Done Iter |
+    IterStep.Yield (Item, Iter)
+
+pub trait Iterator = Iter => Item => Iter ~> Item => {
+    next: Iter -> IterStep (Iter, Item)
+}
+
+pub trait IntoIterator =
+    Source => Iter => Source ~> Iter => Iterator Iter => {
+    into_iterator: Source -> Iter
+}
+```
+
+`IterStep.Done iterator` retains the terminal state, while
+`IterStep.Yield (item, iterator)` contains an item and the state used for the
+next call. `Done` and `Yield` remain inside the `IterStep` namespace. An
+`IntoIterator` implementation consumes its source and selects one default
+iterator type; wrapper types can provide alternative iteration modes.
+
+`for` is a prelude macro which accepts any `IntoIterator` source:
+
+```staple
+for item in items {
+    consume item
+}
+
+for (key, value) in pairs {
+    consume (key, value)
+}
+```
+
+The source is evaluated once. Each yielded item is matched against the binding
+pattern in a fresh iteration scope. The successor iterator is installed before
+the body, so `continue` advances normally. `break` exits the iteration and
+`return` exits the enclosing function. Normal exhaustion produces `()`, making
+the complete `for` expression unit-valued.
+
+Function application binds more tightly than infix operators, so a compound
+iterator expression must be parenthesized as one macro argument. In particular,
+ranges are written:
+
+```staple
+for index in (0 .. 10) { consume index }
+for index in (0 ..= 10) { consume index }
+```
+
+`start .. end` excludes `end`; `start ..= end` includes it. Both operators are
+non-associative at precedence 3 and evaluate their endpoints once. Standard
+iteration is available for every signed, unsigned, and pointer-sized integer
+type. Ranges advance by one, and a range whose start is greater than its end is
+empty. Inclusive iteration yields a maximum integer endpoint without computing
+an overflowing successor. `Range T` and `RangeInclusive T` expose their
+representations so custom concrete iterator implementations can use them.
 
 ## Types
 

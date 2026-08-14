@@ -1,0 +1,614 @@
+use std.core.iterator (IntoIterator, Iterator)
+use std.core.iterator.IterStep (Done, Yield)
+
+pub(repr) type Range = T => (
+    current: T,
+    end: T,
+)
+
+pub(repr) type RangeInclusive = T => (
+    current: T,
+    end: T,
+    finished: Bool,
+)
+
+pub def infix 3 .. : T => Copy T => T -> T -> Range T = start => end => Range (
+    current: start,
+    end: end,
+)
+
+pub def infix 3 ..= : T => Copy T => T -> T -> RangeInclusive T = start => end => RangeInclusive (
+    current: start,
+    end: end,
+    finished: False satisfies Bool,
+)
+
+impl Iterator (Range I8) I8 {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies I8),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range I8) (Range I8) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive I8) I8 {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies I8),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive I8) (RangeInclusive I8) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (Range I16) I16 {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies I16),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range I16) (Range I16) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive I16) I16 {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies I16),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive I16) (RangeInclusive I16) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (Range I32) I32 {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies I32),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range I32) (Range I32) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive I32) I32 {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies I32),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive I32) (RangeInclusive I32) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (Range I64) I64 {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies I64),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range I64) (Range I64) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive I64) I64 {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies I64),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive I64) (RangeInclusive I64) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (Range U8) U8 {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies U8),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range U8) (Range U8) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive U8) U8 {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies U8),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive U8) (RangeInclusive U8) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (Range U16) U16 {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies U16),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range U16) (Range U16) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive U16) U16 {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies U16),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive U16) (RangeInclusive U16) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (Range U32) U32 {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies U32),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range U32) (Range U32) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive U32) U32 {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies U32),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive U32) (RangeInclusive U32) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (Range U64) U64 {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies U64),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range U64) (Range U64) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive U64) U64 {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies U64),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive U64) (RangeInclusive U64) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (Range ISize) ISize {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies ISize),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range ISize) (Range ISize) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive ISize) ISize {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies ISize),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive ISize) (RangeInclusive ISize) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (Range USize) USize {
+    def next = Range (current, end) => match current < end {
+        True() => Yield (
+            current,
+            Range (
+                current: current + (1 satisfies USize),
+                end: end,
+            ),
+        ),
+        False() => Done (Range (
+            current: current,
+            end: end,
+        )),
+    }
+}
+
+impl IntoIterator (Range USize) (Range USize) {
+    def into_iterator = iterator => iterator
+}
+
+impl Iterator (RangeInclusive USize) USize {
+    def next = RangeInclusive (current, end, finished) => match finished {
+        True() => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
+        False() => match current < end {
+            True() => Yield (
+                current,
+                RangeInclusive (
+                    current: current + (1 satisfies USize),
+                    end: end,
+                    finished: False satisfies Bool,
+                ),
+            ),
+            False() => match current == end {
+                True() => Yield (
+                    current,
+                    RangeInclusive (
+                        current: current,
+                        end: end,
+                        finished: True satisfies Bool,
+                    ),
+                ),
+                False() => Done (RangeInclusive (
+                    current: current,
+                    end: end,
+                    finished: True satisfies Bool,
+                )),
+            },
+        },
+    }
+}
+
+impl IntoIterator (RangeInclusive USize) (RangeInclusive USize) {
+    def into_iterator = iterator => iterator
+}
