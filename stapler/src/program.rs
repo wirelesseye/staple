@@ -82,6 +82,7 @@ impl std::error::Error for LoadDiagnostic {}
 pub struct Program {
     entry: ModuleId,
     standard_library_core: Option<ModuleId>,
+    standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
     standard_library_io: Option<ModuleId>,
     modules: Vec<SourceModule>,
@@ -97,6 +98,7 @@ impl Program {
         let mut program = Self {
             entry: ModuleId(0),
             standard_library_core: None,
+            standard_library_syntax: None,
             standard_library_cinterop: None,
             standard_library_io: None,
             modules: vec![SourceModule {
@@ -262,6 +264,10 @@ impl Program {
         self.standard_library_core
     }
 
+    pub fn standard_library_syntax(&self) -> Option<ModuleId> {
+        self.standard_library_syntax
+    }
+
     pub fn standard_library_cinterop(&self) -> Option<ModuleId> {
         self.standard_library_cinterop
     }
@@ -328,6 +334,7 @@ pub struct ProgramLoader {
     package_entry: Option<ModuleId>,
     standard_library_root: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
+    standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
     standard_library_io: Option<ModuleId>,
 }
@@ -817,6 +824,9 @@ impl ProgramLoader {
 
     fn load_standard_library(&mut self) -> Result<(), LoadDiagnostic> {
         let root = self.resolve_standard_library_root()?;
+        let syntax =
+            canonical_file(&root.join("std/syntax.sta")).map_err(LoadDiagnostic::compiler)?;
+        self.standard_library_syntax = Some(self.load_file(&syntax)?);
         let core = canonical_file(&root.join("std/core.sta")).map_err(LoadDiagnostic::compiler)?;
         self.standard_library_core = Some(self.load_file(&core)?);
         let cinterop =
@@ -888,6 +898,7 @@ impl ProgramLoader {
         Program {
             entry,
             standard_library_core: self.standard_library_core,
+            standard_library_syntax: self.standard_library_syntax,
             standard_library_cinterop: self.standard_library_cinterop,
             standard_library_io: self.standard_library_io,
             modules: self.modules,

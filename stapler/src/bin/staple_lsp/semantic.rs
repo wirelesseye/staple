@@ -1069,10 +1069,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dependency.sta"),
-            "pub macro imported: Expr -> Expr = value: Expr => quote { $value }\n",
+            "use std.syntax (quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => quote { $value }\n",
         )
         .unwrap();
         let source = concat!(
+            "use std.syntax (quote, Expr, CallExpr, Item)\n",
             "use dependency\n",
             "macro choose: Expr -> Expr = _: Expr => quote { 1 }\n",
             "macro choose: CallExpr -> Expr = _: CallExpr => quote { 2 }\n",

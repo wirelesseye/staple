@@ -9,7 +9,4 @@ pub use std.core.reference *
 pub use std.core.result *
 pub use std.core.sized *
 pub use std.core.string *
-pub use std.core.syntax *
 pub use std.core.typegroup *
-
-pub macro quote: T => QuoteResult T => Braced Syntax -> T

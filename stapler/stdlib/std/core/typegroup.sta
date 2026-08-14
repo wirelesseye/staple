@@ -1,3 +1,5 @@
+use std.syntax *
+
 def typegroup_public_visibility: Visibility -> Visibility = visibility => match visibility {
     Private => Private,
     Public => Public,

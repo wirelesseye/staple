@@ -32,6 +32,7 @@ impl Fixture {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).expect("module directory should be created");
         }
+        let source = with_syntax_imports(source);
         fs::write(path, source).expect("module should be written");
     }
 
@@ -63,6 +64,34 @@ impl Fixture {
             .check(resolved)
             .map(|_| ())
             .map_err(format_diagnostics)
+    }
+}
+
+fn with_syntax_imports(source: &str) -> String {
+    if source.contains("use std.syntax") {
+        return source.to_owned();
+    }
+    let mut names = Vec::new();
+    for name in [
+        "quote",
+        "Expr",
+        "Type",
+        "Pattern",
+        "Item",
+        "Syntax",
+        "SyntaxNode",
+        "Ident",
+        "CallExpr",
+        "MacroCallVisibility",
+    ] {
+        if source.contains(name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        source.to_owned()
+    } else {
+        format!("{source}\nuse std.syntax ({})\n", names.join(", "))
     }
 }
 
@@ -348,6 +377,7 @@ fn inline_glob_reexports_types_traits_and_macros() {
         "library.sta",
         concat!(
             "mod child {\n",
+            "    use std.syntax (quote)\n",
             "    pub type alias Number = I32\n",
             "    pub trait Identity = T => { identity: T -> T }\n",
             "    pub macro reveal = item => quote { $item }\n",

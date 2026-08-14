@@ -744,6 +744,7 @@ pub struct NameResolver {
     current_module: ModuleId,
     multiple_modules: bool,
     standard_library_core: Option<ModuleId>,
+    standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
     standard_library_io: Option<ModuleId>,
 }
@@ -760,6 +761,7 @@ impl NameResolver {
     pub fn resolve_program(mut self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
         let (program, macro_analysis) = crate::macro_expand::expand_program(program)?;
         self.standard_library_core = program.standard_library_core();
+        self.standard_library_syntax = program.standard_library_syntax();
         self.standard_library_cinterop = program.standard_library_cinterop();
         self.standard_library_io = program.standard_library_io();
         let standard_library_directory = self
@@ -833,10 +835,13 @@ impl NameResolver {
             .flat_map(|block| block.bindings.iter())
             .filter_map(|binding| self.declared_symbols.get(&binding.syntax.id).copied())
             .collect();
-        let standard_traits = self
+        let mut standard_traits = self
             .standard_library_core
             .map(|core| self.interfaces[core.0].traits.clone())
             .unwrap_or_default();
+        if let Some(syntax) = self.standard_library_syntax {
+            standard_traits.extend(self.interfaces[syntax.0].traits.clone());
+        }
         let mut resolved = ResolvedModule {
             program,
             functions: self.functions,
@@ -906,6 +911,9 @@ impl NameResolver {
         }
         self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
+        let Some(syntax) = program.standard_library_syntax() else {
+            return;
+        };
         for name in [
             "Ident",
             "CallExpr",
@@ -924,7 +932,7 @@ impl NameResolver {
             "Syntax",
             "SyntaxNode",
         ] {
-            self.register_builtin_type(core, "std.core", name, BuiltinType::Syntax);
+            self.register_builtin_type(syntax, "std.syntax", name, BuiltinType::Syntax);
         }
 
         if let Some(cinterop) = program.standard_library_cinterop() {
@@ -2443,6 +2451,7 @@ impl NameResolver {
                 let name = if self.multiple_modules
                     || base_name == "main"
                     || Some(self.current_module) == self.standard_library_core
+                    || Some(self.current_module) == self.standard_library_syntax
                     || Some(self.current_module) == self.standard_library_cinterop
                     || Some(self.current_module) == self.standard_library_io
                 {

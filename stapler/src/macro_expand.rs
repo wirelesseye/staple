@@ -491,6 +491,7 @@ impl MacroExpander {
         let mut definitions = HashMap::new();
         let mut scopes = vec![ModuleScope::default(); program.modules().len()];
         let core = program.standard_library_core();
+        let syntax = program.standard_library_syntax();
         let cinterop = program.standard_library_cinterop();
 
         for source_module in program.modules() {
@@ -503,7 +504,8 @@ impl MacroExpander {
                             modifier: declaration.modifier,
                             syntax: declaration.syntax.id,
                         };
-                        let kind = if Some(source_module.id) == core && declaration.name == "quote"
+                        let kind = if Some(source_module.id) == syntax
+                            && declaration.name == "quote"
                         {
                             MacroKind::Quote
                         } else if Some(source_module.id) == cinterop
@@ -3463,6 +3465,24 @@ impl MacroExpander {
         environment: &Environment,
         expected: &MetaType,
     ) -> Option<Value> {
+        let quote_is_imported =
+            self.scopes[module.0]
+                .macros
+                .get("quote")
+                .is_some_and(|definitions| {
+                    definitions.iter().any(|key| {
+                        self.definitions
+                            .get(key)
+                            .is_some_and(|definition| matches!(definition.kind, MacroKind::Quote))
+                    })
+                });
+        if !quote_is_imported {
+            self.diagnostics.push(Diagnostic::new(
+                quote.syntax.span.clone(),
+                "`quote` requires an explicit import from `std.syntax`",
+            ));
+            return None;
+        }
         if *expected == MetaType::Syntax {
             let syntax = self.substitute_raw_quote(module, &quote.contents, environment)?;
             return Some(Value::Syntax(SyntaxValue::Raw(syntax)));

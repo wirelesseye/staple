@@ -1,3 +1,5 @@
+use std.syntax (Expr)
+
 pub type CChar = opaque
 pub type CPointer = Pointee => opaque
 pub type CString = opaque

@@ -8,13 +8,83 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 fn resolve(source: &str) -> stapler::ResolvedModule {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = with_syntax_imports(source);
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source(source, root)
+        .load_source(&source, root)
         .expect("source should load");
     NameResolver::new()
         .resolve_program(program)
         .expect("source should resolve")
+}
+
+fn with_syntax_imports(source: &str) -> String {
+    if source.contains("use std.syntax") {
+        return source.to_owned();
+    }
+    let mut names = Vec::new();
+    for (name, used) in [
+        ("quote", source.contains("quote")),
+        (
+            "Expr",
+            source.contains(": Expr") || source.contains("-> Expr"),
+        ),
+        (
+            "Type",
+            source.contains(": Type =>")
+                || source.contains(": Type ->")
+                || source.contains("-> Type"),
+        ),
+        (
+            "Pattern",
+            source.contains(": Pattern =>")
+                || source.contains(": Pattern ->")
+                || source.contains("-> Pattern"),
+        ),
+        (
+            "Item",
+            source.contains(": Item")
+                || source.contains("-> Item")
+                || source.contains("Sequence Item"),
+        ),
+        (
+            "Syntax",
+            source.contains(": Syntax")
+                || source.contains("-> Syntax")
+                || source.contains("Braced Syntax"),
+        ),
+        ("SyntaxNode", source.contains("SyntaxNode")),
+        ("Ident", source.contains("Ident")),
+        ("CallExpr", source.contains("CallExpr")),
+        ("Sequence", source.contains("Sequence")),
+        ("Optional", source.contains("Optional")),
+        ("Separated", source.contains("Separated")),
+        ("Comma", source.contains("Comma")),
+        ("Equals", source.contains("Equals")),
+        ("FatArrow", source.contains("FatArrow")),
+        ("Parenthesized", source.contains("Parenthesized")),
+        ("Bracketed", source.contains("Bracketed")),
+        ("Braced", source.contains("Braced")),
+        (
+            "MacroCallVisibility",
+            source.contains("MacroCallVisibility"),
+        ),
+        (
+            "Visibility",
+            source.contains(": Visibility") || source.contains("-> Visibility"),
+        ),
+        ("StringType", source.contains("StringType")),
+        ("QuoteResult", source.contains("QuoteResult")),
+    ] {
+        if used && !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    if names.is_empty() {
+        source.to_owned()
+    } else {
+        format!("{source}\nuse std.syntax ({})\n", names.join(", "))
+    }
 }
 
 fn type_check(source: &str) -> stapler::TypedModule {
@@ -1697,6 +1767,45 @@ fn cinterop_types_require_an_explicit_import() {
 }
 
 #[test]
+fn syntax_types_and_quote_require_an_explicit_import() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("type alias Captured = SyntaxNode\n", root)
+        .expect("source should load without importing syntax names");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("syntax types should not be in the core prelude");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "unknown type `SyntaxNode`"),
+        "{diagnostics:#?}",
+    );
+
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "macro identity = value => quote { $value }\nidentity 1\n",
+            root,
+        )
+        .expect("quote syntax should parse before import resolution");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("quote should require an explicit import");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "`quote` requires an explicit import from `std.syntax`"
+    }));
+
+    resolve(concat!(
+        "use std.syntax (quote, Expr)\n",
+        "macro identity: Expr -> Expr = value => quote { $value }\n",
+        "let result: I32 = identity 42\n",
+    ));
+}
+
+#[test]
 fn c_pointer_preserves_its_pointee_type() {
     let module = resolve(concat!(
         "use std.cinterop *\n",
@@ -2017,7 +2126,7 @@ fn diagnoses_invalid_structured_syntax_operations() {
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(source, root)
+            .load_source(&with_syntax_imports(source), root)
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
@@ -2050,7 +2159,7 @@ fn rejects_structured_syntax_values_at_runtime() {
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(source, root)
+            .load_source(&with_syntax_imports(source), root)
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
@@ -2265,7 +2374,7 @@ fn rejects_legacy_typegroup_call_syntax() {
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(source, root)
+            .load_source(&with_syntax_imports(source), root)
             .expect("legacy syntax should still parse as an ordinary call");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
@@ -2351,7 +2460,7 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(source, root)
+            .load_source(&with_syntax_imports(source), root)
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
@@ -2428,7 +2537,7 @@ fn diagnoses_invalid_visibility_macro_uses() {
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(source, root)
+            .load_source(&with_syntax_imports(source), root)
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
@@ -2452,7 +2561,7 @@ fn implicit_macro_call_visibility_can_make_overloads_ambiguous() {
     );
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source(source, root)
+        .load_source(&with_syntax_imports(source), root)
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
@@ -2511,7 +2620,7 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(source, root)
+            .load_source(&with_syntax_imports(source), root)
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
@@ -2612,13 +2721,13 @@ fn syntax_node_quotation_requires_one_shortest_structural_node() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            concat!(
+            &with_syntax_imports(concat!(
                 "macro invalid: Expr -> Expr = _: Expr => {\n",
                 "    let node: SyntaxNode = quote { left right }\n",
                 "    quote { 0 }\n",
                 "}\n",
                 "let result = invalid ()\n",
-            ),
+            )),
             root,
         )
         .expect("source should parse");
@@ -2730,7 +2839,7 @@ fn type_and_pattern_overlaps_with_expression_overloads_are_ambiguous() {
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(source, root)
+            .load_source(&with_syntax_imports(source), root)
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
@@ -2766,7 +2875,7 @@ fn diagnoses_invalid_type_and_pattern_macro_inputs_and_splices() {
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(source, root)
+            .load_source(&with_syntax_imports(source), root)
             .expect("source should parse losslessly");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
@@ -2867,7 +2976,7 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
-            .load_source(source, root)
+            .load_source(&with_syntax_imports(source), root)
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
@@ -3415,7 +3524,9 @@ fn diagnoses_recursive_macro_expansion() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro recursive = value => quote { recursive $value }\nrecursive 1\n",
+            &with_syntax_imports(
+                "macro recursive = value => quote { recursive $value }\nrecursive 1\n",
+            ),
             root,
         )
         .expect("source should parse");
@@ -3435,7 +3546,7 @@ fn rejects_repeated_splices_with_a_specific_diagnostic() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro many = values => quote { $values... }\nmany 1\n",
+            &with_syntax_imports("macro many = values => quote { $values... }\nmany 1\n"),
             root,
         )
         .expect("source should parse");

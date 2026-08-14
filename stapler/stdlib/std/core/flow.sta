@@ -1,4 +1,5 @@
 use std.core.boolean (True, False)
+use std.syntax *
 
 pub macro if =
     condition: Expr =>
