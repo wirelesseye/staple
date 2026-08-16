@@ -1280,6 +1280,92 @@ fn parses_mutable_patterns_and_assignment_statements_losslessly() {
 }
 
 #[test]
+fn parses_var_bindings_and_pattern_propagation_losslessly() {
+    let source = concat!(
+        "var value = 1\n",
+        "var mut counter = 2\n",
+        "var (left, right) = (3, 4)\n",
+        "let (var alpha, mut beta) = (5, 6)\n",
+        "def update = (var parameter: I32) => { parameter = 7; parameter }\n",
+        "match update 0 { Box (var inner) => inner, _ => 0 }\n",
+        "var outer@(nested_left, nested_right) = (8, 9)\n",
+        "value = right\n",
+    );
+    let module = parse(source).expect("var bindings should parse");
+    assert_eq!(module.text(), source);
+
+    let Statement::Binding(value) = statement(&module.items[0]) else {
+        panic!("expected var binding");
+    };
+    assert!(value.reassignable && !value.mutable);
+
+    let Statement::Binding(counter) = statement(&module.items[1]) else {
+        panic!("expected var mut binding");
+    };
+    assert!(counter.reassignable && counter.mutable);
+
+    let Statement::PatternBinding(pair) = statement(&module.items[2]) else {
+        panic!("expected propagated var pattern binding");
+    };
+    let Pattern::Product(pattern) = &pair.pattern else {
+        panic!("expected product pattern");
+    };
+    assert!(pattern.elements.iter().all(|element| matches!(
+        element,
+        Pattern::Binding(binding) if binding.reassignable && !binding.mutable
+    )));
+
+    let Statement::PatternBinding(mixed) = statement(&module.items[3]) else {
+        panic!("expected per-name pattern binding");
+    };
+    let Pattern::Product(mixed_pattern) = &mixed.pattern else {
+        panic!("expected product pattern");
+    };
+    assert!(matches!(
+        &mixed_pattern.elements[0],
+        Pattern::Binding(binding) if binding.reassignable && !binding.mutable
+    ));
+    assert!(matches!(
+        &mixed_pattern.elements[1],
+        Pattern::Binding(binding) if binding.mutable && !binding.reassignable
+    ));
+
+    let Statement::Binding(update) = statement(&module.items[4]) else {
+        panic!("expected function binding");
+    };
+    let Some(Expression::Function(function)) = &update.value else {
+        panic!("expected function value");
+    };
+    let Pattern::Product(parameters) = &function.pattern else {
+        panic!("expected product pattern");
+    };
+    assert!(matches!(
+        &parameters.elements[0],
+        Pattern::Binding(binding) if binding.reassignable && !binding.mutable
+    ));
+
+    let Statement::PatternBinding(outer) = statement(&module.items[6]) else {
+        panic!("expected at-pattern var propagation");
+    };
+    let Pattern::At(at) = &outer.pattern else {
+        panic!("expected at-pattern");
+    };
+    assert!(at.binding.reassignable);
+    let Pattern::Product(nested) = at.pattern.as_ref() else {
+        panic!("expected nested product pattern");
+    };
+    assert!(nested.elements.iter().all(|element| matches!(
+        element,
+        Pattern::Binding(binding) if binding.reassignable
+    )));
+
+    assert!(parse("def var value = 1\n").is_err());
+    assert!(parse("extern \"c\" { var value: I32 }\n").is_err());
+    assert!(parse("mut var value = 1\n").is_err());
+    assert!(parse("let (var Box inner, extra) = pair\n").is_err());
+}
+
+#[test]
 fn parses_loop_break_and_continue_losslessly() {
     let source = concat!(
         "def choose = () => loop {\n",

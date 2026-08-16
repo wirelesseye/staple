@@ -111,6 +111,7 @@ impl<'a> Classifier<'a> {
                 | TokenKind::As
                 | TokenKind::Pub
                 | TokenKind::Let
+                | TokenKind::Var
                 | TokenKind::Mut
                 | TokenKind::Return
                 | TokenKind::Loop
@@ -454,7 +455,13 @@ impl<'a> Classifier<'a> {
             .and_then(|module| module.symbol_for(binding.syntax.id))
             .map(|symbol| self.value_symbol_kind(symbol))
             .unwrap_or(VARIABLE);
-        let modifiers = DECLARATION | DEFINITION | if binding.mutable { 0 } else { READONLY };
+        let modifiers = DECLARATION
+            | DEFINITION
+            | if binding.mutable || binding.reassignable {
+                0
+            } else {
+                READONLY
+            };
         self.mark_declaration(
             &binding.syntax,
             &binding.name,
@@ -616,7 +623,7 @@ impl<'a> Classifier<'a> {
                     .unwrap_or(VARIABLE);
                 let readonly = resolved
                     .and_then(|module| module.symbol_for(value.syntax.id))
-                    .is_some_and(|symbol| !resolved.unwrap().is_mutable_symbol(symbol));
+                    .is_some_and(|symbol| !resolved.unwrap().has_mutable_storage(symbol));
                 self.mark_last(
                     &value.syntax,
                     &value.name,
@@ -661,7 +668,13 @@ impl<'a> Classifier<'a> {
                     &value.syntax,
                     &value.name,
                     kind,
-                    DECLARATION | DEFINITION | if value.mutable { 0 } else { READONLY },
+                    DECLARATION
+                        | DEFINITION
+                        | if value.mutable || value.reassignable {
+                            0
+                        } else {
+                            READONLY
+                        },
                     1,
                 );
                 if let Some(symbol) = resolved.and_then(|module| module.symbol_for(value.syntax.id))

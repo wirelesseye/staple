@@ -103,7 +103,7 @@ impl Collector<'_> {
         match statement {
             Statement::Binding(binding) => self.collect_binding_declaration(binding),
             Statement::PatternBinding(binding) => {
-                self.collect_pattern_declarations(&binding.pattern, Some("let"));
+                self.collect_pattern_declarations(&binding.pattern, true);
                 self.collect_expression_declarations(&binding.value);
             }
             Statement::Assignment(assignment) => {
@@ -126,10 +126,7 @@ impl Collector<'_> {
             self.declarations.insert(
                 symbol,
                 Declaration {
-                    prefix: Some(match binding.kind {
-                        BindingKind::Let => "let",
-                        BindingKind::Def => "def",
-                    }),
+                    prefix: Some(binding.keyword()),
                     name: binding.name.clone(),
                 },
             );
@@ -142,7 +139,7 @@ impl Collector<'_> {
     fn collect_expression_declarations(&mut self, expression: &Expression) {
         match expression {
             Expression::Function(function) => {
-                self.collect_pattern_declarations(&function.pattern, None);
+                self.collect_pattern_declarations(&function.pattern, false);
                 self.collect_expression_declarations(&function.body);
             }
             Expression::Satisfies(satisfies) => {
@@ -151,7 +148,7 @@ impl Collector<'_> {
             Expression::Match(match_) => {
                 self.collect_expression_declarations(&match_.subject);
                 for arm in &match_.arms {
-                    self.collect_pattern_declarations(&arm.pattern, None);
+                    self.collect_pattern_declarations(&arm.pattern, false);
                     self.collect_expression_declarations(&arm.body);
                 }
             }
@@ -211,17 +208,24 @@ impl Collector<'_> {
         }
     }
 
-    fn collect_pattern_declarations(&mut self, pattern: &Pattern, prefix: Option<&'static str>) {
+    fn collect_pattern_declarations(&mut self, pattern: &Pattern, is_let_context: bool) {
         match pattern {
             Pattern::At(at) => {
                 self.collect_pattern_declarations(
                     &Pattern::Binding(at.binding.as_ref().clone()),
-                    prefix,
+                    is_let_context,
                 );
-                self.collect_pattern_declarations(&at.pattern, prefix);
+                self.collect_pattern_declarations(&at.pattern, is_let_context);
             }
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.typed.symbol_for(binding.syntax.id) {
+                    let prefix = is_let_context.then(|| {
+                        if binding.reassignable {
+                            "var"
+                        } else {
+                            "let"
+                        }
+                    });
                     self.declarations.insert(
                         symbol,
                         Declaration {
@@ -233,11 +237,11 @@ impl Collector<'_> {
             }
             Pattern::Product(product) => {
                 for element in &product.elements {
-                    self.collect_pattern_declarations(element, prefix);
+                    self.collect_pattern_declarations(element, is_let_context);
                 }
             }
             Pattern::Nominal(nominal) => {
-                self.collect_pattern_declarations(&nominal.argument, prefix)
+                self.collect_pattern_declarations(&nominal.argument, is_let_context)
             }
             Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
         }
@@ -560,10 +564,7 @@ impl Collector<'_> {
             })
             .map(|value_type| self.display_type(value_type));
         if let Some(value_type) = value_type {
-            let prefix = match binding.kind {
-                BindingKind::Let => "let",
-                BindingKind::Def => "def",
-            };
+            let prefix = binding.keyword();
             self.named(
                 &binding.syntax,
                 &binding.name,

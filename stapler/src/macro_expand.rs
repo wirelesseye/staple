@@ -354,13 +354,15 @@ fn separated_parenthesized(
 struct EnvironmentBinding {
     value: Rc<RefCell<Value>>,
     mutable: bool,
+    reassignable: bool,
 }
 
 impl EnvironmentBinding {
-    fn new(value: Value, mutable: bool) -> Self {
+    fn new(value: Value, mutable: bool, reassignable: bool) -> Self {
         Self {
             value: Rc::new(RefCell::new(value)),
             mutable,
+            reassignable,
         }
     }
 
@@ -2821,7 +2823,7 @@ impl MacroExpander {
                             };
                             local.insert(
                                 binding.name.clone(),
-                                EnvironmentBinding::new(value, binding.mutable),
+                                EnvironmentBinding::new(value, binding.mutable, binding.reassignable),
                             );
                         }
                         Statement::PatternBinding(binding) => {
@@ -3211,11 +3213,22 @@ impl MacroExpander {
             ));
             return false;
         };
-        if !binding.mutable {
+        if fields.is_empty() {
+            if !binding.reassignable {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "cannot assign to immutable compile-time binding `{}`",
+                        name.name
+                    ),
+                ));
+                return false;
+            }
+        } else if !binding.mutable {
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!(
-                    "cannot assign to immutable compile-time binding `{}`",
+                    "cannot write through immutable compile-time binding `{}`",
                     name.name
                 ),
             ));
@@ -5332,7 +5345,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             }
             environment.insert(
                 at.binding.name.clone(),
-                EnvironmentBinding::new(value.clone(), at.binding.mutable),
+                EnvironmentBinding::new(value.clone(), at.binding.mutable, at.binding.reassignable),
             );
             bind_pattern(&at.pattern, value, environment)
         }
@@ -5371,7 +5384,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             }
             environment.insert(
                 binding.name.clone(),
-                EnvironmentBinding::new(value, binding.mutable),
+                EnvironmentBinding::new(value, binding.mutable, binding.reassignable),
             );
             true
         }

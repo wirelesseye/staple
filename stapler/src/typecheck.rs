@@ -10,6 +10,26 @@ use crate::{
 
 const MAX_PRODUCT_ARITY: usize = 65_535;
 
+enum PlaceIssue {
+    /// The root binding is not declared `var` and cannot be reassigned.
+    NotReassignable(String),
+    /// The root binding is not declared `mut` and cannot be written through.
+    NotMutable(String),
+    /// The target is not a place at all (e.g. a temporary).
+    NotAPlace,
+}
+
+fn place_expression_name(expression: &Expression) -> String {
+    match expression {
+        Expression::Name(name) => name.name.clone(),
+        Expression::Access(access) => match &access.accessor {
+            Accessor::Name(name) => name.clone(),
+            Accessor::Index(index) => index.clone(),
+        },
+        _ => "value".to_string(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedTraitBound {
     pub trait_id: TraitId,
@@ -3172,41 +3192,70 @@ impl TypeChecker {
 
     fn check_assignment_place(&mut self, module: &ResolvedModule, assignment: &crate::Assignment) {
         let current_module = module.module_for_syntax(assignment.syntax.id);
-        if !self.is_writable_place(module, &assignment.target, current_module) {
-            self.diagnostics.push(Diagnostic::new(
-                assignment.target.syntax().span.clone(),
-                "assignment target is not a writable place",
-            ));
+        if let Some(issue) =
+            self.writable_place_issue(module, &assignment.target, current_module, false)
+        {
+            let message = match issue {
+                PlaceIssue::NotReassignable(name) => {
+                    format!("cannot reassign `{name}`; its binding is not declared `var`")
+                }
+                PlaceIssue::NotMutable(name) => {
+                    format!("cannot write through `{name}`; its binding is not declared `mut`")
+                }
+                PlaceIssue::NotAPlace => "assignment target is not a writable place".to_string(),
+            };
+            self.diagnostics
+                .push(Diagnostic::new(assignment.target.syntax().span.clone(), message));
         }
     }
 
-    fn is_writable_place(
+    /// Checks whether `expression` may appear as an assignment target.
+    ///
+    /// `projected` is `true` once the walk has crossed at least one field or
+    /// index access away from the root binding: rebinding the root requires
+    /// `var`, while writing through a projection into an already-owned value
+    /// requires `mut` on the root instead.
+    fn writable_place_issue(
         &self,
         module: &ResolvedModule,
         expression: &Expression,
         current_module: Option<ModuleId>,
-    ) -> bool {
+        projected: bool,
+    ) -> Option<PlaceIssue> {
         if let Some(symbol) = module.symbol_for(expression.syntax().id) {
-            return module.is_mutable_symbol(symbol)
-                && module.symbol_module(symbol) == current_module;
+            let permitted = if projected {
+                module.is_mutable_symbol(symbol)
+            } else {
+                module.is_reassignable_symbol(symbol)
+            };
+            if permitted && module.symbol_module(symbol) == current_module {
+                return None;
+            }
+            if !permitted {
+                let name = place_expression_name(expression);
+                return Some(if projected {
+                    PlaceIssue::NotMutable(name)
+                } else {
+                    PlaceIssue::NotReassignable(name)
+                });
+            }
+            return Some(PlaceIssue::NotAPlace);
         }
         match expression {
             Expression::Access(access) => {
-                if self.expression_crosses_ref(&access.value) {
-                    true
-                } else {
-                    self.is_writable_place(module, &access.value, current_module)
-                }
+                self.writable_place_issue(module, &access.value, current_module, true)
             }
             Expression::Index(index) => {
-                if self.expression_crosses_ref(&index.value) {
-                    true
+                self.writable_place_issue(module, &index.value, current_module, true)
+            }
+            Expression::Name(_) => Some(PlaceIssue::NotAPlace),
+            other => {
+                if projected && self.expression_crosses_ref(other) {
+                    None
                 } else {
-                    self.is_writable_place(module, &index.value, current_module)
+                    Some(PlaceIssue::NotAPlace)
                 }
             }
-            Expression::Name(_) => false,
-            _ => false,
         }
     }
 

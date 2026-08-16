@@ -476,26 +476,109 @@ fn spreads_fixed_product_values_and_call_arguments() {
 #[test]
 fn type_checks_and_lowers_mutable_places_and_ref_replace() {
     let source = concat!(
-        "let mut value = 1\n",
+        "var value = 1\n",
         "value = 2\n",
         "let mut pair = (x: 3, y: 4)\n",
         "pair.x = value\n",
-        "let fixed: Ref I32[2] = Ref (5, 6)\n",
+        "let mut fixed: Ref I32[2] = Ref (5, 6)\n",
         "fixed.0 = pair.x\n",
         "let index: USize = 1\n",
         "fixed[index] = 7\n",
         "let scalar = Ref 8\n",
         "let old = replace (scalar, 9)\n",
-        "def local = () => { let mut inside = 10; inside = old; inside }\n",
+        "def local = () => { var inside = 10; inside = old; inside }\n",
     );
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("mutable places should generate LLVM");
-    assert!(llvm.contains("mutable.binding.cell"));
+    assert!(llvm.contains("binding.cell"));
     assert!(llvm.contains("place.field"));
     assert!(llvm.contains("ref.replace.old"));
+}
+
+#[test]
+fn type_checks_the_four_binding_mutability_forms() {
+    // `let`: neither reassignable nor mutable.
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let a = (x: 1, y: 2)\na = (x: 3, y: 4)\n"))
+        .expect_err("`let` cannot be reassigned");
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `var`")));
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let a = (x: 1, y: 2)\na.x = 3\n"))
+        .expect_err("`let` cannot be written through");
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+
+    // `var`: reassignable, not mutable.
+    type_check("var a = (x: 1, y: 2)\na = (x: 3, y: 4)\n");
+    let diagnostics = TypeChecker::new()
+        .check(resolve("var a = (x: 1, y: 2)\na.x = 3\n"))
+        .expect_err("`var` cannot be written through");
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+
+    // `let mut`: mutable, not reassignable.
+    type_check("let mut a = (x: 1, y: 2)\na.x = 3\n");
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let mut a = (x: 1, y: 2)\na = (x: 3, y: 4)\n"))
+        .expect_err("`let mut` cannot be reassigned");
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `var`")));
+
+    // `var mut`: both.
+    type_check("var mut a = (x: 1, y: 2)\na = (x: 3, y: 4)\na.x = 5\n");
+
+    // Function parameters and match binders follow the same rules.
+    type_check(concat!(
+        "type Box = I32\n",
+        "def parameter = (var value: I32) => { value = value + 1; value }\n",
+        "def field_write = (mut value: (x: I32, y: I32)) => { value.x = 1; value }\n",
+        "def matched = (value: Box) => match value { Box (var inner) => { inner = 2; inner } }\n",
+    ));
+
+    // A `pub` global follows the same rules from another module as it does locally.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Empty\n",
+            "pub let a = (x: 1, y: 2)\n",
+            "a.x = 3\n",
+        )))
+        .expect_err("`pub let` cannot be written through even in its own module");
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+}
+
+#[test]
+fn writes_through_a_ref_require_mut_on_a_named_root() {
+    // A named `Ref`-typed binding needs `mut` to be written through.
+    type_check(concat!(
+        "let mut cell: Ref I32[2] = Ref (1, 2)\n",
+        "cell.0 = 3\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let cell: Ref I32[2] = Ref (1, 2)\ncell.0 = 3\n"))
+        .expect_err("writing through a `Ref` requires `mut` on the binding");
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+
+    // A rootless `Ref` temporary remains writable regardless.
+    type_check(concat!(
+        "def make_ref = () => Ref (3, 4)\n",
+        "(make_ref ()).0 = 5\n",
+    ));
+}
+
+#[test]
+fn captures_a_mut_binding_in_a_shared_cell_for_field_writes() {
+    let module = type_check(concat!(
+        "def make = () => {\n",
+        "  let mut point = (x: 1, y: 2)\n",
+        "  let update = () => { point.x = point.x + 1; point.x }\n",
+        "  update ()\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("captured mut binding should generate LLVM");
+    assert!(llvm.contains("binding.cell"));
 }
 
 #[test]
@@ -511,12 +594,10 @@ fn rejects_invalid_assignment_targets_and_uninitialized_mutable_lets() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("let value = 1\nvalue = 2\n"))
-        .expect_err("immutable names cannot be assigned");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("writable place"))
-    );
+        .expect_err("immutable names cannot be reassigned");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("not declared `var`")));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
@@ -535,7 +616,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
     let module = type_check(concat!(
         "use std.cinterop *\n",
         "def local = (first: CString, second: CString) => {\n",
-        "  let mut value = first\n",
+        "  var value = first\n",
         "  value = second\n",
         "  let moved = value\n",
         "  value = c_string \"replacement\"\n",
@@ -543,7 +624,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "  drop value\n",
         "}\n",
         "def captured = (initial: CString) => {\n",
-        "  let mut value = initial\n",
+        "  var value = initial\n",
         "  () => { let old = value; value = c_string \"next\"; drop old }\n",
         "}\n",
         "def managed = (initial: CString, next: CString) => {\n",
@@ -556,8 +637,8 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("move-only mutable cells should generate LLVM");
-    assert!(llvm.contains("mutable.drop.is_live"));
-    assert!(llvm.contains("__staple_gc_finalize_mutable_cell_"));
+    assert!(llvm.contains("cell.drop.is_live"));
+    assert!(llvm.contains("__staple_gc_finalize_cell_"));
     assert!(llvm.contains("ref.replace.old"));
 }
 
@@ -566,22 +647,22 @@ fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
     type_check(concat!(
         "type Box = I32\n",
         "type Empty\n",
-        "def parameter = (mut value: I32) => { value = value + 1; value }\n",
-        "def matched = (value: Box | Empty) => match value { Box (mut inner) => { inner = 3; inner }, Empty() => 0 }\n",
-        "def borrowed = (value: Ref I32) => { let Ref (mut inner) = value; inner = 4; inner }\n",
+        "def parameter = (var value: I32) => { value = value + 1; value }\n",
+        "def matched = (value: Box | Empty) => match value { Box (var inner) => { inner = 3; inner }, Empty() => 0 }\n",
+        "def borrowed = (value: Ref I32) => { let Ref (var inner) = value; inner = 4; inner }\n",
     ));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Resource = I32\n",
             "impl Drop Resource { def drop = Resource value => () }\n",
-            "def invalid = (value: Ref Resource) => { let Ref (mut inner) = value; inner }\n",
+            "def invalid = (value: Ref Resource) => { let Ref (var inner) = value; inner }\n",
         )))
-        .expect_err("move-only Ref borrows cannot become mutable locals");
+        .expect_err("move-only Ref borrows cannot become reassignable locals");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("borrowed through `Ref` cannot be bound as mutable")
+            .contains("borrowed through `Ref` cannot be bound as `var`")
     }));
 }
 
@@ -2298,7 +2379,7 @@ fn diagnoses_invalid_structured_syntax_operations() {
     for (source, expected) in [
         (
             "macro invalid = value: CallExpr => { value.argument = quote { 1 }; value }\ninvalid (f 0)\n",
-            "cannot assign to immutable compile-time binding `value`",
+            "cannot write through immutable compile-time binding `value`",
         ),
         (
             "macro invalid = value: CallExpr => value.missing\ninvalid (f 0)\n",
@@ -3503,7 +3584,7 @@ fn requires_else_to_be_the_last_braced_if_clause() {
 fn expands_standard_while_with_loop_control() {
     let module = type_check(concat!(
         "def run = () => {\n",
-        "  let mut keep_going: Bool = True\n",
+        "  var keep_going: Bool = True\n",
         "  while keep_going { keep_going = False; continue }\n",
         "}\n",
         "run ()\n",
@@ -3528,7 +3609,7 @@ fn expands_standard_for_over_ranges_and_product_iterators() {
         "}\n",
         "impl IntoIterator PairIterator PairIterator { def into_iterator = iterator => iterator }\n",
         "def run = () => {\n",
-        "  let mut total = 0\n",
+        "  var total = 0\n",
         "  for value in (0 ..= 4) {\n",
         "    match value == 2 { True() => { continue }, False() => () }\n",
         "    total = total + value\n",

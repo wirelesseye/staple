@@ -31,6 +31,7 @@ const KEYWORDS: &[&str] = &[
     "trait",
     "type",
     "use",
+    "var",
     "with",
 ];
 
@@ -403,10 +404,7 @@ impl Collector<'_> {
         let symbol = self.typed.symbol_for(binding.syntax.id)?;
         let mut candidate =
             self.definition(&binding.name, DefinitionId::Symbol(symbol), available_from)?;
-        let prefix = match binding.kind {
-            BindingKind::Let => "let",
-            BindingKind::Def => "def",
-        };
+        let prefix = binding.keyword();
         if let Some(detail) = candidate.item.detail.take() {
             candidate.item.detail = Some(format!("{prefix} {}: {detail}", binding.name));
         }

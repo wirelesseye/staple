@@ -51,7 +51,7 @@ struct ModuleEmitter<'module, 'context> {
     globals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
     closure_codes: HashMap<SymbolId, inkwell::values::FunctionValue<'context>>,
     gc_finalizers: HashMap<String, inkwell::values::FunctionValue<'context>>,
-    captured_mutable_symbols: HashSet<SymbolId>,
+    captured_cell_symbols: HashSet<SymbolId>,
     external_symbols: HashSet<SymbolId>,
     storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initialization_states: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
@@ -79,7 +79,7 @@ struct FunctionEnvironment<'context> {
         ),
     >,
     owned_order: Vec<SymbolId>,
-    owned_mutable: HashSet<SymbolId>,
+    owned_cells: HashSet<SymbolId>,
     binding_cells: HashMap<SymbolId, inkwell::values::PointerValue<'context>>,
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
@@ -93,7 +93,7 @@ impl<'context> FunctionEnvironment<'context> {
         self.locals = snapshot.locals.clone();
         self.owned = snapshot.owned.clone();
         self.owned_order = snapshot.owned_order.clone();
-        self.owned_mutable = snapshot.owned_mutable.clone();
+        self.owned_cells = snapshot.owned_cells.clone();
         self.binding_cells = snapshot.binding_cells.clone();
     }
 }
@@ -117,11 +117,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         typed_module: &'module TypedModule,
         target_machine: &TargetMachine,
     ) -> Self {
-        let captured_mutable_symbols = typed_module
+        let captured_cell_symbols = typed_module
             .functions()
             .iter()
             .flat_map(|function| function.captures.iter().copied())
-            .filter(|symbol| typed_module.resolved().is_mutable_symbol(*symbol))
+            .filter(|symbol| typed_module.resolved().has_mutable_storage(*symbol))
             .collect();
         Self {
             context,
@@ -138,7 +138,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             globals: HashMap::new(),
             closure_codes: HashMap::new(),
             gc_finalizers: HashMap::new(),
-            captured_mutable_symbols,
+            captured_cell_symbols,
             external_symbols: HashSet::new(),
             storage: HashMap::new(),
             initialization_states: HashMap::new(),
@@ -749,7 +749,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(symbol)
-                    || self.typed_module.resolved().is_mutable_symbol(symbol)
+                    || self.typed_module.resolved().has_mutable_storage(symbol)
                 {
                     environment
                         .binding_cells
@@ -830,8 +830,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved pattern binding")
                     })?;
-                if binding.mutable && !self.storage.contains_key(&symbol) {
-                    let cell = self.allocate_mutable_cell(
+                if (binding.mutable || binding.reassignable) && !self.storage.contains_key(&symbol)
+                {
+                    let cell = self.allocate_binding_cell(
                         environment,
                         symbol,
                         binding.syntax.span.clone(),
@@ -950,7 +951,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .build_store(*live, self.context.bool_type().const_zero())
                     .map_err(compiler_diagnostic)?;
             }
-            if self.typed_module.resolved().is_mutable_symbol(symbol) {
+            if self.typed_module.resolved().has_mutable_storage(symbol) {
                 self.store_local_initialization_state(environment, symbol, 0, Span::Compiler)?;
             }
         }
@@ -969,12 +970,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 && let Some(value) = value_as_basic(value)
             {
                 self.compile_conditional_drop(value, &value_type, live, span.clone())?;
-            } else if environment.owned_mutable.remove(&symbol)
+            } else if environment.owned_cells.remove(&symbol)
                 && let Some(cell) = environment.binding_cells.get(&symbol).copied()
                 && let Some(value_type) = self.typed_module.type_of_symbol(symbol).cloned()
             {
                 let value_type = substitute_type(value_type, &self.active_type_substitutions);
-                self.compile_conditional_mutable_cell_drop(cell, &value_type, span.clone())?;
+                self.compile_conditional_cell_drop(cell, &value_type, span.clone())?;
             }
         }
         environment.owned_order.truncate(start);
@@ -992,12 +993,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 && let Some(value) = value_as_basic(value)
             {
                 self.compile_conditional_drop(value, &value_type, live, span.clone())?;
-            } else if environment.owned_mutable.contains(&symbol)
+            } else if environment.owned_cells.contains(&symbol)
                 && let Some(cell) = environment.binding_cells.get(&symbol).copied()
                 && let Some(value_type) = self.typed_module.type_of_symbol(symbol).cloned()
             {
                 let value_type = substitute_type(value_type, &self.active_type_substitutions);
-                self.compile_conditional_mutable_cell_drop(cell, &value_type, span.clone())?;
+                self.compile_conditional_cell_drop(cell, &value_type, span.clone())?;
             }
         }
         Ok(())
@@ -1522,7 +1523,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .struct_type(&[llvm_type, self.context.i8_type().into()], false))
     }
 
-    fn allocate_mutable_cell(
+    fn allocate_binding_cell(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
         symbol: SymbolId,
@@ -1532,17 +1533,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             return Ok(cell);
         }
         let cell_type = self.compile_binding_cell_type(symbol)?;
-        let captured = self.captured_mutable_symbols.contains(&symbol);
+        let captured = self.captured_cell_symbols.contains(&symbol);
         let cell = if captured {
             self.build_gc_allocation(
                 self.size_type
                     .const_int(self.target_data.get_store_size(&cell_type), false),
-                "mutable.binding.cell",
+                "binding.cell",
                 span.clone(),
             )?
         } else {
             self.builder
-                .build_alloca(cell_type, "mutable.binding.cell")
+                .build_alloca(cell_type, "binding.cell")
                 .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
         };
         let state = self
@@ -1557,13 +1558,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .type_of_symbol(symbol)
             .cloned()
             .map(|ty| substitute_type(ty, &self.active_type_substitutions))
-            .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked mutable binding"))?;
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked binding cell"))?;
         if self.typed_module.type_needs_drop(&value_type) {
             if captured {
-                let finalizer = self.ensure_mutable_cell_finalizer(&value_type)?;
+                let finalizer = self.ensure_cell_finalizer(&value_type)?;
                 self.set_gc_finalizer(cell, finalizer)?;
             } else {
-                environment.owned_mutable.insert(symbol);
+                environment.owned_cells.insert(symbol);
                 if !environment.owned_order.contains(&symbol) {
                     environment.owned_order.push(symbol);
                 }
@@ -1631,8 +1632,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
                     })?;
-                if binding.mutable {
-                    self.allocate_mutable_cell(environment, symbol, binding.syntax.span.clone())?;
+                if binding.mutable || binding.reassignable {
+                    self.allocate_binding_cell(environment, symbol, binding.syntax.span.clone())?;
                 }
                 if environment.binding_cells.contains_key(&symbol) {
                     self.store_local_initialization_state(
@@ -1814,7 +1815,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             if let Some(symbol) = symbol
                 && let Some(cell) = environment.binding_cells.get(&symbol).copied()
             {
-                self.compile_conditional_mutable_cell_drop(
+                self.compile_conditional_cell_drop(
                     cell,
                     &value_type,
                     assignment.syntax.span.clone(),
@@ -1964,7 +1965,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             return Err(Diagnostic::new(
                 expression.syntax().span.clone(),
-                "mutable binding storage is not available",
+                "binding storage is not available",
             ));
         }
 
@@ -2036,7 +2037,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     (pointer, payload)
                 } else {
                     if let Some(symbol) = self.typed_module.symbol_for(access.value.syntax().id)
-                        && self.typed_module.resolved().is_mutable_symbol(symbol)
+                        && self.typed_module.resolved().has_mutable_storage(symbol)
                     {
                         self.check_symbol_initialization(
                             environment,
@@ -2439,7 +2440,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         self.typed_module
                             .resolved()
                             .requires_initialization_check(access.syntax.id)
-                            || self.typed_module.resolved().is_mutable_symbol(symbol),
+                            || self.typed_module.resolved().has_mutable_storage(symbol),
                         access.syntax.span.clone(),
                         "value is not available here".to_owned(),
                     );
@@ -2593,7 +2594,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     self.typed_module
                         .resolved()
                         .requires_initialization_check(name.syntax.id)
-                        || self.typed_module.resolved().is_mutable_symbol(symbol),
+                        || self.typed_module.resolved().has_mutable_storage(symbol),
                     name.syntax.span.clone(),
                     format!("value `{}` is not available here", name.name),
                 )
@@ -4222,17 +4223,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(function)
     }
 
-    fn ensure_mutable_cell_finalizer(
+    fn ensure_cell_finalizer(
         &mut self,
         value_type: &CheckedType,
     ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
-        let key = format!("mutable-cell:{value_type:?}");
+        let key = format!("cell:{value_type:?}");
         if let Some(function) = self.gc_finalizers.get(&key).copied() {
             return Ok(function);
         }
         let mut hasher = DefaultHasher::new();
         key.hash(&mut hasher);
-        let name = format!("__staple_gc_finalize_mutable_cell_{:016x}", hasher.finish());
+        let name = format!("__staple_gc_finalize_cell_{:016x}", hasher.finish());
         let function_type = self.context.void_type().fn_type(
             &[self.context.ptr_type(AddressSpace::default()).into()],
             false,
@@ -4244,9 +4245,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder.position_at_end(entry);
         let cell = function
             .get_first_param()
-            .expect("mutable cell payload")
+            .expect("cell payload")
             .into_pointer_value();
-        self.compile_conditional_mutable_cell_drop(cell, value_type, Span::Compiler)?;
+        self.compile_conditional_cell_drop(cell, value_type, Span::Compiler)?;
         self.builder
             .build_return(None)
             .map_err(compiler_diagnostic)?;
@@ -4256,7 +4257,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(function)
     }
 
-    fn compile_conditional_mutable_cell_drop(
+    fn compile_conditional_cell_drop(
         &mut self,
         cell: inkwell::values::PointerValue<'context>,
         value_type: &CheckedType,
@@ -4268,11 +4269,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .struct_type(&[llvm_value_type, self.context.i8_type().into()], false);
         let state = self
             .builder
-            .build_struct_gep(cell_type, cell, 1, "mutable.drop.state")
+            .build_struct_gep(cell_type, cell, 1, "cell.drop.state")
             .map_err(compiler_diagnostic)?;
         let live = self
             .builder
-            .build_load(self.context.i8_type(), state, "mutable.drop.live")
+            .build_load(self.context.i8_type(), state, "cell.drop.live")
             .map_err(compiler_diagnostic)?
             .into_int_value();
         let live = self
@@ -4281,29 +4282,29 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 inkwell::IntPredicate::EQ,
                 live,
                 self.context.i8_type().const_int(2, false),
-                "mutable.drop.is_live",
+                "cell.drop.is_live",
             )
             .map_err(compiler_diagnostic)?;
         let function = self
             .builder
             .get_insert_block()
             .and_then(|block| block.get_parent())
-            .ok_or_else(|| Diagnostic::new(span.clone(), "mutable drop outside a function"))?;
-        let drop_block = self.context.append_basic_block(function, "mutable.drop");
+            .ok_or_else(|| Diagnostic::new(span.clone(), "cell drop outside a function"))?;
+        let drop_block = self.context.append_basic_block(function, "cell.drop");
         let continue_block = self
             .context
-            .append_basic_block(function, "mutable.drop.continue");
+            .append_basic_block(function, "cell.drop.continue");
         self.builder
             .build_conditional_branch(live, drop_block, continue_block)
             .map_err(compiler_diagnostic)?;
         self.builder.position_at_end(drop_block);
         let slot = self
             .builder
-            .build_struct_gep(cell_type, cell, 0, "mutable.drop.value")
+            .build_struct_gep(cell_type, cell, 0, "cell.drop.value")
             .map_err(compiler_diagnostic)?;
         let value = self
             .builder
-            .build_load(llvm_value_type, slot, "mutable.drop.loaded")
+            .build_load(llvm_value_type, slot, "cell.drop.loaded")
             .map_err(compiler_diagnostic)?;
         self.compile_drop_value(value, value_type, span)?;
         self.builder
@@ -6047,7 +6048,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(symbol)
-                    || self.typed_module.resolved().is_mutable_symbol(symbol)
+                    || self.typed_module.resolved().has_mutable_storage(symbol)
                 {
                     environment
                         .binding_cells
@@ -6147,7 +6148,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .typed_module
                 .resolved()
                 .requires_initialization_state(symbol)
-                || self.typed_module.resolved().is_mutable_symbol(symbol)
+                || self.typed_module.resolved().has_mutable_storage(symbol)
             {
                 continue;
             }
@@ -6207,7 +6208,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(*symbol)
-                    || self.typed_module.resolved().is_mutable_symbol(*symbol)
+                    || self.typed_module.resolved().has_mutable_storage(*symbol)
                 {
                     return Ok(self.context.ptr_type(AddressSpace::default()).into());
                 }

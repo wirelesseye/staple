@@ -306,6 +306,7 @@ pub struct ResolvedModule {
     checked_initialization_symbols: HashSet<SymbolId>,
     checked_initialization_reads: HashSet<SyntaxId>,
     mutable_symbols: HashSet<SymbolId>,
+    reassignable_symbols: HashSet<SymbolId>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
     trait_modules: HashMap<TraitId, ModuleId>,
@@ -577,6 +578,14 @@ impl ResolvedModule {
         self.mutable_symbols.contains(&symbol)
     }
 
+    pub fn is_reassignable_symbol(&self, symbol: SymbolId) -> bool {
+        self.reassignable_symbols.contains(&symbol)
+    }
+
+    pub fn has_mutable_storage(&self, symbol: SymbolId) -> bool {
+        self.is_mutable_symbol(symbol) || self.is_reassignable_symbol(symbol)
+    }
+
     pub fn symbol_module(&self, symbol: SymbolId) -> Option<ModuleId> {
         self.symbol_modules.get(&symbol).copied()
     }
@@ -745,6 +754,7 @@ pub struct NameResolver {
     trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     mutable_symbols: HashSet<SymbolId>,
+    reassignable_symbols: HashSet<SymbolId>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
@@ -909,6 +919,7 @@ impl NameResolver {
             checked_initialization_symbols: HashSet::new(),
             checked_initialization_reads: HashSet::new(),
             mutable_symbols: self.mutable_symbols,
+            reassignable_symbols: self.reassignable_symbols,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
             import_definitions: self.import_definitions,
@@ -1634,6 +1645,9 @@ impl NameResolver {
         if binding.mutable {
             self.mutable_symbols.insert(symbol);
         }
+        if binding.reassignable {
+            self.reassignable_symbols.insert(symbol);
+        }
         symbol
     }
 
@@ -1651,6 +1665,9 @@ impl NameResolver {
                 if binding.mutable {
                     self.mutable_symbols.insert(symbol);
                 }
+                if binding.reassignable {
+                    self.reassignable_symbols.insert(symbol);
+                }
             }
             Pattern::At(at) => {
                 let binding = &at.binding;
@@ -1663,6 +1680,9 @@ impl NameResolver {
                 self.symbol_modules.insert(symbol, self.current_module);
                 if binding.mutable {
                     self.mutable_symbols.insert(symbol);
+                }
+                if binding.reassignable {
+                    self.reassignable_symbols.insert(symbol);
                 }
                 self.allocate_pattern_symbols(&at.pattern);
             }
@@ -2422,10 +2442,10 @@ impl NameResolver {
         }
         if binding.kind == BindingKind::Let {
             self.declare_allocated(binding);
-            if binding.mutable && binding.value.is_none() {
+            if (binding.mutable || binding.reassignable) && binding.value.is_none() {
                 self.diagnostics.push(Diagnostic::new(
                     binding.syntax.span.clone(),
-                    "mutable `let` bindings require an initializer",
+                    "`mut` and `var` bindings require an initializer",
                 ));
             }
         }
@@ -2973,6 +2993,7 @@ impl NameResolver {
             Pattern::Binding(binding) => {
                 let resolution_name = binding.resolution_name.as_deref().unwrap_or(&binding.name);
                 if !binding.mutable
+                    && !binding.reassignable
                     && matches!(binding.ty, Type::Inferred(_))
                     && let Some(symbol) = binding
                         .syntax
@@ -2992,6 +3013,7 @@ impl NameResolver {
                         self.symbol_modules.remove(&pattern_symbol);
                         self.symbol_declarations.remove(&pattern_symbol);
                         self.mutable_symbols.remove(&pattern_symbol);
+                        self.reassignable_symbols.remove(&pattern_symbol);
                     }
                 } else {
                     self.resolve_type(&binding.ty);
@@ -3211,10 +3233,13 @@ impl NameResolver {
                         binding.syntax.span.clone(),
                     );
                 }
-                if binding.mutable
-                    && let Some(symbol) = self.symbols.get(&binding.syntax.id).copied()
-                {
-                    self.mutable_symbols.insert(symbol);
+                if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
+                    if binding.mutable {
+                        self.mutable_symbols.insert(symbol);
+                    }
+                    if binding.reassignable {
+                        self.reassignable_symbols.insert(symbol);
+                    }
                 }
             }
             Pattern::At(at) => {
@@ -3233,10 +3258,13 @@ impl NameResolver {
                         binding.syntax.span.clone(),
                     );
                 }
-                if binding.mutable
-                    && let Some(symbol) = self.symbols.get(&binding.syntax.id).copied()
-                {
-                    self.mutable_symbols.insert(symbol);
+                if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
+                    if binding.mutable {
+                        self.mutable_symbols.insert(symbol);
+                    }
+                    if binding.reassignable {
+                        self.reassignable_symbols.insert(symbol);
+                    }
                 }
                 self.declare_pattern(&at.pattern);
             }
@@ -3284,10 +3312,13 @@ impl NameResolver {
         } else {
             self.declare_fresh(binding);
         }
-        if binding.mutable
-            && let Some(symbol) = self.symbols.get(&binding.syntax.id).copied()
-        {
-            self.mutable_symbols.insert(symbol);
+        if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
+            if binding.mutable {
+                self.mutable_symbols.insert(symbol);
+            }
+            if binding.reassignable {
+                self.reassignable_symbols.insert(symbol);
+            }
         }
     }
 

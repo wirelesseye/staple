@@ -169,20 +169,26 @@ fn only_the_declaring_module_can_assign_a_public_mutable_global() {
     let fixture = Fixture::new();
     fixture.write(
         "state.sta",
-        "pub let mut counter = 1\ncounter = 2\npub let point = Ref (x: 1, y: 2)\n",
+        "pub var counter = 1\ncounter = 2\npub let mut point = Ref (x: 1, y: 2)\npoint.x = 3\n",
     );
     fixture.write(
         "main.sta",
-        "use state (counter, point)\nlet observed = counter\npoint.x = 4\n",
+        "use state (counter, point)\nlet observed = counter\nlet also_observed = point.x\n",
     );
     fixture
         .compile()
-        .expect("the owner module may assign its mutable global");
+        .expect("the owner module may assign its mutable and reassignable globals");
 
     fixture.write("main.sta", "use state counter\ncounter = 3\n");
     let error = fixture
         .compile()
-        .expect_err("importers cannot assign mutable globals");
+        .expect_err("importers cannot reassign a `var` global");
+    assert!(error.contains("writable place"));
+
+    fixture.write("main.sta", "use state point\npoint.x = 4\n");
+    let error = fixture
+        .compile()
+        .expect_err("importers cannot write through a `mut` global either");
     assert!(error.contains("writable place"));
 }
 
