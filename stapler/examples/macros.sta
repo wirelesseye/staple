@@ -148,21 +148,19 @@ macro identity = value: Expr => quote { $value }
 let true_condition: Bool = True
 let false_condition: Bool = False
 
-def main = () => {
-    choose true_condition (println "short form")
-    choose false_condition (println "not selected") else (println "else form")
+choose true_condition (println "short form")
+choose false_condition (println "not selected") else (println "else form")
 
-    println (describe (left right))
-    println (describe [one two three])
-    println (describe {one, two, three,})
-    println (describe anything)
+println (describe (left right))
+println (describe [one two three])
+println (describe {one, two, three,})
+println (describe anything)
 
-    let total: I32 = generated + left + right + before + after + constructed +
-        first_generated + second_generated + replaced + public_answer + hygienic_answer
-    match total == 377 {
-        True => println "generated values are correct",
-        False => println "unexpected generated values",
-    }
-
-    identity println "excess arguments follow the expansion"
+let total: I32 = generated + left + right + before + after + constructed +
+    first_generated + second_generated + replaced + public_answer + hygienic_answer
+match total == 377 {
+    True => println "generated values are correct",
+    False => println "unexpected generated values",
 }
+
+identity println "excess arguments follow the expansion"

@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{
-    Accessor, Binding, BindingKind, BuiltinType, Diagnostic, Expression, FloatType, FunctionId,
+    Accessor, Binding, BuiltinType, Diagnostic, Expression, FloatType, FunctionId,
     IntegerType, Item, Module, ModuleId, Pattern, PatternBindingKind, ProductExpression,
     ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, TraitId,
     TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId,
@@ -640,7 +640,6 @@ pub struct TypedModule {
     update_index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
     io_type: Option<TypeId>,
-    entry_function: Option<FunctionId>,
     mutated_parameter_symbols: HashSet<SymbolId>,
 }
 
@@ -757,8 +756,14 @@ impl TypedModule {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.io_type)
     }
 
-    pub(crate) fn entry_function(&self) -> Option<FunctionId> {
-        self.entry_function
+    pub(crate) fn io_resource(&self) -> Option<CheckedResource> {
+        self.io_type.map(|id| CheckedResource {
+            value_type: CheckedType::Opaque {
+                id,
+                name: "IO".to_owned(),
+                arguments: Vec::new(),
+            },
+        })
     }
 
     pub(crate) fn is_drop_method(&self, function: FunctionId) -> bool {
@@ -1066,7 +1071,6 @@ impl TypeChecker {
             self.ensure_function_checked(&module, function_id);
         }
         self.infer_resources(&module);
-        let entry_function = self.validate_entry_function(&module);
 
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
@@ -1099,7 +1103,6 @@ impl TypeChecker {
             update_index_trait: self.update_index_trait,
             mutate_index_trait: self.mutate_index_trait,
             io_type: self.io_type,
-            entry_function,
             mutated_parameter_symbols: self.mutated_parameter_symbols,
         };
         let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
@@ -2740,7 +2743,9 @@ impl TypeChecker {
         }
 
         let no_parameters = HashMap::new();
+        let entry_module = module.program().entry();
         for source_module in module.program().modules() {
+            let is_entry_module = source_module.id == entry_module;
             for item in &source_module.syntax.items {
                 let Item::Statement(statement) = item else {
                     continue;
@@ -2782,80 +2787,32 @@ impl TypeChecker {
                     )),
                 }
                 .unwrap_or((&source_module.syntax.syntax, CheckedResourceSet::default()));
-                if !resources.resources.is_empty() {
+                let required = if is_entry_module {
+                    CheckedResourceSet::canonical_with_mutations(
+                        resources
+                            .resources
+                            .iter()
+                            .filter(|resource| {
+                                !matches!(
+                                    &resource.value_type,
+                                    CheckedType::Opaque { id, .. } if Some(*id) == self.io_type
+                                )
+                            })
+                            .cloned()
+                            .collect(),
+                        resources.mutations.clone(),
+                    )
+                } else {
+                    resources
+                };
+                if !required.resources.is_empty() {
                     self.diagnostics.push(Diagnostic::new(
                         syntax.span.clone(),
-                        format!("top-level initialization requires resources {resources}"),
+                        format!("top-level initialization requires resources {required}"),
                     ));
                 }
             }
         }
-    }
-
-    fn validate_entry_function(&mut self, module: &ResolvedModule) -> Option<FunctionId> {
-        let binding = module
-            .program()
-            .module(module.program().entry())
-            .syntax
-            .items
-            .iter()
-            .find_map(|item| match item {
-                Item::Statement(statement) => match statement.as_ref() {
-                    Statement::Binding(binding)
-                        if binding.kind == BindingKind::Def && binding.name == "main" =>
-                    {
-                        Some(binding)
-                    }
-                    _ => None,
-                },
-                _ => None,
-            })?;
-
-        if !binding.type_parameters.is_empty() || !binding.trait_bounds.is_empty() {
-            self.diagnostics.push(Diagnostic::new(
-                binding.syntax.span.clone(),
-                "entry-point `main` cannot be generic",
-            ));
-        }
-        let Some(Expression::Function(function)) = binding.value.as_ref() else {
-            self.diagnostics.push(Diagnostic::new(
-                binding.syntax.span.clone(),
-                "entry-point `main` must be defined directly as a function",
-            ));
-            return None;
-        };
-        let Some(function_id) = module.function_for(function.syntax.id) else {
-            return None;
-        };
-        let Some(function_type) = self.function_types.get(&function_id) else {
-            return Some(function_id);
-        };
-        if function_type.parameter.as_ref() != &CheckedType::empty_product() {
-            self.diagnostics.push(Diagnostic::new(
-                function.pattern.syntax().span.clone(),
-                "entry-point `main` must accept `()`",
-            ));
-        }
-        if function_type.result.as_ref() != &CheckedType::empty_product() {
-            self.diagnostics.push(Diagnostic::new(
-                function.body.syntax().span.clone(),
-                "entry-point `main` must return `()`",
-            ));
-        }
-        if function_type.resources.resources.len() > 1
-            || function_type.resources.resources.iter().any(|resource| {
-                !matches!(
-                    &resource.value_type,
-                    CheckedType::Opaque { id, .. } if Some(*id) == self.io_type
-                )
-            })
-        {
-            self.diagnostics.push(Diagnostic::new(
-                binding.syntax.span.clone(),
-                "entry-point `main` may require only the `std.io.IO` resource",
-            ));
-        }
-        Some(function_id)
     }
 
     fn refreshed_expression_type(

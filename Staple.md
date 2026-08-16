@@ -444,20 +444,21 @@ extern "c" {
 printf (c_string "hello, world!\n")
 ```
 
-The entry module may define an optional source-level entry point:
+The entry module's top-level statements are the program: `std.io.IO` is
+implicitly available to them, so output can be produced directly, without
+defining any function:
 
 ```staple
 use std.io println
 
-def main = () => println "Hello, world!"
+println "Hello, world!"
 ```
 
-Only a direct, non-generic `def main` in the entry module is selected. It must
-have parameter and result type `()`, and may require either no resources or only
-`std.io.IO`; the resource set may be explicit or inferred. A `let main`, an
-imported `main`, and functions named `main` in other modules remain ordinary
-bindings. The native entry point initializes every reachable module, calls the
-source `main` when present, and then returns status zero.
+This implicit `IO` is scoped to the entry module alone; a non-entry module's
+top-level statements still cannot require any resource. `main` carries no
+special meaning — a `def main`, `let main`, or imported `main` is an ordinary
+binding like any other, in every module. The native entry point initializes
+every reachable module, in dependency order, and then returns status zero.
 
 ### Modules and `use`
 
@@ -599,8 +600,8 @@ are initialized before modules which use them. Mutually recursive groups are
 initialized by canonical file path and then logical submodule path, and
 statements within one module keep source order. Declaring an inline submodule
 makes it reachable, so its top-level statements also execute exactly once.
-All reachable top-level initialization completes before the source `main` body
-begins.
+The entry module is always initialized last, after every module it depends
+on, so its top-level statements effectively run as the program body.
 Module globals begin in the `Declared` state, enter `Initializing`
 while their initializer is evaluated, and become `Initialized(value)` only after
 that value has been stored. Reading a global before it is `Initialized` is an
@@ -1251,10 +1252,11 @@ Resource-bearing function types and nominal resource identities are preserved
 when public definitions are imported or re-exported by another module.
 
 `std.io` exports the opaque `IO` resource and the functions `print` and
-`println`, both with type `String ->{IO} ()`. The native entry wrapper supplies
-`IO` only to source `main`; ordinary code receives it transitively through its
-function resource contract. Calling either output function from top-level
-initialization is therefore rejected.
+`println`, both with type `String ->{IO} ()`. `IO` is implicitly available to
+the entry module's top-level statements; ordinary code receives it
+transitively through its function resource contract. Calling either output
+function from a non-entry module's top-level initialization is therefore
+still rejected.
 
 Macros may quote, splice, generate, and transform resource syntax. Attempting
 to evaluate `resource` or `with` as a compile-time macro operation is rejected;
@@ -1468,7 +1470,7 @@ Function application is written by placing the argument expression after the
 function expression. No dedicated call punctuation is required.
 
 ```staple
-def main = () => println "Hello, world!"
+println "Hello, world!"
 ```
 
 Because each function accepts one value, passing several logical arguments

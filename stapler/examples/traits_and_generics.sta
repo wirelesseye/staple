@@ -27,7 +27,5 @@ let int_identity: I32 -> I32 = identity
 let pair: Pair (I32, String) = (42, "answer")
 let flag: Bool = True
 
-def main = () => {
-    println (labeled (int_identity (first pair)))
-    println (labeled flag)
-}
+println (labeled (int_identity (first pair)))
+println (labeled flag)

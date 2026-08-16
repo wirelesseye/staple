@@ -1202,25 +1202,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .build_call(self.initializers[module], &[], "initialize")
                 .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
         }
-        if let Some(entry_function) = self.typed_module.entry_function() {
-            let source_main = self.functions[&entry_function];
-            let function_type = self
-                .typed_module
-                .type_of_function(entry_function)
-                .expect("checked entry function");
-            let mut arguments = vec![
-                self.context
-                    .ptr_type(AddressSpace::default())
-                    .const_null()
-                    .into(),
-            ];
-            if !function_type.resources.resources.is_empty() {
-                arguments.push(self.context.struct_type(&[], false).const_zero().into());
-            }
-            self.builder
-                .build_direct_call(source_main, &arguments, "source.main")
-                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
-        }
         self.builder
             .build_return(Some(&integer_type.const_zero()))
             .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
@@ -1256,11 +1237,20 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .iter()
             .map(|module| (module.id, module.syntax.items.clone()))
             .collect::<Vec<_>>();
+        let entry_module = self.typed_module.resolved().program().entry();
         for (module_id, items) in modules {
             let function = self.initializers[&module_id];
             let entry = self.context.append_basic_block(function, "entry");
             self.builder.position_at_end(entry);
             let mut environment = FunctionEnvironment::default();
+            if module_id == entry_module
+                && let Some(io_resource) = self.typed_module.io_resource()
+            {
+                environment.resources.push((
+                    io_resource,
+                    self.context.struct_type(&[], false).const_zero().into(),
+                ));
+            }
             for item in &items {
                 if let Item::Statement(statement) = item {
                     self.compile_top_level_statement(&mut environment, statement)?;

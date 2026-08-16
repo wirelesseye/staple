@@ -28,14 +28,12 @@ let boxed: Box I32 = Box (value: raw_id)
 let generic_value = unbox boxed
 let singleton_value = switch_number Enabled
 
-def main = () => {
-    println "Nominal patterns, generic constructors, and singleton matches evaluated successfully."
-    if {
-        (same_switch (Enabled, Disabled)) => {
-            println "same"
-        },
-        else => {
-            println "different"
-        },
-    }
+println "Nominal patterns, generic constructors, and singleton matches evaluated successfully."
+if {
+    (same_switch (Enabled, Disabled)) => {
+        println "same"
+    },
+    else => {
+        println "different"
+    },
 }

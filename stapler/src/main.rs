@@ -734,7 +734,7 @@ mod tests {
         let source = std::env::temp_dir().join(format!("stapler-run-{nonce}.sta"));
         std::fs::write(
             &source,
-            "extern \"c\" { let exit: I32 -> () }\ndef main = () => exit 7\n",
+            "extern \"c\" { let exit: I32 -> () }\nexit 7\n",
         )
         .expect("temporary run source should be writable");
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
@@ -762,7 +762,7 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let source = std::env::temp_dir().join(format!("stapler-run-error-{nonce}.sta"));
-        std::fs::write(&source, "def main = () => missing\n")
+        std::fs::write(&source, "missing\n")
             .expect("temporary invalid source should be writable");
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
         let error = run([
@@ -784,7 +784,7 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let source = std::env::temp_dir().join(format!("stapler-run-linker-{nonce}.sta"));
-        std::fs::write(&source, "def main = () => ()\n")
+        std::fs::write(&source, "()\n")
             .expect("temporary source should be writable");
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
         let error = run([
@@ -816,7 +816,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_source_main_with_io_after_top_level_initialization() {
+    fn runs_top_level_io_in_the_entry_module() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -830,7 +830,8 @@ mod tests {
                 "extern \"c\" { let exit: I32 -> () }\n",
                 "var initialized = 0\n",
                 "initialized = 41\n",
-                "def main = () => { println \"source main\"; exit (initialized - 41) }\n",
+                "println \"source main\"\n",
+                "exit (initialized - 41)\n",
             ),
         )
         .expect("temporary source-main source should be writable");

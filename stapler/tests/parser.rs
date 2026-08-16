@@ -797,8 +797,7 @@ fn parses_hello_world_losslessly() {
     assert!(matches!(
         root.items[1],
         Item::Statement(ref statement)
-            if matches!(statement.as_ref(), Statement::Binding(binding)
-                if matches!(binding.value.as_ref(), Some(Expression::Function(_))))
+            if matches!(statement.as_ref(), Statement::Expression(Expression::Call(_)))
     ));
 }
 

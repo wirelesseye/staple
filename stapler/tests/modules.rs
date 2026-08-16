@@ -116,10 +116,8 @@ fn imports_standard_io_print_functions() {
         "main.sta",
         concat!(
             "use std.io (print, println)\n",
-            "def main = () => {\n",
-            "  print \"hello\"\n",
-            "  println \" world\"\n",
-            "}\n",
+            "print \"hello\"\n",
+            "println \" world\"\n",
         ),
     );
 
@@ -139,7 +137,8 @@ fn uses_root_qualified_standard_library_items_without_imports() {
         concat!(
             "let printer: String ->{std.io.IO} () = std.io.println\n",
             "def message: () -> std.cinterop.CString = () => std.cinterop.c_string \"hello\"\n",
-            "def main = () => { message (); printer \"hello\" }\n",
+            "message ()\n",
+            "printer \"hello\"\n",
         ),
     );
 
@@ -966,15 +965,25 @@ fn package_named_file_uses_a_repeated_package_component() {
 }
 
 #[test]
-fn invokes_a_mangled_source_main_from_the_generated_entry_point() {
+fn provides_io_implicitly_only_to_the_entry_modules_top_level() {
     let fixture = Fixture::new();
-    fixture.write("main.sta", "def main = () => ()\n");
+    fixture.write("main.sta", "use std.io println\nprintln \"entry output\"\n");
 
-    let llvm = fixture.compile().expect("source main should compile");
-    assert!(llvm.contains("define <{}> @__staple_m0_main(ptr %0)"));
-    assert!(llvm.contains("define i32 @main()"));
-    let native_main = llvm.split("define i32 @main()").nth(1).unwrap();
-    assert!(native_main.contains("%source.main = call <{}> @__staple_m0_main(ptr null)"));
+    fixture
+        .check_at("main.sta", ".")
+        .expect("IO should be implicitly available at the entry module's top level");
+
+    let fixture = Fixture::new();
+    fixture.write("main.sta", "use dependency *\n");
+    fixture.write(
+        "dependency.sta",
+        "use std.io println\nprintln \"dependency output\"\n",
+    );
+
+    let error = fixture
+        .check_at("main.sta", ".")
+        .expect_err("IO must still be rejected at a non-entry module's top level");
+    assert!(error.contains("top-level initialization requires resources {IO}"));
 }
 
 #[test]
