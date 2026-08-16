@@ -121,7 +121,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .functions()
             .iter()
             .flat_map(|function| function.captures.iter().copied())
-            .filter(|symbol| typed_module.resolved().has_mutable_storage(*symbol))
+            .filter(|symbol| typed_module.has_mutable_storage(*symbol))
             .collect();
         Self {
             context,
@@ -749,7 +749,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(symbol)
-                    || self.typed_module.resolved().has_mutable_storage(symbol)
+                    || self.typed_module.has_mutable_storage(symbol)
                 {
                     environment
                         .binding_cells
@@ -830,7 +830,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved pattern binding")
                     })?;
-                if (binding.mutable || binding.reassignable) && !self.storage.contains_key(&symbol)
+                // `has_mutable_storage` subsumes `binding.mutable ||
+                // binding.reassignable` (the resolver's sets are built from
+                // exactly those flags) and additionally covers a function
+                // parameter that a `mut` effect permits writing into —
+                // parameter mutability is declared on the signature, not
+                // readable from `binding` here.
+                if self.typed_module.has_mutable_storage(symbol) && !self.storage.contains_key(&symbol)
                 {
                     let cell = self.allocate_binding_cell(
                         environment,
@@ -951,7 +957,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .build_store(*live, self.context.bool_type().const_zero())
                     .map_err(compiler_diagnostic)?;
             }
-            if self.typed_module.resolved().has_mutable_storage(symbol) {
+            if self.typed_module.has_mutable_storage(symbol) {
                 self.store_local_initialization_state(environment, symbol, 0, Span::Compiler)?;
             }
         }
@@ -2037,7 +2043,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     (pointer, payload)
                 } else {
                     if let Some(symbol) = self.typed_module.symbol_for(access.value.syntax().id)
-                        && self.typed_module.resolved().has_mutable_storage(symbol)
+                        && self.typed_module.has_mutable_storage(symbol)
                     {
                         self.check_symbol_initialization(
                             environment,
@@ -2440,7 +2446,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         self.typed_module
                             .resolved()
                             .requires_initialization_check(access.syntax.id)
-                            || self.typed_module.resolved().has_mutable_storage(symbol),
+                            || self.typed_module.has_mutable_storage(symbol),
                         access.syntax.span.clone(),
                         "value is not available here".to_owned(),
                     );
@@ -2594,7 +2600,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     self.typed_module
                         .resolved()
                         .requires_initialization_check(name.syntax.id)
-                        || self.typed_module.resolved().has_mutable_storage(symbol),
+                        || self.typed_module.has_mutable_storage(symbol),
                     name.syntax.span.clone(),
                     format!("value `{}` is not available here", name.name),
                 )
@@ -6048,7 +6054,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(symbol)
-                    || self.typed_module.resolved().has_mutable_storage(symbol)
+                    || self.typed_module.has_mutable_storage(symbol)
                 {
                     environment
                         .binding_cells
@@ -6148,7 +6154,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .typed_module
                 .resolved()
                 .requires_initialization_state(symbol)
-                || self.typed_module.resolved().has_mutable_storage(symbol)
+                || self.typed_module.has_mutable_storage(symbol)
             {
                 continue;
             }
@@ -6208,7 +6214,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(*symbol)
-                    || self.typed_module.resolved().has_mutable_storage(*symbol)
+                    || self.typed_module.has_mutable_storage(*symbol)
                 {
                     return Ok(self.context.ptr_type(AddressSpace::default()).into());
                 }

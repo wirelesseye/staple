@@ -6930,6 +6930,9 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
             for resource in &mut function.resources.resources {
                 freshen_type(expander, resource, module, mark);
             }
+            for mutation in &mut function.resources.mutations {
+                expander.freshen_syntax(&mut mutation.syntax, module, mark);
+            }
             freshen_type(expander, &mut function.result, module, mark);
         }
         Type::Application(application) => {

@@ -15,6 +15,12 @@ enum PlaceIssue {
     NotReassignable(String),
     /// The root binding is not declared `mut` and cannot be written through.
     NotMutable(String),
+    /// The root is a function parameter, and the write does not cross a
+    /// `Ref` anywhere along its path. A parameter write that stays entirely
+    /// within a by-value type is never visible to the caller, so unlike an
+    /// ordinary `mut` binding it is never permitted, regardless of any
+    /// declared `mut` effect — rebind into a local `mut` binding instead.
+    NotThroughRef(String),
     /// The target is not a place at all (e.g. a temporary).
     NotAPlace,
 }
@@ -204,37 +210,70 @@ pub struct CheckedResource {
     pub value_type: CheckedType,
 }
 
+/// A parameter a function may write into: either the whole parameter value
+/// or one positional element of a product parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CheckedMutation {
+    Whole,
+    Element(usize),
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CheckedResourceSet {
     pub resources: Vec<CheckedResource>,
+    pub mutations: Vec<CheckedMutation>,
 }
 
 impl CheckedResourceSet {
-    pub fn canonical(mut resources: Vec<CheckedResource>) -> Self {
+    pub fn canonical(resources: Vec<CheckedResource>) -> Self {
+        Self::canonical_with_mutations(resources, Vec::new())
+    }
+
+    pub fn canonical_with_mutations(
+        mut resources: Vec<CheckedResource>,
+        mut mutations: Vec<CheckedMutation>,
+    ) -> Self {
         resources.sort_by(|left, right| {
             format!("{:?}", left.value_type).cmp(&format!("{:?}", right.value_type))
         });
         resources.dedup();
-        Self { resources }
+        mutations.sort_by_key(|mutation| match mutation {
+            CheckedMutation::Whole => (0, 0),
+            CheckedMutation::Element(index) => (1, *index),
+        });
+        mutations.dedup();
+        Self {
+            resources,
+            mutations,
+        }
     }
 
     pub fn union(&self, other: &Self) -> Self {
-        Self::canonical(
+        Self::canonical_with_mutations(
             self.resources
                 .iter()
                 .chain(&other.resources)
                 .cloned()
                 .collect(),
+            self.mutations
+                .iter()
+                .chain(&other.mutations)
+                .cloned()
+                .collect(),
         )
     }
 
+    /// Discharges a resource, as `with` does. Mutations are never discharged
+    /// this way: they are a static property of the parameter, not a runtime
+    /// provider.
     pub fn without(&self, resource: &CheckedResource) -> Self {
-        Self::canonical(
+        Self::canonical_with_mutations(
             self.resources
                 .iter()
                 .filter(|candidate| *candidate != resource)
                 .cloned()
                 .collect(),
+            self.mutations.clone(),
         )
     }
 
@@ -242,20 +281,71 @@ impl CheckedResourceSet {
         self.resources
             .iter()
             .all(|resource| other.resources.contains(resource))
+            && self
+                .mutations
+                .iter()
+                .all(|mutation| other.covers_mutation(mutation))
+    }
+
+    fn covers_mutation(&self, mutation: &CheckedMutation) -> bool {
+        self.mutations.contains(&CheckedMutation::Whole) || self.mutations.contains(mutation)
     }
 }
 
 impl fmt::Display for CheckedResourceSet {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("{")?;
-        for (index, resource) in self.resources.iter().enumerate() {
-            if index > 0 {
+        let mut first = true;
+        for mutation in &self.mutations {
+            if !first {
                 formatter.write_str(", ")?;
             }
+            first = false;
+            match mutation {
+                CheckedMutation::Whole => formatter.write_str("mut")?,
+                CheckedMutation::Element(index) => write!(formatter, "mut {index}")?,
+            }
+        }
+        for resource in &self.resources {
+            if !first {
+                formatter.write_str(", ")?;
+            }
+            first = false;
             write!(formatter, "{}", resource.value_type)?;
         }
         formatter.write_str("}")
     }
+}
+
+/// Renders a resource set exactly like `Display for CheckedResourceSet`,
+/// except that `mut <index>` is rendered as `mut <name>` when `parameter` is
+/// a product with a name at that position — used wherever the parameter
+/// type is in hand (an owning function's signature) to produce the same
+/// spelling a user would write.
+fn format_named_resource_set(resources: &CheckedResourceSet, parameter: &CheckedType) -> String {
+    let mut entries = Vec::new();
+    for mutation in &resources.mutations {
+        entries.push(match mutation {
+            CheckedMutation::Whole => "mut".to_string(),
+            CheckedMutation::Element(index) => {
+                let name = match parameter {
+                    CheckedType::Product(product) => product
+                        .elements
+                        .get(*index)
+                        .and_then(|element| element.name.as_deref()),
+                    _ => None,
+                };
+                match name {
+                    Some(name) => format!("mut {name}"),
+                    None => format!("mut {index}"),
+                }
+            }
+        });
+    }
+    for resource in &resources.resources {
+        entries.push(resource.value_type.to_string());
+    }
+    format!("{{{}}}", entries.join(", "))
 }
 
 impl CheckedType {
@@ -476,13 +566,16 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::Function(function) => {
-                if function.resources.resources.is_empty() {
+                if function.resources.resources.is_empty() && function.resources.mutations.is_empty()
+                {
                     write!(formatter, "{} -> {}", function.parameter, function.result)
                 } else {
                     write!(
                         formatter,
                         "{} ->{} {}",
-                        function.parameter, function.resources, function.result
+                        function.parameter,
+                        format_named_resource_set(&function.resources, &function.parameter),
+                        function.result
                     )
                 }
             }
@@ -547,11 +640,28 @@ pub struct TypedModule {
     mutate_index_trait: Option<TraitId>,
     io_type: Option<TypeId>,
     entry_function: Option<FunctionId>,
+    mutated_parameter_symbols: HashSet<SymbolId>,
 }
 
 impl TypedModule {
     pub fn resolved(&self) -> &ResolvedModule {
         &self.resolved
+    }
+
+    /// Whether `symbol` needs addressable, cell-backed storage rather than
+    /// a plain SSA value: a `mut`/`var` binding (from the resolver), or a
+    /// function parameter that a `mut` effect — declared or inferred — is
+    /// actually known to write into. Parameter mutability cannot be read
+    /// off the parameter's own binding pattern; `mut` was moved to the
+    /// function's effect set, so `ResolvedModule::has_mutable_storage`
+    /// alone is not enough once a symbol may be a parameter. This uses the
+    /// narrower, post-inference set of *actually mutated* parameters
+    /// (`TypeChecker::mutated_parameter_symbols`), not the wider set every
+    /// parameter belongs to for the type checker's own in-body checks —
+    /// allocating a cell for every parameter regardless of use would
+    /// corrupt move/drop tracking for move-only ones.
+    pub fn has_mutable_storage(&self, symbol: SymbolId) -> bool {
+        self.resolved.has_mutable_storage(symbol) || self.mutated_parameter_symbols.contains(&symbol)
     }
 
     pub fn syntax(&self) -> &Module {
@@ -863,6 +973,31 @@ pub struct TypeChecker {
     return_reachable: bool,
     diagnostics: Vec<Diagnostic>,
     io_type: Option<TypeId>,
+    /// Every symbol bound by some function's parameter pattern, across the
+    /// whole module. Unlike `mut`/`var` on ordinary bindings, a parameter's
+    /// writability is declared on the function's *signature* rather than the
+    /// pattern, so this stands in for `ResolvedModule::is_mutable_symbol` at
+    /// every parameter root: a function may always write into any of its own
+    /// parameters (including through a captured closure); whether that write
+    /// is *exposed* to callers is governed separately by the function's
+    /// declared or inferred `mut` effects.
+    mutable_parameter_symbols: HashSet<SymbolId>,
+    /// Positional parameter symbols for each function, indexed the same way
+    /// as `CheckedMutation::Element` and the source `MutationTargetKind`:
+    /// element-wise for a product pattern, otherwise a single "whole
+    /// parameter" entry at index 0.
+    parameter_symbols: HashMap<FunctionId, Vec<Option<SymbolId>>>,
+    /// The narrower counterpart to `mutable_parameter_symbols`: only the
+    /// parameter symbols a function's *final* (declared or inferred) `mut`
+    /// effects actually cover, computed once inference has settled every
+    /// function's effect set. `mutable_parameter_symbols` unconditionally
+    /// covers every parameter of every function — deliberately, so the
+    /// in-body writable-place check never needs to wait on inference — but
+    /// that same permissiveness is wrong for codegen: it would allocate a
+    /// storage cell for every parameter in the program, not just the ones
+    /// actually written into, corrupting move/drop tracking for move-only
+    /// parameters that happen to share this set purely because they exist.
+    mutated_parameter_symbols: HashSet<SymbolId>,
 }
 
 impl TypeChecker {
@@ -870,7 +1005,24 @@ impl TypeChecker {
         Self::default()
     }
 
-    pub fn check(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
+    /// Type-checks on a dedicated thread with a generous stack size.
+    /// `infer_resources` now always runs (mut effects need inference even
+    /// when a program declares no resources), and its per-function AST
+    /// walk adds recursion depth on top of `check_expression`'s own —
+    /// deeply nested or macro-generated code (the standard library
+    /// included) can exceed a default 2MB thread stack, which some test
+    /// harnesses use for spawned test threads even though a typical `main`
+    /// thread does not.
+    pub fn check(self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || self.check_inner(module))
+            .expect("type-checking thread should spawn")
+            .join()
+            .expect("type-checking should not panic")
+    }
+
+    fn check_inner(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
         self.io_type = module
             .type_declarations()
             .keys()
@@ -912,14 +1064,7 @@ impl TypeChecker {
         for function_id in function_ids {
             self.ensure_function_checked(&module, function_id);
         }
-        if !self.resource_types.is_empty()
-            || self
-                .function_types
-                .values()
-                .any(|function| !function.resources.resources.is_empty())
-        {
-            self.infer_resources(&module);
-        }
+        self.infer_resources(&module);
         let entry_function = self.validate_entry_function(&module);
 
         if !self.diagnostics.is_empty() {
@@ -954,6 +1099,7 @@ impl TypeChecker {
             mutate_index_trait: self.mutate_index_trait,
             io_type: self.io_type,
             entry_function,
+            mutated_parameter_symbols: self.mutated_parameter_symbols,
         };
         let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
         if ownership_diagnostics.is_empty() {
@@ -1351,10 +1497,16 @@ impl TypeChecker {
     }
 
     fn validate_indexing_trait_method_types(&mut self, module: &ResolvedModule) {
-        for (trait_id, trait_name, arity, result_parameter) in [
-            (self.index_trait, "Index", 2, Some(2usize)),
-            (self.update_index_trait, "UpdateIndex", 3, Some(0usize)),
-            (self.mutate_index_trait, "MutateIndex", 3, None),
+        for (trait_id, trait_name, arity, result_parameter, mutations) in [
+            (self.index_trait, "Index", 2, Some(2usize), Vec::new()),
+            (self.update_index_trait, "UpdateIndex", 3, Some(0usize), Vec::new()),
+            (
+                self.mutate_index_trait,
+                "MutateIndex",
+                3,
+                None,
+                vec![CheckedMutation::Element(0)],
+            ),
         ] {
             let Some(trait_id) = trait_id else {
                 continue;
@@ -1383,7 +1535,7 @@ impl TypeChecker {
                         .collect(),
                     variadic: false,
                 })),
-                resources: CheckedResourceSet::default(),
+                resources: CheckedResourceSet::canonical_with_mutations(Vec::new(), mutations),
                 result: Box::new(
                     result_parameter.map_or_else(CheckedType::empty_product, |index| {
                         parameters[index].clone()
@@ -1914,6 +2066,7 @@ impl TypeChecker {
                             matches!(&reference.value_type, CheckedType::Ref(payload)
                                 if payload.as_ref() == &replacement.value_type
                                     && payload.as_ref() == function.result.as_ref())
+                                && function.resources.mutations == [CheckedMutation::Element(0)]
                         }
                         _ => false,
                     })
@@ -1939,8 +2092,50 @@ impl TypeChecker {
         }
     }
 
+    /// The reverse of `parameter_symbols[function_id]`: each parameter
+    /// symbol mapped back to its position, for attributing a write found
+    /// while walking `function_id`'s body back onto its own signature.
+    fn parameter_positions(&self, function_id: FunctionId) -> HashMap<SymbolId, usize> {
+        self.parameter_symbols
+            .get(&function_id)
+            .into_iter()
+            .flatten()
+            .enumerate()
+            .filter_map(|(index, symbol)| symbol.map(|symbol| (symbol, index)))
+            .collect()
+    }
+
+    /// The module a function is declared in, used as the calling context for
+    /// call-site `mut` checks performed deep inside its body. Unlike
+    /// `Statement::Assignment`, an arbitrary expression's own syntax id is
+    /// never in `syntax_modules` (only declarations and assignment
+    /// statements are), so `module.module_for_syntax` cannot be applied
+    /// directly to a `Call` node — this is resolved once per function
+    /// instead, from a symbol that reliably carries it: any parameter (a
+    /// parameter necessarily lives in the same module as the function
+    /// itself), falling back to the function's own declaring binding.
+    fn function_module(&self, module: &ResolvedModule, function: &ResolvedFunction) -> Option<ModuleId> {
+        self.parameter_symbols
+            .get(&function.id)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .find_map(|symbol| module.symbol_module(*symbol))
+            .or_else(|| {
+                function
+                    .binding_syntax
+                    .and_then(|syntax| module.module_for_syntax(syntax))
+            })
+    }
+
     fn seed_function_types(&mut self, module: &ResolvedModule) {
         for function in module.functions() {
+            let parameter_symbols = function_parameter_symbols(module, &function.pattern);
+            for symbol in parameter_symbols.iter().flatten() {
+                self.mutable_parameter_symbols.insert(*symbol);
+            }
+            self.parameter_symbols.insert(function.id, parameter_symbols);
+
             if let Some(expected) = self.impl_function_types.get(&function.id).cloned() {
                 self.function_types.insert(function.id, expected);
                 if let Some(trait_id) = self.default_function_traits.get(&function.id).copied() {
@@ -2166,10 +2361,18 @@ impl TypeChecker {
         self.normalize_sum_type(values, span)
     }
 
+    /// `target_parameters` maps the symbols of the *currently inferred*
+    /// function's own parameters to their positions, so a write reachable
+    /// from this expression can be attributed back to one of them. It stays
+    /// the same across a nested function literal: captured cells are shared
+    /// eagerly, so a closure that mutates a captured enclosing parameter
+    /// attributes that mutation to the enclosing function, at the point the
+    /// closure is created (see the `Expression::Function` arm).
     fn expression_resources_now(
         &self,
         module: &ResolvedModule,
         expression: &Expression,
+        target_parameters: &HashMap<SymbolId, usize>,
     ) -> CheckedResourceSet {
         let union = |values: Vec<CheckedResourceSet>| {
             values
@@ -2179,19 +2382,39 @@ impl TypeChecker {
                 })
         };
         match expression {
-            Expression::Function(_) => CheckedResourceSet::default(),
-            Expression::Satisfies(value) => self.expression_resources_now(module, &value.value),
+            Expression::Function(value) => {
+                let Some(function_id) = module.function_for(value.syntax.id) else {
+                    return CheckedResourceSet::default();
+                };
+                let function = &module.functions()[function_id.0];
+                // Resources never escape a nested function literal (they are
+                // provided dynamically, at call time). Mutations do: only
+                // the writes this closure performs through captured
+                // symbols that happen to be *our* parameters count, never
+                // its own resources or its own parameters' mutations (those
+                // are attributed to the closure's own inferred type instead,
+                // computed separately when its own turn comes around).
+                let inner =
+                    self.expression_resources_now(module, &function.body, target_parameters);
+                CheckedResourceSet::canonical_with_mutations(Vec::new(), inner.mutations)
+            }
+            Expression::Satisfies(value) => {
+                self.expression_resources_now(module, &value.value, target_parameters)
+            }
             Expression::Match(value) => union(
-                std::iter::once(self.expression_resources_now(module, &value.subject))
-                    .chain(
-                        value
-                            .arms
-                            .iter()
-                            .map(|arm| self.expression_resources_now(module, &arm.body)),
-                    )
-                    .collect(),
+                std::iter::once(self.expression_resources_now(
+                    module,
+                    &value.subject,
+                    target_parameters,
+                ))
+                .chain(value.arms.iter().map(|arm| {
+                    self.expression_resources_now(module, &arm.body, target_parameters)
+                }))
+                .collect(),
             ),
-            Expression::Loop(value) => self.block_resources_now(module, &value.body),
+            Expression::Loop(value) => {
+                self.block_resources_now(module, &value.body, target_parameters)
+            }
             Expression::Resource(value) => self
                 .resource_types
                 .get(&value.syntax.id)
@@ -2199,59 +2422,87 @@ impl TypeChecker {
                 .map(|resource| CheckedResourceSet::canonical(vec![resource]))
                 .unwrap_or_default(),
             Expression::With(value) => {
-                let provider = self.expression_resources_now(module, &value.value);
-                let body = self.block_resources_now(module, &value.body);
+                let provider =
+                    self.expression_resources_now(module, &value.value, target_parameters);
+                let body = self.block_resources_now(module, &value.body, target_parameters);
                 let body = self
                     .resource_types
                     .get(&value.syntax.id)
                     .map_or(body.clone(), |resource| body.without(resource));
                 provider.union(&body)
             }
-            Expression::Block(value) => self.block_resources_now(module, value),
+            Expression::Block(value) => {
+                self.block_resources_now(module, value, target_parameters)
+            }
             Expression::Product(value) => union(
                 value
                     .elements
                     .iter()
-                    .map(|element| self.expression_resources_now(module, &element.value))
+                    .map(|element| {
+                        self.expression_resources_now(module, &element.value, target_parameters)
+                    })
                     .collect(),
             ),
             Expression::Call(value) => {
-                let children = self
-                    .expression_resources_now(module, &value.callee)
-                    .union(&self.expression_resources_now(module, &value.argument));
-                let called = self
+                let mut result = self
+                    .expression_resources_now(module, &value.callee, target_parameters)
+                    .union(&self.expression_resources_now(
+                        module,
+                        &value.argument,
+                        target_parameters,
+                    ));
+                let called_type = self
                     .function_origin(module, &value.callee)
-                    .and_then(|function| {
-                        self.function_types
-                            .get(&function)
-                            .map(|function| function.resources.clone())
-                    })
+                    .and_then(|function| self.function_types.get(&function).cloned())
                     .or_else(|| {
-                        self.expression_types
-                            .get(&value.callee.syntax().id)
-                            .and_then(|ty| match ty {
-                                CheckedType::Function(function) => Some(function.resources.clone()),
-                                _ => None,
-                            })
-                    })
-                    .unwrap_or_default();
-                children.union(&called)
+                        match self.expression_types.get(&value.callee.syntax().id) {
+                            Some(CheckedType::Function(function)) => Some(function.clone()),
+                            _ => None,
+                        }
+                    });
+                if let Some(function_type) = &called_type {
+                    result = result.union(&CheckedResourceSet::canonical(
+                        function_type.resources.resources.clone(),
+                    ));
+                    for mutation in &function_type.resources.mutations {
+                        if let Some(attributed) = attribute_call_mutation(
+                            module,
+                            &value.argument,
+                            mutation,
+                            target_parameters,
+                        ) {
+                            result = result.union(&CheckedResourceSet::canonical_with_mutations(
+                                Vec::new(),
+                                vec![attributed],
+                            ));
+                        }
+                    }
+                }
+                result
             }
-            Expression::Access(value) => self.expression_resources_now(module, &value.value),
+            Expression::Access(value) => {
+                self.expression_resources_now(module, &value.value, target_parameters)
+            }
             Expression::Index(value) => self
-                .expression_resources_now(module, &value.value)
-                .union(&self.expression_resources_now(module, &value.index)),
+                .expression_resources_now(module, &value.value, target_parameters)
+                .union(&self.expression_resources_now(
+                    module,
+                    &value.index,
+                    target_parameters,
+                )),
             Expression::Infix(value) => module.lowered_infix(value.syntax.id).map_or_else(
                 || {
                     union(
                         value
                             .operands
                             .iter()
-                            .map(|operand| self.expression_resources_now(module, operand))
+                            .map(|operand| {
+                                self.expression_resources_now(module, operand, target_parameters)
+                            })
                             .collect(),
                     )
                 },
-                |lowered| self.expression_resources_now(module, lowered),
+                |lowered| self.expression_resources_now(module, lowered, target_parameters),
             ),
             Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
@@ -2265,37 +2516,111 @@ impl TypeChecker {
         }
     }
 
+    /// `target_parameters` grows across the block's own statements, in
+    /// order: a `let`/`var` binding whose value crosses a `Ref` rooted at a
+    /// tracked parameter (or an already-tracked alias) makes the newly
+    /// bound name an alias of that same position, so a later write through
+    /// it — including via a helper function like `replace` — is correctly
+    /// attributed back to the parameter. The extension is local to this
+    /// block: it does not leak into the enclosing scope, but does propagate
+    /// into nested blocks and closures the same way `target_parameters`
+    /// itself already does, since they are handed the (possibly extended)
+    /// map current at the point they are reached.
     fn block_resources_now(
         &self,
         module: &ResolvedModule,
         block: &crate::BlockExpression,
+        target_parameters: &HashMap<SymbolId, usize>,
     ) -> CheckedResourceSet {
-        block
-            .statements
-            .iter()
-            .fold(CheckedResourceSet::default(), |resources, statement| {
-                resources.union(&match statement {
-                    Statement::Binding(value) => value
-                        .value
-                        .as_ref()
-                        .map(|value| self.expression_resources_now(module, value))
-                        .unwrap_or_default(),
-                    Statement::PatternBinding(value) => {
-                        self.expression_resources_now(module, &value.value)
+        let mut owned: Option<HashMap<SymbolId, usize>> = None;
+        let mut resources = CheckedResourceSet::default();
+        for statement in &block.statements {
+            let current = owned.as_ref().unwrap_or(target_parameters);
+            let contribution = match statement {
+                Statement::Binding(value) => value
+                    .value
+                    .as_ref()
+                    .map(|value| self.expression_resources_now(module, value, current))
+                    .unwrap_or_default(),
+                Statement::PatternBinding(value) => {
+                    self.expression_resources_now(module, &value.value, current)
+                }
+                Statement::Assignment(value) => {
+                    let combined = self
+                        .expression_resources_now(module, &value.target, current)
+                        .union(&self.expression_resources_now(module, &value.value, current));
+                    match assignment_mutation(self, module, &value.target, current) {
+                        Some(mutation) => combined.union(&CheckedResourceSet::canonical_with_mutations(
+                            Vec::new(),
+                            vec![mutation],
+                        )),
+                        None => combined,
                     }
-                    Statement::Assignment(value) => self
-                        .expression_resources_now(module, &value.target)
-                        .union(&self.expression_resources_now(module, &value.value)),
-                    Statement::Return(value) => self.expression_resources_now(module, &value.value),
-                    Statement::Break(value) => value
-                        .value
-                        .as_ref()
-                        .map(|value| self.expression_resources_now(module, value))
-                        .unwrap_or_default(),
-                    Statement::Continue(_) => CheckedResourceSet::default(),
-                    Statement::Expression(value) => self.expression_resources_now(module, value),
-                })
-            })
+                }
+                Statement::Return(value) => {
+                    self.expression_resources_now(module, &value.value, current)
+                }
+                Statement::Break(value) => value
+                    .value
+                    .as_ref()
+                    .map(|value| self.expression_resources_now(module, value, current))
+                    .unwrap_or_default(),
+                Statement::Continue(_) => CheckedResourceSet::default(),
+                Statement::Expression(value) => {
+                    self.expression_resources_now(module, value, current)
+                }
+            };
+            let alias = self.statement_parameter_ref_alias(module, statement, current);
+            resources = resources.union(&contribution);
+            if let Some((symbol, position)) = alias {
+                let mut extended = owned.take().unwrap_or_else(|| target_parameters.clone());
+                extended.insert(symbol, position);
+                owned = Some(extended);
+            }
+        }
+        resources
+    }
+
+    /// If `statement` is a binding whose value crosses a `Ref` rooted at one
+    /// of `target_parameters`, returns the newly bound symbol and the
+    /// position it aliases. Scoped to the direct forms only: a bare
+    /// `let`/`var` binding (`Statement::Binding`, or a destructuring
+    /// `Pattern::Binding`), or one level of nominal unwrap
+    /// (`let Name inner = <value>`) — not nested or product patterns, which
+    /// would need to decide which of several bound names aliases which part
+    /// of the source.
+    fn statement_parameter_ref_alias(
+        &self,
+        module: &ResolvedModule,
+        statement: &Statement,
+        target_parameters: &HashMap<SymbolId, usize>,
+    ) -> Option<(SymbolId, usize)> {
+        let (symbol, value) = match statement {
+            Statement::Binding(binding) => (
+                module.symbol_for(binding.syntax.id)?,
+                binding.value.as_ref()?,
+            ),
+            Statement::PatternBinding(binding) => {
+                let bound = match &binding.pattern {
+                    Pattern::Binding(value) => value,
+                    Pattern::Nominal(nominal) => match nominal.argument.as_ref() {
+                        Pattern::Binding(value) => value,
+                        _ => return None,
+                    },
+                    _ => return None,
+                };
+                (module.symbol_for(bound.syntax.id)?, &binding.value)
+            }
+            _ => return None,
+        };
+        if !self.expression_crosses_ref(value) {
+            return None;
+        }
+        let (root, _) = place_root_symbol(module, value)?;
+        target_parameters
+            .get(&root)
+            .copied()
+            .map(|position| (symbol, position))
     }
 
     fn infer_resources(&mut self, module: &ResolvedModule) {
@@ -2320,7 +2645,9 @@ impl TypeChecker {
                 if declared.contains_key(&function.id) {
                     continue;
                 }
-                let inferred = self.expression_resources_now(module, &function.body);
+                let target_parameters = self.parameter_positions(function.id);
+                let inferred =
+                    self.expression_resources_now(module, &function.body, &target_parameters);
                 if self.function_types[&function.id].resources != inferred {
                     updates.push((function.id, function.binding_syntax, inferred));
                 }
@@ -2346,20 +2673,72 @@ impl TypeChecker {
         }
 
         for function in module.functions() {
-            let actual = self.expression_resources_now(module, &function.body);
+            let target_parameters = self.parameter_positions(function.id);
+            let actual =
+                self.expression_resources_now(module, &function.body, &target_parameters);
             if let Some(allowed) = declared.get(&function.id)
                 && !actual.is_subset_of(allowed)
             {
+                let parameter = self.function_types[&function.id].parameter.clone();
                 self.diagnostics.push(Diagnostic::new(
                     function.body.syntax().span.clone(),
                     format!(
-                        "function body requires resources {actual}, which are not contained in its declared resource set {allowed}"
+                        "function body requires effects {}, which are not contained in its \
+                         declared effect set {}",
+                        format_named_resource_set(&actual, &parameter),
+                        format_named_resource_set(allowed, &parameter)
+                    ),
+                ));
+            } else if let Some(trait_type) = self.impl_function_types.get(&function.id)
+                && !actual.is_subset_of(&trait_type.resources)
+            {
+                // Impl methods are resolved without an expected type of
+                // their own (`binding_annotation` is always `None`), so
+                // they are never in `declared` and their inferred effects
+                // would otherwise silently overwrite the trait's — this is
+                // the one place that keeps an implementation honest against
+                // what its trait method promised callers.
+                let parameter = trait_type.parameter.clone();
+                let allowed = trait_type.resources.clone();
+                self.diagnostics.push(Diagnostic::new(
+                    function.body.syntax().span.clone(),
+                    format!(
+                        "trait implementation requires effects {}, which are not contained in \
+                         the trait method's declared effect set {}",
+                        format_named_resource_set(&actual, &parameter),
+                        format_named_resource_set(&allowed, &parameter)
                     ),
                 ));
             }
-            self.record_expression_resources(module, &function.body);
+            // Codegen needs to know which parameters are actually written
+            // into, to allocate storage for exactly those — never every
+            // parameter of every function, which `mutable_parameter_symbols`
+            // covers on purpose for the (pre-inference) writable-place check.
+            if let Some(symbols) = self.parameter_symbols.get(&function.id).cloned() {
+                for mutation in &actual.mutations {
+                    match mutation {
+                        CheckedMutation::Whole => {
+                            self.mutated_parameter_symbols
+                                .extend(symbols.iter().flatten().copied());
+                        }
+                        CheckedMutation::Element(index) => {
+                            if let Some(Some(symbol)) = symbols.get(*index) {
+                                self.mutated_parameter_symbols.insert(*symbol);
+                            }
+                        }
+                    }
+                }
+            }
+            let current_module = self.function_module(module, function);
+            self.record_expression_resources(
+                module,
+                &function.body,
+                &target_parameters,
+                current_module,
+            );
         }
 
+        let no_parameters = HashMap::new();
         for source_module in module.program().modules() {
             for item in &source_module.syntax.items {
                 let Item::Statement(statement) = item else {
@@ -2367,31 +2746,39 @@ impl TypeChecker {
                 };
                 let (syntax, resources) = match statement.as_ref() {
                     Statement::Binding(binding) => binding.value.as_ref().map(|value| {
-                        (value.syntax(), self.expression_resources_now(module, value))
+                        (
+                            value.syntax(),
+                            self.expression_resources_now(module, value, &no_parameters),
+                        )
                     }),
                     Statement::PatternBinding(binding) => Some((
                         binding.value.syntax(),
-                        self.expression_resources_now(module, &binding.value),
+                        self.expression_resources_now(module, &binding.value, &no_parameters),
                     )),
                     Statement::Assignment(value) => Some((
                         &value.syntax,
-                        self.expression_resources_now(module, &value.target)
-                            .union(&self.expression_resources_now(module, &value.value)),
+                        self.expression_resources_now(module, &value.target, &no_parameters)
+                            .union(&self.expression_resources_now(
+                                module,
+                                &value.value,
+                                &no_parameters,
+                            )),
                     )),
                     Statement::Return(value) => Some((
                         &value.syntax,
-                        self.expression_resources_now(module, &value.value),
+                        self.expression_resources_now(module, &value.value, &no_parameters),
                     )),
                     Statement::Break(value) => value.value.as_ref().map(|expression| {
                         (
                             &value.syntax,
-                            self.expression_resources_now(module, expression),
+                            self.expression_resources_now(module, expression, &no_parameters),
                         )
                     }),
                     Statement::Continue(_) => None,
-                    Statement::Expression(value) => {
-                        Some((value.syntax(), self.expression_resources_now(module, value)))
-                    }
+                    Statement::Expression(value) => Some((
+                        value.syntax(),
+                        self.expression_resources_now(module, value, &no_parameters),
+                    )),
                 }
                 .unwrap_or((&source_module.syntax.syntax, CheckedResourceSet::default()));
                 if !resources.resources.is_empty() {
@@ -2705,7 +3092,13 @@ impl TypeChecker {
         changed
     }
 
-    fn record_expression_resources(&mut self, module: &ResolvedModule, expression: &Expression) {
+    fn record_expression_resources(
+        &mut self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        target_parameters: &HashMap<SymbolId, usize>,
+        current_module: Option<ModuleId>,
+    ) {
         if let Some(function_id) = self.function_origin(module, expression)
             && let Some(resources) = self
                 .function_types
@@ -2716,51 +3109,144 @@ impl TypeChecker {
         {
             function.resources = resources;
         }
-        let resources = self.expression_resources_now(module, expression);
+        let resources = self.expression_resources_now(module, expression, target_parameters);
         self.expression_resources
             .insert(expression.syntax().id, resources);
         match expression {
+            // A nested function literal's own syntax nodes are recorded
+            // separately, on its own pass over `module.functions()`.
             Expression::Function(_) | Expression::Resource(_) => {}
-            Expression::Satisfies(value) => self.record_expression_resources(module, &value.value),
+            Expression::Satisfies(value) => self.record_expression_resources(
+                module,
+                &value.value,
+                target_parameters,
+                current_module,
+            ),
             Expression::Match(value) => {
-                self.record_expression_resources(module, &value.subject);
+                self.record_expression_resources(
+                    module,
+                    &value.subject,
+                    target_parameters,
+                    current_module,
+                );
                 for arm in &value.arms {
-                    self.record_expression_resources(module, &arm.body);
+                    self.record_expression_resources(
+                        module,
+                        &arm.body,
+                        target_parameters,
+                        current_module,
+                    );
                 }
             }
             Expression::Loop(value) => {
                 for statement in &value.body.statements {
-                    self.record_statement_resources(module, statement);
+                    self.record_statement_resources(
+                        module,
+                        statement,
+                        target_parameters,
+                        current_module,
+                    );
                 }
             }
             Expression::With(value) => {
-                self.record_expression_resources(module, &value.value);
+                self.record_expression_resources(
+                    module,
+                    &value.value,
+                    target_parameters,
+                    current_module,
+                );
                 for statement in &value.body.statements {
-                    self.record_statement_resources(module, statement);
+                    self.record_statement_resources(
+                        module,
+                        statement,
+                        target_parameters,
+                        current_module,
+                    );
                 }
             }
             Expression::Block(value) => {
                 for statement in &value.statements {
-                    self.record_statement_resources(module, statement);
+                    self.record_statement_resources(
+                        module,
+                        statement,
+                        target_parameters,
+                        current_module,
+                    );
                 }
             }
             Expression::Product(value) => {
                 for element in &value.elements {
-                    self.record_expression_resources(module, &element.value);
+                    self.record_expression_resources(
+                        module,
+                        &element.value,
+                        target_parameters,
+                        current_module,
+                    );
                 }
             }
             Expression::Call(value) => {
-                self.record_expression_resources(module, &value.callee);
-                self.record_expression_resources(module, &value.argument);
+                self.record_expression_resources(
+                    module,
+                    &value.callee,
+                    target_parameters,
+                    current_module,
+                );
+                self.record_expression_resources(
+                    module,
+                    &value.argument,
+                    target_parameters,
+                    current_module,
+                );
+                // Only checkable now, after inference has settled every
+                // unannotated callee's mutations: during the earlier
+                // top-down check, an unannotated callee's `mutations` were
+                // still empty.
+                let called_type = self
+                    .function_origin(module, &value.callee)
+                    .and_then(|function| self.function_types.get(&function).cloned())
+                    .or_else(|| match self.expression_types.get(&value.callee.syntax().id) {
+                        Some(CheckedType::Function(function)) => Some(function.clone()),
+                        _ => None,
+                    });
+                if let Some(function_type) = called_type
+                    && !function_type.resources.mutations.is_empty()
+                {
+                    self.check_call_mutations(
+                        module,
+                        &value.argument,
+                        &function_type.resources.mutations,
+                        current_module,
+                    );
+                }
             }
-            Expression::Access(value) => self.record_expression_resources(module, &value.value),
+            Expression::Access(value) => self.record_expression_resources(
+                module,
+                &value.value,
+                target_parameters,
+                current_module,
+            ),
             Expression::Index(value) => {
-                self.record_expression_resources(module, &value.value);
-                self.record_expression_resources(module, &value.index);
+                self.record_expression_resources(
+                    module,
+                    &value.value,
+                    target_parameters,
+                    current_module,
+                );
+                self.record_expression_resources(
+                    module,
+                    &value.index,
+                    target_parameters,
+                    current_module,
+                );
             }
             Expression::Infix(value) => {
                 for operand in &value.operands {
-                    self.record_expression_resources(module, operand);
+                    self.record_expression_resources(
+                        module,
+                        operand,
+                        target_parameters,
+                        current_module,
+                    );
                 }
             }
             Expression::SyntaxArgument(_)
@@ -2775,28 +3261,67 @@ impl TypeChecker {
         }
     }
 
-    fn record_statement_resources(&mut self, module: &ResolvedModule, statement: &Statement) {
+    fn record_statement_resources(
+        &mut self,
+        module: &ResolvedModule,
+        statement: &Statement,
+        target_parameters: &HashMap<SymbolId, usize>,
+        current_module: Option<ModuleId>,
+    ) {
         match statement {
             Statement::Binding(value) => {
                 if let Some(value) = &value.value {
-                    self.record_expression_resources(module, value);
+                    self.record_expression_resources(
+                        module,
+                        value,
+                        target_parameters,
+                        current_module,
+                    );
                 }
             }
-            Statement::PatternBinding(value) => {
-                self.record_expression_resources(module, &value.value)
-            }
+            Statement::PatternBinding(value) => self.record_expression_resources(
+                module,
+                &value.value,
+                target_parameters,
+                current_module,
+            ),
             Statement::Assignment(value) => {
-                self.record_expression_resources(module, &value.target);
-                self.record_expression_resources(module, &value.value);
+                self.record_expression_resources(
+                    module,
+                    &value.target,
+                    target_parameters,
+                    current_module,
+                );
+                self.record_expression_resources(
+                    module,
+                    &value.value,
+                    target_parameters,
+                    current_module,
+                );
             }
-            Statement::Return(value) => self.record_expression_resources(module, &value.value),
+            Statement::Return(value) => self.record_expression_resources(
+                module,
+                &value.value,
+                target_parameters,
+                current_module,
+            ),
             Statement::Break(value) => {
                 if let Some(value) = &value.value {
-                    self.record_expression_resources(module, value);
+                    self.record_expression_resources(
+                        module,
+                        value,
+                        target_parameters,
+                        current_module,
+                    );
                 }
             }
             Statement::Continue(_) => {}
-            Statement::Expression(value) => self.record_expression_resources(module, value),
+            Statement::Expression(value) => self.record_expression_resources(
+                module,
+                value,
+                target_parameters,
+                current_module,
+            ),
         }
     }
 
@@ -3101,6 +3626,17 @@ impl TypeChecker {
                         ));
                     }
                     self.check_expression_expected(module, &assignment.value, Some(&arguments[2]));
+                    // `mutate_index`'s fixed signature declares `mut 0` on
+                    // `Target`; `index.value` occupies that position. This
+                    // does not depend on inference having run: the target
+                    // is compiler-fixed, not read from `self.function_types`.
+                    let current_module = module.module_for_syntax(assignment.syntax.id);
+                    self.check_call_mutations(
+                        module,
+                        &index.value,
+                        &[CheckedMutation::Element(0)],
+                        current_module,
+                    );
                     if let Some(method) = module
                         .traits()
                         .get(&trait_id)
@@ -3193,7 +3729,7 @@ impl TypeChecker {
     fn check_assignment_place(&mut self, module: &ResolvedModule, assignment: &crate::Assignment) {
         let current_module = module.module_for_syntax(assignment.syntax.id);
         if let Some(issue) =
-            self.writable_place_issue(module, &assignment.target, current_module, false)
+            self.writable_place_issue(module, &assignment.target, current_module, false, false)
         {
             let message = match issue {
                 PlaceIssue::NotReassignable(name) => {
@@ -3202,6 +3738,11 @@ impl TypeChecker {
                 PlaceIssue::NotMutable(name) => {
                     format!("cannot write through `{name}`; its binding is not declared `mut`")
                 }
+                PlaceIssue::NotThroughRef(name) => format!(
+                    "cannot write through parameter `{name}`; the path does not cross a `Ref`, \
+                     so no `mut` effect can make it writable — rebind into a local `mut` \
+                     binding instead"
+                ),
                 PlaceIssue::NotAPlace => "assignment target is not a writable place".to_string(),
             };
             self.diagnostics
@@ -3214,17 +3755,29 @@ impl TypeChecker {
     /// `projected` is `true` once the walk has crossed at least one field or
     /// index access away from the root binding: rebinding the root requires
     /// `var`, while writing through a projection into an already-owned value
-    /// requires `mut` on the root instead.
+    /// requires `mut` on the root instead. `crossed_ref` tracks whether any
+    /// step so far has passed through a `Ref`-typed value — for a parameter
+    /// root this is required, not merely `mut`: a write that never crosses a
+    /// `Ref` is invisible to the caller no matter what the signature
+    /// declares, so it is rejected outright rather than gated by an effect.
+    /// An ordinary (non-parameter) binding is unaffected by this: its own
+    /// `mut` flag continues to permit by-value writes exactly as before.
     fn writable_place_issue(
         &self,
         module: &ResolvedModule,
         expression: &Expression,
         current_module: Option<ModuleId>,
         projected: bool,
+        crossed_ref: bool,
     ) -> Option<PlaceIssue> {
         if let Some(symbol) = module.symbol_for(expression.syntax().id) {
+            let is_parameter = self.mutable_parameter_symbols.contains(&symbol);
             let permitted = if projected {
-                module.is_mutable_symbol(symbol)
+                if is_parameter {
+                    crossed_ref
+                } else {
+                    module.is_mutable_symbol(symbol)
+                }
             } else {
                 module.is_reassignable_symbol(symbol)
             };
@@ -3233,20 +3786,24 @@ impl TypeChecker {
             }
             if !permitted {
                 let name = place_expression_name(expression);
-                return Some(if projected {
-                    PlaceIssue::NotMutable(name)
-                } else {
+                return Some(if !projected {
                     PlaceIssue::NotReassignable(name)
+                } else if is_parameter {
+                    PlaceIssue::NotThroughRef(name)
+                } else {
+                    PlaceIssue::NotMutable(name)
                 });
             }
             return Some(PlaceIssue::NotAPlace);
         }
         match expression {
             Expression::Access(access) => {
-                self.writable_place_issue(module, &access.value, current_module, true)
+                let crossed_ref = crossed_ref || self.expression_crosses_ref(&access.value);
+                self.writable_place_issue(module, &access.value, current_module, true, crossed_ref)
             }
             Expression::Index(index) => {
-                self.writable_place_issue(module, &index.value, current_module, true)
+                let crossed_ref = crossed_ref || self.expression_crosses_ref(&index.value);
+                self.writable_place_issue(module, &index.value, current_module, true, crossed_ref)
             }
             Expression::Name(_) => Some(PlaceIssue::NotAPlace),
             other => {
@@ -3269,6 +3826,44 @@ impl TypeChecker {
                 CheckedType::Distinct { representation, .. } => value_type = *representation,
                 CheckedType::Ref(_) => return true,
                 _ => return false,
+            }
+        }
+    }
+
+    /// Requires that a call's argument roots are writable wherever the
+    /// callee declares a `mut` effect on the corresponding parameter
+    /// position. A `let` binding otherwise gives no real guarantee — a
+    /// callee could freely mutate through it — so this is checked exactly
+    /// like `check_assignment_place`, just at the boundary of a call
+    /// instead of a literal assignment statement. An argument with no root
+    /// place (a temporary) is never checked: nothing holds a reference to
+    /// it that mutation could surprise.
+    fn check_call_mutations(
+        &mut self,
+        module: &ResolvedModule,
+        argument: &Expression,
+        mutations: &[CheckedMutation],
+        current_module: Option<ModuleId>,
+    ) {
+        for mutation in mutations {
+            let target_expression = call_mutation_target_expression(argument, mutation);
+            let Some((root, _)) = place_root_symbol(module, target_expression) else {
+                continue;
+            };
+            // When the calling context's module could not be determined
+            // (an anonymous closure with no parameters and no binding to
+            // anchor on), the module boundary is not enforced; it only ever
+            // protects a `pub` global from another module, which cannot
+            // apply to a symbol reached from an unnamed closure regardless.
+            let permitted = (module.is_mutable_symbol(root)
+                || self.mutable_parameter_symbols.contains(&root))
+                && (current_module.is_none() || module.symbol_module(root) == current_module);
+            if !permitted {
+                let name = place_expression_name(target_expression);
+                self.diagnostics.push(Diagnostic::new(
+                    target_expression.syntax().span.clone(),
+                    format!("cannot write through `{name}`; its binding is not declared `mut`"),
+                ));
             }
         }
     }
@@ -3506,7 +4101,9 @@ impl TypeChecker {
                     &crate::ResourceSet {
                         syntax: resource.resource.syntax().clone(),
                         resources: vec![resource.resource.clone()],
+                        mutations: Vec::new(),
                     },
+                    None,
                 );
                 let Some(resource_type) = resources.resources.into_iter().next() else {
                     return CheckedType::Error;
@@ -3521,7 +4118,9 @@ impl TypeChecker {
                     &crate::ResourceSet {
                         syntax: with.resource.syntax().clone(),
                         resources: vec![with.resource.clone()],
+                        mutations: Vec::new(),
                     },
+                    None,
                 );
                 let Some(resource_type) = resources.resources.into_iter().next() else {
                     return CheckedType::Error;
@@ -5470,7 +6069,11 @@ impl TypeChecker {
             }
             Type::Function(function) => {
                 let parameter = self.resolve_source_type_inner(module, &function.parameter);
-                let resources = self.resolve_resource_set(module, &function.resources);
+                let resources = self.resolve_resource_set(
+                    module,
+                    &function.resources,
+                    Some(&function.parameter),
+                );
                 let result = self.resolve_source_type_inner(module, &function.result);
                 if (!parameter.is_sized() && parameter != CheckedType::Error)
                     || (!result.is_sized() && result != CheckedType::Error)
@@ -5536,6 +6139,7 @@ impl TypeChecker {
         &mut self,
         module: &ResolvedModule,
         source: &crate::ResourceSet,
+        parameter: Option<&Type>,
     ) -> CheckedResourceSet {
         let mut resources = Vec::new();
         for resource in &source.resources {
@@ -5567,7 +6171,76 @@ impl TypeChecker {
             }
             resources.push(CheckedResource { value_type });
         }
-        CheckedResourceSet::canonical(resources)
+        let mut mutations = Vec::new();
+        for mutation in &source.mutations {
+            if let Some(resolved) = self.resolve_mutation_target(parameter, mutation) {
+                mutations.push(resolved);
+            }
+        }
+        CheckedResourceSet::canonical_with_mutations(resources, mutations)
+    }
+
+    /// Resolves a `mut`/`mut <index>`/`mut <name>` effect-set entry against
+    /// the function's *source* parameter type. Named and positional targets
+    /// require a product parameter; resolution uses the source type (not the
+    /// checked one) because a single-element product collapses to its bare
+    /// element type, dropping the name, once normalized.
+    fn resolve_mutation_target(
+        &mut self,
+        parameter: Option<&Type>,
+        mutation: &crate::MutationTarget,
+    ) -> Option<CheckedMutation> {
+        match &mutation.target {
+            crate::MutationTargetKind::Whole => Some(CheckedMutation::Whole),
+            crate::MutationTargetKind::Element(index) => {
+                let Some(Type::Product(product)) = parameter else {
+                    self.diagnostics.push(Diagnostic::new(
+                        mutation.syntax.span.clone(),
+                        "a positional mutation target requires a product parameter; use `mut` \
+                         for the whole parameter",
+                    ));
+                    return None;
+                };
+                if *index >= product.elements.len() {
+                    self.diagnostics.push(Diagnostic::new(
+                        mutation.syntax.span.clone(),
+                        format!(
+                            "mutation target `{index}` is out of range for a parameter with {} \
+                             element(s)",
+                            product.elements.len()
+                        ),
+                    ));
+                    return None;
+                }
+                Some(CheckedMutation::Element(*index))
+            }
+            crate::MutationTargetKind::Named(name) => {
+                let Some(Type::Product(product)) = parameter else {
+                    self.diagnostics.push(Diagnostic::new(
+                        mutation.syntax.span.clone(),
+                        format!(
+                            "mutation target `{name}` requires a named product parameter; use \
+                             `mut` for the whole parameter"
+                        ),
+                    ));
+                    return None;
+                };
+                match product
+                    .elements
+                    .iter()
+                    .position(|element| element.name.as_deref() == Some(name.as_str()))
+                {
+                    Some(index) => Some(CheckedMutation::Element(index)),
+                    None => {
+                        self.diagnostics.push(Diagnostic::new(
+                            mutation.syntax.span.clone(),
+                            format!("mutation target `{name}` is not a parameter name"),
+                        ));
+                        None
+                    }
+                }
+            }
+        }
     }
 
     fn normalize_sum_type(&mut self, alternatives: Vec<CheckedType>, span: Span) -> CheckedType {
@@ -6346,7 +7019,7 @@ pub(crate) fn substitute_type(
         }),
         CheckedType::Function(function) => CheckedType::Function(CheckedFunctionType {
             parameter: Box::new(substitute_type(*function.parameter, substitutions)),
-            resources: CheckedResourceSet::canonical(
+            resources: CheckedResourceSet::canonical_with_mutations(
                 function
                     .resources
                     .resources
@@ -6355,6 +7028,7 @@ pub(crate) fn substitute_type(
                         value_type: substitute_type(resource.value_type, substitutions),
                     })
                     .collect(),
+                function.resources.mutations,
             ),
             result: Box::new(substitute_type(*function.result, substitutions)),
         }),
@@ -6836,6 +7510,144 @@ fn normalize_product_type(elements: Vec<CheckedTypeElement>, variadic: bool) -> 
     } else {
         CheckedType::Product(CheckedProductType { elements, variadic })
     }
+}
+
+/// The symbol a single pattern binds at a place-expression root: the name
+/// itself for a binding pattern, the alias for an at-pattern (nested
+/// bindings are independent copies and are never a place for this position),
+/// and nothing for patterns that never bind a writable place.
+fn pattern_element_symbol(module: &ResolvedModule, pattern: &Pattern) -> Option<SymbolId> {
+    match pattern {
+        Pattern::Binding(binding) => module.symbol_for(binding.syntax.id),
+        Pattern::At(at) => module.symbol_for(at.binding.syntax.id),
+        Pattern::Wildcard(_)
+        | Pattern::StringLiteral(_)
+        | Pattern::Product(_)
+        | Pattern::Nominal(_)
+        | Pattern::Splice(_) => None,
+    }
+}
+
+/// Maps a function's parameter positions to symbols, in the same indexing
+/// `CheckedMutation::Element` and source `MutationTargetKind` use: one entry
+/// per product element for a parenthesized pattern, otherwise a single
+/// "whole parameter" entry at index 0. This mirrors `resolve_mutation_target`
+/// resolving against the *source* parameter type rather than the checked one.
+fn function_parameter_symbols(module: &ResolvedModule, pattern: &Pattern) -> Vec<Option<SymbolId>> {
+    match pattern {
+        Pattern::Product(product) => product
+            .elements
+            .iter()
+            .map(|element| pattern_element_symbol(module, element))
+            .collect(),
+        other => vec![pattern_element_symbol(module, other)],
+    }
+}
+
+/// Walks a place expression to its root symbol, mirroring
+/// `TypeChecker::writable_place_issue`'s traversal. Returns the root symbol
+/// and whether the walk crossed at least one field/index projection to
+/// reach it — a bare name reference is unprojected, `a.b`/`a[i]` are.
+fn place_root_symbol(module: &ResolvedModule, expression: &Expression) -> Option<(SymbolId, bool)> {
+    fn walk(
+        module: &ResolvedModule,
+        expression: &Expression,
+        projected: bool,
+    ) -> Option<(SymbolId, bool)> {
+        if let Some(symbol) = module.symbol_for(expression.syntax().id) {
+            return Some((symbol, projected));
+        }
+        match expression {
+            Expression::Access(access) => walk(module, &access.value, true),
+            Expression::Index(index) => walk(module, &index.value, true),
+            _ => None,
+        }
+    }
+    walk(module, expression, false)
+}
+
+/// The mutation a `Statement::Assignment` performs, if its target is a
+/// projected write into one of `target_parameters`. When the root is a
+/// parameter, this also requires the path to cross a `Ref` (mirroring
+/// `writable_place_issue`'s hard-error rule): a by-value parameter write is
+/// already rejected during checking, so inference should not report a
+/// mutation enforcement would never permit. Bracket assignment (`a[i] = v`)
+/// dispatches to `MutateIndex`, whose fixed signature declares `mut 0` on
+/// `Target`, so it counts as writing into `index.value` regardless of
+/// projection — the index operation is itself the projection, and
+/// `MutateIndex` only derives for `Ref` targets in the first place.
+fn assignment_mutation(
+    checker: &TypeChecker,
+    module: &ResolvedModule,
+    target: &Expression,
+    target_parameters: &HashMap<SymbolId, usize>,
+) -> Option<CheckedMutation> {
+    if let Expression::Index(index) = target {
+        let (root, _) = place_root_symbol(module, &index.value)?;
+        return target_parameters.get(&root).copied().map(CheckedMutation::Element);
+    }
+    let (root, projected) = place_root_symbol(module, target)?;
+    if !projected {
+        return None;
+    }
+    let position = target_parameters.get(&root).copied()?;
+    if !assignment_crosses_ref(checker, target) {
+        return None;
+    }
+    Some(CheckedMutation::Element(position))
+}
+
+/// Whether a projected place expression's path crosses a `Ref` anywhere
+/// between `expression` and its root, mirroring the incremental walk in
+/// `TypeChecker::writable_place_issue`.
+fn assignment_crosses_ref(checker: &TypeChecker, expression: &Expression) -> bool {
+    match expression {
+        Expression::Access(access) => {
+            checker.expression_crosses_ref(&access.value)
+                || assignment_crosses_ref(checker, &access.value)
+        }
+        Expression::Index(index) => {
+            checker.expression_crosses_ref(&index.value)
+                || assignment_crosses_ref(checker, &index.value)
+        }
+        _ => false,
+    }
+}
+
+/// The sub-expression of a call argument that a callee's mutation target
+/// refers to: the whole argument for `Whole`, or the matching product
+/// element for `Element(i)` when the argument literally is a product
+/// expression. When it cannot be structurally decomposed (anything other
+/// than a literal product expression), the whole argument stands in,
+/// conservatively — there is nothing more precise to point at.
+fn call_mutation_target_expression<'a>(
+    argument: &'a Expression,
+    mutation: &CheckedMutation,
+) -> &'a Expression {
+    match mutation {
+        CheckedMutation::Whole => argument,
+        CheckedMutation::Element(index) => match argument {
+            Expression::Product(product) => product
+                .elements
+                .get(*index)
+                .map_or(argument, |element| &element.value),
+            _ => argument,
+        },
+    }
+}
+
+/// Attributes a callee's declared mutation onto the caller, by locating the
+/// argument sub-expression the target corresponds to and mapping its root
+/// symbol back onto the caller's own parameter positions.
+fn attribute_call_mutation(
+    module: &ResolvedModule,
+    argument: &Expression,
+    mutation: &CheckedMutation,
+    target_parameters: &HashMap<SymbolId, usize>,
+) -> Option<CheckedMutation> {
+    let target_expression = call_mutation_target_expression(argument, mutation);
+    let (root, _) = place_root_symbol(module, target_expression)?;
+    target_parameters.get(&root).copied().map(CheckedMutation::Element)
 }
 
 fn structural_trait_arguments(

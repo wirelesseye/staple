@@ -143,7 +143,7 @@ impl<'a> OwnershipChecker<'a> {
             let state = if self
                 .module
                 .is_copy_in_function(value_type, Some(function.id))
-                || self.module.resolved().has_mutable_storage(*capture)
+                || self.module.has_mutable_storage(*capture)
             {
                 ValueState::Available
             } else {
@@ -162,7 +162,7 @@ impl<'a> OwnershipChecker<'a> {
                 if let Some(function_id) = self.module.function_for(value.syntax.id) {
                     let captures = self.module.functions()[function_id.0].captures.clone();
                     for capture in captures {
-                        if !self.module.resolved().has_mutable_storage(capture) {
+                        if !self.module.has_mutable_storage(capture) {
                             self.use_symbol(capture, &value.syntax, true);
                         }
                     }

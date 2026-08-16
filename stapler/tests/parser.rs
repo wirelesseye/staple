@@ -34,6 +34,72 @@ fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
     assert!(parse("def bad: () ->{Clock I32 = () => 0\n").is_err());
 }
 
+#[test]
+fn parses_mut_effect_sets_losslessly() {
+    use stapler::{MutationTarget, MutationTargetKind};
+
+    fn mutations(annotation: &Option<Type>) -> &[MutationTarget] {
+        let Some(Type::Function(function)) = annotation else {
+            panic!("expected function annotation");
+        };
+        &function.resources.mutations
+    }
+
+    let source = concat!(
+        "def f1: A ->{mut} () = a => ()\n",
+        "def f2: (A, B) ->{mut 0} () = (a, b) => ()\n",
+        "def f3: (a: A, b: B) ->{mut a} () = (a, b) => ()\n",
+        "def f4: (a: A, b: B) ->{mut a, IO} () = (a, b) => ()\n",
+    );
+    let module = parse(source).expect("mut effect sets should parse");
+    assert_eq!(module.text(), source);
+
+    let Statement::Binding(f1) = statement(&module.items[0]) else {
+        panic!("expected binding");
+    };
+    assert!(matches!(
+        mutations(&f1.annotation),
+        [MutationTarget {
+            target: MutationTargetKind::Whole,
+            ..
+        }]
+    ));
+
+    let Statement::Binding(f2) = statement(&module.items[1]) else {
+        panic!("expected binding");
+    };
+    assert!(matches!(
+        mutations(&f2.annotation),
+        [MutationTarget {
+            target: MutationTargetKind::Element(0),
+            ..
+        }]
+    ));
+
+    let Statement::Binding(f3) = statement(&module.items[2]) else {
+        panic!("expected binding");
+    };
+    let [MutationTarget {
+        target: MutationTargetKind::Named(name),
+        ..
+    }] = mutations(&f3.annotation)
+    else {
+        panic!("expected a named mutation target");
+    };
+    assert_eq!(name, "a");
+
+    let Statement::Binding(f4) = statement(&module.items[3]) else {
+        panic!("expected binding");
+    };
+    let Some(Type::Function(function)) = &f4.annotation else {
+        panic!("expected function annotation");
+    };
+    assert_eq!(function.resources.mutations.len(), 1);
+    assert_eq!(function.resources.resources.len(), 1);
+
+    assert!(parse("def bad: A ->{mut mut} () = a => ()\n").is_err());
+}
+
 fn statement(item: &Item) -> &Statement {
     let Item::Statement(statement) = item else {
         panic!("expected statement");
@@ -919,7 +985,8 @@ fn parses_nested_product_patterns_losslessly() {
 fn parses_at_patterns_losslessly_and_right_associatively() {
     let source = concat!(
         "let point@(x, y) = (1, 2)\n",
-        "def copy = mut outer: (I32, I32)@inner@(left, right) => outer\n",
+        "let mut outer: (I32, I32)@inner@(left, right) = (1, 2)\n",
+        "def copy = var outer@(left, right) => outer\n",
     );
     let root = parse(source).expect("at-patterns should parse");
     assert_eq!(root.text(), source);
@@ -929,21 +996,30 @@ fn parses_at_patterns_losslessly_and_right_associatively() {
     };
     assert!(matches!(point.pattern, Pattern::At(_)));
 
-    let Statement::Binding(copy) = statement(&root.items[1]) else {
-        panic!("expected function binding");
+    let Statement::PatternBinding(outer_let) = statement(&root.items[1]) else {
+        panic!("expected destructuring binding");
     };
-    let Some(Expression::Function(function)) = &copy.value else {
-        panic!("expected function");
-    };
-    let Pattern::At(outer) = &function.pattern else {
+    let Pattern::At(outer) = &outer_let.pattern else {
         panic!("expected outer at-pattern");
     };
     assert!(outer.binding.mutable);
     assert!(matches!(outer.pattern.as_ref(), Pattern::At(_)));
 
+    let Statement::Binding(copy) = statement(&root.items[2]) else {
+        panic!("expected function binding");
+    };
+    let Some(Expression::Function(function)) = &copy.value else {
+        panic!("expected function");
+    };
+    let Pattern::At(parameter) = &function.pattern else {
+        panic!("expected parameter at-pattern");
+    };
+    assert!(parameter.binding.reassignable);
+
     assert!(parse("let _@(x, y) = (1, 2)\n").is_err());
     assert!(parse("let (x, y)@point = (1, 2)\n").is_err());
     assert!(parse("let point@ = (1, 2)\n").is_err());
+    assert!(parse("def bad = mut outer@(left, right) => outer\n").is_err());
 }
 
 #[test]
@@ -1256,7 +1332,7 @@ fn parses_mutable_patterns_and_assignment_statements_losslessly() {
     let source = concat!(
         "let mut value = 1\n",
         "let (mut left, right) = (2, 3)\n",
-        "def update = (mut parameter: I32) => { parameter = 4; parameter }\n",
+        "def update = (var parameter: I32) => { parameter = 4; parameter }\n",
         "value = left\n",
     );
     let module = parse(source).expect("mutable bindings and assignments should parse");
@@ -1277,6 +1353,7 @@ fn parses_mutable_patterns_and_assignment_statements_losslessly() {
         Statement::Assignment(_)
     ));
     assert!(parse("extern \"c\" { let mut value: I32 }\n").is_err());
+    assert!(parse("def bad = (mut parameter: I32) => parameter\n").is_err());
 }
 
 #[test]

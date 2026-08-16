@@ -146,6 +146,7 @@ pub struct FunctionType {
 pub struct ResourceSet {
     pub syntax: Syntax,
     pub resources: Vec<Type>,
+    pub mutations: Vec<MutationTarget>,
 }
 
 impl ResourceSet {
@@ -153,8 +154,25 @@ impl ResourceSet {
         Self {
             syntax: Syntax::compiler(),
             resources: Vec::new(),
+            mutations: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MutationTarget {
+    pub syntax: Syntax,
+    pub target: MutationTargetKind,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationTargetKind {
+    /// `mut` with no argument: the whole parameter.
+    Whole,
+    /// `mut 0`: a positional product element.
+    Element(usize),
+    /// `mut a`: a named product element.
+    Named(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

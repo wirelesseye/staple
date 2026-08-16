@@ -796,7 +796,20 @@ impl NameResolver {
         self.resolve_program(Program::single(module.clone()))
     }
 
-    pub fn resolve_program(mut self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
+    /// Resolves on a dedicated thread with a generous stack size: this is a
+    /// deep recursive-descent walk over the whole program (standard library
+    /// included), and some callers (notably test harnesses) run on threads
+    /// with a smaller default stack than a typical `main` thread provides.
+    pub fn resolve_program(self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(move || self.resolve_program_inner(program))
+            .expect("name resolution thread should spawn")
+            .join()
+            .expect("name resolution should not panic")
+    }
+
+    fn resolve_program_inner(mut self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
         let (program, macro_analysis) = crate::macro_expand::expand_program(program)?;
         self.standard_library_core = program.standard_library_core();
         self.standard_library_syntax = program.standard_library_syntax();

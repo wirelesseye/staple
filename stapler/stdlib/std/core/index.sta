@@ -10,5 +10,5 @@ pub trait UpdateIndex = Target => Position => Value =>
 
 pub trait MutateIndex = Target => Position => Value =>
     {Target, Position} ~> Value => {
-    mutate_index: (Target, Position, Value) -> ()
+    mutate_index: (Target, Position, Value) ->{mut 0} ()
 }

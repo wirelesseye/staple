@@ -667,7 +667,7 @@ A `var` binding must have an initializer.
 binding itself: writes into fields of a by-value product, or through a `Ref`,
 both require the root binding to be declared `mut`. `mut` may combine with
 `var` (`var mut`) to allow both. Like `var`, `mut` may mark individual names
-in any binding pattern, and a `mut` binding must have an initializer:
+in most binding patterns, and a `mut` binding must have an initializer:
 
 ```staple
 let mut point = (x: 3, y: 4)
@@ -681,12 +681,21 @@ let borrowed: Ref I32 = Ref 3
 borrowed.0 = 4 // error: `borrowed` is not declared `mut`
 ```
 
-Bracket assignment is instead delegated to `MutateIndex`, independently of
-`mut`; homogeneous values use `UpdateIndex` to produce a replacement product.
-Bindings captured by functions are shared cells whenever they are declared
-`var` or `mut`, so the defining scope and all closures observe subsequent
-assignments. Public `var` and `mut` module bindings remain reassignable or
-writable, respectively, only from their declaring module.
+Bracket assignment is delegated to `MutateIndex`, whose `Target` parameter
+carries a `mut` effect (see the "Mutation effects" subsection under
+"Functions"); `a[i] = v` therefore also requires `a`'s root binding to be
+declared `mut`. Homogeneous values instead use `UpdateIndex` to produce a
+replacement product, which needs no `mut` at all. Bindings captured by
+functions are shared cells whenever they are declared `var` or `mut`, so the
+defining scope and all closures observe subsequent assignments. Public `var`
+and `mut` module bindings remain reassignable or writable, respectively, only
+from their declaring module.
+
+`mut` is not one of the patterns a function parameter may carry: a
+parameter's writability is declared on the function's own signature instead,
+as a `mut` effect. `var` remains legal on a parameter, since reassigning the
+callee's own copy is never visible to the caller and needs no such
+declaration.
 
 An external declaration may omit its value because its implementation is
 provided outside staple:
@@ -1040,11 +1049,11 @@ let first@second@(left, right) = (1, 2)
 ```
 
 The name before `@` is always a binding, even when capitalized, and may use
-the usual `mut` or `var` modifier or type annotation. An annotation constrains the
-complete value at that pattern position; it does not select a sum alternative
-independently of the nested pattern. At-patterns are available in `let`
-bindings, function parameters, match arms, propagating bindings, and quoted or
-spliced patterns.
+the usual `var` modifier, or `mut` outside function parameter position, or a
+type annotation. An annotation constrains the complete value at that pattern
+position; it does not select a sum alternative independently of the nested
+pattern. At-patterns are available in `let` bindings, function parameters,
+match arms, propagating bindings, and quoted or spliced patterns.
 
 At runtime, the complete value must be `Copy`, because the alias and nested
 bindings receive independent copies. This also means mutating a `mut` alias
@@ -1220,6 +1229,51 @@ initialization is therefore rejected.
 Macros may quote, splice, generate, and transform resource syntax. Attempting
 to evaluate `resource` or `with` as a compile-time macro operation is rejected;
 providers exist only in runtime lexical scopes.
+
+### Mutation effects
+
+The same braces also declare which of a function's own parameters its body
+writes into, using `mut`:
+
+```staple
+def f1: A ->{mut} () = a => { ... }                   // may mutate the whole parameter
+def f2: (A, B) ->{mut 0} () = (a, b) => { ... }        // may mutate parameter 0 only
+def f3: (a: A, b: B) ->{mut a} () = (a, b) => { ... }  // same, named
+def f4: (a: A, b: B) ->{mut a, IO} () = (a, b) => { ... }
+```
+
+Bare `mut` names the whole parameter; `mut 0` and `mut a` name one element of
+a product parameter, positionally or by the name written in the parameter
+list. A function with no `mut` effect may still write into its own parameters
+locally — the write is never visible to the caller unless it also crosses a
+`Ref` — but exposing that capability in the signature is what lets a caller
+pass a `mut` binding into the call, and what a caller must grant for the call
+to type-check at all:
+
+```staple
+def clear: Ref (I32, I32) ->{mut} () = cell => { cell.0 = 0 }
+
+let mut counter: Ref (I32, I32) = Ref (1, 2)
+clear counter
+
+let fixed: Ref (I32, I32) = Ref (1, 2)
+clear fixed // error: `fixed` is not declared `mut`
+```
+
+Like resources, an unannotated function infers the minimal `mut` effects its
+body requires, and a declared set is a contract: the body may mutate fewer
+parameters than it declares, but never more. Unlike resources, `mut` effects
+carry no runtime value and add no hidden parameter; they are checked purely
+at compile time. They also do not accumulate through a call graph the way a
+resource requirement does merely by being called — a nested function literal
+contributes nothing to its enclosing function just by existing. Mutating a
+value the closure captured from its enclosing function is the one exception:
+because a captured cell is shared eagerly rather than provided dynamically at
+call time, that mutation is attributed to the enclosing function, at the
+point the closure is created.
+
+`MutateIndex.mutate_index` declares `mut 0` on its `Target` parameter, so
+`a[i] = v` requires `a`'s root binding to be declared `mut`.
 
 ### Traits and bounded generic functions
 

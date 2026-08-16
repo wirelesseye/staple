@@ -1221,6 +1221,12 @@ impl Grammar {
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
         let pattern = self.parse_pattern()?;
+        if pattern_has_mutable(&pattern) {
+            return Err(self.error(
+                "`mut` is not allowed on a parameter; declare it in the function's effect \
+                 set, e.g. `->{mut a}`",
+            ));
+        }
         self.expect(TokenKind::FatArrow, "expected `=>` before function body")?;
         let body = Box::new(self.parse_expression()?);
         Ok(FunctionExpression {
@@ -1390,9 +1396,34 @@ impl Grammar {
         let start = self.position;
         self.expect(TokenKind::LBrace, "expected `{` before resource set")?;
         let mut resources = Vec::new();
+        let mut mutations = Vec::new();
         if !self.at(TokenKind::RBrace) {
             loop {
-                resources.push(self.parse_type_union()?);
+                let entry_start = self.position;
+                if self.eat(TokenKind::Mut) {
+                    let target = match self.peek() {
+                        Some(TokenKind::Integer) => {
+                            let text = self.bump_token().expect("peeked integer").text;
+                            let index = text.parse::<usize>().map_err(|_| {
+                                self.error(
+                                    "mutation target index must be a non-negative integer",
+                                )
+                            })?;
+                            MutationTargetKind::Element(index)
+                        }
+                        Some(TokenKind::Identifier) => {
+                            let name = self.bump_token().expect("peeked identifier").text;
+                            MutationTargetKind::Named(name)
+                        }
+                        _ => MutationTargetKind::Whole,
+                    };
+                    mutations.push(MutationTarget {
+                        syntax: self.syntax(entry_start),
+                        target,
+                    });
+                } else {
+                    resources.push(self.parse_type_union()?);
+                }
                 if !self.eat(TokenKind::Comma) {
                     break;
                 }
@@ -1402,6 +1433,7 @@ impl Grammar {
         Ok(ResourceSet {
             syntax: self.syntax(start),
             resources,
+            mutations,
         })
     }
 
@@ -2516,6 +2548,19 @@ fn mark_pattern_reassignable(pattern: &mut Pattern) {
         }
         Pattern::Nominal(nominal) => mark_pattern_reassignable(&mut nominal.argument),
         Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+    }
+}
+
+/// Returns whether `pattern` marks any binding `mut`. Function parameter
+/// patterns reject this: parameter mutability is declared in the function's
+/// effect set instead.
+fn pattern_has_mutable(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(binding) => binding.mutable,
+        Pattern::At(at) => at.binding.mutable || pattern_has_mutable(&at.pattern),
+        Pattern::Product(product) => product.elements.iter().any(pattern_has_mutable),
+        Pattern::Nominal(nominal) => pattern_has_mutable(&nominal.argument),
+        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
     }
 }
 

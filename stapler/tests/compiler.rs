@@ -1,7 +1,7 @@
 use inkwell::context::Context;
 use stapler::{
-    CheckedType, CodeGenerator, Item, NameResolver, ProgramLoader, RecursiveConstruction,
-    Statement, TypeChecker, parse,
+    CheckedMutation, CheckedType, CodeGenerator, Item, NameResolver, ProgramLoader,
+    RecursiveConstruction, Statement, TypeChecker, parse,
 };
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -155,7 +155,7 @@ fn rejects_invalid_resource_contracts_and_types() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("not contained in its declared resource set")
+            .contains("not contained in its declared effect set")
     }));
 }
 
@@ -484,7 +484,7 @@ fn type_checks_and_lowers_mutable_places_and_ref_replace() {
         "fixed.0 = pair.x\n",
         "let index: USize = 1\n",
         "fixed[index] = 7\n",
-        "let scalar = Ref 8\n",
+        "let mut scalar = Ref 8\n",
         "let old = replace (scalar, 9)\n",
         "def local = () => { var inside = 10; inside = old; inside }\n",
     );
@@ -527,13 +527,25 @@ fn type_checks_the_four_binding_mutability_forms() {
     // `var mut`: both.
     type_check("var mut a = (x: 1, y: 2)\na = (x: 3, y: 4)\na.x = 5\n");
 
-    // Function parameters and match binders follow the same rules.
+    // Function parameters and match binders follow the same rules — except
+    // that a parameter's `mut` write must also cross a `Ref`: unlike an
+    // ordinary binding, a by-value parameter write is never visible to the
+    // caller, so it is rejected outright regardless of any declared effect.
     type_check(concat!(
         "type Box = I32\n",
         "def parameter = (var value: I32) => { value = value + 1; value }\n",
-        "def field_write = (mut value: (x: I32, y: I32)) => { value.x = 1; value }\n",
+        "def field_write: Ref (x: I32, y: I32) ->{mut} () = value => { value.x = 1 }\n",
         "def matched = (value: Box) => match value { Box (var inner) => { inner = 2; inner } }\n",
     ));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "def by_value: (x: I32, y: I32) ->{mut} () = value => { value.x = 1 }\n",
+        ))
+        .expect_err("a by-value parameter write never crosses a `Ref`");
+    assert!(diagnostics.iter().any(|d| d
+        .message
+        .contains("the path does not cross a `Ref`")));
 
     // A `pub` global follows the same rules from another module as it does locally.
     let diagnostics = TypeChecker::new()
@@ -579,6 +591,208 @@ fn captures_a_mut_binding_in_a_shared_cell_for_field_writes() {
         .compile_module(&module)
         .expect("captured mut binding should generate LLVM");
     assert!(llvm.contains("binding.cell"));
+}
+
+fn function_mutations(module: &stapler::TypedModule, name: &str) -> Vec<CheckedMutation> {
+    let function = module
+        .functions()
+        .iter()
+        .find(|function| function.name == name)
+        .unwrap_or_else(|| panic!("function `{name}`"));
+    module
+        .type_of_function(function.id)
+        .unwrap_or_else(|| panic!("type of `{name}`"))
+        .resources
+        .mutations
+        .clone()
+}
+
+#[test]
+fn infers_a_positional_mutation_from_a_projected_write() {
+    let module = type_check(concat!(
+        "def f = (p: Ref (I32, I32)) => { p.0 = 1 }\n",
+        "def g = () => { let mut pair: Ref (I32, I32) = Ref (1, 2); f pair }\n",
+    ));
+    assert_eq!(
+        function_mutations(&module, "f"),
+        vec![CheckedMutation::Element(0)]
+    );
+}
+
+#[test]
+fn rejects_a_declared_empty_effect_set_when_the_body_mutates_a_parameter() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "def f: Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
+        ))
+        .expect_err("an empty declared effect set forbids mutation");
+    assert!(diagnostics.iter().any(|d| d
+        .message
+        .contains("not contained in its declared effect set")));
+}
+
+#[test]
+fn rejects_a_declared_mutation_target_the_body_does_not_write() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def f: (a: Ref (I32, I32), b: Ref (I32, I32)) ->{mut a} () = (a, b) => { b.0 = 1 }\n",
+        )))
+        .expect_err("writing `b` exceeds the declared `mut a`");
+    assert!(diagnostics.iter().any(|d| d
+        .message
+        .contains("not contained in its declared effect set")));
+}
+
+#[test]
+fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
+    let by_index = type_check(
+        "def f: (a: Ref (I32, I32), b: I32) ->{mut 0} () = (a, b) => { a.0 = 1 }\n",
+    );
+    let by_name = type_check(
+        "def f: (a: Ref (I32, I32), b: I32) ->{mut a} () = (a, b) => { a.0 = 1 }\n",
+    );
+    assert_eq!(
+        function_mutations(&by_index, "f"),
+        function_mutations(&by_name, "f"),
+    );
+}
+
+#[test]
+fn a_whole_parameter_declaration_covers_writing_a_single_element() {
+    type_check("def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n");
+}
+
+#[test]
+fn call_site_mutation_propagates_from_callee_to_an_unannotated_caller() {
+    let module = type_check(concat!(
+        "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n",
+        "def g = (q: Ref (I32, I32)) => { f q }\n",
+    ));
+    assert_eq!(
+        function_mutations(&module, "g"),
+        vec![CheckedMutation::Element(0)]
+    );
+}
+
+#[test]
+fn rejects_passing_a_non_mut_binding_to_a_mutating_parameter() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n",
+            "def g = () => { let pair: Ref (I32, I32) = Ref (1, 2); f pair }\n",
+        )))
+        .expect_err("the caller's binding must be declared `mut`");
+    assert!(diagnostics.iter().any(|d| d
+        .message
+        .contains("cannot write through `pair`; its binding is not declared `mut`")));
+}
+
+#[test]
+fn a_closure_mutating_a_captured_parameter_attributes_to_the_enclosing_function() {
+    let module = type_check(concat!(
+        "def outer = (p: Ref (I32, I32)) => {\n",
+        "  let update = () => { p.0 = 1 }\n",
+        "  update ()\n",
+        "}\n",
+    ));
+    assert_eq!(
+        function_mutations(&module, "outer"),
+        vec![CheckedMutation::Element(0)]
+    );
+}
+
+#[test]
+fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Reset = T => { reset: T -> () }\n",
+            "impl Reset (Ref (I32, I32)) { def reset = p => { p.0 = 0 } }\n",
+        )))
+        .expect_err("the impl mutates a parameter its trait does not declare");
+    assert!(diagnostics.iter().any(|d| d
+        .message
+        .contains("not contained in the trait method's declared effect set")));
+}
+
+#[test]
+fn infers_a_mut_effect_through_a_ref_crossing_local_alias() {
+    let module = type_check(concat!(
+        "type MyInt = Ref I32\n",
+        "def mutate_my_int: (MyInt, I32) ->{mut 0} () = (my_int, value) => {\n",
+        "  let MyInt mut inner = my_int\n",
+        "  replace (inner, value)\n",
+        "  ()\n",
+        "}\n",
+        "def foo = (my_int: MyInt) => { mutate_my_int (my_int, 42) }\n",
+    ));
+    assert_eq!(
+        function_mutations(&module, "foo"),
+        vec![CheckedMutation::Element(0)]
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type MyInt = Ref I32\n",
+            "def mutate_my_int: (MyInt, I32) ->{mut 0} () = (my_int, value) => {\n",
+            "  let MyInt mut inner = my_int\n",
+            "  replace (inner, value)\n",
+            "  ()\n",
+            "}\n",
+            "def bad = () => {\n",
+            "  let my_int: MyInt = MyInt (Ref 1)\n",
+            "  mutate_my_int (my_int, 42)\n",
+            "}\n",
+        )))
+        .expect_err("the caller's `my_int` must be declared `mut` too");
+    assert!(diagnostics.iter().any(|d| d
+        .message
+        .contains("cannot write through `my_int`; its binding is not declared `mut`")));
+}
+
+/// The number of `%`-named values in a function's LLVM `define` line: one
+/// per parameter (the closure environment, any hidden resources, and the
+/// function's own flattened parameters), regardless of their types.
+fn llvm_parameter_count(llvm: &str, function: &str) -> usize {
+    let needle = format!("@{function}(");
+    let start = llvm
+        .find(&needle)
+        .unwrap_or_else(|| panic!("no `define` for `{function}` in:\n{llvm}"));
+    let signature = &llvm[start..];
+    let end = signature
+        .find(')')
+        .unwrap_or_else(|| panic!("unterminated parameter list for `{function}`"));
+    signature[..end].matches('%').count()
+}
+
+#[test]
+fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
+    let module = type_check(concat!(
+        "type Clock = I32\n",
+        "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n",
+        "def g: Ref (I32, I32) ->{mut, Clock} () = p => { p.0 = 1 }\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("mut effects should not affect the ABI");
+    let base = llvm_parameter_count(&llvm, "f");
+    let with_resource = llvm_parameter_count(&llvm, "g");
+    // Adding the `Clock` resource on top of the same `mut` effect adds
+    // exactly its own one hidden parameter, not a second one for `mut`
+    // (which contributes nothing to the ABI either way).
+    assert_eq!(with_resource, base + 1);
+}
+
+#[test]
+fn a_mutated_ref_parameter_lowers_and_the_caller_observes_the_write() {
+    let module = type_check(concat!(
+        "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = p.0 + 1 }\n",
+        "def use_it = () => { let mut pair: Ref (I32, I32) = Ref (1, 2); f pair; pair.0 }\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a mutated Ref parameter should lower");
 }
 
 #[test]
@@ -628,7 +842,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "  () => { let old = value; value = c_string \"next\"; drop old }\n",
         "}\n",
         "def managed = (initial: CString, next: CString) => {\n",
-        "  let reference = Ref initial\n",
+        "  let mut reference = Ref initial\n",
         "  let old = replace (reference, next)\n",
         "  drop old\n",
         "}\n",
@@ -713,11 +927,11 @@ fn derives_trait_delegated_product_indexing() {
         "let updated: I32[3] = UpdateIndex.update_index ((1, 2, 3), position, 9)\n",
         "let update_operation: (I32[3], USize, I32) -> I32[3] = UpdateIndex.update_index\n",
         "let updated_again: I32[3] = update_operation (updated, position, 10)\n",
-        "let fixed: Ref I32[3] = Ref updated_again\n",
-        "let mutate_operation: (Ref I32[3], USize, I32) -> () = MutateIndex.mutate_index\n",
+        "let mut fixed: Ref I32[3] = Ref updated_again\n",
+        "let mutate_operation: (Ref I32[3], USize, I32) ->{mut 0} () = MutateIndex.mutate_index\n",
         "mutate_operation (fixed, position, 6)\n",
         "fixed[position] = 7\n",
-        "let erased: Ref I32[] = fixed\n",
+        "let mut erased: Ref I32[] = fixed\n",
         "erased[position] = 8\n",
     );
     let module = type_check(source);
