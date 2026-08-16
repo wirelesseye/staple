@@ -908,6 +908,36 @@ references, and scalar values cannot be spread. Names belonging to the spread
 product's elements are preserved. Spreads are also allowed when constructing a
 product used as a function argument.
 
+A spread written `...=` flattens its operand by name instead of by position.
+Every element of the operand must be named, and the surrounding product must
+itself consist entirely of named elements and `...`/`...=` spreads:
+
+```staple
+let dimensions = (
+    height: 600,
+    width: 800,
+)
+let config: (
+    width: I32,
+    height: I32,
+    title: String,
+) = (
+    ...=dimensions,
+    title: "Staple",
+)
+// Equivalent to (width: 800, height: 600, title: "Staple")
+```
+
+Each named field, whether written explicitly or contributed by a `...=`
+spread, is looked up by name in the surrounding product's expected type, so
+its position in the constructed value does not depend on where it was
+written or on its position within the spread operand. A later field or
+`...=` spread overrides an earlier one with the same name. Because placement
+is name-driven, `...=` requires the enclosing product to have a known,
+fully-named expected product type; every expected field must be supplied
+exactly once, and supplying a field the expected type does not have is an
+error.
+
 Bracket indexing is delegated to the prelude `Index` trait:
 
 ```staple

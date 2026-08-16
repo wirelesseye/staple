@@ -474,6 +474,84 @@ fn spreads_fixed_product_values_and_call_arguments() {
 }
 
 #[test]
+fn spreads_named_product_values_by_name_and_overrides_fields() {
+    let source = concat!(
+        "let dimensions = (height: 600, width: 800)\n",
+        "let config: (width: I32, height: I32, title: String) = (\n",
+        "    ...=dimensions,\n",
+        "    title: \"Staple\",\n",
+        ")\n",
+        "let overridden: (width: I32, height: I32) = (\n",
+        "    ...=dimensions,\n",
+        "    width: 900,\n",
+        ")\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("named product value spreads should generate LLVM");
+    assert!(llvm.contains("product.spread.element"));
+}
+
+#[test]
+fn rejects_invalid_named_product_spreads() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let dimensions = (height: 600, width: 800)\n",
+            "let config = (...=dimensions, title: \"Staple\")\n",
+        )))
+        .expect_err("a named spread requires a known expected product type");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("requires a fully-named expected product type")));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let dimensions = (height: 600, width: 800)\n",
+            "let config: (width: I32, height: I32, title: String) = (...=dimensions)\n",
+        )))
+        .expect_err("a required field left unfilled should be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("missing field `title`"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let dimensions = (height: 600, width: 800)\n",
+            "let config: (width: I32, height: I32) = (...=dimensions, extra: 1)\n",
+        )))
+        .expect_err("a field absent from the expected type should be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("unknown field"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let unnamed = (1, 2)\n",
+            "let config: (width: I32, height: I32) = (...=unnamed)\n",
+        )))
+        .expect_err("an operand with unnamed elements cannot be named-spread");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("must have every element named")));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let dimensions = (height: 600, width: 800)\n",
+            "let config: (width: I32, height: I32) = (...dimensions, ...=dimensions)\n",
+        )))
+        .expect_err("a positional spread cannot combine with a named spread");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("cannot combine a positional spread with a named spread")));
+}
+
+#[test]
 fn type_checks_and_lowers_mutable_places_and_ref_replace() {
     let source = concat!(
         "var value = 1\n",

@@ -3,9 +3,10 @@ use std::fmt;
 
 use crate::{
     Accessor, Binding, BindingKind, BuiltinType, Diagnostic, Expression, FloatType, FunctionId,
-    IntegerType, Item, Module, ModuleId, Pattern, PatternBindingKind, ProductType,
-    ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, TraitId, TraitMethodId,
-    Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
+    IntegerType, Item, Module, ModuleId, Pattern, PatternBindingKind, ProductExpression,
+    ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, TraitId,
+    TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId,
+    TypeParameterPattern,
 };
 
 const MAX_PRODUCT_ARITY: usize = 65_535;
@@ -4049,6 +4050,165 @@ impl TypeChecker {
         self.check_expression_expected(module, expression, None)
     }
 
+    /// Checks a product expression containing one or more `...=` spreads.
+    /// Named spreads merge their operand's elements by name rather than by
+    /// position, so the result can only be laid out once the expected named
+    /// product type is known; later elements (explicit or spread) override
+    /// earlier ones with the same name.
+    fn check_named_spread_product(
+        &mut self,
+        module: &ResolvedModule,
+        product: &ProductExpression,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        let expected_product = match expected {
+            Some(CheckedType::Product(expected_product))
+                if !expected_product.variadic
+                    && expected_product
+                        .elements
+                        .iter()
+                        .all(|element| element.name.is_some()) =>
+            {
+                Some(expected_product.clone())
+            }
+            _ => None,
+        };
+        if expected_product.is_none() {
+            self.diagnostics.push(Diagnostic::new(
+                product.syntax.span.clone(),
+                "a named product spread (`...=`) requires a fully-named expected product type",
+            ));
+        }
+
+        let mut fields: HashMap<String, (CheckedType, Span)> = HashMap::new();
+        for element in &product.elements {
+            if element.spread {
+                let value_type = self.check_expression(module, &element.value);
+                if self.did_return {
+                    return CheckedType::empty_product();
+                }
+                if !element.named_spread {
+                    self.diagnostics.push(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "cannot combine a positional spread with a named spread in the same product",
+                    ));
+                    continue;
+                }
+                match value_type {
+                    CheckedType::Product(operand) if !operand.variadic => {
+                        if operand.elements.iter().any(|field| field.name.is_none()) {
+                            self.diagnostics.push(Diagnostic::new(
+                                element.syntax.span.clone(),
+                                "a named spread operand must have every element named",
+                            ));
+                        } else {
+                            for field in operand.elements {
+                                fields.insert(
+                                    field.name.expect("checked all-named above"),
+                                    (field.value_type, element.syntax.span.clone()),
+                                );
+                            }
+                        }
+                    }
+                    CheckedType::ErasedProduct(_) => {
+                        self.diagnostics.push(Diagnostic::new(
+                            element.syntax.span.clone(),
+                            "cannot spread an erased product value",
+                        ));
+                    }
+                    CheckedType::Error => {}
+                    other => self.diagnostics.push(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        format!("cannot spread non-product value of type `{other}`"),
+                    )),
+                }
+                continue;
+            }
+            let Some(name) = element.name.clone() else {
+                self.diagnostics.push(Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "every element must be named when the product contains a named spread",
+                ));
+                self.check_expression(module, &element.value);
+                if self.did_return {
+                    return CheckedType::empty_product();
+                }
+                continue;
+            };
+            let expected_field_type = expected_product.as_ref().and_then(|expected_product| {
+                expected_product
+                    .elements
+                    .iter()
+                    .find(|field| field.name.as_deref() == Some(name.as_str()))
+                    .map(|field| &field.value_type)
+            });
+            let value_type =
+                self.check_expression_expected(module, &element.value, expected_field_type);
+            if self.did_return {
+                return CheckedType::empty_product();
+            }
+            fields.insert(name, (value_type, element.syntax.span.clone()));
+        }
+
+        let Some(expected_product) = expected_product else {
+            return CheckedType::Error;
+        };
+
+        let expected_names: HashSet<&str> = expected_product
+            .elements
+            .iter()
+            .filter_map(|field| field.name.as_deref())
+            .collect();
+        for name in fields.keys() {
+            if !expected_names.contains(name.as_str()) {
+                self.diagnostics.push(Diagnostic::new(
+                    product.syntax.span.clone(),
+                    format!("unknown field `{name}` in named product spread"),
+                ));
+            }
+        }
+
+        let mut elements = Vec::with_capacity(expected_product.elements.len());
+        let mut has_error = false;
+        for expected_element in &expected_product.elements {
+            let name = expected_element
+                .name
+                .clone()
+                .expect("checked all-named above");
+            match fields.get(&name) {
+                Some((value_type, span)) => {
+                    match merge_types(value_type.clone(), expected_element.value_type.clone()) {
+                        Some(merged) => elements.push(CheckedTypeElement {
+                            name: Some(name),
+                            value_type: merged,
+                        }),
+                        None => {
+                            has_error = true;
+                            self.diagnostics.push(Diagnostic::new(
+                                span.clone(),
+                                format!(
+                                    "expected `{}`, found `{}`",
+                                    expected_element.value_type, value_type
+                                ),
+                            ));
+                        }
+                    }
+                }
+                None => {
+                    has_error = true;
+                    self.diagnostics.push(Diagnostic::new(
+                        product.syntax.span.clone(),
+                        format!("missing field `{name}` in named product spread"),
+                    ));
+                }
+            }
+        }
+        if has_error {
+            return CheckedType::Error;
+        }
+        normalize_product_type(elements, false)
+    }
+
     fn check_expression_expected(
         &mut self,
         module: &ResolvedModule,
@@ -4163,6 +4323,11 @@ impl TypeChecker {
                     self.return_reachable = outer_reachable;
                 }
                 result
+            }
+            Expression::Product(product)
+                if product.elements.iter().any(|element| element.named_spread) =>
+            {
+                self.check_named_spread_product(module, product, expected)
             }
             Expression::Product(product) => {
                 let mut elements = Vec::new();

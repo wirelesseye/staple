@@ -2132,6 +2132,7 @@ impl Grammar {
                     None
                 };
                 let spread = self.eat(TokenKind::Ellipsis);
+                let named_spread = spread && self.eat(TokenKind::Equals);
                 if spread && name.is_some() {
                     return Err(self.error("a product value spread cannot be named"));
                 }
@@ -2141,6 +2142,7 @@ impl Grammar {
                     name,
                     value,
                     spread,
+                    named_spread,
                 });
                 if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
                     break;

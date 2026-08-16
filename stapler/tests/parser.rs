@@ -1328,6 +1328,38 @@ fn parses_repeated_spread_erased_and_variable_index_syntax() {
 }
 
 #[test]
+fn parses_named_product_value_spread_syntax() {
+    let source = concat!(
+        "let dimensions = (height: 600, width: 800)\n",
+        "let config: (width: I32, height: I32, title: String) = (\n",
+        "    ...=dimensions,\n",
+        "    title: \"Staple\",\n",
+        ")\n",
+    );
+    let module = parse(source).expect("named product spreads should parse");
+    assert_eq!(module.text(), source);
+
+    let Statement::Binding(config) = statement(&module.items[1]) else {
+        panic!("expected config binding");
+    };
+    let Some(Expression::Product(config)) = &config.value else {
+        panic!("expected config product value");
+    };
+    assert!(config.elements[0].spread);
+    assert!(config.elements[0].named_spread);
+    assert!(config.elements[0].name.is_none());
+    assert!(!config.elements[1].spread);
+    assert!(!config.elements[1].named_spread);
+}
+
+#[test]
+fn rejects_a_named_element_before_a_named_product_spread() {
+    let source = "let value = (name: ...=other)\n";
+    let error = parse(source).expect_err("a named element before a spread should be rejected");
+    assert!(error.message.contains("cannot be named"));
+}
+
+#[test]
 fn parses_mutable_patterns_and_assignment_statements_losslessly() {
     let source = concat!(
         "let mut value = 1\n",

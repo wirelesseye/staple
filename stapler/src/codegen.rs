@@ -6260,6 +6260,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         product: &ProductExpression,
     ) -> CodeGenerationResult<Vec<BasicValueEnum<'context>>> {
+        if product.elements.iter().any(|element| element.named_spread) {
+            return self.compile_named_spread_product_elements(environment, product);
+        }
         let mut values = Vec::new();
         for element in &product.elements {
             let value = self.compile_expression(environment, &element.value)?;
@@ -6307,6 +6310,97 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             })?);
         }
         Ok(values)
+    }
+
+    /// Compiles a product literal that contains one or more `...=` named
+    /// spreads. Every contributing element (explicit or spread) is first
+    /// gathered into a name-keyed map, then reassembled in the order of the
+    /// expression's already-checked final type so the resulting struct
+    /// layout matches what typechecking computed.
+    fn compile_named_spread_product_elements(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        product: &ProductExpression,
+    ) -> CodeGenerationResult<Vec<BasicValueEnum<'context>>> {
+        let mut fields: HashMap<String, BasicValueEnum<'context>> = HashMap::new();
+        for element in &product.elements {
+            let value = self.compile_expression(environment, &element.value)?;
+            if environment.did_return {
+                return Ok(Vec::new());
+            }
+            if element.spread {
+                let Some(CheckedType::Product(value_type)) =
+                    self.concrete_expression_type(&element.value)
+                else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "product spread operand does not have a fixed product type",
+                    ));
+                };
+                if value_type.elements.is_empty() {
+                    continue;
+                }
+                let Some(BasicValueEnum::StructValue(product_value)) = value_as_basic(value) else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "product spread operand has an invalid representation",
+                    ));
+                };
+                for (index, field_type) in value_type.elements.iter().enumerate() {
+                    let name = field_type.name.clone().ok_or_else(|| {
+                        Diagnostic::new(
+                            element.syntax.span.clone(),
+                            "a named spread operand must have every element named",
+                        )
+                    })?;
+                    let extracted = self
+                        .builder
+                        .build_extract_value(product_value, index as u32, "product.spread.element")
+                        .map_err(|error| {
+                            Diagnostic::new(element.syntax.span.clone(), error.to_string())
+                        })?;
+                    fields.insert(name, extracted);
+                }
+                continue;
+            }
+            let name = element.name.clone().ok_or_else(|| {
+                Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "every element must be named when the product contains a named spread",
+                )
+            })?;
+            let basic = value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "product element is not a first-class value",
+                )
+            })?;
+            fields.insert(name, basic);
+        }
+        let Some(CheckedType::Product(final_type)) =
+            self.concrete_expression_type(&Expression::Product(product.clone()))
+        else {
+            return Err(Diagnostic::new(
+                product.syntax.span.clone(),
+                "named product spread does not have a known product type",
+            ));
+        };
+        final_type
+            .elements
+            .iter()
+            .map(|field| {
+                let name = field
+                    .name
+                    .clone()
+                    .expect("named spread result fields are always named");
+                fields.get(&name).copied().ok_or_else(|| {
+                    Diagnostic::new(
+                        product.syntax.span.clone(),
+                        format!("missing field `{name}` in named product spread"),
+                    )
+                })
+            })
+            .collect()
     }
 
     fn compile_arguments(

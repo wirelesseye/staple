@@ -159,6 +159,9 @@ pub struct ProductElement {
     pub name: Option<String>,
     pub value: Expression,
     pub spread: bool,
+    /// Whether this is a `...=` spread, which merges the operand's named
+    /// elements by name instead of by position.
+    pub named_spread: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

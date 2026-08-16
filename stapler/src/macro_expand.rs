@@ -248,6 +248,7 @@ impl DelimitedSyntaxValue {
                         name: None,
                         value: expression,
                         spread: false,
+                        named_spread: false,
                     }],
                 }))
             }
@@ -327,6 +328,20 @@ enum Value {
     },
 }
 
+/// Sets a named field within a compile-time product value, overriding an
+/// existing field with the same name in place (keeping its original
+/// position) or appending a new one.
+fn set_named_product_field(values: &mut Vec<(Option<String>, Value)>, name: String, value: Value) {
+    if let Some(existing) = values
+        .iter_mut()
+        .find(|(existing_name, _)| existing_name.as_deref() == Some(name.as_str()))
+    {
+        existing.1 = value;
+    } else {
+        values.push((Some(name), value));
+    }
+}
+
 fn separated_parenthesized(
     syntax: Syntax,
     elements: Vec<Value>,
@@ -340,6 +355,7 @@ fn separated_parenthesized(
                 name: None,
                 value: value.into_expression()?,
                 spread: false,
+                named_spread: false,
             }),
             _ => None,
         })
@@ -2550,7 +2566,8 @@ impl MacroExpander {
                 Some(Value::Syntax(SyntaxValue::Visibility(visibility.clone())))
             }
             Expression::Product(product) => {
-                let mut values = Vec::new();
+                let has_named_spread = product.elements.iter().any(|element| element.named_spread);
+                let mut values: Vec<(Option<String>, Value)> = Vec::new();
                 for element in &product.elements {
                     let sequence_element = match self.quote_context.clone() {
                         Some(MetaType::Sequence(expected)) => Some(*expected),
@@ -2571,7 +2588,29 @@ impl MacroExpander {
                             ));
                             return None;
                         };
-                        values.extend(elements);
+                        if element.named_spread {
+                            for (name, value) in elements {
+                                let Some(name) = name else {
+                                    self.diagnostics.push(Diagnostic::new(
+                                        element.syntax.span.clone(),
+                                        "a named spread operand must have every element named",
+                                    ));
+                                    return None;
+                                };
+                                set_named_product_field(&mut values, name, value);
+                            }
+                        } else {
+                            values.extend(elements);
+                        }
+                    } else if has_named_spread {
+                        let Some(name) = element.name.clone() else {
+                            self.diagnostics.push(Diagnostic::new(
+                                element.syntax.span.clone(),
+                                "every element must be named when the product contains a named spread",
+                            ));
+                            return None;
+                        };
+                        set_named_product_field(&mut values, name, value);
                     } else {
                         values.push((element.name.clone(), value));
                     }

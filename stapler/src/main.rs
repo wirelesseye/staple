@@ -1145,6 +1145,52 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_named_product_value_spreads() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source =
+            std::env::temp_dir().join(format!("stapler-named-product-spread-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-named-product-spread-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let dimensions = (height: 600, width: 800)\n",
+                "let config: (width: I32, height: I32, title: String) = (\n",
+                "    ...=dimensions,\n",
+                "    title: \"Staple\",\n",
+                ")\n",
+                "let overridden: (width: I32, height: I32) = (\n",
+                "    ...=dimensions,\n",
+                "    width: 900,\n",
+                ")\n",
+                "exit ((config.width - 800) + (config.height - 600) * 2 + (overridden.width - 900) * 4 + (overridden.height - 600) * 8)\n",
+            ),
+        )
+        .expect("temporary named-product-spread source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("named-product-spread executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("named-product-spread executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn drops_owned_locals_in_reverse_scope_order() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
