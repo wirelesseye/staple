@@ -929,7 +929,14 @@ impl Grammar {
             }
             (TypeDeclarationKind::Opaque, None)
         } else {
-            (kind, Some(self.parse_type()?))
+            let previous = self.newline_terminates_type;
+            let previous_any = self.any_newline_terminates_type;
+            self.newline_terminates_type = true;
+            self.any_newline_terminates_type = true;
+            let underlying = self.parse_type();
+            self.newline_terminates_type = previous;
+            self.any_newline_terminates_type = previous_any;
+            (kind, Some(underlying?))
         };
         if representation_visibility == Visibility::Public
             && !matches!(

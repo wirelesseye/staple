@@ -1093,6 +1093,38 @@ fn parses_named_product_types_values_and_access() {
 }
 
 #[test]
+fn type_declaration_underlying_type_stops_at_newline() {
+    let source = concat!(
+        "type Test = ()\n",
+        "\n",
+        "std.io.println \"Hello, world!\"\n",
+    );
+    let root = parse(source).expect("statement after a type alias should parse");
+    assert_eq!(root.text(), source);
+    assert_eq!(root.items.len(), 2);
+
+    assert!(matches!(
+        root.items[0],
+        Item::TypeDeclaration(ref declaration)
+            if matches!(
+                declaration.underlying,
+                Some(Type::Product(ref product)) if product.elements.is_empty()
+            )
+    ));
+
+    let Item::Statement(statement) = &root.items[1] else {
+        panic!("expected expression statement");
+    };
+    let Statement::Expression(Expression::Call(call)) = statement.as_ref() else {
+        panic!("expected a call expression, not a continued type application");
+    };
+    let Expression::Access(println) = call.callee.as_ref() else {
+        panic!("expected `std.io.println` access chain as callee");
+    };
+    assert_eq!(println.accessor, Accessor::Name("println".into()));
+}
+
+#[test]
 fn parses_compile_time_parameters_and_type_application() {
     let source = concat!(
         "type alias Pair = (A, B) => (A, B)\n",
