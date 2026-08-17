@@ -127,9 +127,6 @@ impl<'a> Classifier<'a> {
                 | TokenKind::Match
                 | TokenKind::Alias
                 | TokenKind::Opaque
-                | TokenKind::Infix
-                | TokenKind::Infixl
-                | TokenKind::Infixr
                 | TokenKind::Underscore => Some(KEYWORD),
                 TokenKind::Satisfies
                 | TokenKind::Operator
@@ -141,8 +138,7 @@ impl<'a> Classifier<'a> {
                 | TokenKind::Star
                 | TokenKind::Plus
                 | TokenKind::Minus
-                | TokenKind::Slash
-                | TokenKind::Backtick => Some(OPERATOR),
+                | TokenKind::Slash => Some(OPERATOR),
                 _ => None,
             };
             if let Some(kind) = kind {
@@ -584,14 +580,6 @@ impl<'a> Classifier<'a> {
             Expression::Index(value) => {
                 self.expression_with_mod(&value.value, resolved, modifiers);
                 self.expression(&value.index, resolved);
-            }
-            Expression::Infix(value) => {
-                for operand in &value.operands {
-                    self.expression(operand, resolved);
-                }
-                for operator in &value.operators {
-                    self.mark_last(&operator.syntax, &operator.name, OPERATOR, 0, 1);
-                }
             }
             Expression::SyntaxArgument(_) => {}
             Expression::VisibilityArgument(value) => self.visibility(value),

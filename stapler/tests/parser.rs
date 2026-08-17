@@ -1,6 +1,6 @@
 use stapler::{
-    Accessor, Associativity, Expression, Item, Pattern, Statement, TokenKind, Type,
-    TypeDeclarationKind, UseKind, Visibility, parse,
+    Accessor, Expression, Item, Pattern, Statement, TokenKind, Type, TypeDeclarationKind, UseKind,
+    Visibility, parse,
 };
 
 #[test]
@@ -815,11 +815,19 @@ fn parses_product_parameter_and_expression_body() {
     assert!(
         matches!(function.pattern, Pattern::Product(ref product) if product.elements.len() == 2)
     );
-    assert!(matches!(
-        *function.body,
-        Expression::Infix(ref infix)
-            if infix.operators.len() == 1 && infix.operators[0].name == "+"
-    ));
+    let Expression::Call(outer) = function.body.as_ref() else {
+        panic!("expected desugared `+` call");
+    };
+    let Expression::Call(inner) = outer.callee.as_ref() else {
+        panic!("expected desugared `+` call");
+    };
+    let Expression::Access(access) = inner.callee.as_ref() else {
+        panic!("expected `Add.add` access");
+    };
+    assert!(matches!(access.value.as_ref(), Expression::Name(name) if name.name == "Add"));
+    assert!(matches!(&access.accessor, Accessor::Name(name) if name == "add"));
+    assert!(matches!(inner.argument.as_ref(), Expression::Name(name) if name.name == "a"));
+    assert!(matches!(outer.argument.as_ref(), Expression::Name(name) if name.name == "b"));
 }
 
 #[test]
@@ -837,7 +845,7 @@ fn parses_low_precedence_satisfies_expression() {
         panic!("expected satisfies expression");
     };
     assert!(matches!(satisfies.ty, Type::Named(ref named) if named.name == "I32"));
-    assert!(matches!(satisfies.value.as_ref(), Expression::Infix(_)));
+    assert!(matches!(satisfies.value.as_ref(), Expression::Call(_)));
     assert_eq!(root.text(), source);
 }
 
@@ -863,45 +871,48 @@ fn parses_contextually_typed_curried_parameters() {
 }
 
 #[test]
-fn parses_inline_fixity_and_operator_call_forms() {
-    let source = concat!(
-        "def infixl 6 +: I32 -> I32 -> I32 = x => y => x\n",
-        "def infixr 5 **: I32 -> I32 -> I32 = x => y => y\n",
-        "1 + 2 ** 3\n",
-        "1 `combine` 2\n",
-        "(+) 1 2\n",
-        "(+)\n",
-    );
-    let root = parse(source).expect("operator syntax should parse");
-    let Statement::Binding(plus) = statement(&root.items[0]) else {
-        panic!("expected operator binding");
+fn parses_mixed_precedence_builtin_operator_expression() {
+    let source = "1 + 2 * 3\n";
+    let root = parse(source).expect("builtin operator expression should parse");
+    let Statement::Expression(Expression::Call(outer)) = statement(&root.items[0]) else {
+        panic!("expected desugared `+` call");
     };
-    assert_eq!(plus.name, "+");
-    assert_eq!(
-        plus.fixity.expect("fixity").associativity,
-        Associativity::Left
-    );
-    assert_eq!(plus.fixity.expect("fixity").precedence, 6);
+    let Expression::Call(add_call) = outer.callee.as_ref() else {
+        panic!("expected desugared `+` call");
+    };
+    let Expression::Access(access) = add_call.callee.as_ref() else {
+        panic!("expected `Add.add` access");
+    };
+    assert!(matches!(access.value.as_ref(), Expression::Name(name) if name.name == "Add"));
+    assert!(matches!(&access.accessor, Accessor::Name(name) if name == "add"));
+    assert!(matches!(add_call.argument.as_ref(), Expression::Integer(int) if int.literal == "1"));
 
-    let Statement::Expression(Expression::Infix(infix)) = statement(&root.items[2]) else {
-        panic!("expected infix chain");
+    let Expression::Call(multiply_outer) = outer.argument.as_ref() else {
+        panic!("expected `2 * 3` nested under `+`");
     };
-    assert_eq!(
-        infix
-            .operators
-            .iter()
-            .map(|op| op.name.as_str())
-            .collect::<Vec<_>>(),
-        ["+", "**"]
-    );
-    assert!(matches!(
-        statement(&root.items[4]),
-        Statement::Expression(Expression::Call(_))
-    ));
+    let Expression::Call(multiply_call) = multiply_outer.callee.as_ref() else {
+        panic!("expected desugared `*` call");
+    };
+    let Expression::Access(multiply_access) = multiply_call.callee.as_ref() else {
+        panic!("expected `Multiply.multiply` access");
+    };
     assert!(
-        matches!(statement(&root.items[5]), Statement::Expression(Expression::Name(name)) if name.name == "+")
+        matches!(multiply_access.value.as_ref(), Expression::Name(name) if name.name == "Multiply")
     );
+    assert!(matches!(&multiply_access.accessor, Accessor::Name(name) if name == "multiply"));
     assert_eq!(root.text(), source);
+}
+
+#[test]
+fn rejects_chained_comparison_operators() {
+    let error = parse("1 == 2 == 3\n").expect_err("chained comparisons should be rejected");
+    assert!(error.message.contains("cannot be chained"));
+}
+
+#[test]
+fn rejects_chained_range_operators() {
+    let error = parse("0 .. 1 .. 2\n").expect_err("chained ranges should be rejected");
+    assert!(error.message.contains("cannot be chained"));
 }
 
 #[test]
@@ -910,13 +921,6 @@ fn rejects_dot_as_a_binding_name() {
         .expect_err("dot should remain punctuation rather than a binding name");
 
     assert_eq!(error.message, "expected binding name");
-}
-
-#[test]
-fn rejects_block_local_fixity_modifiers() {
-    let error = parse("def outer = () => { def infixl 6 + = x: I32 => x }\n")
-        .expect_err("block fixity should be rejected");
-    assert!(error.message.contains("module level"));
 }
 
 #[test]

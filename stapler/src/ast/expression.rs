@@ -13,7 +13,6 @@ pub enum Expression {
     Call(CallExpression),
     Access(AccessExpression),
     Index(IndexExpression),
-    Infix(InfixExpression),
     SyntaxArgument(SyntaxArgumentExpression),
     VisibilityArgument(VisibilitySyntax),
     Quote(QuoteExpression),
@@ -39,7 +38,6 @@ impl Expression {
             Self::Call(expression) => &expression.syntax,
             Self::Access(expression) => &expression.syntax,
             Self::Index(expression) => &expression.syntax,
-            Self::Infix(expression) => &expression.syntax,
             Self::SyntaxArgument(expression) => &expression.syntax,
             Self::VisibilityArgument(expression) => &expression.syntax,
             Self::Quote(expression) => &expression.syntax,
@@ -189,20 +187,6 @@ pub struct IndexExpression {
 pub enum Accessor {
     Name(String),
     Index(String),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InfixExpression {
-    pub syntax: Syntax,
-    pub operands: Vec<Expression>,
-    pub operators: Vec<InfixOperator>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct InfixOperator {
-    pub syntax: Syntax,
-    pub namespace: Option<String>,
-    pub name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

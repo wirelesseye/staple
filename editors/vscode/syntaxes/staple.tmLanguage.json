@@ -45,12 +45,10 @@
       "patterns": [
         {
           "name": "meta.function.definition.staple",
-          "match": "\\b(def)\\s+(?:(infix|infixl|infixr)\\s+([0-9]+)\\s+)?((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*|[!#$%&*+./<=>?@\\\\^|~:-]+)",
+          "match": "\\b(def)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
           "captures": {
             "1": { "name": "storage.type.function.staple" },
-            "2": { "name": "storage.modifier.fixity.staple" },
-            "3": { "name": "constant.numeric.integer.precedence.staple" },
-            "4": { "name": "variable.other.readwrite.staple" }
+            "2": { "name": "variable.other.readwrite.staple" }
           }
         },
         {
@@ -130,7 +128,7 @@
         },
         {
           "name": "storage.modifier.staple",
-          "match": "\\b(?:alias|infix|infixl|infixr|mut|opaque|pub)\\b"
+          "match": "\\b(?:alias|mut|opaque|pub)\\b"
         },
         {
           "name": "keyword.operator.expression.staple",
@@ -175,10 +173,6 @@
         {
           "name": "keyword.operator.symbolic.staple",
           "match": "[!#$%&*+/<=>?@\\\\^|~:-]+|\\.{2,}"
-        },
-        {
-          "name": "punctuation.definition.operator.staple",
-          "match": "`"
         }
       ]
     },

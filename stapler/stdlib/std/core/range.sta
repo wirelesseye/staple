@@ -12,12 +12,12 @@ pub(repr) type RangeInclusive = T => (
     finished: Bool,
 )
 
-pub def infix 3 .. : T => Copy T => T -> T -> Range T = start => end => Range (
+pub def range : T => Copy T => T -> T -> Range T = start => end => Range (
     current: start,
     end: end,
 )
 
-pub def infix 3 ..= : T => Copy T => T -> T -> RangeInclusive T = start => end => RangeInclusive (
+pub def range_inclusive : T => Copy T => T -> T -> RangeInclusive T = start => end => RangeInclusive (
     current: start,
     end: end,
     finished: False satisfies Bool,

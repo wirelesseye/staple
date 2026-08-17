@@ -81,9 +81,6 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
                 "match" => TokenKind::Match,
                 "alias" => TokenKind::Alias,
                 "opaque" => TokenKind::Opaque,
-                "infix" => TokenKind::Infix,
-                "infixl" => TokenKind::Infixl,
-                "infixr" => TokenKind::Infixr,
                 "_" => TokenKind::Underscore,
                 _ => TokenKind::Identifier,
             };
@@ -256,7 +253,6 @@ fn single_character_kind(character: char) -> TokenKind {
         '+' => TokenKind::Plus,
         '-' => TokenKind::Minus,
         '/' => TokenKind::Slash,
-        '`' => TokenKind::Backtick,
         _ => TokenKind::Unknown,
     }
 }

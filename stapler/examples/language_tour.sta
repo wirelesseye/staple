@@ -12,14 +12,12 @@ def nested_sum = (first: I32, (second: I32, third: I32)) => {
     subtotal + third
 } satisfies I32
 
-// Symbolic and backtick infix operators are ordinary curried functions.
-def infixl 1 |>: I32 -> I32 -> I32 = value => function_result => function_result
-def infixr 5 choose: I32 -> I32 -> I32 = left => right => right
-
+// Arithmetic, comparison, and range operators are fixed language syntax
+// that dispatch to trait methods (`Add`, `Eq`, `PartialOrd`, ...).
 let product_year = details.1
 let closure_result = add_ten 32
 let nested_result = nested_sum (10, (20, 12))
-let operator_results = (1 + 2 * 3, 1 |> 9, 1 `choose` 2)
+let operator_results = (1 + 2 * 3, 1 < 2, 0 .. 3)
 
 println details.0
 println "Products, closures, nested patterns, and operators evaluated successfully."

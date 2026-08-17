@@ -1224,21 +1224,6 @@ fn rejects_default_for_products_with_non_default_elements() {
     );
 }
 
-fn infix_call(
-    expression: &stapler::Expression,
-) -> (&str, &stapler::Expression, &stapler::Expression) {
-    let stapler::Expression::Call(outer) = expression else {
-        panic!("expected lowered outer call");
-    };
-    let stapler::Expression::Call(inner) = outer.callee.as_ref() else {
-        panic!("expected lowered inner call");
-    };
-    let stapler::Expression::Name(operator) = inner.callee.as_ref() else {
-        panic!("expected operator name");
-    };
-    (&operator.name, &inner.argument, &outer.argument)
-}
-
 #[test]
 fn resolves_names_in_function_parameters() {
     let source = "def first: _ -> I32 = (a: I32, b: I32) => a\nfirst (1, 2)\n";
@@ -2032,12 +2017,10 @@ fn type_checks_transparent_aliases() {
 #[test]
 fn uses_regular_prelude_functions_for_i32_arithmetic() {
     let module = type_check(concat!(
-        "def add_one = (+) 1\n",
         "let sum = 1 + 2\n",
         "let difference = 4 - 3\n",
         "let product = 2 * 3\n",
         "let quotient = 8 / 2\n",
-        "add_one 2\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -2048,7 +2031,6 @@ fn uses_regular_prelude_functions_for_i32_arithmetic() {
     assert!(llvm.contains("sub i32"));
     assert!(llvm.contains("mul i32"));
     assert!(llvm.contains("sdiv i32"));
-    assert!(llvm.contains("closure.call"));
     assert!(!llvm.contains("declare i32 @__i32_add"));
 }
 
@@ -4429,87 +4411,16 @@ fn adapts_non_variadic_externs_used_as_function_values() {
 }
 
 #[test]
-fn calls_user_defined_functions_with_symbolic_and_backtick_infix_syntax() {
-    let module = type_check(concat!(
-        "def infixl 6 +: I32 -> I32 -> I32 = x => y => x\n",
-        "def infixl 7 combine: I32 -> I32 -> I32 = x => y => y\n",
-        "def plus = (+)\n",
-        "1 + 2\n",
-        "1 `combine` 2\n",
-        "(+) 1 2\n",
-        "plus 1 2\n",
-    ));
+fn compiles_builtin_arithmetic_via_trait_dispatch() {
+    let module = type_check("let answer: I32 = 1 + 2\n");
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("infix calls should compile as curried calls");
-    assert!(llvm.contains("@operator.2b"));
-    assert!(llvm.contains("closure.call"));
-}
-
-#[test]
-fn rejects_incompatible_fixity_chains() {
-    let syntax = parse(concat!(
-        "def infix 4 ==: I32 -> I32 -> I32 = x => y => x\n",
-        "1 == 2 == 3\n",
-    ))
-    .expect("source should parse");
-    let diagnostics = NameResolver::new()
-        .resolve(&syntax)
-        .expect_err("non-associative chaining should fail");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("incompatible associativity"))
-    );
-}
-
-#[test]
-fn associates_infix_chains_using_inline_fixity() {
-    let source = concat!(
-        "def infixl 6 +: I32 -> I32 -> I32 = x => y => x\n",
-        "def infixr 7 **: I32 -> I32 -> I32 = x => y => y\n",
-        "def choose: I32 -> I32 -> I32 = x => y => x\n",
-        "1 + 2 + 3\n",
-        "1 ** 2 ** 3\n",
-        "1 + 2 ** 3\n",
-        "1 `choose` 2 `choose` 3\n",
-    );
-    let module = resolve(source);
-    let lowered = module
-        .syntax()
-        .items
-        .iter()
-        .skip(3)
-        .map(|item| {
-            let Item::Statement(statement) = item else {
-                panic!("expected expression item");
-            };
-            let Statement::Expression(stapler::Expression::Infix(infix)) = statement.as_ref()
-            else {
-                panic!("expected infix source expression");
-            };
-            module
-                .lowered_infix(infix.syntax.id)
-                .expect("lowered infix")
-        })
-        .collect::<Vec<_>>();
-
-    let (operator, left, _) = infix_call(lowered[0]);
-    assert_eq!(operator, "+");
-    assert_eq!(infix_call(left).0, "+");
-
-    let (operator, _, right) = infix_call(lowered[1]);
-    assert_eq!(operator, "**");
-    assert_eq!(infix_call(right).0, "**");
-
-    let (operator, _, right) = infix_call(lowered[2]);
-    assert_eq!(operator, "+");
-    assert_eq!(infix_call(right).0, "**");
-
-    let (operator, left, _) = infix_call(lowered[3]);
-    assert_eq!(operator, "choose");
-    assert_eq!(infix_call(left).0, "choose");
+        .expect("builtin `+` should compile via ordinary trait dispatch");
+    // "operator.2b" is the mangled symbol a binding literally named `+` would
+    // get; since `+` is fixed grammar now, not a binding, it must not appear.
+    assert!(!llvm.contains("@operator.2b"));
+    assert!(llvm.contains("add"));
 }
 
 #[test]
@@ -4690,11 +4601,11 @@ fn rejects_invalid_default_trait_member_bodies() {
 #[test]
 fn type_checks_product_and_curried_multi_parameter_traits() {
     let module = type_check(concat!(
-        "trait Add = Left => Right => Output => { add: (Left, Right) -> Output }\n",
+        "trait Merge = Left => Right => Output => { merge: (Left, Right) -> Output }\n",
         "trait Convert = (From, To) => { convert: From -> To }\n",
-        "impl Add I32 I32 I32 { def add = (left, right) => left + right }\n",
+        "impl Merge I32 I32 I32 { def merge = (left, right) => left + right }\n",
         "impl Convert (I32, String) { def convert = value => \"converted\" }\n",
-        "def combine: (L, R, O) => Add L R O => (L, R) -> O = pair => Add.add pair\n",
+        "def combine: (L, R, O) => Merge L R O => (L, R) -> O = pair => Merge.merge pair\n",
         "let total: I32 = combine (20, 22)\n",
         "let converted: String = Convert.convert total\n",
     ));

@@ -2494,20 +2494,6 @@ impl TypeChecker {
                     &value.index,
                     target_parameters,
                 )),
-            Expression::Infix(value) => module.lowered_infix(value.syntax.id).map_or_else(
-                || {
-                    union(
-                        value
-                            .operands
-                            .iter()
-                            .map(|operand| {
-                                self.expression_resources_now(module, operand, target_parameters)
-                            })
-                            .collect(),
-                    )
-                },
-                |lowered| self.expression_resources_now(module, lowered, target_parameters),
-            ),
             Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
             | Expression::Quote(_)
@@ -3022,9 +3008,6 @@ impl TypeChecker {
                 self.refresh_expression_function_types(module, &value.value)
                     | self.refresh_expression_function_types(module, &value.index)
             }
-            Expression::Infix(value) => value.operands.iter().fold(false, |changed, operand| {
-                self.refresh_expression_function_types(module, operand) | changed
-            }),
             Expression::Resource(_)
             | Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
@@ -3196,16 +3179,6 @@ impl TypeChecker {
                     target_parameters,
                     current_module,
                 );
-            }
-            Expression::Infix(value) => {
-                for operand in &value.operands {
-                    self.record_expression_resources(
-                        module,
-                        operand,
-                        target_parameters,
-                        current_module,
-                    );
-                }
             }
             Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
@@ -4695,11 +4668,6 @@ impl TypeChecker {
                 );
                 arguments[2].clone()
             }
-            Expression::Infix(infix) => module
-                .lowered_infix(infix.syntax.id)
-                .cloned()
-                .map(|lowered| self.check_expression_expected(module, &lowered, expected))
-                .unwrap_or(CheckedType::Error),
             Expression::Name(name) => {
                 let symbol = module.symbol_for(name.syntax.id);
                 if let Some(symbol) = symbol {
@@ -5945,9 +5913,6 @@ impl TypeChecker {
                 .symbol_for(access.syntax.id)
                 .and_then(|symbol| self.function_symbols.get(&symbol).copied()),
             Expression::Call(call) => self.function_origin(module, &call.callee),
-            Expression::Infix(infix) => module
-                .lowered_infix(infix.syntax.id)
-                .and_then(|expression| self.function_origin(module, expression)),
             _ => None,
         }
     }

@@ -150,20 +150,6 @@ fn uses_root_qualified_standard_library_items_without_imports() {
 }
 
 #[test]
-fn uses_root_qualified_operators_without_imports() {
-    let fixture = Fixture::new();
-    fixture.write("main.sta", "let answer: I32 = 20 package.ops.<> 22\n");
-    fixture.write(
-        "ops.sta",
-        "pub def infixl 6 <>: I32 -> I32 -> I32 = left => right => left + right\n",
-    );
-
-    fixture
-        .compile()
-        .expect("root-qualified operators should retain their exported fixity");
-}
-
-#[test]
 fn only_the_declaring_module_can_assign_a_public_mutable_global() {
     let fixture = Fixture::new();
     fixture.write(
@@ -1253,36 +1239,6 @@ fn rejects_user_declarations_with_the_intrinsic_abi() {
         .compile()
         .expect_err("the intrinsic ABI must be reserved");
     assert!(error.contains("reserved for the standard library"));
-}
-
-#[test]
-fn imports_operator_values_and_their_fixities() {
-    let fixture = Fixture::new();
-    fixture.write(
-        "math.sta",
-        concat!(
-            "pub def infixl 6 +: I32 -> I32 -> I32 = x => y => x\n",
-            "pub def infixr 5 **: I32 -> I32 -> I32 = x => y => y\n",
-        ),
-    );
-    fixture.write(
-        "main.sta",
-        concat!(
-            "use math\n",
-            "use math + as combine\n",
-            "use math ((**))\n",
-            "1 `combine` 2\n",
-            "1 ** 2 ** 3\n",
-            "1 math.+ 2\n",
-            "(math.+) 1 2\n",
-        ),
-    );
-
-    let llvm = fixture
-        .compile()
-        .expect("imported operators and fixities should compile");
-    assert!(llvm.contains("operator.2b"));
-    assert!(llvm.contains("operator.2a2a"));
 }
 
 #[test]

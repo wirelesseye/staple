@@ -602,13 +602,3 @@ impl PartialOrd F64 {
     }
 }
 
-pub def infixl 6 + : T => Copy T => Add T => T -> T -> T = left => right => Add.add left right
-pub def infixl 6 - : T => Copy T => Subtract T => T -> T -> T = left => right => Subtract.subtract left right
-pub def infixl 7 * : T => Copy T => Multiply T => T -> T -> T = left => right => Multiply.multiply left right
-pub def infixl 7 / : T => Copy T => Divide T => T -> T -> T = left => right => Divide.divide left right
-pub def infix 4 == : T => Copy T => Eq T => T -> T -> Bool = left => right => Eq.equal left right
-pub def infix 4 != : T => Copy T => Eq T => T -> T -> Bool = left => right => Eq.not_equal left right
-pub def infix 4 < : T => Copy T => PartialOrd T => T -> T -> Bool = left => right => PartialOrd.lt left right
-pub def infix 4 <= : T => Copy T => PartialOrd T => T -> T -> Bool = left => right => PartialOrd.le left right
-pub def infix 4 > : T => Copy T => PartialOrd T => T -> T -> Bool = left => right => PartialOrd.gt left right
-pub def infix 4 >= : T => Copy T => PartialOrd T => T -> T -> Bool = left => right => PartialOrd.ge left right

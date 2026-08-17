@@ -680,7 +680,7 @@ impl Grammar {
                 self.parse_continue_statement(start)
             }
             Some(TokenKind::Def) => self
-                .parse_binding(visibility, start, start.is_some())
+                .parse_binding(visibility, start)
                 .map(Statement::Binding),
             _ if visibility == Visibility::Public => {
                 Err(self.error("`pub` must modify a declaration"))
@@ -801,7 +801,7 @@ impl Grammar {
             return Err(self.error("`?` requires a destructuring pattern"));
         }
         self.position = checkpoint;
-        self.parse_binding(visibility, start, start.is_some())
+        self.parse_binding(visibility, start)
             .map(Statement::Binding)
     }
 
@@ -835,7 +835,7 @@ impl Grammar {
             }
             self.expect(TokenKind::RParen, "expected `)` after imported items")?;
             UseKind::Selected(names)
-        } else if self.at(TokenKind::Identifier) || self.peek().is_some_and(is_symbol_kind) {
+        } else if self.at(TokenKind::Identifier) {
             let item = self.parse_value_name("expected imported item")?;
             if self.eat(TokenKind::As) {
                 let alias = self.parse_value_name("expected import alias after `as`")?;
@@ -870,7 +870,7 @@ impl Grammar {
             if self.peek().is_none() {
                 return Err(self.error("unterminated extern block"));
             }
-            let binding = self.parse_binding(Visibility::Private, None, true)?;
+            let binding = self.parse_binding(Visibility::Private, None)?;
             if binding.mutable {
                 return Err(self.error("external bindings cannot be mutable"));
             }
@@ -964,7 +964,6 @@ impl Grammar {
         &mut self,
         visibility: Visibility,
         start: Option<usize>,
-        allow_fixity: bool,
     ) -> Result<Binding, ParseError> {
         let start = start.unwrap_or(self.position);
         let (kind, reassignable) = match self.peek() {
@@ -986,34 +985,8 @@ impl Grammar {
         if mutable && kind != BindingKind::Let {
             return Err(self.error("`mut` is only allowed on `let` and `var` bindings"));
         }
-        let fixity = match self.peek() {
-            Some(TokenKind::Infix | TokenKind::Infixl | TokenKind::Infixr) => {
-                if !allow_fixity {
-                    return Err(self.error("fixity modifiers are only allowed at module level"));
-                }
-                let associativity = match self.bump_token().expect("peeked fixity").kind {
-                    TokenKind::Infix => Associativity::None,
-                    TokenKind::Infixl => Associativity::Left,
-                    TokenKind::Infixr => Associativity::Right,
-                    _ => unreachable!(),
-                };
-                let precedence = self
-                    .expect(TokenKind::Integer, "expected precedence after fixity")?
-                    .text
-                    .parse::<u8>()
-                    .map_err(|_| self.error("operator precedence must be between 0 and 9"))?;
-                if precedence > 9 {
-                    return Err(self.error("operator precedence must be between 0 and 9"));
-                }
-                Some(Fixity {
-                    associativity,
-                    precedence,
-                })
-            }
-            _ => None,
-        };
-        let (name, consumed_colon) = self.parse_binding_name()?;
-        let annotation = if consumed_colon || self.eat(TokenKind::Colon) {
+        let name = self.parse_binding_name()?;
+        let annotation = if self.eat(TokenKind::Colon) {
             Some(())
         } else {
             None
@@ -1045,7 +1018,6 @@ impl Grammar {
             mutable,
             reassignable,
             name,
-            fixity,
             type_parameters,
             trait_bounds,
             annotation,
@@ -1191,7 +1163,8 @@ impl Grammar {
         }))
     }
 
-    /// Parses an expression, including function expressions and infix calls.
+    /// Parses an expression, including function expressions and builtin
+    /// operator expressions.
     ///
     /// Function parsing is attempted first and rewound on failure so an ordinary
     /// expression can begin with the same tokens as a parameter pattern.
@@ -1202,7 +1175,7 @@ impl Grammar {
             Err(error) => error,
         };
         self.position = checkpoint;
-        let mut expression = self.parse_infix_expression()?;
+        let mut expression = self.parse_range_expression()?;
         while self.eat(TokenKind::Satisfies) {
             let previous = self.newline_terminates_type;
             let previous_any = self.any_newline_terminates_type;
@@ -1627,84 +1600,225 @@ impl Grammar {
         }))
     }
 
-    /// Parses a flat infix chain for fixity-aware lowering during resolution.
-    fn parse_infix_expression(&mut self) -> Result<Expression, ParseError> {
+    /// Comparison operators recognized at precedence 4 (non-associative),
+    /// paired with the trait/method they desugar to.
+    const COMPARISON_OPERATORS: [(&'static str, &'static str, &'static str); 6] = [
+        ("==", "Eq", "equal"),
+        ("!=", "Eq", "not_equal"),
+        ("<=", "PartialOrd", "le"),
+        (">=", "PartialOrd", "ge"),
+        ("<", "PartialOrd", "lt"),
+        (">", "PartialOrd", "gt"),
+    ];
+
+    /// Parses a `..`/`..=` range expression (precedence 3, non-associative),
+    /// desugaring directly to a call to the prelude's `range`/`range_inclusive`
+    /// functions.
+    fn parse_range_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
-        let mut operands = vec![self.parse_call_expression()?];
-        let mut operators = Vec::new();
-        while let Some(operator) = self.parse_infix_operator()? {
-            operators.push(operator);
-            operands.push(self.parse_call_expression()?);
+        let left = self.parse_comparison_expression()?;
+        if self.newline_terminates_expression && self.has_newline_before_next_token() {
+            return Ok(left);
         }
-        if operators.is_empty() {
-            Ok(operands.pop().expect("one operand"))
+        let operator_start = self.position;
+        let function_name = if self.eat_operator("..=") {
+            "range_inclusive"
+        } else if self.eat_operator("..") {
+            "range"
         } else {
-            Ok(Expression::Infix(InfixExpression {
-                syntax: self.syntax(start),
-                operands,
-                operators,
-            }))
+            return Ok(left);
+        };
+        let applied = self.apply_prelude_operator(start, operator_start, function_name, left);
+        let right = self.parse_comparison_expression()?;
+        let expression = Expression::Call(CallExpression {
+            syntax: self.syntax(start),
+            callee: Box::new(applied),
+            argument: Box::new(right),
+        });
+        if !(self.newline_terminates_expression && self.has_newline_before_next_token())
+            && (self.at_operator("..=") || self.at_operator(".."))
+        {
+            return Err(self.error(
+                "range operators cannot be chained; parenthesize to disambiguate",
+            ));
         }
+        Ok(expression)
     }
 
-    fn parse_infix_operator(&mut self) -> Result<Option<InfixOperator>, ParseError> {
-        if self.newline_terminates_expression && self.has_newline_before_next_token() {
-            return Ok(None);
-        }
+    /// Parses `==`/`!=`/`<`/`<=`/`>`/`>=` (precedence 4, non-associative),
+    /// desugaring directly to the corresponding `Eq`/`PartialOrd` trait call.
+    fn parse_comparison_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
-        if self.peek() == Some(TokenKind::Equals) {
-            return Ok(None);
+        let left = self.parse_additive_expression()?;
+        if self.newline_terminates_expression && self.has_newline_before_next_token() {
+            return Ok(left);
         }
-        if self.eat(TokenKind::Backtick) {
-            let first = self
-                .expect(
-                    TokenKind::Identifier,
-                    "expected function name after backtick",
-                )?
-                .text;
-            let (namespace, name) =
-                self.parse_qualified_name_from(first, "expected qualified function name")?;
-            self.expect(TokenKind::Backtick, "expected closing backtick")?;
-            return Ok(Some(InfixOperator {
-                syntax: self.syntax(start),
-                namespace,
-                name,
-            }));
+        let operator_start = self.position;
+        let Some((trait_name, method_name)) = self.eat_comparison_operator() else {
+            return Ok(left);
+        };
+        let applied =
+            self.apply_trait_operator(start, operator_start, trait_name, method_name, left);
+        let right = self.parse_additive_expression()?;
+        let expression = Expression::Call(CallExpression {
+            syntax: self.syntax(start),
+            callee: Box::new(applied),
+            argument: Box::new(right),
+        });
+        if !(self.newline_terminates_expression && self.has_newline_before_next_token())
+            && self.at_comparison_operator()
+        {
+            return Err(self.error(
+                "comparison operators cannot be chained; parenthesize to disambiguate",
+            ));
         }
-        if let Some(operator_offset) = self.qualified_symbol_offset(0) {
-            let mut namespace = Vec::new();
-            while self.peek_n(1) == Some(TokenKind::Dot)
-                && self.peek_n(2) == Some(TokenKind::Identifier)
-            {
-                namespace.push(self.bump_token().expect("peeked namespace").text);
-                self.expect(TokenKind::Dot, "expected `.`")?;
+        Ok(expression)
+    }
+
+    /// Parses `+`/`-` (precedence 6, left-associative), desugaring each
+    /// application directly to the corresponding `Add`/`Subtract` trait call.
+    fn parse_additive_expression(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        let mut expression = self.parse_multiplicative_expression()?;
+        loop {
+            if self.newline_terminates_expression && self.has_newline_before_next_token() {
+                break;
             }
-            namespace.push(self.bump_token().expect("peeked namespace").text);
-            self.expect(TokenKind::Dot, "expected `.`")?;
-            debug_assert!(operator_offset >= 2);
-            let name = self.bump_token().expect("peeked operator").text;
-            return Ok(Some(InfixOperator {
+            let operator_start = self.position;
+            let operator = if self.eat(TokenKind::Plus) {
+                Some(("Add", "add"))
+            } else if self.eat(TokenKind::Minus) {
+                Some(("Subtract", "subtract"))
+            } else {
+                None
+            };
+            let Some((trait_name, method_name)) = operator else {
+                break;
+            };
+            let applied = self.apply_trait_operator(
+                start,
+                operator_start,
+                trait_name,
+                method_name,
+                expression,
+            );
+            let right = self.parse_multiplicative_expression()?;
+            expression = Expression::Call(CallExpression {
                 syntax: self.syntax(start),
-                namespace: Some(namespace.join(".")),
-                name,
-            }));
+                callee: Box::new(applied),
+                argument: Box::new(right),
+            });
         }
-        if self.peek().is_some_and(is_symbol_kind) {
-            let name = self.bump_token().expect("peeked operator").text;
-            return Ok(Some(InfixOperator {
+        Ok(expression)
+    }
+
+    /// Parses `*`/`/` (precedence 7, left-associative), desugaring each
+    /// application directly to the corresponding `Multiply`/`Divide` trait call.
+    fn parse_multiplicative_expression(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        let mut expression = self.parse_call_expression()?;
+        loop {
+            if self.newline_terminates_expression && self.has_newline_before_next_token() {
+                break;
+            }
+            let operator_start = self.position;
+            let operator = if self.eat(TokenKind::Star) {
+                Some(("Multiply", "multiply"))
+            } else if self.eat(TokenKind::Slash) {
+                Some(("Divide", "divide"))
+            } else {
+                None
+            };
+            let Some((trait_name, method_name)) = operator else {
+                break;
+            };
+            let applied = self.apply_trait_operator(
+                start,
+                operator_start,
+                trait_name,
+                method_name,
+                expression,
+            );
+            let right = self.parse_call_expression()?;
+            expression = Expression::Call(CallExpression {
                 syntax: self.syntax(start),
-                namespace: None,
-                name,
-            }));
+                callee: Box::new(applied),
+                argument: Box::new(right),
+            });
         }
-        Ok(None)
+        Ok(expression)
+    }
+
+    fn eat_comparison_operator(&mut self) -> Option<(&'static str, &'static str)> {
+        for (text, trait_name, method_name) in Self::COMPARISON_OPERATORS {
+            if self.eat_operator(text) {
+                return Some((trait_name, method_name));
+            }
+        }
+        None
+    }
+
+    fn at_comparison_operator(&self) -> bool {
+        Self::COMPARISON_OPERATORS
+            .iter()
+            .any(|(text, _, _)| self.at_operator(text))
+    }
+
+    /// Builds `Trait.method left` using the operator token's own span for the
+    /// synthesized `Trait`/`method` names. Must be called immediately after
+    /// consuming the operator token and before parsing the right operand, so
+    /// the synthesized spans stay tied to the operator instead of growing to
+    /// include the right-hand side.
+    fn apply_trait_operator(
+        &mut self,
+        start: usize,
+        operator_start: usize,
+        trait_name: &str,
+        method_name: &str,
+        left: Expression,
+    ) -> Expression {
+        let name = Expression::Name(NameExpression {
+            syntax: self.syntax(operator_start),
+            name: trait_name.to_owned(),
+        });
+        let access = Expression::Access(AccessExpression {
+            syntax: self.syntax(operator_start),
+            value: Box::new(name),
+            accessor: Accessor::Name(method_name.to_owned()),
+        });
+        Expression::Call(CallExpression {
+            syntax: self.syntax(start),
+            callee: Box::new(access),
+            argument: Box::new(left),
+        })
+    }
+
+    /// Builds `function left` for a builtin operator that desugars to an
+    /// ordinary prelude function rather than a trait method (`..`/`..=`). See
+    /// `apply_trait_operator` for the span-timing requirement.
+    fn apply_prelude_operator(
+        &mut self,
+        start: usize,
+        operator_start: usize,
+        function_name: &str,
+        left: Expression,
+    ) -> Expression {
+        let name = Expression::Name(NameExpression {
+            syntax: self.syntax(operator_start),
+            name: function_name.to_owned(),
+        });
+        Expression::Call(CallExpression {
+            syntax: self.syntax(start),
+            callee: Box::new(name),
+            argument: Box::new(left),
+        })
     }
 
     /// Parses juxtaposition-based function calls.
     fn parse_call_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_access_expression()?;
-        while self.starts_atom() && self.qualified_symbol_offset(0).is_none() {
+        while self.starts_atom() {
             let checkpoint = self.position;
             let next_syntax_id = self.next_syntax_id;
             let argument = match self.parse_access_expression() {
@@ -1867,7 +1981,6 @@ impl Grammar {
             }
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
             Some(TokenKind::LBracket) => self.parse_syntax_argument(),
-            Some(TokenKind::LParen) if self.parenthesized_operator() => self.parse_operator_value(),
             Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
             Some(TokenKind::Identifier | TokenKind::Underscore) => {
                 let start = self.position;
@@ -2170,12 +2283,6 @@ impl Grammar {
         if self.newline_terminates_expression && self.has_newline_before_next_token() {
             return false;
         }
-        if self.peek() == Some(TokenKind::Identifier)
-            && self.peek_n(1) == Some(TokenKind::Dot)
-            && self.peek_n(2).is_some_and(is_symbol_kind)
-        {
-            return false;
-        }
         if self.brace_terminates_expression && self.peek() == Some(TokenKind::LBrace) {
             return false;
         }
@@ -2228,57 +2335,8 @@ impl Grammar {
         }
     }
 
-    fn parenthesized_operator(&self) -> bool {
-        self.peek() == Some(TokenKind::LParen)
-            && (self.peek_n(1).is_some_and(is_symbol_kind)
-                && self.peek_n(2) == Some(TokenKind::RParen)
-                || self
-                    .qualified_symbol_offset(1)
-                    .is_some_and(|operator| self.peek_n(operator + 1) == Some(TokenKind::RParen)))
-    }
-
-    fn parse_operator_value(&mut self) -> Result<Expression, ParseError> {
-        let start = self.position;
-        self.expect(TokenKind::LParen, "expected `(`")?;
-        let first = self.bump_token().expect("peeked operator value");
-        let mut qualified_parts = Vec::new();
-        if first.kind == TokenKind::Identifier {
-            qualified_parts.push(first.text.clone());
-            while self.peek_n(1) == Some(TokenKind::Dot)
-                && self.peek_n(2) == Some(TokenKind::Identifier)
-            {
-                self.expect(TokenKind::Dot, "expected `.`")?;
-                qualified_parts.push(self.bump_token().expect("peeked namespace").text);
-            }
-            self.expect(TokenKind::Dot, "expected `.`")?;
-            qualified_parts.push(self.bump_token().expect("peeked qualified operator").text);
-        }
-        self.expect(TokenKind::RParen, "expected `)` after operator")?;
-        let expression = if !qualified_parts.is_empty() {
-            let mut parts = qualified_parts.into_iter();
-            let mut expression = Expression::Name(NameExpression {
-                syntax: self.syntax(start),
-                name: parts.next().expect("qualified operator has a namespace"),
-            });
-            for part in parts {
-                expression = Expression::Access(AccessExpression {
-                    syntax: self.syntax(start),
-                    value: Box::new(expression),
-                    accessor: Accessor::Name(part),
-                });
-            }
-            expression
-        } else {
-            Expression::Name(NameExpression {
-                syntax: self.syntax(start),
-                name: first.text,
-            })
-        };
-        Ok(expression)
-    }
-
     fn parse_value_name(&mut self, message: &'static str) -> Result<String, ParseError> {
-        if self.peek() == Some(TokenKind::Identifier) || self.peek().is_some_and(is_symbol_kind) {
+        if self.peek() == Some(TokenKind::Identifier) {
             Ok(self.bump_token().expect("peeked value name").text)
         } else {
             Err(self.error(message))
@@ -2299,41 +2357,12 @@ impl Grammar {
         Ok(((!parts.is_empty()).then(|| parts.join(".")), name))
     }
 
-    fn qualified_symbol_offset(&self, start: usize) -> Option<usize> {
-        if self.peek_n(start) != Some(TokenKind::Identifier) {
-            return None;
-        }
-        let mut offset = start + 1;
-        loop {
-            if self.peek_n(offset) != Some(TokenKind::Dot) {
-                return None;
-            }
-            match self.peek_n(offset + 1) {
-                Some(TokenKind::Identifier) => offset += 2,
-                Some(kind) if is_symbol_kind(kind) => return Some(offset + 1),
-                _ => return None,
-            }
-        }
-    }
-
-    fn parse_binding_name(&mut self) -> Result<(String, bool), ParseError> {
-        let mut name = self.parse_value_name("expected binding name")?;
-        let consumed_colon =
-            name.len() > 1 && name.ends_with(':') && self.peek().is_some_and(is_type_atom_start);
-        if consumed_colon {
-            name.pop();
-        }
-        Ok((name, consumed_colon))
+    fn parse_binding_name(&mut self) -> Result<String, ParseError> {
+        self.parse_value_name("expected binding name")
     }
 
     fn parse_import_name(&mut self) -> Result<String, ParseError> {
-        if self.eat(TokenKind::LParen) {
-            let name = self.parse_value_name("expected operator in imported name")?;
-            self.expect(TokenKind::RParen, "expected `)` after imported operator")?;
-            Ok(name)
-        } else {
-            self.parse_value_name("expected imported item name")
-        }
+        self.parse_value_name("expected imported item name")
     }
 
     /// Returns the next non-trivia token kind without consuming it.
@@ -2388,6 +2417,14 @@ impl Grammar {
         } else {
             false
         }
+    }
+
+    /// Returns whether the next non-trivia token is an exact-text operator
+    /// token, without consuming it.
+    fn at_operator(&self, expected: &str) -> bool {
+        self.tokens
+            .get(self.next_non_trivia(self.position))
+            .is_some_and(|token| token.kind == TokenKind::Operator && token.text == expected)
     }
 
     /// Consumes a required token or reports `message` at the cursor.
@@ -2571,19 +2608,6 @@ fn pattern_has_mutable(pattern: &Pattern) -> bool {
         Pattern::Nominal(nominal) => pattern_has_mutable(&nominal.argument),
         Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
     }
-}
-
-fn is_symbol_kind(kind: TokenKind) -> bool {
-    matches!(
-        kind,
-        TokenKind::Operator
-            | TokenKind::Colon
-            | TokenKind::Equals
-            | TokenKind::Star
-            | TokenKind::Plus
-            | TokenKind::Minus
-            | TokenKind::Slash
-    )
 }
 
 fn is_type_atom_start(kind: TokenKind) -> bool {

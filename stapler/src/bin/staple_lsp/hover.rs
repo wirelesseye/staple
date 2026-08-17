@@ -183,11 +183,6 @@ impl Collector<'_> {
                 self.collect_expression_declarations(&index.value);
                 self.collect_expression_declarations(&index.index);
             }
-            Expression::Infix(infix) => {
-                for operand in &infix.operands {
-                    self.collect_expression_declarations(operand);
-                }
-            }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(quote) => match &quote.template {
                 QuoteTemplate::Expression(expression) => {
@@ -674,11 +669,6 @@ impl Collector<'_> {
             Expression::Index(index) => {
                 self.expression(&index.value);
                 self.expression(&index.index);
-            }
-            Expression::Infix(infix) => {
-                for operand in &infix.operands {
-                    self.expression(operand);
-                }
             }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(quote) => match &quote.template {

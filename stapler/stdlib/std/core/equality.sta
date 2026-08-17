@@ -1,4 +1,4 @@
-pub trait Eq = T => {
+pub trait Eq = T => Copy T => {
     equal: T -> T -> Bool
     not_equal: T -> T -> Bool
 }

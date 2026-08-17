@@ -22,19 +22,19 @@ pub type Equal
 pub type Greater
 pub type alias Ordering = Less | Equal | Greater
 
-pub trait Add = T => {
+pub trait Add = T => Copy T => {
     add: T -> T -> T
 }
 
-pub trait Subtract = T => {
+pub trait Subtract = T => Copy T => {
     subtract: T -> T -> T
 }
 
-pub trait Multiply = T => {
+pub trait Multiply = T => Copy T => {
     multiply: T -> T -> T
 }
 
-pub trait Divide = T => {
+pub trait Divide = T => Copy T => {
     divide: T -> T -> T
 }
 

@@ -2509,17 +2509,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map_err(|error| Diagnostic::new(access.syntax.span.clone(), error.to_string()))
             }
             Expression::Index(index) => self.compile_index_expression(environment, index),
-            Expression::Infix(infix) => {
-                let lowered = self
-                    .typed_module
-                    .resolved()
-                    .lowered_infix(infix.syntax.id)
-                    .cloned()
-                    .ok_or_else(|| {
-                        Diagnostic::new(infix.syntax.span.clone(), "unresolved infix expression")
-                    })?;
-                self.compile_expression(environment, &lowered)
-            }
             Expression::Name(name) => {
                 let symbol = self
                     .typed_module

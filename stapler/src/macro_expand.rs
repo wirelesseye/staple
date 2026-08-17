@@ -2041,14 +2041,6 @@ impl MacroExpander {
                 index.index = Box::new(self.expand_expression(module, *index.index, depth));
                 Expression::Index(index)
             }
-            Expression::Infix(mut infix) => {
-                infix.operands = infix
-                    .operands
-                    .into_iter()
-                    .map(|operand| self.expand_expression(module, operand, depth))
-                    .collect();
-                Expression::Infix(infix)
-            }
             Expression::Quote(quote) => {
                 self.diagnostics.push(Diagnostic::new(
                     quote.syntax.span.clone(),
@@ -2619,6 +2611,11 @@ impl MacroExpander {
             }
             Expression::Call(call) => {
                 let (head, arguments) = flatten_call(expression);
+                if let Some(result) =
+                    self.eval_builtin_operator_call(module, head, &arguments, environment)
+                {
+                    return result;
+                }
                 if let Some(keys) = self.resolve_macro(module, head) {
                     let selected = self.select_macro(
                         &keys,
@@ -2921,7 +2918,6 @@ impl MacroExpander {
                 }
                 Some(result)
             }
-            Expression::Infix(infix) => self.eval_infix(module, infix, environment),
             Expression::CString(_) => {
                 self.diagnostics.push(Diagnostic::new(
                     expression.syntax().span.clone(),
@@ -3402,49 +3398,88 @@ impl MacroExpander {
         }
     }
 
-    fn eval_infix(
+    /// Folds a builtin arithmetic/comparison operator call the parser
+    /// desugars `+`/`-`/`*`/`/`/`==`/`!=`/`<`/`<=`/`>`/`>=` into (e.g.
+    /// `Add.add left right` for `left + right`), the same way the language's
+    /// former `infix` expression evaluator once folded operator chains
+    /// directly by operator name. Returns `None` when `head`/`arguments`
+    /// doesn't match one of these ten known trait/method pairs with exactly
+    /// two arguments, so the caller falls back to ordinary call evaluation
+    /// (this also means `..`/`..=`, which desugar to plain function calls
+    /// rather than a trait method, are left to that fallback and remain
+    /// unsupported at compile time, unchanged from before).
+    fn eval_builtin_operator_call(
         &mut self,
         module: ModuleId,
-        infix: &crate::InfixExpression,
+        head: &Expression,
+        arguments: &[&Expression],
         environment: &mut Environment,
-    ) -> Option<Value> {
-        let mut value = self.eval_expression(module, infix.operands.first()?, environment)?;
-        for (operator, operand) in infix.operators.iter().zip(&infix.operands[1..]) {
-            let right = self.eval_expression(module, operand, environment)?;
-            value = match (&value, &right, operator.name.as_str()) {
-                (Value::Integer(left), Value::Integer(right), "+") => {
-                    Value::Integer(left.wrapping_add(*right))
-                }
-                (Value::Integer(left), Value::Integer(right), "-") => {
-                    Value::Integer(left.wrapping_sub(*right))
-                }
-                (Value::Integer(left), Value::Integer(right), "*") => {
-                    Value::Integer(left.wrapping_mul(*right))
-                }
-                (Value::Integer(left), Value::Integer(right), "/") if *right != 0 => {
-                    Value::Integer(left.wrapping_div(*right))
-                }
-                (Value::Integer(left), Value::Integer(right), "==") => bool_value(left == right),
-                (Value::Integer(left), Value::Integer(right), "!=") => bool_value(left != right),
-                (Value::Integer(left), Value::Integer(right), "<") => bool_value(left < right),
-                (Value::Integer(left), Value::Integer(right), "<=") => bool_value(left <= right),
-                (Value::Integer(left), Value::Integer(right), ">") => bool_value(left > right),
-                (Value::Integer(left), Value::Integer(right), ">=") => bool_value(left >= right),
-                (Value::String(left), Value::String(right), "==") => bool_value(left == right),
-                (Value::String(left), Value::String(right), "!=") => bool_value(left != right),
-                _ => {
-                    self.diagnostics.push(Diagnostic::new(
-                        operator.syntax.span.clone(),
-                        format!(
-                            "operator `{}` is not available for these compile-time values",
-                            operator.name
-                        ),
-                    ));
-                    return None;
-                }
-            };
+    ) -> Option<Option<Value>> {
+        const BUILTIN_OPERATOR_METHODS: [(&str, &str, &str); 10] = [
+            ("Add", "add", "+"),
+            ("Subtract", "subtract", "-"),
+            ("Multiply", "multiply", "*"),
+            ("Divide", "divide", "/"),
+            ("Eq", "equal", "=="),
+            ("Eq", "not_equal", "!="),
+            ("PartialOrd", "lt", "<"),
+            ("PartialOrd", "le", "<="),
+            ("PartialOrd", "gt", ">"),
+            ("PartialOrd", "ge", ">="),
+        ];
+        if arguments.len() != 2 {
+            return None;
         }
-        Some(value)
+        let Expression::Access(access) = head else {
+            return None;
+        };
+        let Expression::Name(name) = access.value.as_ref() else {
+            return None;
+        };
+        let Accessor::Name(method) = &access.accessor else {
+            return None;
+        };
+        let operator = BUILTIN_OPERATOR_METHODS
+            .iter()
+            .find(|(trait_name, method_name, _)| {
+                *trait_name == name.name && *method_name == method
+            })
+            .map(|(_, _, operator)| *operator)?;
+        let Some(left) = self.eval_expression(module, arguments[0], environment) else {
+            return Some(None);
+        };
+        let Some(right) = self.eval_expression(module, arguments[1], environment) else {
+            return Some(None);
+        };
+        Some(match (&left, &right, operator) {
+            (Value::Integer(left), Value::Integer(right), "+") => {
+                Some(Value::Integer(left.wrapping_add(*right)))
+            }
+            (Value::Integer(left), Value::Integer(right), "-") => {
+                Some(Value::Integer(left.wrapping_sub(*right)))
+            }
+            (Value::Integer(left), Value::Integer(right), "*") => {
+                Some(Value::Integer(left.wrapping_mul(*right)))
+            }
+            (Value::Integer(left), Value::Integer(right), "/") if *right != 0 => {
+                Some(Value::Integer(left.wrapping_div(*right)))
+            }
+            (Value::Integer(left), Value::Integer(right), "==") => Some(bool_value(left == right)),
+            (Value::Integer(left), Value::Integer(right), "!=") => Some(bool_value(left != right)),
+            (Value::Integer(left), Value::Integer(right), "<") => Some(bool_value(left < right)),
+            (Value::Integer(left), Value::Integer(right), "<=") => Some(bool_value(left <= right)),
+            (Value::Integer(left), Value::Integer(right), ">") => Some(bool_value(left > right)),
+            (Value::Integer(left), Value::Integer(right), ">=") => Some(bool_value(left >= right)),
+            (Value::String(left), Value::String(right), "==") => Some(bool_value(left == right)),
+            (Value::String(left), Value::String(right), "!=") => Some(bool_value(left != right)),
+            _ => {
+                self.diagnostics.push(Diagnostic::new(
+                    access.syntax.span.clone(),
+                    format!("operator `{operator}` is not available for these compile-time values"),
+                ));
+                None
+            }
+        })
     }
 
     fn instantiate_quote(
@@ -3873,14 +3908,6 @@ impl MacroExpander {
             Expression::Index(index) => {
                 self.freshen_expression(&mut index.value, module, mark);
                 self.freshen_expression(&mut index.index, module, mark);
-            }
-            Expression::Infix(infix) => {
-                for operand in &mut infix.operands {
-                    self.freshen_expression(operand, module, mark);
-                }
-                for operator in &mut infix.operators {
-                    self.freshen_syntax(&mut operator.syntax, module, mark);
-                }
             }
             Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
@@ -5231,8 +5258,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
                     | Statement::Continue(_) => true,
                 })
         }
-        Expression::Infix(_)
-        | Expression::Function(_)
+        Expression::Function(_)
         | Expression::Product(_)
         | Expression::String(_)
         | Expression::CString(_)
@@ -5779,11 +5805,6 @@ fn substitute_splices(
         Expression::Index(index) => {
             *index.value = substitute_splices(&index.value, environment, diagnostics)?;
             *index.index = substitute_splices(&index.index, environment, diagnostics)?;
-        }
-        Expression::Infix(infix) => {
-            for operand in &mut infix.operands {
-                *operand = substitute_splices(operand, environment, diagnostics)?;
-            }
         }
         Expression::Quote(_) => {}
         Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
@@ -6631,11 +6652,6 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut index.value, mark, scopes);
             alpha_rename_expression(&mut index.index, mark, scopes);
         }
-        Expression::Infix(infix) => {
-            for operand in &mut infix.operands {
-                alpha_rename_expression(operand, mark, scopes);
-            }
-        }
         Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)
         | Expression::Quote(_)
@@ -6700,7 +6716,6 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Call(value) => &mut value.syntax,
         Expression::Access(value) => &mut value.syntax,
         Expression::Index(value) => &mut value.syntax,
-        Expression::Infix(value) => &mut value.syntax,
         Expression::SyntaxArgument(value) => &mut value.syntax,
         Expression::VisibilityArgument(value) => &mut value.syntax,
         Expression::Quote(value) => &mut value.syntax,

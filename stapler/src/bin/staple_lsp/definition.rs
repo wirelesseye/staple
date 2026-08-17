@@ -212,11 +212,6 @@ impl DeclarationCollector<'_> {
                 self.expression(&value.value);
                 self.expression(&value.index);
             }
-            Expression::Infix(value) => {
-                for operand in &value.operands {
-                    self.expression(operand);
-                }
-            }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression),
@@ -568,14 +563,6 @@ impl Collector<'_> {
                 self.expression(&value.value);
                 self.expression(&value.index);
             }
-            Expression::Infix(value) => {
-                for operand in &value.operands {
-                    self.expression(operand);
-                }
-                for operator in &value.operators {
-                    self.add_resolved(&operator.syntax, &operator.name, true);
-                }
-            }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(expression) => self.expression(expression),
@@ -786,16 +773,6 @@ mod tests {
         assert_target(source, &entries, "identity", "identity");
         assert_target(source, &entries, "value", "value");
         assert_target(source, &entries, "first", "first");
-        assert!(
-            entries.iter().any(|entry| {
-                &source[entry.range.clone()] == "+"
-                    && entry
-                        .targets
-                        .iter()
-                        .any(|target| target.path.ends_with("std/core/number.sta"))
-            }),
-            "missing operator definition: {entries:?}"
-        );
     }
 
     #[test]

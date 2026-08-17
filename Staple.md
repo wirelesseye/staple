@@ -799,25 +799,25 @@ Macros are module items and support the same namespace, glob, selected, and
 renamed import forms as values and types. Public macros retain their definition
 environment, including private helpers used by generated syntax.
 
-Operators are ordinary curried function values. The standard prelude provides
-`+`, `-`, `*`, and `/` through the `Add`, `Subtract`, `Multiply`, and `Divide`
-traits. Each operator is one bounded generic function; arithmetic is not
-implemented with function overloading. The standard integer implementations
-are backed by private compiler intrinsics. A symbolic function may
-declare its fixity as part of its binding:
+Operators are fixed grammar with fixed precedence and associativity; there is
+no user-definable operator or infix-function syntax. Each operator desugars
+directly to a call against a standard prelude trait, and arithmetic is not
+implemented with function overloading:
 
-```staple
-def infixl 6 <>: I32 -> I32 -> I32 = left => right => left
-```
+| Operator(s) | Precedence | Associativity | Desugars to |
+|---|---|---|---|
+| `*`, `/` | 7 | left | `Multiply.multiply`, `Divide.divide` |
+| `+`, `-` | 6 | left | `Add.add`, `Subtract.subtract` |
+| `==`, `!=`, `<`, `<=`, `>`, `>=` | 4 | none | `Eq.equal`/`Eq.not_equal`, `PartialOrd.lt`/`le`/`gt`/`ge` |
+| `..`, `..=` | 3 | none | the prelude's `range`/`range_inclusive` functions |
 
-`infixl`, `infixr`, and `infix` declare left, right, and no associativity. The
-following integer is a precedence from `0` through `9`. A function without an
-explicit fixity defaults to `infixl 9`. Fixity modifiers are allowed only on
-module-level `let` and `def` bindings and external declarations.
-
-Symbolic operators use maximal sequences of
-`!#$%&*+./<=>?@\^|-~:`. Staple's arrows, comments, and structural punctuation
-remain reserved in their grammatical contexts.
+Function application and access bind tighter than every operator above.
+Chaining two non-associative operators at the same precedence (for example
+`1 == 2 == 3`) is a parse error; parenthesize to disambiguate. The standard
+integer implementations of `Add`, `Subtract`, `Multiply`, `Divide`, `Eq`, and
+`PartialOrd` are backed by private compiler intrinsics. `..`/`..=` are not
+trait-based: they call the prelude's `range`/`range_inclusive` functions
+directly, which construct `Range T`/`RangeInclusive T` values.
 
 ### Products
 
@@ -1499,27 +1499,18 @@ Both calls produce `3`. `add 1` returns a function that captures the value of
 stored or passed like other values. Product-parameter functions remain the
 ordinary choice when all arguments should be supplied together.
 
-An infix call supplies its left and right operands through two curried calls:
+The fixed operators (`+ - * / == != < <= > >= .. ..=`, see
+[Values and expressions](#values-and-expressions)) desugar to the same shape:
+an operator call supplies its left and right operands through two curried
+calls against the operator's trait method or prelude function.
 
 ```staple
-def infixl 6 <>: I32 -> I32 -> I32 = left => right => left
-def infixr 5 choose: I32 -> I32 -> I32 = left => right => right
-
-1 <> 2
-1 `choose` 2
-(<>) 1 2
-(<>)
+1 + 2
+1 == 2
 ```
 
-The last expression passes `<>` as a value rather than calling it. Function
-application and access bind more tightly than infix calls. Operators at the
-same precedence must use a compatible associativity; chaining an `infix`
-operator is an error.
-
-Public functions carry their fixity through namespace, glob, selected, and
-renamed imports. Symbolic selected imports use an extra pair of parentheses,
-for example `use math ((<>))`; qualified values and calls may be written
-`(math.<>)` and `1 math.<> 2`.
+`1 + 2` desugars to `Add.add 1 2`; there is no way to write a custom infix
+operator or to pass a builtin operator as a bare value.
 
 ## Block expressions
 
@@ -1682,7 +1673,7 @@ the body, so `continue` advances normally. `break` exits the iteration and
 `return` exits the enclosing function. Normal exhaustion produces `()`, making
 the complete `for` expression unit-valued.
 
-Function application binds more tightly than infix operators, so a compound
+Function application binds more tightly than operators, so a compound
 iterator expression must be parenthesized as one macro argument. In particular,
 ranges are written:
 
@@ -1691,9 +1682,12 @@ for index in (0 .. 10) { consume index }
 for index in (0 ..= 10) { consume index }
 ```
 
-`start .. end` excludes `end`; `start ..= end` includes it. Both operators are
-non-associative at precedence 3 and evaluate their endpoints once. Standard
-iteration is available for every signed, unsigned, and pointer-sized integer
+`start .. end` excludes `end`; `start ..= end` includes it. Both are fixed,
+non-associative operators at precedence 3 (see
+[Values and expressions](#values-and-expressions)) that desugar to the
+prelude's `range`/`range_inclusive` functions and evaluate their endpoints
+once. Standard iteration is available for every signed, unsigned, and
+pointer-sized integer
 type. Ranges advance by one, and a range whose start is greater than its end is
 empty. Inclusive iteration yields a maximum integer endpoint without computing
 an overflowing successor. `Range T` and `RangeInclusive T` expose their

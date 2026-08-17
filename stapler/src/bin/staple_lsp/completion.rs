@@ -12,9 +12,6 @@ const KEYWORDS: &[&str] = &[
     "def",
     "extern",
     "impl",
-    "infix",
-    "infixl",
-    "infixr",
     "let",
     "loop",
     "macro",
@@ -358,11 +355,6 @@ impl Collector<'_> {
             Expression::Index(value) => {
                 self.expression(&value.value, module_index);
                 self.expression(&value.index, module_index);
-            }
-            Expression::Infix(value) => {
-                for operand in &value.operands {
-                    self.expression(operand, module_index);
-                }
             }
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(value) => self.expression(value, module_index),

@@ -268,16 +268,6 @@ impl<'a> OwnershipChecker<'a> {
                 self.check_expression(&value.index, true);
                 true
             }
-            Expression::Infix(value) => {
-                if let Some(lowered) = self.module.resolved().lowered_infix(value.syntax.id) {
-                    self.check_expression(lowered, consume)
-                } else {
-                    for operand in &value.operands {
-                        self.check_expression(operand, true);
-                    }
-                    true
-                }
-            }
             Expression::Name(value) => {
                 if let Some(symbol) = self.module.symbol_for(value.syntax.id) {
                     self.use_symbol(symbol, &value.syntax, consume);
