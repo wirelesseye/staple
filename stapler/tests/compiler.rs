@@ -73,7 +73,6 @@ fn with_syntax_imports(source: &str) -> String {
             "Visibility",
             source.contains(": Visibility") || source.contains("-> Visibility"),
         ),
-        ("StringType", source.contains("StringType")),
         ("QuoteResult", source.contains("QuoteResult")),
     ] {
         if used && !names.contains(&name) {
@@ -4011,12 +4010,61 @@ fn rejects_bare_literal_identifier_macro_parameters() {
 }
 
 #[test]
-fn string_type_is_satisfied_by_strings_and_literal_types() {
+fn subtype_bound_call_preserves_string_literal_type() {
+    let module = type_check(concat!(
+        "def string_identity: T => T <: String => T -> T = x => x\n",
+        "string_identity \"foo\"\n",
+    ));
+    let Item::Statement(statement) = &module.syntax().items[1] else {
+        panic!("expected expression statement");
+    };
+    let Statement::Expression(expression) = statement.as_ref() else {
+        panic!("expected expression statement");
+    };
+    assert_eq!(
+        module.type_of_expression(expression.syntax().id),
+        Some(&CheckedType::StringLiteralSet(vec!["foo".to_owned()]))
+    );
+}
+
+#[test]
+fn subtype_bound_rejects_non_string_arguments() {
+    let module = resolve(concat!(
+        "def string_identity: T => T <: String => T -> T = x => x\n",
+        "string_identity 1\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("`I32` does not satisfy `T <: String`");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "subtype bound is not satisfied: `I32` is not a subtype of `String`"
+    }));
+}
+
+#[test]
+fn subtype_bound_reflexivity() {
     type_check(concat!(
-        "def preserve: T => StringType T => T -> T = value => value\n",
-        "let literal = preserve \"hello\"\n",
-        "let text: String = \"hello\"\n",
-        "let copied: String = preserve text\n",
+        "def echo: T => T <: T => T -> T = x => x\n",
+        "echo \"hello\"\n",
+        "echo 1\n",
+    ));
+}
+
+#[test]
+fn subtype_bound_union_introduction() {
+    type_check(concat!(
+        "def widen: T => T <: I32 | String => T -> () = x => ()\n",
+        "widen 1\n",
+        "widen \"text\"\n",
+    ));
+}
+
+#[test]
+fn subtype_bound_union_elimination() {
+    type_check(concat!(
+        "def accept: T => T <: I32 | String | F64 => T -> () = x => ()\n",
+        "let value: I32 | String = 1\n",
+        "accept value\n",
     ));
 }
 
@@ -4028,23 +4076,9 @@ fn ident_rejects_non_string_spelling_types() {
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("Ident's spelling argument must satisfy StringType");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message == "trait bound is not satisfied for `I32`" })
-    );
-}
-
-#[test]
-fn rejects_explicit_string_type_implementations() {
-    let module = resolve("impl StringType I32 {}\n");
-    let diagnostics = TypeChecker::new()
-        .check(module)
-        .expect_err("StringType must remain sealed");
+        .expect_err("Ident's spelling argument must satisfy `Spelling <: String`");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message
-            == "`StringType` is compiler-defined and cannot be implemented explicitly"
+        diagnostic.message == "subtype bound is not satisfied: `I32` is not a subtype of `String`"
     }));
 }
 

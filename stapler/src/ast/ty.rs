@@ -188,3 +188,10 @@ pub struct TraitBound {
     pub trait_name: NamedType,
     pub arguments: Vec<Type>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubtypeBound {
+    pub syntax: Syntax,
+    pub parameter: NamedType,
+    pub supertype: Type,
+}

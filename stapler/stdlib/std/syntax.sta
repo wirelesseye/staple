@@ -2,7 +2,7 @@
 // their data in the first structured-syntax slice; the remaining expression
 // forms round-trip through UnstructuredExpr without exposing their fields yet.
 @recursive_constructor
-pub(repr) type Ident = Spelling => StringType Spelling => Spelling
+pub(repr) type Ident = Spelling => Spelling <: String => Spelling
 @recursive_constructor
 pub(repr) type CallExpr = (
     callee: Expr,
@@ -37,10 +37,6 @@ pub type Public
 pub type PublicRepr
 pub type alias Visibility = Private | Public | PublicRepr
 pub type MacroCallVisibility = opaque
-
-// A sealed compiler-defined marker: String and every string literal type
-// satisfy it. It has no runtime methods or user implementations.
-pub trait StringType = T => {}
 
 // An arbitrary lossless syntax fragment. SyntaxNode is exactly one structural
 // node; delimiter nodes retain their complete, opaque contents.

@@ -439,12 +439,14 @@ impl Grammar {
             .text;
         let mut type_parameters = Vec::new();
         let mut trait_bounds = Vec::new();
+        let mut subtype_bounds = Vec::new();
         let annotation = if self.eat(TokenKind::Colon) {
             let previous = self.newline_terminates_type;
             self.newline_terminates_type = true;
             type_parameters = self.parse_type_parameters()?;
             if !type_parameters.is_empty() {
                 self.parse_sized_relaxations(&mut type_parameters)?;
+                subtype_bounds = self.parse_subtype_bounds()?;
                 trait_bounds = self.parse_trait_bounds()?;
             }
             let annotation = self.parse_type();
@@ -465,6 +467,7 @@ impl Grammar {
             modifier,
             type_parameters,
             trait_bounds,
+            subtype_bounds,
             annotation,
             value,
         })
@@ -488,6 +491,7 @@ impl Grammar {
         while let Some(dependency) = self.parse_functional_dependency()? {
             functional_dependencies.push(dependency);
         }
+        let subtype_bounds = self.parse_subtype_bounds()?;
         let prerequisites = self.parse_trait_bounds()?;
         self.expect(TokenKind::LBrace, "expected `{` before trait members")?;
         let mut members = Vec::new();
@@ -526,6 +530,7 @@ impl Grammar {
             type_parameters,
             functional_dependencies,
             prerequisites,
+            subtype_bounds,
             members,
         })
     }
@@ -916,6 +921,11 @@ impl Grammar {
             Vec::new()
         };
         self.parse_sized_relaxations(&mut type_parameters)?;
+        let subtype_bounds = if type_parameters.is_empty() {
+            Vec::new()
+        } else {
+            self.parse_subtype_bounds()?
+        };
         let trait_bounds = if type_parameters.is_empty() {
             Vec::new()
         } else {
@@ -955,6 +965,7 @@ impl Grammar {
             name,
             type_parameters,
             trait_bounds,
+            subtype_bounds,
             underlying,
         })
     }
@@ -993,10 +1004,12 @@ impl Grammar {
         };
         let mut type_parameters = Vec::new();
         let mut trait_bounds = Vec::new();
+        let mut subtype_bounds = Vec::new();
         let annotation = if annotation.is_some() {
             type_parameters = self.parse_type_parameters()?;
             if !type_parameters.is_empty() {
                 self.parse_sized_relaxations(&mut type_parameters)?;
+                subtype_bounds = self.parse_subtype_bounds()?;
                 trait_bounds = self.parse_trait_bounds()?;
             }
             Some(self.parse_type()?)
@@ -1020,6 +1033,7 @@ impl Grammar {
             name,
             type_parameters,
             trait_bounds,
+            subtype_bounds,
             annotation,
             value,
         })
@@ -1080,6 +1094,44 @@ impl Grammar {
                     name,
                 },
                 arguments,
+            });
+        }
+        Ok(bounds)
+    }
+
+    fn parse_subtype_bounds(&mut self) -> Result<Vec<SubtypeBound>, ParseError> {
+        let mut bounds = Vec::new();
+        loop {
+            let checkpoint = self.position;
+            let start = self.position;
+            let name = match self.expect(TokenKind::Identifier, "expected compile-time parameter") {
+                Ok(token) => token.text,
+                Err(_) => {
+                    self.position = checkpoint;
+                    break;
+                }
+            };
+            if !self.eat_operator("<:") {
+                self.position = checkpoint;
+                break;
+            }
+            let Ok(supertype) = self.parse_type_union() else {
+                self.position = checkpoint;
+                break;
+            };
+            if !self.eat(TokenKind::FatArrow) {
+                self.position = checkpoint;
+                break;
+            }
+            let syntax = self.syntax(start);
+            bounds.push(SubtypeBound {
+                syntax: syntax.clone(),
+                parameter: NamedType {
+                    syntax,
+                    namespace: None,
+                    name,
+                },
+                supertype,
             });
         }
         Ok(bounds)

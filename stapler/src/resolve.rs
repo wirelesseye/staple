@@ -263,6 +263,7 @@ pub struct ResolvedFunction {
     pub binding_annotation: Option<Type>,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<crate::TraitBound>,
+    pub subtype_bounds: Vec<crate::SubtypeBound>,
     pub captures: Vec<SymbolId>,
     pub body: Expression,
 }
@@ -753,6 +754,7 @@ pub struct NameResolver {
     definition_context_namespaces: Vec<HashMap<String, ModuleId>>,
     binding_type_parameters: HashMap<SyntaxId, Vec<TypeParameterPattern>>,
     binding_trait_bounds: HashMap<SyntaxId, Vec<crate::TraitBound>>,
+    binding_subtype_bounds: HashMap<SyntaxId, Vec<crate::SubtypeBound>>,
     declared_types: Vec<HashMap<String, TypeId>>,
     declared_macros: Vec<HashMap<String, Vec<MacroId>>>,
     declared_traits: Vec<HashMap<String, TraitId>>,
@@ -1606,6 +1608,8 @@ impl NameResolver {
             .insert(binding.syntax.id, binding.type_parameters.clone());
         self.binding_trait_bounds
             .insert(binding.syntax.id, binding.trait_bounds.clone());
+        self.binding_subtype_bounds
+            .insert(binding.syntax.id, binding.subtype_bounds.clone());
         self.symbols.insert(binding.syntax.id, symbol);
         self.symbol_owners.insert(symbol, None);
         self.symbol_modules.insert(symbol, self.current_module);
@@ -2110,6 +2114,20 @@ impl NameResolver {
                         self.resolve_type(argument);
                     }
                 }
+                for bound in &declaration.subtype_bounds {
+                    if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                        self.type_parameters.insert(bound.syntax.id, id);
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            bound.parameter.syntax.span.clone(),
+                            format!(
+                                "unknown compile-time parameter `{}` in subtype bound",
+                                bound.parameter.name
+                            ),
+                        ));
+                    }
+                    self.resolve_type(&bound.supertype);
+                }
                 if let Some(underlying) = &declaration.underlying {
                     self.resolve_type(underlying);
                     if declaration.representation_visibility == Visibility::Public {
@@ -2377,6 +2395,9 @@ impl NameResolver {
         self.binding_trait_bounds
             .entry(binding.syntax.id)
             .or_insert_with(|| binding.trait_bounds.clone());
+        self.binding_subtype_bounds
+            .entry(binding.syntax.id)
+            .or_insert_with(|| binding.subtype_bounds.clone());
         self.push_type_parameter_scope();
         for parameter in &binding.type_parameters {
             self.declare_type_parameter_pattern(parameter);
@@ -2391,6 +2412,20 @@ impl NameResolver {
             for argument in &bound.arguments {
                 self.resolve_type(argument);
             }
+        }
+        for bound in &binding.subtype_bounds {
+            if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                self.type_parameters.insert(bound.syntax.id, id);
+            } else {
+                self.diagnostics.push(Diagnostic::new(
+                    bound.parameter.syntax.span.clone(),
+                    format!(
+                        "unknown compile-time parameter `{}` in subtype bound",
+                        bound.parameter.name
+                    ),
+                ));
+            }
+            self.resolve_type(&bound.supertype);
         }
         if let Some(value) = &binding.value {
             self.resolve_expression(
@@ -2626,6 +2661,9 @@ impl NameResolver {
                         .unwrap_or_default(),
                     trait_bounds: suggested_function
                         .and_then(|(_, syntax)| self.binding_trait_bounds.get(&syntax).cloned())
+                        .unwrap_or_default(),
+                    subtype_bounds: suggested_function
+                        .and_then(|(_, syntax)| self.binding_subtype_bounds.get(&syntax).cloned())
                         .unwrap_or_default(),
                     captures,
                     body: (*function.body).clone(),

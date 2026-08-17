@@ -1,4 +1,6 @@
-use super::{Expression, NamedType, Syntax, TraitBound, Type, TypeParameterPattern};
+use super::{
+    Expression, NamedType, SubtypeBound, Syntax, TraitBound, Type, TypeParameterPattern,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
@@ -178,6 +180,7 @@ pub struct TypeDeclaration {
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
+    pub subtype_bounds: Vec<SubtypeBound>,
     pub underlying: Option<Type>,
 }
 
@@ -203,6 +206,7 @@ pub struct MacroDeclaration {
     pub modifier: bool,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
+    pub subtype_bounds: Vec<SubtypeBound>,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
 }
@@ -215,6 +219,7 @@ pub struct TraitDeclaration {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub functional_dependencies: Vec<FunctionalDependency>,
     pub prerequisites: Vec<TraitBound>,
+    pub subtype_bounds: Vec<SubtypeBound>,
     pub members: Vec<TraitMember>,
 }
 
@@ -264,6 +269,7 @@ pub struct Binding {
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
+    pub subtype_bounds: Vec<SubtypeBound>,
     pub annotation: Option<Type>,
     pub value: Option<Expression>,
 }

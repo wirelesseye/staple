@@ -44,6 +44,12 @@ pub struct CheckedTraitBound {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedSubtypeBound {
+    pub parameter: TypeParameterId,
+    pub supertype: CheckedType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedTraitDispatch {
     pub method: TraitMethodId,
     pub arguments: Vec<CheckedType>,
@@ -938,6 +944,7 @@ pub struct TypeChecker {
     expression_resources: HashMap<SyntaxId, CheckedResourceSet>,
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
+    function_subtype_bounds: HashMap<FunctionId, Vec<CheckedSubtypeBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
     trait_parameter_arguments: HashMap<TraitId, Vec<CheckedType>>,
     trait_functional_dependencies: HashMap<TraitId, Vec<CheckedFunctionalDependency>>,
@@ -954,7 +961,6 @@ pub struct TypeChecker {
     string_representation: Option<CheckedType>,
     copy_trait: Option<TraitId>,
     sized_trait: Option<TraitId>,
-    string_type_trait: Option<TraitId>,
     quote_result_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
@@ -962,6 +968,7 @@ pub struct TypeChecker {
     update_index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
+    active_subtype_bounds: Vec<Vec<CheckedSubtypeBound>>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     top_level_bindings: HashMap<SymbolId, Binding>,
     checking_bindings: HashSet<SymbolId>,
@@ -1036,7 +1043,6 @@ impl TypeChecker {
             .copied();
         self.copy_trait = module.standard_trait("Copy");
         self.sized_trait = module.standard_trait("Sized");
-        self.string_type_trait = module.standard_trait("StringType");
         self.quote_result_trait = module.standard_trait("QuoteResult");
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
@@ -1164,20 +1170,6 @@ impl TypeChecker {
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
                 "standard library must declare public empty trait `Copy`",
-            )),
-        }
-        match self
-            .string_type_trait
-            .and_then(|id| module.traits().get(&id))
-        {
-            Some(string_type)
-                if string_type.declaration.visibility == crate::Visibility::Public
-                    && string_type.declaration.type_parameters.len() == 1
-                    && string_type.parameters.len() == 1
-                    && string_type.declaration.members.is_empty() => {}
-            _ => self.diagnostics.push(Diagnostic::new(
-                Span::Compiler,
-                "standard library must declare public empty trait `StringType`",
             )),
         }
         match self
@@ -1350,13 +1342,6 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     "`Copy` is implemented structurally and cannot be implemented explicitly",
-                ));
-                continue;
-            }
-            if Some(implementation.trait_id) == self.string_type_trait {
-                self.diagnostics.push(Diagnostic::new(
-                    span,
-                    "`StringType` is compiler-defined and cannot be implemented explicitly",
                 ));
                 continue;
             }
@@ -1719,6 +1704,19 @@ impl TypeChecker {
         Some(CheckedTraitBound {
             trait_id,
             arguments,
+        })
+    }
+
+    fn resolve_subtype_bound(
+        &mut self,
+        module: &ResolvedModule,
+        bound: &crate::SubtypeBound,
+    ) -> Option<CheckedSubtypeBound> {
+        let parameter = module.type_parameter_for(bound.syntax.id)?;
+        let supertype = self.resolve_source_type(module, &bound.supertype);
+        Some(CheckedSubtypeBound {
+            parameter,
+            supertype,
         })
     }
 
@@ -2243,6 +2241,15 @@ impl TypeChecker {
             if !bounds.is_empty() {
                 self.function_bounds.insert(function.id, bounds);
             }
+            let mut subtype_bounds = Vec::new();
+            for bound in &function.subtype_bounds {
+                if let Some(bound) = self.resolve_subtype_bound(module, bound) {
+                    subtype_bounds.push(bound);
+                }
+            }
+            if !subtype_bounds.is_empty() {
+                self.function_subtype_bounds.insert(function.id, subtype_bounds);
+            }
         }
     }
 
@@ -2261,6 +2268,12 @@ impl TypeChecker {
         let function_type = self.function_types[&function.id].clone();
         self.active_function_bounds.push(
             self.function_bounds
+                .get(&function.id)
+                .cloned()
+                .unwrap_or_default(),
+        );
+        self.active_subtype_bounds.push(
+            self.function_subtype_bounds
                 .get(&function.id)
                 .cloned()
                 .unwrap_or_default(),
@@ -2344,6 +2357,7 @@ impl TypeChecker {
         self.checking_functions.remove(&function_id);
         self.checked_functions.insert(function_id);
         self.active_function_bounds.pop();
+        self.active_subtype_bounds.pop();
     }
 
     fn join_return_contributions(
@@ -4384,8 +4398,40 @@ impl TypeChecker {
                         }
                         _ => None,
                     };
-                    let argument_type =
-                        self.check_expression_expected(module, &call.argument, argument_expected);
+                    let bare_parameter_string_literal = match (&raw_callee_type, call.argument.as_ref())
+                    {
+                        (CheckedType::Function(function), Expression::String(string))
+                            if matches!(function.parameter.as_ref(), CheckedType::Parameter { .. }) =>
+                        {
+                            Some(string)
+                        }
+                        _ => None,
+                    };
+                    // A bare top-level `T` parameter and a string literal
+                    // argument: decode the literal directly into its literal
+                    // type, bypassing the shared expected-type-driven
+                    // widening pipeline entirely, so `T` narrows to the exact
+                    // literal instead of `String`. Scoped to this exact shape
+                    // (not routed through `literal_is_admitted`/`merge_types`
+                    // generally) so other expected-type-driven checking
+                    // elsewhere in the compiler is unaffected.
+                    let argument_type = if let Some(string) = bare_parameter_string_literal {
+                        match crate::string_literal::decode(&string.literal) {
+                            Ok(value) => {
+                                let literal_type = CheckedType::StringLiteralSet(vec![value]);
+                                self.expression_types
+                                    .insert(string.syntax.id, literal_type.clone());
+                                literal_type
+                            }
+                            Err(message) => {
+                                self.diagnostics
+                                    .push(Diagnostic::new(string.syntax.span.clone(), message));
+                                CheckedType::Error
+                            }
+                        }
+                    } else {
+                        self.check_expression_expected(module, &call.argument, argument_expected)
+                    };
                     if self.did_return {
                         return CheckedType::empty_product();
                     }
@@ -4397,7 +4443,7 @@ impl TypeChecker {
                         && !checked_type_contains_erased_product(&raw_callee_type)
                     {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
-                            parameter: Box::new(argument_type.clone()),
+                            parameter: Box::new(widen_literal_type(argument_type.clone())),
                             resources: match &raw_callee_type {
                                 CheckedType::Function(function) => function.resources.clone(),
                                 _ => CheckedResourceSet::default(),
@@ -5868,14 +5914,6 @@ impl TypeChecker {
                 &bounds,
             );
         }
-        if Some(trait_id) == self.string_type_trait {
-            return matches!(
-                target,
-                CheckedType::String | CheckedType::StringLiteralSet(_)
-            ) || self.active_function_bounds.iter().flatten().any(|bound| {
-                bound.trait_id == trait_id && bound.arguments.as_slice() == arguments
-            });
-        }
         if Some(trait_id) == self.default_trait {
             let bounds = self
                 .active_function_bounds
@@ -5898,6 +5936,53 @@ impl TypeChecker {
                 .iter()
                 .any(|bound| bound.trait_id == trait_id && bound.arguments == arguments)
         })
+    }
+
+    fn is_subtype(&self, sub: &CheckedType, sup: &CheckedType) -> bool {
+        if matches!(sub, CheckedType::Error | CheckedType::Inferred)
+            || matches!(sup, CheckedType::Error | CheckedType::Inferred)
+        {
+            return true;
+        }
+        if sub == sup {
+            return true;
+        }
+        if let (CheckedType::Parameter { id: a, .. }, CheckedType::Parameter { id: b, .. }) =
+            (sub, sup)
+            && a == b
+        {
+            return true;
+        }
+        if let CheckedType::Sum(sub_sum) = sub {
+            return sub_sum
+                .alternatives
+                .iter()
+                .all(|alternative| self.is_subtype(alternative, sup));
+        }
+        if let CheckedType::Sum(sup_sum) = sup {
+            return sup_sum
+                .alternatives
+                .iter()
+                .any(|alternative| self.is_subtype(sub, alternative));
+        }
+        if matches!(sub, CheckedType::StringLiteralSet(_)) && *sup == CheckedType::String {
+            return true;
+        }
+        if let (
+            CheckedType::StringLiteralSet(sub_values),
+            CheckedType::StringLiteralSet(sup_values),
+        ) = (sub, sup)
+        {
+            return sub_values
+                .iter()
+                .all(|value| sup_values.contains(value));
+        }
+        if let CheckedType::Parameter { id, .. } = sub {
+            return self.active_subtype_bounds.iter().flatten().any(|bound| {
+                bound.parameter == *id && self.is_subtype(&bound.supertype, sup)
+            });
+        }
+        false
     }
 
     fn function_origin(
@@ -5929,7 +6014,12 @@ impl TypeChecker {
             .get(&function_id)
             .cloned()
             .unwrap_or_default();
-        if bounds.is_empty() {
+        let subtype_bounds = self
+            .function_subtype_bounds
+            .get(&function_id)
+            .cloned()
+            .unwrap_or_default();
+        if bounds.is_empty() && subtype_bounds.is_empty() {
             return;
         }
         let mut substitutions = HashMap::new();
@@ -5946,6 +6036,19 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
                     trait_bound_failure(&arguments),
+                ));
+            }
+        }
+        for bound in subtype_bounds {
+            let actual = substitutions
+                .get(&bound.parameter)
+                .cloned()
+                .unwrap_or(CheckedType::Error);
+            let supertype = substitute_type(bound.supertype, &substitutions);
+            if !self.is_subtype(&actual, &supertype) {
+                self.diagnostics.push(Diagnostic::new(
+                    span.clone(),
+                    subtype_bound_failure(&actual, &supertype),
                 ));
             }
         }
@@ -6440,6 +6543,23 @@ impl TypeChecker {
                 return CheckedType::Error;
             }
         }
+        for bound in &declaration.subtype_bounds {
+            let Some(checked_bound) = self.resolve_subtype_bound(module, bound) else {
+                continue;
+            };
+            let actual = substitutions
+                .get(&checked_bound.parameter)
+                .cloned()
+                .unwrap_or(CheckedType::Error);
+            let supertype = substitute_type(checked_bound.supertype, &substitutions);
+            if !self.is_subtype(&actual, &supertype) {
+                self.diagnostics.push(Diagnostic::new(
+                    bound.syntax.span.clone(),
+                    subtype_bound_failure(&actual, &supertype),
+                ));
+                return CheckedType::Error;
+            }
+        }
         if module.builtin_type(id) == Some(BuiltinType::String) {
             return CheckedType::String;
         }
@@ -6496,12 +6616,20 @@ impl TypeChecker {
                 "type declaration bounds conflict with a functional dependency",
             ));
         }
+        let mut declaration_subtype_bounds = Vec::new();
+        for bound in &declaration.subtype_bounds {
+            if let Some(bound) = self.resolve_subtype_bound(module, bound) {
+                declaration_subtype_bounds.push(bound);
+            }
+        }
         self.active_function_bounds.push(declaration_bounds);
+        self.active_subtype_bounds.push(declaration_subtype_bounds);
         let template = self.resolve_source_type(
             module,
             declaration.underlying.as_ref().expect("represented type"),
         );
         self.active_function_bounds.pop();
+        self.active_subtype_bounds.pop();
         self.resolving_named_types.remove(&id);
         let representation = substitute_type(template, &substitutions);
         if declaration.kind == TypeDeclarationKind::Distinct && !representation.is_sized() {
@@ -7005,6 +7133,21 @@ fn literal_is_admitted(value_type: &CheckedType, value: &str) -> bool {
     }
 }
 
+/// Widens `StringLiteralSet` to `String` (recursing into `Sum`
+/// alternatives). Used when synthesizing an expected callee type for
+/// overload/return-type-driven re-resolution, so a literal-narrowed
+/// argument type doesn't leak into that unrelated comparison and fail to
+/// merge back against the callee's naturally widened instantiation.
+fn widen_literal_type(value_type: CheckedType) -> CheckedType {
+    match value_type {
+        CheckedType::StringLiteralSet(_) => CheckedType::String,
+        CheckedType::Sum(sum) => CheckedType::Sum(CheckedSumType {
+            alternatives: sum.alternatives.into_iter().map(widen_literal_type).collect(),
+        }),
+        other => other,
+    }
+}
+
 fn coverage_pattern_matches_literal(pattern: CoveragePattern<'_>, literal: &str) -> bool {
     match pattern {
         CoveragePattern::Pattern(Pattern::At(at)) => {
@@ -7371,7 +7514,14 @@ pub(crate) fn infer_type_parameters(
 ) -> bool {
     match template {
         CheckedType::Parameter { id, .. } => match substitutions.get(id) {
-            Some(existing) => existing == actual,
+            Some(existing) if existing == actual => true,
+            Some(existing) => match merge_types(existing.clone(), actual.clone()) {
+                Some(merged) => {
+                    substitutions.insert(*id, merged);
+                    true
+                }
+                None => false,
+            },
             None => {
                 substitutions.insert(*id, actual.clone());
                 true
@@ -7955,6 +8105,10 @@ fn trait_bound_failure(arguments: &[CheckedType]) -> String {
             .join(", ");
         format!("trait bound is not satisfied for `({arguments})`")
     }
+}
+
+fn subtype_bound_failure(sub: &CheckedType, sup: &CheckedType) -> String {
+    format!("subtype bound is not satisfied: `{sub}` is not a subtype of `{sup}`")
 }
 
 fn is_copy_type(

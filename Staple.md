@@ -87,12 +87,12 @@ macro choose = condition => then => else => quote {
 ```
 
 Typed parameters constrain the grammar accepted at an invocation. `Ident` is a
-generic syntax type whose argument constrains its spelling. `Ident String`
-accepts any identifier and `Ident "else"` accepts exactly the identifier
-`else`. The compiler-owned, methodless `StringType` trait is satisfied by
-`String` and every string literal type, and constrains the argument of `Ident`.
-It cannot be implemented explicitly. A literal identifier parameter may use a
-typed wildcard when its syntax is not needed, or a binding when it is:
+generic syntax type whose argument constrains its spelling, declared as
+`pub(repr) type Ident = Spelling => Spelling <: String => Spelling`. `Ident
+String` accepts any identifier and `Ident "else"` accepts exactly the
+identifier `else`, because every string literal type is a subtype of `String`
+(see [Subtype bounds](#subtype-bounds)). A literal identifier parameter may use
+a typed wildcard when its syntax is not needed, or a binding when it is:
 
 ```staple
 macro conditional =
@@ -1463,6 +1463,35 @@ concrete trait arguments and emits a direct reference to the selected
 implementation member. Trait objects, runtime dictionaries, associated items,
 generic implementations, and independently generic trait
 members are not currently supported.
+
+### Subtype bounds
+
+A generic `def` or `type` may also bound a compile-time parameter with `<:`,
+placed alongside trait bounds between the parameter binder and the ordinary
+type:
+
+```staple
+def string_identity: T => T <: String => T -> T = x => x
+```
+
+`T <: SuperType` is not backed by an `impl`; it is checked against a fixed
+subtyping relation instead:
+
+- `T <: T` (reflexivity);
+- every string literal type is a subtype of `String`, and a literal type whose
+  values are a subset of another literal type's values is a subtype of it;
+- `A <: A | B` and `B <: A | B` (a type is a subtype of any union containing
+  it, or containing a wider type it is a subtype of); and
+- if `A <: C` and `B <: C`, then `A | B <: C` (a union is a subtype of `C`
+  exactly when each of its alternatives is).
+
+Unlike a trait bound, satisfying `T <: SuperType` does not widen the argument:
+calling `string_identity "foo"` infers `T` as the literal type `"foo"`, not
+`String`, so the call's result type is `"foo"`. The declared bound is still
+enforced — `string_identity 1` is rejected, since `I32` is not a subtype of
+`String`. `Ident`'s spelling parameter (see [Metaprogramming](#metaprogramming))
+is bounded this way: `pub(repr) type Ident = Spelling => Spelling <: String =>
+Spelling`.
 
 ## Function application
 
