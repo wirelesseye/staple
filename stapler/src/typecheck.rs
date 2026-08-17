@@ -1864,6 +1864,28 @@ impl TypeChecker {
             let Some(underlying) = declaration.underlying.as_ref() else {
                 continue;
             };
+            // The constructor's arguments are the declaration's own type
+            // parameters (see `checked_type_parameter_pattern` below), so
+            // this instantiation is self-referential: it asks whether each
+            // parameter satisfies the declaration's own bounds. Those bounds
+            // must already be active for that reflexive check to succeed,
+            // mirroring the push `instantiate_type_declaration` performs
+            // around resolving the representation itself.
+            let mut declaration_bounds = Vec::new();
+            for bound in &declaration.trait_bounds {
+                if let Some(bound) = self.resolve_trait_bound(module, bound) {
+                    declaration_bounds.push(bound);
+                }
+            }
+            let declaration_bounds = self.expand_trait_bounds(declaration_bounds);
+            let mut declaration_subtype_bounds = Vec::new();
+            for bound in &declaration.subtype_bounds {
+                if let Some(bound) = self.resolve_subtype_bound(module, bound) {
+                    declaration_subtype_bounds.push(bound);
+                }
+            }
+            self.active_function_bounds.push(declaration_bounds);
+            self.active_subtype_bounds.push(declaration_subtype_bounds);
             let parameter = self.resolve_source_type(module, underlying);
             let arguments = declaration
                 .type_parameters
@@ -1871,6 +1893,8 @@ impl TypeChecker {
                 .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
                 .collect::<Vec<_>>();
             let result = self.instantiate_type_declaration(module, *id, arguments);
+            self.active_function_bounds.pop();
+            self.active_subtype_bounds.pop();
             self.symbol_types.insert(
                 *symbol,
                 CheckedType::Function(CheckedFunctionType {

@@ -6059,3 +6059,15 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
             .contains("may be moved before the next loop iteration")
     }));
 }
+
+#[test]
+fn pub_repr_type_constructor_satisfies_its_own_subtype_bound() {
+    let module = type_check(concat!(
+        "pub(repr) type Ident2 = Spelling => Spelling <: String => Spelling\n",
+        "let literal: Ident2 String = Ident2 \"answer\"\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("distinct type whose representation is a bare bounded parameter should compile");
+}
