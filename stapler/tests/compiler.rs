@@ -2519,6 +2519,47 @@ fn constructs_identifier_and_call_syntax() {
 }
 
 #[test]
+fn bare_ident_defaults_spelling_to_string() {
+    let module = type_check(concat!(
+        "macro classify_ident = value: Ident => match value {\n",
+        "    Ident \"target\" => quote { 1 },\n",
+        "    Ident _ => quote { 2 },\n",
+        "}\n",
+        "let spelling: I32 = classify_ident target\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("bare `Ident` should default its spelling to `String` and generate code");
+}
+
+#[test]
+fn bare_ident_and_explicit_ident_string_are_the_same_type() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "macro invalid: Expr -> Expr = _: Expr => {\n",
+                "    let ident: Ident = quote { name }\n",
+                "    quote { 0 }\n",
+                "}\n",
+                "let result = invalid ()\n",
+            ),
+            root,
+        )
+        .expect("unsupported contextual quote source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("narrow syntax nodes are not direct QuoteResult targets");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "Ident String does not satisfy `QuoteResult`"
+        })
+    );
+}
+
+#[test]
 fn structured_syntax_overloads_use_leaf_specificity() {
     let module = type_check(concat!(
         "macro classify = _: Expr => quote { 1 }\n",
@@ -4079,6 +4120,155 @@ fn ident_rejects_non_string_spelling_types() {
         .expect_err("Ident's spelling argument must satisfy `Spelling <: String`");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "subtype bound is not satisfied: `I32` is not a subtype of `String`"
+    }));
+}
+
+#[test]
+fn default_type_bound_fills_omitted_type_argument() {
+    let module = type_check(concat!(
+        "type alias Box = T => T ?= String => (value: T)\n",
+        "let boxed: Box = (value: \"hi\")\n",
+        "let explicit: Box I32 = (value: 42)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("defaulted and explicit instantiations should compile");
+}
+
+#[test]
+fn default_type_bound_rejects_mismatched_default_value() {
+    let module = resolve(concat!(
+        "type alias Box = T => T ?= String => (value: T)\n",
+        "let boxed: Box = (value: 42)\n",
+    ));
+    TypeChecker::new()
+        .check(module)
+        .expect_err("defaulted `Box` should require a `String` value, not `I32`");
+}
+
+#[test]
+fn default_type_bound_may_reference_an_earlier_parameter() {
+    let module = type_check(concat!(
+        "type alias Pair = A => B => B ?= A => (A, B)\n",
+        "let same: Pair I32 = (1, 2)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("chained default should compile");
+}
+
+#[test]
+fn default_type_bound_referencing_an_earlier_parameter_rejects_mismatch() {
+    let module = resolve(concat!(
+        "type alias Pair = A => B => B ?= A => (A, B)\n",
+        "let bad: Pair I32 = (1, \"x\")\n",
+    ));
+    TypeChecker::new()
+        .check(module)
+        .expect_err("`B` should default to `I32`, not accept a `String`");
+}
+
+#[test]
+fn default_type_bound_is_checked_against_subtype_bound() {
+    let module = resolve(concat!(
+        "type alias Constrained = T => T <: String => T ?= I32 => T\n",
+        "let bad: Constrained\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err("`I32` default should not satisfy `T <: String`");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "subtype bound is not satisfied: `I32` is not a subtype of `String`"
+    }));
+}
+
+#[test]
+fn default_type_bound_does_not_fire_when_a_later_parameter_lacks_one() {
+    let module = resolve(concat!(
+        "type alias Weird = A => B => A ?= I32 => (A, B)\n",
+        "let bad: Weird = (1, 2)\n",
+    ));
+    let diagnostics = TypeChecker::new().check(module).expect_err(concat!(
+        "`Weird`'s `B` parameter has no default, so the defaulted `A` ",
+        "cannot fill in for a fully bare `Weird` either"
+    ));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message == "expected `Weird`, found `(I32, I32)`" })
+    );
+}
+
+#[test]
+fn trait_default_type_bound_fills_missing_implementation_and_bound_arguments() {
+    let module = type_check(concat!(
+        "trait Converts = From => To => To ?= String => { convert: From -> To }\n",
+        "impl Converts I32 { def convert = value => to_string value }\n",
+        "def show: T => Converts T => T -> String = value => convert value\n",
+        "let text: String = show 42\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("defaulted trait argument should compile");
+    assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn inline_default_type_bound_introduces_and_defaults_in_one_clause() {
+    let module = type_check(concat!(
+        "type alias Pair = A => B ?= A => (A, B)\n",
+        "let same: Pair I32 = (1, 2)\n",
+        "let overridden: Pair I32 String = (1, \"x\")\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("inline default should compile just like the two-clause form");
+}
+
+#[test]
+fn inline_default_type_bound_combines_with_a_trailing_subtype_bound() {
+    let module = type_check(concat!(
+        "type alias Ident2 = Spelling ?= String => Spelling <: String => Spelling\n",
+        "let literal: Ident2 = \"answer\"\n",
+        "let widened: Ident2 String = \"answer\"\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("inline default combined with a trailing subtype bound should compile");
+}
+
+#[test]
+fn inline_default_type_bound_for_trait_parameter_fills_missing_argument() {
+    let module = type_check(concat!(
+        "trait Converts = From => To ?= String => { convert: From -> To }\n",
+        "impl Converts I32 { def convert = value => to_string value }\n",
+        "def show: T => Converts T => T -> String = value => convert value\n",
+        "let text: String = show 42\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("inline trait default should compile just like the two-clause form");
+    assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn rejects_duplicate_default_type_bound_for_the_same_parameter() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("type alias Bad = T ?= I32 => T ?= String => T\n", root)
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("`T` cannot have two conflicting defaults");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "duplicate default type bound for compile-time parameter `T`"
     }));
 }
 

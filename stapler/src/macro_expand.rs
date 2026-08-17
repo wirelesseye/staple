@@ -5953,6 +5953,14 @@ fn substitute_subtype_bound(
     substitute_type(&mut bound.supertype, environment, diagnostics)
 }
 
+fn substitute_default_bound(
+    bound: &mut crate::DefaultTypeBound,
+    environment: &Environment,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Option<()> {
+    substitute_type(&mut bound.default, environment, diagnostics)
+}
+
 fn qualified_macro_access_path(
     access: &crate::AccessExpression,
 ) -> Option<(String, String, Option<usize>)> {
@@ -6262,6 +6270,9 @@ fn substitute_item(
             for bound in &mut declaration.subtype_bounds {
                 substitute_subtype_bound(bound, environment, diagnostics)?;
             }
+            for bound in &mut declaration.default_bounds {
+                substitute_default_bound(bound, environment, diagnostics)?;
+            }
             for member in &mut declaration.members {
                 substitute_type(&mut member.annotation, environment, diagnostics)?;
                 if let Some(default) = &mut member.default {
@@ -6292,6 +6303,9 @@ fn substitute_item(
             }
             for bound in &mut declaration.subtype_bounds {
                 substitute_subtype_bound(bound, environment, diagnostics)?;
+            }
+            for bound in &mut declaration.default_bounds {
+                substitute_default_bound(bound, environment, diagnostics)?;
             }
             if let Some(underlying) = &mut declaration.underlying {
                 substitute_type(underlying, environment, diagnostics)?;
@@ -6888,6 +6902,17 @@ fn freshen_subtype_bound(
     freshen_type(expander, &mut bound.supertype, module, mark);
 }
 
+fn freshen_default_bound(
+    expander: &mut MacroExpander,
+    bound: &mut crate::DefaultTypeBound,
+    module: ModuleId,
+    mark: u64,
+) {
+    expander.freshen_syntax(&mut bound.syntax, module, mark);
+    expander.freshen_syntax(&mut bound.parameter.syntax, module, mark);
+    freshen_type(expander, &mut bound.default, module, mark);
+}
+
 fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId, mark: u64) {
     match item {
         Item::Modified(modified) => {
@@ -6932,6 +6957,9 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             for bound in &mut declaration.subtype_bounds {
                 freshen_subtype_bound(expander, bound, module, mark);
             }
+            for bound in &mut declaration.default_bounds {
+                freshen_default_bound(expander, bound, module, mark);
+            }
             if let Some(underlying) = &mut declaration.underlying {
                 freshen_type(expander, underlying, module, mark);
             }
@@ -6953,6 +6981,9 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             }
             for bound in &mut declaration.subtype_bounds {
                 freshen_subtype_bound(expander, bound, module, mark);
+            }
+            for bound in &mut declaration.default_bounds {
+                freshen_default_bound(expander, bound, module, mark);
             }
             for member in &mut declaration.members {
                 expander.freshen_syntax(&mut member.syntax, module, mark);

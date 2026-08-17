@@ -483,7 +483,8 @@ impl Grammar {
             .expect(TokenKind::Identifier, "expected trait name")?
             .text;
         self.expect(TokenKind::Equals, "expected `=` after trait name")?;
-        let type_parameters = self.parse_type_parameters()?;
+        let (type_parameters, mut default_bounds) =
+            self.parse_type_parameters_with_inline_defaults()?;
         if type_parameters.is_empty() {
             return Err(self.error("expected trait type parameter followed by `=>`"));
         }
@@ -492,6 +493,7 @@ impl Grammar {
             functional_dependencies.push(dependency);
         }
         let subtype_bounds = self.parse_subtype_bounds()?;
+        default_bounds.extend(self.parse_default_bounds()?);
         let prerequisites = self.parse_trait_bounds()?;
         self.expect(TokenKind::LBrace, "expected `{` before trait members")?;
         let mut members = Vec::new();
@@ -531,6 +533,7 @@ impl Grammar {
             functional_dependencies,
             prerequisites,
             subtype_bounds,
+            default_bounds,
             members,
         })
     }
@@ -915,10 +918,10 @@ impl Grammar {
         if !has_body && kind == TypeDeclarationKind::Alias {
             return Err(self.error("expected `=` after type alias name"));
         }
-        let mut type_parameters = if has_body {
-            self.parse_type_parameters()?
+        let (mut type_parameters, mut default_bounds) = if has_body {
+            self.parse_type_parameters_with_inline_defaults()?
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
         self.parse_sized_relaxations(&mut type_parameters)?;
         let subtype_bounds = if type_parameters.is_empty() {
@@ -926,6 +929,9 @@ impl Grammar {
         } else {
             self.parse_subtype_bounds()?
         };
+        if !type_parameters.is_empty() {
+            default_bounds.extend(self.parse_default_bounds()?);
+        }
         let trait_bounds = if type_parameters.is_empty() {
             Vec::new()
         } else {
@@ -966,6 +972,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            default_bounds,
             underlying,
         })
     }
@@ -1056,6 +1063,70 @@ impl Grammar {
         Ok(parameters)
     }
 
+    /// Like `parse_type_parameters`, but each binder may also carry an
+    /// inline default (`Name ?= Default =>`) as sugar for introducing the
+    /// parameter and giving it a default type bound in the same clause,
+    /// instead of introducing it plainly and adding a separate trailing
+    /// `Name ?= Default =>` clause afterward. The two forms produce
+    /// identical `DefaultTypeBound`s and may be freely mixed; callers
+    /// should still parse trailing default clauses afterward with
+    /// `parse_default_bounds` and merge the two lists.
+    fn parse_type_parameters_with_inline_defaults(
+        &mut self,
+    ) -> Result<(Vec<TypeParameterPattern>, Vec<DefaultTypeBound>), ParseError> {
+        let mut parameters = Vec::new();
+        let mut defaults = Vec::new();
+        loop {
+            let checkpoint = self.position;
+            let start = self.position;
+            let Ok(parameter) = self.parse_type_parameter_pattern() else {
+                self.position = checkpoint;
+                break;
+            };
+            if self.eat(TokenKind::FatArrow) {
+                parameters.push(parameter);
+                continue;
+            }
+            if self.at_operator("?=") {
+                let TypeParameterPattern::Binding(binding) = &parameter else {
+                    return Err(self.error(
+                        "default types are only supported for named compile-time parameters",
+                    ));
+                };
+                let name = binding.name.clone();
+                let already_introduced = parameters.iter().any(|existing| {
+                    matches!(existing, TypeParameterPattern::Binding(existing) if existing.name == name)
+                });
+                if already_introduced {
+                    // `Name` was already introduced by an earlier plain
+                    // clause; this `?=` is a separate trailing default bound
+                    // on it, not a new parameter to introduce here — leave
+                    // it for `parse_default_bounds`.
+                    self.position = checkpoint;
+                    break;
+                }
+                self.eat_operator("?=");
+                let default = self.parse_type_union()?;
+                self.expect(TokenKind::FatArrow, "expected `=>` after default type")?;
+                let syntax = self.syntax(start);
+                defaults.push(DefaultTypeBound {
+                    syntax: syntax.clone(),
+                    parameter: NamedType {
+                        syntax,
+                        namespace: None,
+                        name,
+                    },
+                    default,
+                });
+                parameters.push(parameter);
+                continue;
+            }
+            self.position = checkpoint;
+            break;
+        }
+        Ok((parameters, defaults))
+    }
+
     fn parse_trait_bounds(&mut self) -> Result<Vec<TraitBound>, ParseError> {
         let mut bounds = Vec::new();
         loop {
@@ -1132,6 +1203,44 @@ impl Grammar {
                     name,
                 },
                 supertype,
+            });
+        }
+        Ok(bounds)
+    }
+
+    fn parse_default_bounds(&mut self) -> Result<Vec<DefaultTypeBound>, ParseError> {
+        let mut bounds = Vec::new();
+        loop {
+            let checkpoint = self.position;
+            let start = self.position;
+            let name = match self.expect(TokenKind::Identifier, "expected compile-time parameter") {
+                Ok(token) => token.text,
+                Err(_) => {
+                    self.position = checkpoint;
+                    break;
+                }
+            };
+            if !self.eat_operator("?=") {
+                self.position = checkpoint;
+                break;
+            }
+            let Ok(default) = self.parse_type_union() else {
+                self.position = checkpoint;
+                break;
+            };
+            if !self.eat(TokenKind::FatArrow) {
+                self.position = checkpoint;
+                break;
+            }
+            let syntax = self.syntax(start);
+            bounds.push(DefaultTypeBound {
+                syntax: syntax.clone(),
+                parameter: NamedType {
+                    syntax,
+                    namespace: None,
+                    name,
+                },
+                default,
             });
         }
         Ok(bounds)

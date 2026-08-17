@@ -88,10 +88,12 @@ macro choose = condition => then => else => quote {
 
 Typed parameters constrain the grammar accepted at an invocation. `Ident` is a
 generic syntax type whose argument constrains its spelling, declared as
-`pub(repr) type Ident = Spelling => Spelling <: String => Spelling`. `Ident
-String` accepts any identifier and `Ident "else"` accepts exactly the
-identifier `else`, because every string literal type is a subtype of `String`
-(see [Subtype bounds](#subtype-bounds)). A literal identifier parameter may use
+`pub(repr) type Ident = Spelling ?= String => Spelling <: String => Spelling`.
+`Ident` and `Ident String` both accept any identifier — `Spelling` defaults to
+`String` (see [Default type parameters](#default-type-parameters)) — and
+`Ident "else"` accepts exactly the identifier `else`, because every string
+literal type is a subtype of `String` (see [Subtype
+bounds](#subtype-bounds)). A literal identifier parameter may use
 a typed wildcard when its syntax is not needed, or a binding when it is:
 
 ```staple
@@ -1490,8 +1492,55 @@ calling `string_identity "foo"` infers `T` as the literal type `"foo"`, not
 `String`, so the call's result type is `"foo"`. The declared bound is still
 enforced — `string_identity 1` is rejected, since `I32` is not a subtype of
 `String`. `Ident`'s spelling parameter (see [Metaprogramming](#metaprogramming))
-is bounded this way: `pub(repr) type Ident = Spelling => Spelling <: String =>
-Spelling`.
+is bounded this way, combined with a default (see [Default type
+parameters](#default-type-parameters)): `pub(repr) type Ident = Spelling ?=
+String => Spelling <: String => Spelling`.
+
+### Default type parameters
+
+A `type` or `trait` may give one or more of its trailing compile-time
+parameters a default with `?=`, introducing the parameter and its default in
+one clause in place of the ordinary `Name =>` binder:
+
+```staple
+type Box = T ?= String => (value: T)
+type alias Pair = A => B ?= A => (A, B)
+trait Increment = T ?= I32 => { increment: T -> T }
+```
+
+`Name ?= Default =>` is sugar for introducing `Name` plainly and then adding
+a separate trailing `Name ?= Default =>` clause afterward, alongside subtype
+and trait bounds — the two forms produce the same result and may be freely
+mixed. The trailing form is useful when a parameter needs other clauses too;
+`Ident`'s spelling parameter (see [Metaprogramming](#metaprogramming)) is
+declared this way, combining a default with a subtype bound:
+`pub(repr) type Ident = Spelling ?= String => Spelling <: String => Spelling`.
+Only a plain named parameter can carry a default — a product or splice
+pattern in the binder position is a parse error if followed by `?=`.
+
+At a use site, trailing arguments may be omitted as long as every parameter
+from that point on has a default; the omitted arguments are filled in from
+their defaults instead of leaving the type partially applied:
+
+```staple
+let boxed: Box = Box (value: "hi")       // T defaults to String
+let explicit: Box I32 = Box (value: 42)  // an explicit argument overrides the default
+```
+
+A default expression may refer to an earlier parameter in the same list —
+`Pair I32` above supplies only `A`, and `B`'s default resolves it to `I32` too
+— but not to a later one. If any parameter from the first omitted one onward
+lacks a default, none of the trailing arguments are filled in and the type is
+left partially applied as before. A filled-in default is still checked
+against that parameter's own subtype and trait bounds, exactly as an explicit
+argument would be.
+
+Trait defaults apply the same way to under-supplied trait arguments, in both
+an `impl` header and a bound clause — complementing the functional-dependency
+based inference described above ([Traits and bounded generic
+functions](#traits-and-bounded-generic-functions)). Given `trait Converts =
+From => To ?= String => { convert: From -> To }`, `impl Converts I32 { ... }`
+supplies only `From` and fills `To` with `String`.
 
 ## Function application
 
@@ -2056,9 +2105,11 @@ HashMap (String, I32)
 CurriedMap String I32
 ```
 
-A type annotation must apply every compile-time parameter. Applying a
-non-parameterized type, supplying the wrong product shape, or leaving a type
-partially applied is an error.
+A type annotation must apply every compile-time parameter, unless the omitted
+trailing parameters all have defaults (see [Default type
+parameters](#default-type-parameters)). Applying a non-parameterized type,
+supplying the wrong product shape, or leaving a type partially applied is an
+error.
 
 Product types and values may have a trailing comma.
 

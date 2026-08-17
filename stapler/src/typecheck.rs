@@ -50,6 +50,12 @@ pub struct CheckedSubtypeBound {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedDefaultBound {
+    pub parameter: TypeParameterId,
+    pub default: CheckedType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedTraitDispatch {
     pub method: TraitMethodId,
     pub arguments: Vec<CheckedType>,
@@ -1597,9 +1603,7 @@ impl TypeChecker {
             source_arguments
         };
         let expected_arity = resolved_trait.declaration.type_parameters.len();
-        if source_arguments.len() > expected_arity
-            || (!allow_inference && source_arguments.len() != expected_arity)
-        {
+        if source_arguments.len() > expected_arity {
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!(
@@ -1612,14 +1616,57 @@ impl TypeChecker {
             ));
             return None;
         }
-        let arguments = source_arguments
-            .iter()
-            .map(|argument| self.resolve_source_type(module, argument))
-            .chain(
-                std::iter::repeat(CheckedType::Inferred)
-                    .take(expected_arity.saturating_sub(source_arguments.len())),
-            )
-            .collect::<Vec<_>>();
+        let mut trait_defaults: HashMap<TypeParameterId, CheckedType> = HashMap::new();
+        for bound in &resolved_trait.declaration.default_bounds {
+            if let Some(checked) = self.resolve_default_bound(module, bound) {
+                trait_defaults.insert(checked.parameter, checked.default);
+            }
+        }
+        let has_default = |pattern: &TypeParameterPattern| -> bool {
+            match pattern {
+                TypeParameterPattern::Binding(binding) => module
+                    .type_parameter_for(binding.syntax.id)
+                    .is_some_and(|id| trait_defaults.contains_key(&id)),
+                _ => false,
+            }
+        };
+        let arity_satisfied = source_arguments.len() >= expected_arity
+            || resolved_trait.declaration.type_parameters[source_arguments.len()..]
+                .iter()
+                .all(has_default);
+        if !allow_inference && !arity_satisfied {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!(
+                    "trait `{}` expects {} compile-time argument{}, found {}",
+                    resolved_trait.declaration.name,
+                    expected_arity,
+                    if expected_arity == 1 { "" } else { "s" },
+                    source_arguments.len()
+                ),
+            ));
+            return None;
+        }
+        let mut default_substitutions: HashMap<TypeParameterId, CheckedType> = HashMap::new();
+        let mut arguments = Vec::with_capacity(expected_arity);
+        for (index, pattern) in resolved_trait.declaration.type_parameters.iter().enumerate() {
+            let value = if index < source_arguments.len() {
+                self.resolve_source_type(module, &source_arguments[index])
+            } else if let TypeParameterPattern::Binding(binding) = pattern
+                && let Some(param_id) = module.type_parameter_for(binding.syntax.id)
+                && let Some(default) = trait_defaults.get(&param_id)
+            {
+                substitute_type(default.clone(), &default_substitutions)
+            } else {
+                CheckedType::Inferred
+            };
+            if let TypeParameterPattern::Binding(binding) = pattern
+                && let Some(param_id) = module.type_parameter_for(binding.syntax.id)
+            {
+                default_substitutions.insert(param_id, value.clone());
+            }
+            arguments.push(value);
+        }
         let mut substitutions = HashMap::new();
         // `Sized T` must be expressible while `T` is unsized: the obligation
         // itself is what proves that the argument satisfies `Sized`.
@@ -1718,6 +1765,16 @@ impl TypeChecker {
             parameter,
             supertype,
         })
+    }
+
+    fn resolve_default_bound(
+        &mut self,
+        module: &ResolvedModule,
+        bound: &crate::DefaultTypeBound,
+    ) -> Option<CheckedDefaultBound> {
+        let parameter = module.type_parameter_for(bound.syntax.id)?;
+        let default = self.resolve_source_type(module, &bound.default);
+        Some(CheckedDefaultBound { parameter, default })
     }
 
     fn expand_trait_bounds(&self, bounds: Vec<CheckedTraitBound>) -> Vec<CheckedTraitBound> {
@@ -6231,7 +6288,8 @@ impl TypeChecker {
                         sized: module.type_parameter_is_sized(id),
                     }
                 } else {
-                    self.resolve_named_type(module, named)
+                    let resolved = self.resolve_named_type(module, named);
+                    self.finish_defaulted_type(module, resolved)
                 }
             }
             Type::Product(product) => {
@@ -6281,7 +6339,7 @@ impl TypeChecker {
                 })
             }
             Type::Application(application) => {
-                let callee = self.resolve_source_type_inner(module, &application.callee);
+                let callee = self.resolve_type_application_callee(module, &application.callee);
                 let argument = self.resolve_source_type_inner(module, &application.argument);
                 self.apply_type_argument(module, callee, argument, application.syntax.span.clone())
             }
@@ -6474,7 +6532,82 @@ impl TypeChecker {
         }
     }
 
-    fn apply_type_argument(
+    /// Fills unsupplied trailing type parameters of `id` from their default
+    /// bounds (`T ?= Default`), given the arguments already supplied as a
+    /// prefix. Returns `None` if any unsupplied trailing parameter lacks a
+    /// default, is not a plain binding, or is otherwise unresolvable — the
+    /// caller should fall back to leaving the type partially applied.
+    fn fill_default_type_arguments(
+        &mut self,
+        module: &ResolvedModule,
+        id: TypeId,
+        arguments: Vec<CheckedType>,
+    ) -> Option<Vec<CheckedType>> {
+        let declaration = self.type_declarations[&id].clone();
+        if arguments.len() >= declaration.type_parameters.len() {
+            return Some(arguments);
+        }
+        let mut defaults = HashMap::new();
+        for bound in &declaration.default_bounds {
+            if let Some(checked) = self.resolve_default_bound(module, bound) {
+                defaults.insert(checked.parameter, checked.default);
+            }
+        }
+        let mut substitutions = HashMap::new();
+        for (pattern, argument) in declaration.type_parameters.iter().zip(&arguments) {
+            self.bind_type_argument(module, pattern, argument, &mut substitutions);
+        }
+        let mut filled = arguments;
+        for pattern in &declaration.type_parameters[filled.len()..] {
+            let TypeParameterPattern::Binding(binding) = pattern else {
+                return None;
+            };
+            let param_id = module.type_parameter_for(binding.syntax.id)?;
+            let default = defaults.get(&param_id)?.clone();
+            let resolved = substitute_type(default, &substitutions);
+            substitutions.insert(param_id, resolved.clone());
+            filled.push(resolved);
+        }
+        Some(filled)
+    }
+
+    /// Resolves the callee position of a type application without filling in
+    /// default type arguments: another argument is still coming from the
+    /// enclosing application, so a partially applied `TypeConstructor` here
+    /// is not yet finished. `Type::Named`/`Type::Application` are the only
+    /// shapes a valid callee can take; anything else falls back to the
+    /// ordinary resolver, which will report it as not accepting arguments.
+    fn resolve_type_application_callee(
+        &mut self,
+        module: &ResolvedModule,
+        callee: &Type,
+    ) -> CheckedType {
+        match callee {
+            Type::Named(named) => {
+                if let Some(id) = module.type_parameter_for(named.syntax.id) {
+                    CheckedType::Parameter {
+                        id,
+                        name: named.name.clone(),
+                        sized: module.type_parameter_is_sized(id),
+                    }
+                } else {
+                    self.resolve_named_type(module, named)
+                }
+            }
+            Type::Application(application) => {
+                let callee = self.resolve_type_application_callee(module, &application.callee);
+                let argument = self.resolve_source_type_inner(module, &application.argument);
+                self.push_type_argument(module, callee, argument, application.syntax.span.clone())
+            }
+            other => self.resolve_source_type_inner(module, other),
+        }
+    }
+
+    /// Pushes one more argument onto a `TypeConstructor` without attempting
+    /// to fill in defaults for any parameters still missing afterward. Used
+    /// while walking the callee spine of a type application, where more
+    /// arguments may still follow.
+    fn push_type_argument(
         &mut self,
         module: &ResolvedModule,
         callee: CheckedType,
@@ -6510,6 +6643,48 @@ impl TypeChecker {
             return CheckedType::Error;
         }
         self.instantiate_type_declaration(module, id, arguments)
+    }
+
+    /// Like `push_type_argument`, but this is the final argument for this
+    /// type expression (no enclosing application will supply more), so a
+    /// still-partial result is finished off by filling in defaults where
+    /// possible.
+    fn apply_type_argument(
+        &mut self,
+        module: &ResolvedModule,
+        callee: CheckedType,
+        argument: CheckedType,
+        span: Span,
+    ) -> CheckedType {
+        let result = self.push_type_argument(module, callee, argument, span);
+        self.finish_defaulted_type(module, result)
+    }
+
+    /// Finishes a possibly-partial `TypeConstructor` by filling in defaults
+    /// for any trailing parameters still missing, if every one of them has
+    /// one. Leaves anything else (including a `TypeConstructor` that still
+    /// can't be finished) untouched.
+    fn finish_defaulted_type(
+        &mut self,
+        module: &ResolvedModule,
+        value_type: CheckedType,
+    ) -> CheckedType {
+        let CheckedType::TypeConstructor {
+            id,
+            name,
+            arguments,
+        } = value_type
+        else {
+            return value_type;
+        };
+        match self.fill_default_type_arguments(module, id, arguments.clone()) {
+            Some(filled) => self.instantiate_type_declaration(module, id, filled),
+            None => CheckedType::TypeConstructor {
+                id,
+                name,
+                arguments,
+            },
+        }
     }
 
     fn instantiate_type_declaration(

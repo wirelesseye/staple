@@ -2,7 +2,7 @@
 // their data in the first structured-syntax slice; the remaining expression
 // forms round-trip through UnstructuredExpr without exposing their fields yet.
 @recursive_constructor
-pub(repr) type Ident = Spelling => Spelling <: String => Spelling
+pub(repr) type Ident = Spelling ?= String => Spelling <: String => Spelling
 @recursive_constructor
 pub(repr) type CallExpr = (
     callee: Expr,

@@ -1,5 +1,6 @@
 use super::{
-    Expression, NamedType, SubtypeBound, Syntax, TraitBound, Type, TypeParameterPattern,
+    DefaultTypeBound, Expression, NamedType, SubtypeBound, Syntax, TraitBound, Type,
+    TypeParameterPattern,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,6 +182,7 @@ pub struct TypeDeclaration {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub default_bounds: Vec<DefaultTypeBound>,
     pub underlying: Option<Type>,
 }
 
@@ -220,6 +222,7 @@ pub struct TraitDeclaration {
     pub functional_dependencies: Vec<FunctionalDependency>,
     pub prerequisites: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub default_bounds: Vec<DefaultTypeBound>,
     pub members: Vec<TraitMember>,
 }
 

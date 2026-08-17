@@ -1153,6 +1153,93 @@ fn parses_compile_time_parameters_and_type_application() {
 }
 
 #[test]
+fn parses_default_type_bounds_losslessly() {
+    let source = concat!(
+        "type Box = T => T ?= String => (value: T)\n",
+        "type alias Pair = A => B => B ?= A => (A, B)\n",
+        "trait Increment = T => T ?= I32 => { increment: T -> T }\n",
+    );
+    let root = parse(source).expect("default type bounds should parse");
+    assert_eq!(root.text(), source);
+
+    let Item::TypeDeclaration(boxed) = &root.items[0] else {
+        panic!("expected type declaration");
+    };
+    assert_eq!(boxed.default_bounds.len(), 1);
+    assert_eq!(boxed.default_bounds[0].parameter.name, "T");
+    assert!(matches!(boxed.default_bounds[0].default, Type::Named(_)));
+
+    let Item::TypeDeclaration(pair) = &root.items[1] else {
+        panic!("expected type alias declaration");
+    };
+    assert_eq!(pair.default_bounds.len(), 1);
+    assert_eq!(pair.default_bounds[0].parameter.name, "B");
+
+    let Item::TraitDeclaration(increment) = &root.items[2] else {
+        panic!("expected trait declaration");
+    };
+    assert_eq!(increment.default_bounds.len(), 1);
+    assert_eq!(increment.default_bounds[0].parameter.name, "T");
+}
+
+#[test]
+fn parses_inline_default_type_bounds_losslessly() {
+    let source = concat!(
+        "pub(repr) type Ident = Spelling ?= String => Spelling <: String => Spelling\n",
+        "type alias Pair = A => B ?= A => (A, B)\n",
+        "trait Converts = From => To ?= String => { convert: From -> To }\n",
+    );
+    let root = parse(source).expect("inline default type bounds should parse");
+    assert_eq!(root.text(), source);
+
+    let Item::TypeDeclaration(ident) = &root.items[0] else {
+        panic!("expected type declaration");
+    };
+    assert_eq!(ident.type_parameters.len(), 1);
+    assert_eq!(ident.default_bounds.len(), 1);
+    assert_eq!(ident.default_bounds[0].parameter.name, "Spelling");
+    assert_eq!(ident.subtype_bounds.len(), 1);
+    assert_eq!(ident.subtype_bounds[0].parameter.name, "Spelling");
+
+    let Item::TypeDeclaration(pair) = &root.items[1] else {
+        panic!("expected type alias declaration");
+    };
+    assert_eq!(pair.type_parameters.len(), 2);
+    assert_eq!(pair.default_bounds.len(), 1);
+    assert_eq!(pair.default_bounds[0].parameter.name, "B");
+
+    let Item::TraitDeclaration(converts) = &root.items[2] else {
+        panic!("expected trait declaration");
+    };
+    assert_eq!(converts.type_parameters.len(), 2);
+    assert_eq!(converts.default_bounds.len(), 1);
+    assert_eq!(converts.default_bounds[0].parameter.name, "To");
+}
+
+#[test]
+fn rejects_inline_default_on_a_product_type_parameter() {
+    assert!(parse("type alias Bad = (A, B) ?= (I32, I32) => (A, B)\n").is_err());
+}
+
+#[test]
+fn combines_inline_and_trailing_default_type_bounds() {
+    let source = concat!(
+        "type alias Triple = A ?= I32 => B => C ?= B => (A, B, C)\n",
+        "type alias Triple = A ?= I32 => B => B ?= I32 => (A, B)\n",
+    );
+    let root = parse(source).expect("mixed inline and trailing defaults should parse");
+    assert_eq!(root.text(), source);
+
+    let Item::TypeDeclaration(triple) = &root.items[0] else {
+        panic!("expected type declaration");
+    };
+    assert_eq!(triple.type_parameters.len(), 3);
+    assert_eq!(triple.default_bounds.len(), 2);
+    assert_eq!(triple.default_bounds[0].parameter.name, "A");
+    assert_eq!(triple.default_bounds[1].parameter.name, "C");
+}
+
+#[test]
 fn parses_sized_relaxations_losslessly() {
     let source = concat!(
         "pub(repr) type RefLike = T => ?Sized T => T\n",

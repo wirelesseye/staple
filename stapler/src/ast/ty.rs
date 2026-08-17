@@ -195,3 +195,10 @@ pub struct SubtypeBound {
     pub parameter: NamedType,
     pub supertype: Type,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DefaultTypeBound {
+    pub syntax: Syntax,
+    pub parameter: NamedType,
+    pub default: Type,
+}

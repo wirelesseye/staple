@@ -2128,6 +2128,30 @@ impl NameResolver {
                     }
                     self.resolve_type(&bound.supertype);
                 }
+                let mut defaulted_parameters = HashSet::new();
+                for bound in &declaration.default_bounds {
+                    if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                        self.type_parameters.insert(bound.syntax.id, id);
+                        if !defaulted_parameters.insert(id) {
+                            self.diagnostics.push(Diagnostic::new(
+                                bound.parameter.syntax.span.clone(),
+                                format!(
+                                    "duplicate default type bound for compile-time parameter `{}`",
+                                    bound.parameter.name
+                                ),
+                            ));
+                        }
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            bound.parameter.syntax.span.clone(),
+                            format!(
+                                "unknown compile-time parameter `{}` in default type bound",
+                                bound.parameter.name
+                            ),
+                        ));
+                    }
+                    self.resolve_type(&bound.default);
+                }
                 if let Some(underlying) = &declaration.underlying {
                     self.resolve_type(underlying);
                     if declaration.representation_visibility == Visibility::Public {
@@ -2219,6 +2243,30 @@ impl NameResolver {
                     for argument in &prerequisite.arguments {
                         self.resolve_type(argument);
                     }
+                }
+                let mut defaulted_parameters = HashSet::new();
+                for bound in &declaration.default_bounds {
+                    if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                        self.type_parameters.insert(bound.syntax.id, id);
+                        if !defaulted_parameters.insert(id) {
+                            self.diagnostics.push(Diagnostic::new(
+                                bound.parameter.syntax.span.clone(),
+                                format!(
+                                    "duplicate default type bound for compile-time parameter `{}`",
+                                    bound.parameter.name
+                                ),
+                            ));
+                        }
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            bound.parameter.syntax.span.clone(),
+                            format!(
+                                "unknown compile-time parameter `{}` in default type bound",
+                                bound.parameter.name
+                            ),
+                        ));
+                    }
+                    self.resolve_type(&bound.default);
                 }
                 let mut default_methods = HashMap::new();
                 for member in &declaration.members {
