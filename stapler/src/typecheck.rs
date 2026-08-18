@@ -1082,9 +1082,24 @@ impl TypeChecker {
 
         let module_order = module.program().initialization_order().to_vec();
         for module_id in module_order {
+            // Each module's top-level statements execute as their own
+            // initializer (a dedicated function in codegen), so reachability
+            // tracking must be live here exactly as it is inside a function
+            // body — otherwise a top-level `break`/`continue` never records
+            // itself (see the `return_reachable` guard on `Statement::Break`/
+            // `Continue`), and `check_loop_expression` then treats a
+            // perfectly ordinary `loop { ...; break }` as never exiting,
+            // marking every subsequent top-level item unreachable and
+            // silently skipping their checks.
+            let outer_did_return = self.did_return;
+            let outer_return_reachable = self.return_reachable;
+            self.did_return = false;
+            self.return_reachable = true;
             for item in &module.program().module(module_id).syntax.items {
                 self.check_item(&module, item);
             }
+            self.did_return = outer_did_return;
+            self.return_reachable = outer_return_reachable;
         }
         let function_ids = module
             .functions()

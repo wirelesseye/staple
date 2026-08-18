@@ -6101,6 +6101,29 @@ fn accepts_divergent_loops_in_typed_contexts() {
 }
 
 #[test]
+fn checks_reachability_correctly_after_a_top_level_loop_with_break() {
+    // A top-level `loop { ...; break }` (here via the `for` macro's
+    // expansion) must not poison reachability for the rest of the module:
+    // `total` is genuinely used afterward, and `to_string` is a
+    // trait-method-shorthand whose overload resolution is skipped for
+    // code the checker (wrongly) considers unreachable, so this exercises
+    // both symptoms at once.
+    let source = concat!(
+        "var total = 0\n",
+        "for value in (0 ..= 2) {\n",
+        "  total = total + value\n",
+        "}\n",
+        "let text: String = to_string total\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("code after a top-level loop with a break should still be checked and generated");
+    assert!(llvm.contains("loop.body"));
+}
+
+#[test]
 fn checks_ownership_across_loop_exits_and_back_edges() {
     let module = type_check(concat!(
         "type Resource = I32\n",
