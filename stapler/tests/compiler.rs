@@ -1062,6 +1062,83 @@ fn rejects_overlapping_structural_indexing_implementations() {
 }
 
 #[test]
+fn derives_iterator_item_as_a_sum_of_product_elements() {
+    type_check(concat!(
+        "let iterator: (I32[3], USize) = IntoIterator.into_iterator (1, 2, 3)\n",
+        "let homogeneous_step: IterStep ((I32[3], USize), I32) = Iterator.next iterator\n",
+        "let mixed: (I32, String, I32) = (1, \"two\", 3)\n",
+        "let mixed_iterator: ((I32, String, I32), USize) = IntoIterator.into_iterator mixed\n",
+        "let mixed_step: IterStep (((I32, String, I32), USize), I32 | String) = Iterator.next mixed_iterator\n",
+    ));
+}
+
+#[test]
+fn derives_structural_iteration_for_products() {
+    let source = concat!(
+        "def sum_pair = pair: (I32, I32) => {\n",
+        "  var total = 0\n",
+        "  for value in pair { total = total + value }\n",
+        "  total\n",
+        "}\n",
+        "let homogeneous_total: I32 = sum_pair (1, 2)\n",
+        "def classify = value: I32 | String => match value {\n",
+        "  number: I32 => number,\n",
+        "  text: String => 0,\n",
+        "}\n",
+        "def sum_mixed = triple: (I32, String, I32) => {\n",
+        "  var total = 0\n",
+        "  for value in triple { total = total + classify(value) }\n",
+        "  total\n",
+        "}\n",
+        "let mixed_total: I32 = sum_mixed (1, \"two\", 3)\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("derived iteration traits should generate LLVM");
+    assert!(llvm.contains("structural_IntoIterator"));
+    assert!(llvm.contains("structural_Iterator"));
+    assert!(llvm.contains("next.case"));
+    assert!(llvm.contains("loop.body"));
+}
+
+#[test]
+fn rejects_structural_iteration_for_non_copy_products() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop CString\n",
+            "def invalid = pair: (CString, I32) => {\n",
+            "  var count = 0\n",
+            "  for value in pair { count = count + 1 }\n",
+            "  count\n",
+            "}\n",
+        )))
+        .expect_err("a product containing a move-only element cannot derive IntoIterator");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
+    );
+}
+
+#[test]
+fn rejects_overlapping_structural_iterator_implementations() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "impl IntoIterator I32[2] (I32[2], USize) {\n",
+            "  def into_iterator = value => (value, 0 satisfies USize)\n",
+            "}\n",
+        )))
+        .expect_err("structural product IntoIterator cannot be overridden");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("derived structurally for this product type")
+    }));
+}
+
+#[test]
 fn rejects_erased_products_outside_refs_and_ref_destructuring() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let invalid: I32[]\n"))

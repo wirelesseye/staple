@@ -21,10 +21,10 @@ use crate::typecheck::{
 };
 use crate::{
     CallExpression, CheckedFunctionType, CheckedProductType, CheckedResource, CheckedResourceSet,
-    CheckedType, Diagnostic, Expression, FloatType, FunctionId, IntegerBinaryOperation,
-    IntegerCompareOperation, IntegerType, IntrinsicFunction, Item, ModuleId, NumericType, Pattern,
-    PatternBindingKind, ProductExpression, ResolvedFunction, Span, Statement, SymbolId,
-    TypeParameterId, TypedModule,
+    CheckedType, CheckedTypeElement, Diagnostic, Expression, FloatType, FunctionId,
+    IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction, Item,
+    ModuleId, NumericType, Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, Span,
+    Statement, SymbolId, TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -2748,6 +2748,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 &arguments[2],
                 span.clone(),
             )?,
+            crate::StructuralTraitMethod::IntoIterator => {
+                self.compile_structural_into_iterator_body(values, span.clone())?
+            }
+            crate::StructuralTraitMethod::Iterator => self.compile_structural_next_body(
+                values,
+                &arguments[0],
+                &arguments[1],
+                &function_type.result,
+                span.clone(),
+            )?,
         };
         self.builder
             .build_return(Some(&result))
@@ -2985,6 +2995,187 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         )?;
         value_as_basic(self.unit_value())
             .ok_or_else(|| Diagnostic::new(span, "unit is not first-class"))
+    }
+
+    fn compile_structural_into_iterator_body(
+        &mut self,
+        values: &[BasicValueEnum<'context>],
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        // `values` holds the source product's own elements flattened as
+        // separate parameters (the same top-level-product flattening
+        // `compile_structural_index_body` observes for its `target`), so
+        // the source value itself must first be rebuilt as a single
+        // struct before being paired with the initial cursor.
+        let source_value = self.build_product_value(values, span.clone())?;
+        let cursor = self.size_type.const_int(0, false);
+        self.build_product_value(&[source_value, cursor.into()], span)
+    }
+
+    /// `next` for a structurally-iterable product: the `Iter` is `(P,
+    /// USize)` (the product plus a cursor). If the cursor is in range, the
+    /// field it names is extracted with the same per-index LLVM `switch`
+    /// used by `compile_structural_index_body` and coerced into `Item`;
+    /// otherwise the `Iter` is returned unchanged via `Done`. Which sum
+    /// alternative is `Done`/`Yield` is found by matching `result`'s
+    /// alternatives against their expected (already-substituted)
+    /// representation, since `IterStep.Done`/`IterStep.Yield` are ordinary
+    /// prelude `Distinct` types, not compiler intrinsics.
+    fn compile_structural_next_body(
+        &mut self,
+        values: &[BasicValueEnum<'context>],
+        iter: &CheckedType,
+        item: &CheckedType,
+        result: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        // `Iter` is itself a 2-element top-level product `(P, USize)`, so
+        // it arrives flattened into two separate parameters, the same way
+        // `compile_structural_index_body` receives `target`/`position`
+        // separately rather than as one struct.
+        let [product_value, BasicValueEnum::IntValue(cursor)] = values else {
+            return Err(Diagnostic::new(span, "invalid structural Iterator arguments"));
+        };
+        let CheckedType::Product(iter_product) = iter else {
+            return Err(Diagnostic::new(span, "invalid structural Iterator target"));
+        };
+        let CheckedType::Product(product) = &iter_product.elements[0].value_type else {
+            return Err(Diagnostic::new(span, "invalid structural Iterator target"));
+        };
+        let CheckedType::Sum(result_sum) = result else {
+            return Err(Diagnostic::new(span, "invalid structural Iterator result"));
+        };
+        let yield_representation = CheckedType::Product(CheckedProductType {
+            elements: vec![
+                CheckedTypeElement {
+                    name: None,
+                    value_type: item.clone(),
+                },
+                CheckedTypeElement {
+                    name: None,
+                    value_type: iter.clone(),
+                },
+            ],
+            variadic: false,
+        });
+        let done_alternative = result_sum
+            .alternatives
+            .iter()
+            .find(|alternative| {
+                matches!(alternative, CheckedType::Distinct { representation, .. } if representation.as_ref() == iter)
+            })
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing `IterStep.Done` alternative"))?;
+        let yield_alternative = result_sum
+            .alternatives
+            .iter()
+            .find(|alternative| {
+                matches!(alternative, CheckedType::Distinct { representation, .. } if representation.as_ref() == &yield_representation)
+            })
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing `IterStep.Yield` alternative"))?;
+
+        let product_value = *product_value;
+        let cursor = *cursor;
+
+        let length = self
+            .size_type
+            .const_int(product.elements.len() as u64, false);
+        let in_range = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::ULT, cursor, length, "next.in_range")
+            .map_err(compiler_diagnostic)?;
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .expect("structural next is in a function");
+        let done_block = self.context.append_basic_block(function, "next.done");
+        let dispatch_block = self.context.append_basic_block(function, "next.dispatch");
+        let unreachable_block = self.context.append_basic_block(function, "next.unreachable");
+        let merge = self.context.append_basic_block(function, "next.merge");
+
+        let result_type = self.compile_type(result)?;
+        let result_slot = self
+            .builder
+            .build_alloca(result_type, "next.result")
+            .map_err(compiler_diagnostic)?;
+
+        self.builder
+            .build_conditional_branch(in_range, dispatch_block, done_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(done_block);
+        let iter_value = self.build_product_value(&[product_value, cursor.into()], span.clone())?;
+        let done_value =
+            self.coerce_value(iter_value.as_any_value_enum(), &done_alternative, result, span.clone())?;
+        let done_value = value_as_basic(done_value)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "iterator step is not first-class"))?;
+        self.builder
+            .build_store(result_slot, done_value)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_unconditional_branch(merge)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(dispatch_block);
+        let cases = product
+            .elements
+            .iter()
+            .enumerate()
+            .map(|(index, _)| {
+                (
+                    self.size_type.const_int(index as u64, false),
+                    self.context.append_basic_block(function, "next.case"),
+                )
+            })
+            .collect::<Vec<_>>();
+        self.builder
+            .build_switch(cursor, unreachable_block, &cases)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(unreachable_block);
+        self.builder
+            .build_unreachable()
+            .map_err(compiler_diagnostic)?;
+
+        for (index, element) in product.elements.iter().enumerate() {
+            self.builder.position_at_end(cases[index].1);
+            let field = self
+                .builder
+                .build_extract_value(product_value.into_struct_value(), index as u32, "next.field")
+                .map_err(compiler_diagnostic)?;
+            let item_value =
+                self.coerce_value(field.as_any_value_enum(), &element.value_type, item, span.clone())?;
+            let item_value = value_as_basic(item_value)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "iterated field is not first-class"))?;
+
+            let next_index = self.size_type.const_int((index + 1) as u64, false);
+            let next_iter_value =
+                self.build_product_value(&[product_value, next_index.into()], span.clone())?;
+            let yield_representation_value =
+                self.build_product_value(&[item_value, next_iter_value], span.clone())?;
+            let yielded = self.coerce_value(
+                yield_representation_value.as_any_value_enum(),
+                &yield_alternative,
+                result,
+                span.clone(),
+            )?;
+            let yielded = value_as_basic(yielded)
+                .ok_or_else(|| Diagnostic::new(span.clone(), "iterator step is not first-class"))?;
+            self.builder
+                .build_store(result_slot, yielded)
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_unconditional_branch(merge)
+                .map_err(compiler_diagnostic)?;
+        }
+
+        self.builder.position_at_end(merge);
+        self.builder
+            .build_load(result_type, result_slot, "next.value")
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
     fn compile_structural_replace(

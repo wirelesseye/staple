@@ -66,6 +66,8 @@ pub enum StructuralTraitMethod {
     Index,
     UpdateIndex,
     MutateIndex,
+    IntoIterator,
+    Iterator,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -651,6 +653,8 @@ pub struct TypedModule {
     index_trait: Option<TraitId>,
     update_index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
+    into_iterator_trait: Option<TraitId>,
+    iterator_trait: Option<TraitId>,
     io_type: Option<TypeId>,
     mutated_parameter_symbols: HashSet<SymbolId>,
 }
@@ -821,6 +825,8 @@ impl TypedModule {
             self.index_trait,
             self.update_index_trait,
             self.mutate_index_trait,
+            self.into_iterator_trait,
+            self.iterator_trait,
             |value_type| self.is_copy_type(value_type),
         )
         .map(|(_, method)| method)
@@ -878,6 +884,8 @@ impl TypedModule {
             self.index_trait,
             self.update_index_trait,
             self.mutate_index_trait,
+            self.into_iterator_trait,
+            self.iterator_trait,
             |value_type| self.is_copy_type(value_type),
         ) {
             return Some(arguments);
@@ -973,6 +981,8 @@ pub struct TypeChecker {
     index_trait: Option<TraitId>,
     update_index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
+    into_iterator_trait: Option<TraitId>,
+    iterator_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
     active_subtype_bounds: Vec<Vec<CheckedSubtypeBound>>,
     function_symbols: HashMap<SymbolId, FunctionId>,
@@ -1055,6 +1065,8 @@ impl TypeChecker {
         self.index_trait = module.standard_trait("Index");
         self.update_index_trait = module.standard_trait("UpdateIndex");
         self.mutate_index_trait = module.standard_trait("MutateIndex");
+        self.into_iterator_trait = module.standard_trait("IntoIterator");
+        self.iterator_trait = module.standard_trait("Iterator");
         self.collect_type_declarations(&module);
         self.collect_string_representation(&module);
         self.collect_traits(&module);
@@ -1114,6 +1126,8 @@ impl TypeChecker {
             index_trait: self.index_trait,
             update_index_trait: self.update_index_trait,
             mutate_index_trait: self.mutate_index_trait,
+            into_iterator_trait: self.into_iterator_trait,
+            iterator_trait: self.iterator_trait,
             io_type: self.io_type,
             mutated_parameter_symbols: self.mutated_parameter_symbols,
         };
@@ -1238,6 +1252,31 @@ impl TypeChecker {
                     Span::Compiler,
                     format!(
                         "standard library must declare public trait `{trait_name}` with three parameters, the required functional dependency, and one `{member_name}` member"
+                    ),
+                ));
+            }
+        }
+        for (trait_id, trait_name, member_name) in [
+            (self.iterator_trait, "Iterator", "next"),
+            (self.into_iterator_trait, "IntoIterator", "into_iterator"),
+        ] {
+            let valid = trait_id
+                .and_then(|id| module.traits().get(&id))
+                .is_some_and(|resolved| {
+                    resolved.declaration.visibility == crate::Visibility::Public
+                        && resolved.parameters.len() == 2
+                        && resolved.declaration.members.len() == 1
+                        && resolved.declaration.members[0].name == member_name
+                        && resolved.functional_dependencies.len() == 1
+                        && resolved.functional_dependencies[0].determinants
+                            == resolved.parameters[..1]
+                        && resolved.functional_dependencies[0].dependent == resolved.parameters[1]
+                });
+            if !valid {
+                self.diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!(
+                        "standard library must declare public trait `{trait_name}` with two parameters, the required functional dependency, and one `{member_name}` member"
                     ),
                 ));
             }
@@ -1383,6 +1422,8 @@ impl TypeChecker {
                 self.index_trait,
                 self.update_index_trait,
                 self.mutate_index_trait,
+                self.into_iterator_trait,
+                self.iterator_trait,
                 |value_type| {
                     is_copy_type(
                         value_type,
@@ -1398,7 +1439,7 @@ impl TypeChecker {
             {
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "indexing traits are derived structurally for this product type and cannot be implemented explicitly",
+                    "indexing and iteration traits are derived structurally for this product type and cannot be implemented explicitly",
                 ));
                 continue;
             }
@@ -5882,6 +5923,8 @@ impl TypeChecker {
             self.index_trait,
             self.update_index_trait,
             self.mutate_index_trait,
+            self.into_iterator_trait,
+            self.iterator_trait,
             |value_type| {
                 is_copy_type(
                     value_type,
@@ -5946,6 +5989,8 @@ impl TypeChecker {
             self.index_trait,
             self.update_index_trait,
             self.mutate_index_trait,
+            self.into_iterator_trait,
+            self.iterator_trait,
             |value_type| {
                 is_copy_type(
                     value_type,
@@ -8086,14 +8131,106 @@ fn attribute_call_mutation(
     target_parameters.get(&root).copied().map(CheckedMutation::Element)
 }
 
+/// Whether `product` is eligible for a structural derivation (`Index`,
+/// `IntoIterator`, `Iterator`): fixed arity, at least one element, and every
+/// element `Copy` so that extracting a single element (by index or by
+/// iteration) can be done by value without consuming the rest.
+fn is_qualifying_product(
+    product: &CheckedProductType,
+    is_copy: &impl Fn(&CheckedType) -> bool,
+) -> bool {
+    !product.variadic
+        && !product.elements.is_empty()
+        && product
+            .elements
+            .iter()
+            .all(|element| is_copy(&element.value_type))
+}
+
+/// The duplicate-free sum of `product`'s element types (a single type when
+/// `product` is homogeneous). Used both as `Index`'s `Output` and, for the
+/// same product, as an iterator's `Item`.
+fn product_item(product: &CheckedProductType) -> CheckedType {
+    normalize_substituted_sum(
+        product
+            .elements
+            .iter()
+            .map(|element| element.value_type.clone())
+            .collect(),
+    )
+}
+
 fn structural_trait_arguments(
     trait_id: TraitId,
     arguments: &[CheckedType],
     index_trait: Option<TraitId>,
     update_index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
+    into_iterator_trait: Option<TraitId>,
+    iterator_trait: Option<TraitId>,
     is_copy: impl Fn(&CheckedType) -> bool,
 ) -> Option<(Vec<CheckedType>, StructuralTraitMethod)> {
+    if Some(trait_id) == into_iterator_trait {
+        let [source, iter] = arguments else {
+            return None;
+        };
+        let CheckedType::Product(product) = source else {
+            return None;
+        };
+        if !is_qualifying_product(product, &is_copy) {
+            return None;
+        }
+        let derived_iter = CheckedType::Product(CheckedProductType {
+            elements: vec![
+                CheckedTypeElement {
+                    name: None,
+                    value_type: source.clone(),
+                },
+                CheckedTypeElement {
+                    name: None,
+                    value_type: CheckedType::USize,
+                },
+            ],
+            variadic: false,
+        });
+        if *iter == CheckedType::Inferred || *iter == derived_iter {
+            return Some((
+                vec![source.clone(), derived_iter],
+                StructuralTraitMethod::IntoIterator,
+            ));
+        }
+        return None;
+    }
+
+    if Some(trait_id) == iterator_trait {
+        let [iter, item] = arguments else {
+            return None;
+        };
+        let CheckedType::Product(iter_product) = iter else {
+            return None;
+        };
+        if iter_product.variadic || iter_product.elements.len() != 2 {
+            return None;
+        }
+        if iter_product.elements[1].value_type != CheckedType::USize {
+            return None;
+        }
+        let CheckedType::Product(inner) = &iter_product.elements[0].value_type else {
+            return None;
+        };
+        if !is_qualifying_product(inner, &is_copy) {
+            return None;
+        }
+        let derived_item = product_item(inner);
+        if *item == CheckedType::Inferred || *item == derived_item {
+            return Some((
+                vec![iter.clone(), derived_item],
+                StructuralTraitMethod::Iterator,
+            ));
+        }
+        return None;
+    }
+
     let [target, position, dependent] = arguments else {
         return None;
     };
@@ -8104,21 +8241,8 @@ fn structural_trait_arguments(
 
     if Some(trait_id) == index_trait {
         let output = match target {
-            CheckedType::Product(product)
-                if !product.variadic
-                    && !product.elements.is_empty()
-                    && product
-                        .elements
-                        .iter()
-                        .all(|element| is_copy(&element.value_type)) =>
-            {
-                normalize_substituted_sum(
-                    product
-                        .elements
-                        .iter()
-                        .map(|element| element.value_type.clone())
-                        .collect(),
-                )
+            CheckedType::Product(product) if is_qualifying_product(product, &is_copy) => {
+                product_item(product)
             }
             CheckedType::Ref(payload) => match payload.as_ref() {
                 CheckedType::Product(product) if !product.variadic => {
