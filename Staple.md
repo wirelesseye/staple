@@ -191,8 +191,10 @@ pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T
 
 `ParseQuoteResult` is a sealed compiler capability implemented only for
 `SyntaxNode`, `Expr`, `Type`, `Pattern`, `Item`, `Sequence Item`, `Comma`,
-`Equals`, and `FatArrow` — never for `Syntax`, which is `quote`'s own
-always-opaque result, not a syntax node `parse_quote` can produce.
+`Equals`, `FatArrow`, `Visibility`, and the three delimited syntax types
+(`Parenthesized`, `Bracketed`, `Braced`) with any of their supported content
+shapes — never for `Syntax`, which is `quote`'s own always-opaque result, not
+a syntax node `parse_quote` can produce.
 `SyntaxNode` requires exactly one shortest
 structural node. The grammatical categories parse the complete fragment in
 their respective contexts, while `Sequence Item` parses zero or more complete
@@ -207,9 +209,9 @@ returns opaque `Syntax`.
 
 A macro's declared or inferred result is also checked against its body: when
 that result is a concrete syntax type — `SyntaxNode`, `Expr`, `Type`,
-`Pattern`, `Item`, `Sequence Item`, `Comma`, `Equals`, or `FatArrow` — but the
-body's tail expression is a bare `quote { ... }`, the mismatch is rejected at
-the declaration, since
+`Pattern`, `Item`, `Sequence Item`, `Comma`, `Equals`, `FatArrow`,
+`Visibility`, or a delimited syntax type — but the body's tail expression is
+a bare `quote { ... }`, the mismatch is rejected at the declaration, since
 `quote` can only ever produce opaque `Syntax`. Replacing that `quote` with
 `parse_quote` resolves it.
 
@@ -341,6 +343,11 @@ not by the number of parameters after implicit values are inserted. Therefore
 an ordinary overload and an implicitly-private overload consuming the same
 source syntax are ambiguous. An explicit prefix before the macro name selects
 only overloads beginning with `MacroCallVisibility`.
+
+`Visibility` is also a `parse_quote` result type, following the same
+absence-means-`Private` convention: `parse_quote { }: Visibility` yields
+`Private`, `parse_quote { pub }: Visibility` yields `Public`, and
+`parse_quote { pub(repr) }: Visibility` yields `PublicRepr`.
 
 Inside an item quotation, a visibility value may be spliced immediately before
 a declaration. `Private` emits no prefix, `Public` emits `pub`, and

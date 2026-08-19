@@ -3702,6 +3702,38 @@ impl MacroExpander {
             return Some(Value::Syntax(SyntaxValue::Items(Vec::new())));
         }
 
+        if *expected == MetaType::Visibility
+            && quote
+                .contents
+                .tokens()
+                .iter()
+                .all(|token| token.kind.is_trivia())
+        {
+            return Some(Value::Syntax(SyntaxValue::Visibility(private_visibility())));
+        }
+
+        if matches!(expected, MetaType::Delimited(_, _))
+            && !quote
+                .contents
+                .tokens()
+                .iter()
+                .any(|token| token.kind == crate::TokenKind::Dollar)
+        {
+            let value =
+                delimiter_argument_value(expected, &quote.contents, &mut self.next_syntax_id);
+            let Some(value) = value else {
+                self.diagnostics.push(Diagnostic::new(
+                    quote.contents.span.clone(),
+                    format!(
+                        "quotation cannot be interpreted as {}",
+                        format_meta_type(expected)
+                    ),
+                ));
+                return None;
+            };
+            return Some(Value::Syntax(value));
+        }
+
         if matches!(
             expected,
             MetaType::SyntaxNode | MetaType::Comma | MetaType::Equals | MetaType::FatArrow
@@ -3742,6 +3774,7 @@ impl MacroExpander {
             MetaType::SyntaxNode => !matches!(value, SyntaxValue::Items(_) | SyntaxValue::Raw(_)),
             MetaType::Expr => value.to_expression().is_some(),
             MetaType::Item => matches!(value, SyntaxValue::Item(_)),
+            MetaType::Visibility => matches!(value, SyntaxValue::Visibility(_)),
             MetaType::Sequence(element) if **element == MetaType::Item => {
                 matches!(value, SyntaxValue::Item(_) | SyntaxValue::Items(_))
             }
@@ -5465,8 +5498,10 @@ fn quote_result_type(meta: &MetaType) -> bool {
         | MetaType::Item
         | MetaType::Comma
         | MetaType::Equals
-        | MetaType::FatArrow => true,
+        | MetaType::FatArrow
+        | MetaType::Visibility => true,
         MetaType::Sequence(element) => **element == MetaType::Item,
+        MetaType::Delimited(_, _) => !invalid_raw_syntax_shape(meta),
         _ => false,
     }
 }
@@ -5809,6 +5844,13 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
                     .iter()
                     .zip(values)
                     .all(|(expected, (_, value))| meta_type_matches_value(expected, value))
+        }
+        (MetaType::Product(expected), Value::Sequence(values)) => {
+            expected.len() == values.len()
+                && expected
+                    .iter()
+                    .zip(values)
+                    .all(|(expected, value)| meta_type_matches_value(expected, value))
         }
         (MetaType::Optional(expected), Value::Nominal(name, value)) => match name.as_str() {
             "None" => matches!(value.as_ref(), Value::Product(values) if values.is_empty()),

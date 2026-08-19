@@ -3013,6 +3013,101 @@ fn parse_quote_produces_punctuation_result_types() {
 }
 
 #[test]
+fn parse_quote_produces_visibility_result_type() {
+    let module = type_check(concat!(
+        "macro visibility: Expr -> Expr = _: Expr => {\n",
+        "    let none: Visibility = parse_quote { }\n",
+        "    let pub_: Visibility = parse_quote { pub }\n",
+        "    let repr: Visibility = parse_quote { pub(repr) }\n",
+        "    match (none, pub_, repr) {\n",
+        "        (Private, Public, PublicRepr) => parse_quote { 42 },\n",
+        "    }\n",
+        "}\n",
+        "let result: I32 = visibility (0)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("private, public, and public-repr parse_quote results should construct");
+}
+
+#[test]
+fn parse_quote_produces_delimited_result_types() {
+    let module = type_check(concat!(
+        "macro delimited: Expr -> Expr = _: Expr => {\n",
+        "    let fixed: Parenthesized (Ident String, Comma, Ident String) = parse_quote { (a, b) }\n",
+        "    let sequence: Bracketed (Sequence Ident String) = parse_quote { [one two] }\n",
+        "    let separated: Braced (Separated (Ident String) Comma) = parse_quote { { x, y, } }\n",
+        "    let nested: Parenthesized Syntax = parse_quote { ((a), (b)) }\n",
+        "    match (fixed, sequence, separated) {\n",
+        "        (Parenthesized (Ident \"a\", Comma, Ident \"b\"),\n",
+        "         Bracketed (Sequence (Ident \"one\", Ident \"two\")),\n",
+        "         Braced (Separated (separator: Comma, elements: (Ident \"x\", _), trailing: True()))) =>\n",
+        "            match nested { Parenthesized _ => parse_quote { 42 } },\n",
+        "    }\n",
+        "}\n",
+        "let result: I32 = delimited (0)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context).compile_module(&module).expect(
+        "fixed, sequence, and separated parse_quote results should construct, including a \
+             nested same-kind delimiter captured opaquely as Syntax",
+    );
+}
+
+#[test]
+fn parse_quote_rejects_spliced_delimited_result() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            &with_syntax_imports(concat!(
+                "macro bad: Expr -> Expr = value: Expr => {\n",
+                "    let x: Parenthesized (Expr, Expr) = parse_quote { ($value, $value) }\n",
+                "    parse_quote { 0 }\n",
+                "}\n",
+                "let result: I32 = bad (1)\n",
+            )),
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("splicing into a delimited-result quotation should be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .starts_with("quotation cannot be interpreted as Parenthesized")
+    }));
+}
+
+#[test]
+fn parse_quote_rejects_spliced_visibility_result() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            &with_syntax_imports(concat!(
+                "macro bad = vis: Visibility => {\n",
+                "    let x: Visibility = parse_quote { $vis }\n",
+                "    parse_quote { 0 }\n",
+                "}\n",
+                "let result = bad pub\n",
+            )),
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("splicing a whole Visibility value should be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("contains visibility syntax, not expression syntax")
+    }));
+}
+
+#[test]
 fn rejects_legacy_typegroup_call_syntax() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for source in [
@@ -3997,7 +4092,6 @@ fn constructs_and_destructures_separated_syntax() {
     let module = type_check(concat!(
         "macro inspect = value: Parenthesized (Separated (Ident String) Comma) => match value {\n",
         "    Parenthesized (Separated (separator: Comma, elements: (Ident \"one\", Ident \"two\"), trailing: True())) => parse_quote { 1 },\n",
-        "    _ => parse_quote { 0 },\n",
         "}\n",
         "macro construct = _: Expr => Parenthesized (Separated (\n",
         "    separator: Comma,\n",
