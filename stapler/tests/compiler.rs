@@ -2931,14 +2931,63 @@ fn modifier_macro_deletes_its_target_by_producing_zero_items() {
 }
 
 #[test]
-fn diagnoses_non_outermost_modifier_producing_multiple_items() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let source = concat!(
-        "macro @outer: Item -> Item = item => item\n",
+fn non_outermost_modifier_applies_the_next_modifier_to_its_first_item() {
+    let module = type_check(concat!(
+        "macro @outer: Item -> Item = _ => parse_quote { let transformed: I32 = 100 }\n",
         "macro @inner: Item -> Sequence Item = _ => parse_quote {\n",
         "    let first: I32 = 1\n",
         "    let second: I32 = 2\n",
         "}\n",
+        "@outer\n",
+        "@inner\n",
+        "let original: I32 = 0\n",
+        "let result: I32 = transformed + second\n",
+    ));
+    assert!(!module.resolved().syntax().items.iter().any(|item| {
+        matches!(item, Item::Statement(statement)
+            if matches!(statement.as_ref(), Statement::Binding(binding)
+                if binding.name == "first"))
+    }));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect(
+            "the outermost modifier should apply to the inner modifier's first item, with the \
+             rest passed through unmodified",
+        );
+}
+
+#[test]
+fn outermost_modifier_combines_its_own_items_with_earlier_trailing_items() {
+    let module = type_check(concat!(
+        "macro @outer: Item -> Sequence Item = _ => parse_quote {\n",
+        "    let replaced_first: I32 = 100\n",
+        "    let from_outer: I32 = 200\n",
+        "}\n",
+        "macro @inner: Item -> Sequence Item = _ => parse_quote {\n",
+        "    let first: I32 = 1\n",
+        "    let second: I32 = 2\n",
+        "}\n",
+        "@outer\n",
+        "@inner\n",
+        "let original: I32 = 0\n",
+        "let result: I32 = replaced_first + from_outer + second\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect(
+            "items trailing from an inner modifier should combine with the outermost \
+             modifier's own multi-item result",
+        );
+}
+
+#[test]
+fn diagnoses_non_outermost_modifier_producing_zero_items() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = concat!(
+        "macro @outer: Item -> Item = item => item\n",
+        "macro @inner: Item -> Sequence Item = _ => parse_quote {}\n",
         "@outer\n",
         "@inner\n",
         "let original: I32 = 0\n",
@@ -2949,13 +2998,13 @@ fn diagnoses_non_outermost_modifier_producing_multiple_items() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("a non-outermost modifier producing multiple items should be diagnosed");
+        .expect_err("a non-outermost modifier producing zero items should be diagnosed");
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.message
-                == "modifier macro `@inner` produced 2 items, which is only allowed for the outermost modifier in the chain"
+                == "modifier macro `@inner` produced no items, so the remaining modifiers in the chain have nothing to apply to"
         }),
-        "expected non-outermost multi-item diagnostic, found {diagnostics:#?}"
+        "expected non-outermost zero-item diagnostic, found {diagnostics:#?}"
     );
 }
 

@@ -54,6 +54,22 @@ enum ModifierChainResult {
     Items(Vec<Item>),
 }
 
+fn split_first_item(mut items: Vec<Item>) -> (Option<Item>, Vec<Item>) {
+    if items.is_empty() {
+        (None, items)
+    } else {
+        let first = items.remove(0);
+        (Some(first), items)
+    }
+}
+
+fn split_modifier_chain_result(result: ModifierChainResult) -> (Option<Item>, Vec<Item>) {
+    match result {
+        ModifierChainResult::Item(item) => (Some(item), Vec::new()),
+        ModifierChainResult::Items(items) => split_first_item(items),
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum MetaType {
     Syntax,
@@ -1398,13 +1414,20 @@ impl MacroExpander {
         depth: usize,
     ) -> Option<ModifierChainResult> {
         let mut current = *modified.item;
+        let mut trailing: Vec<Item> = Vec::new();
         if let Item::Modified(nested) = current {
-            match self.apply_modifier_chain(module, nested, depth + 1)? {
-                ModifierChainResult::Item(item) => current = item,
-                ModifierChainResult::Items(_) => {
+            let result = self.apply_modifier_chain(module, nested, depth + 1)?;
+            let (first, extra) = split_modifier_chain_result(result);
+            trailing.extend(extra);
+            match first {
+                Some(item) => current = item,
+                None if modified.modifiers.is_empty() => {
+                    return Some(ModifierChainResult::Items(trailing));
+                }
+                None => {
                     self.diagnostics.push(Diagnostic::new(
                         modified.syntax.span,
-                        "modifier macro chain produced multiple items, which is only allowed for the outermost modifier applied to an item",
+                        "modifier macro chain produced no item, so the remaining modifiers have nothing to apply to",
                     ));
                     return None;
                 }
@@ -1469,7 +1492,7 @@ impl MacroExpander {
                 current,
                 invocation.syntax.span.clone(),
             );
-            let Some(mut items) = result else {
+            let Some(items) = result else {
                 self.expansion_stack.pop();
                 if self.diagnostics.len() > diagnostic_start {
                     self.diagnostics.push(Diagnostic::new(
@@ -1479,34 +1502,43 @@ impl MacroExpander {
                 }
                 return None;
             };
-            if items.len() == 1 && matches!(items[0], Item::Modified(_)) {
-                let Item::Modified(nested) = items.pop().unwrap() else {
-                    unreachable!()
-                };
-                let nested_result = self.apply_modifier_chain(module, nested, depth + 1);
-                self.expansion_stack.pop();
-                match nested_result? {
-                    ModifierChainResult::Item(item) => items = vec![item],
-                    ModifierChainResult::Items(multiple) => {
-                        if !is_last {
-                            self.diagnostics.push(Diagnostic::new(
-                                invocation.syntax.span.clone(),
-                                format!(
-                                    "modifier macro `@{}` produced multiple items, which is only allowed for the outermost modifier in the chain",
-                                    key.name
-                                ),
-                            ));
-                            return None;
-                        }
-                        return Some(ModifierChainResult::Items(multiple));
-                    }
+            // The first item produced by this invocation continues the chain (feeding the
+            // next modifier, or becoming part of the final result); any further items are
+            // deferred as `trailing`, to be spliced in after the chain's ultimate result.
+            let (first, mut extra) = split_first_item(items);
+            let first = match first {
+                Some(item @ Item::Modified(_)) => {
+                    let Item::Modified(nested) = item else {
+                        unreachable!()
+                    };
+                    let nested_result = self.apply_modifier_chain(module, nested, depth + 1);
+                    self.expansion_stack.pop();
+                    let (nested_first, nested_extra) =
+                        split_modifier_chain_result(nested_result?);
+                    extra.extend(nested_extra);
+                    nested_first
                 }
-            } else {
-                self.expansion_stack.pop();
-            }
-            if items.len() == 1 {
-                let result = items.pop().unwrap();
-                if !modifier_target_supported(&result) {
+                other => {
+                    self.expansion_stack.pop();
+                    other
+                }
+            };
+            let Some(first) = first else {
+                if is_last {
+                    extra.extend(trailing);
+                    return Some(ModifierChainResult::Items(extra));
+                }
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span.clone(),
+                    format!(
+                        "modifier macro `@{}` produced no items, so the remaining modifiers in the chain have nothing to apply to",
+                        key.name
+                    ),
+                ));
+                return None;
+            };
+            if !is_last {
+                if !modifier_target_supported(&first) {
                     self.diagnostics.push(Diagnostic::new(
                         invocation.syntax.span.clone(),
                         format!(
@@ -1516,19 +1548,25 @@ impl MacroExpander {
                     ));
                     return None;
                 }
-                current = result;
-            } else if is_last {
-                return Some(ModifierChainResult::Items(items));
+                trailing.extend(extra);
+                current = first;
+            } else if extra.is_empty() && trailing.is_empty() {
+                if !modifier_target_supported(&first) {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span.clone(),
+                        format!(
+                            "modifier macro `@{}` produced an unsupported item kind",
+                            key.name
+                        ),
+                    ));
+                    return None;
+                }
+                return Some(ModifierChainResult::Item(first));
             } else {
-                self.diagnostics.push(Diagnostic::new(
-                    invocation.syntax.span.clone(),
-                    format!(
-                        "modifier macro `@{}` produced {} items, which is only allowed for the outermost modifier in the chain",
-                        key.name,
-                        items.len()
-                    ),
-                ));
-                return None;
+                let mut batch = vec![first];
+                batch.extend(extra);
+                batch.extend(trailing);
+                return Some(ModifierChainResult::Items(batch));
             }
         }
         Some(ModifierChainResult::Item(current))
