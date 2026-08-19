@@ -2101,7 +2101,7 @@ impl Grammar {
             && self
                 .tokens
                 .get(self.next_non_trivia(self.position))
-                .is_some_and(|token| token.text == "quote")
+                .is_some_and(|token| token.text == "quote" || token.text == "parse_quote")
             && self.peek_n(1) == Some(TokenKind::LBrace)
         {
             return self.parse_quote_expression().map(Expression::Quote);
@@ -2202,8 +2202,13 @@ impl Grammar {
 
     fn parse_quote_expression(&mut self) -> Result<QuoteExpression, ParseError> {
         let start = self.position;
-        let quote = self.expect(TokenKind::Identifier, "expected `quote`")?;
-        debug_assert_eq!(quote.text, "quote");
+        let quote = self.expect(TokenKind::Identifier, "expected `quote` or `parse_quote`")?;
+        debug_assert!(quote.text == "quote" || quote.text == "parse_quote");
+        let kind = if quote.text == "parse_quote" {
+            QuoteKind::ParseQuote
+        } else {
+            QuoteKind::Quote
+        };
         self.expect(TokenKind::LBrace, "expected `{` after `quote`")?;
         self.quote_depth += 1;
         let previous = self.brace_terminates_expression;
@@ -2263,6 +2268,7 @@ impl Grammar {
         self.expect(TokenKind::RBrace, "expected `}` after quoted syntax")?;
         Ok(QuoteExpression {
             syntax: self.syntax(start),
+            kind,
             contents,
             template,
         })

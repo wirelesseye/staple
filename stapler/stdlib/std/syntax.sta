@@ -43,7 +43,8 @@ pub type MacroCallVisibility = opaque
 pub type Syntax = opaque
 pub type alias SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
 
-// A sealed compiler-defined marker for the contextual result of `quote`.
-pub trait QuoteResult = T => {}
+// A sealed compiler-defined marker for the contextual result of `parse_quote`.
+pub trait ParseQuoteResult = T => {}
 
-pub macro quote: T => QuoteResult T => Braced Syntax -> T
+pub macro quote: Braced Syntax -> Syntax
+pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T

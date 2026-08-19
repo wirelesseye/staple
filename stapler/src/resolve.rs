@@ -2885,7 +2885,7 @@ impl NameResolver {
             },
             Expression::Quote(quote) => self.diagnostics.push(Diagnostic::new(
                 quote.syntax.span.clone(),
-                "`quote` is only available during macro expansion",
+                format!("`{}` is only available during macro expansion", quote.kind.name()),
             )),
             Expression::Splice(splice) => self.diagnostics.push(Diagnostic::new(
                 splice.syntax.span.clone(),

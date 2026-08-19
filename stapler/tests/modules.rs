@@ -74,6 +74,7 @@ fn with_syntax_imports(source: &str) -> String {
     let mut names = Vec::new();
     for name in [
         "quote",
+        "parse_quote",
         "Expr",
         "Type",
         "Pattern",
@@ -214,7 +215,7 @@ fn reexports_public_items_through_selected_renamed_glob_and_chained_uses() {
         concat!(
             "pub type alias Number = I32\n",
             "pub let value: Number = 42\n",
-            "pub macro reveal = item => quote { $item }\n",
+            "pub macro reveal = item => parse_quote { $item }\n",
         ),
     );
     fixture.write(
@@ -368,10 +369,10 @@ fn inline_glob_reexports_types_traits_and_macros() {
         "library.sta",
         concat!(
             "mod child {\n",
-            "    use std.syntax (quote)\n",
+            "    use std.syntax (parse_quote)\n",
             "    pub type alias Number = I32\n",
             "    pub trait Identity = T => { identity: T -> T }\n",
-            "    pub macro reveal = item => quote { $item }\n",
+            "    pub macro reveal = item => parse_quote { $item }\n",
             "    pub mod Variant { pub type Ready }\n",
             "}\n",
             "pub use child *\n",
@@ -1039,7 +1040,7 @@ fn imports_user_macros_with_definition_site_hygiene() {
         "helpers.sta",
         concat!(
             "def private_identity: I32 -> I32 = value => value\n",
-            "pub macro reveal = value => quote { private_identity $value }\n",
+            "pub macro reveal = value => parse_quote { private_identity $value }\n",
         ),
     );
 
@@ -1064,7 +1065,7 @@ fn generated_items_keep_definition_and_splice_hygiene() {
         "helpers.sta",
         concat!(
             "let private_value: I32 = 40\n",
-            "pub macro define_generated: Expr -> Item = body => quote {\n",
+            "pub macro define_generated: Expr -> Item = body => parse_quote {\n",
             "    pub def generated = () => private_value + $body\n",
             "}\n",
         ),
@@ -1091,7 +1092,7 @@ fn imports_function_and_modifier_macros_with_the_same_name() {
     fixture.write(
         "helpers.sta",
         concat!(
-            "pub macro identity: Expr -> Expr = value => quote { $value }\n",
+            "pub macro identity: Expr -> Expr = value => parse_quote { $value }\n",
             "pub macro @identity: Item -> Item = item => item\n",
         ),
     );
@@ -1116,7 +1117,7 @@ fn imports_and_reexports_visibility_aware_macros() {
     fixture.write(
         "helpers.sta",
         concat!(
-            "pub macro define = vis: MacroCallVisibility => quote {\n",
+            "pub macro define = vis: MacroCallVisibility => parse_quote {\n",
             "    $vis let generated: I32 = 42\n",
             "}\n",
         ),
@@ -1144,8 +1145,8 @@ fn generated_type_and_pattern_splices_keep_caller_hygiene() {
     fixture.write(
         "helpers.sta",
         concat!(
-            "pub macro define_alias = ty: Type => quote { type alias Generated = $ty }\n",
-            "pub macro destructure = pattern: Pattern => value: Expr => quote { let $pattern = $value }\n",
+            "pub macro define_alias = ty: Type => parse_quote { type alias Generated = $ty }\n",
+            "pub macro destructure = pattern: Pattern => value: Expr => parse_quote { let $pattern = $value }\n",
         ),
     );
 
@@ -1168,7 +1169,7 @@ fn imports_user_macros_through_selected_and_renamed_forms() {
     );
     fixture.write(
         "helpers.sta",
-        "pub macro reveal = value => quote { $value }\n",
+        "pub macro reveal = value => parse_quote { $value }\n",
     );
 
     fixture
@@ -1182,8 +1183,8 @@ fn preserves_macro_overload_sets_through_imports_and_reexports() {
     fixture.write(
         "helpers.sta",
         concat!(
-            "pub macro reveal = value: Expr => quote { $value }\n",
-            "pub macro reveal = value: Expr => _: Ident \"with\" => replacement: Expr => quote { $replacement }\n",
+            "pub macro reveal = value: Expr => parse_quote { $value }\n",
+            "pub macro reveal = value: Expr => _: Ident \"with\" => replacement: Expr => parse_quote { $replacement }\n",
         ),
     );
     fixture.write("bridge.sta", "pub use helpers reveal\n");
@@ -1210,11 +1211,11 @@ fn does_not_merge_macro_overloads_from_unrelated_imports() {
     let fixture = Fixture::new();
     fixture.write(
         "left.sta",
-        "pub macro choose = value: Expr => quote { 1 }\n",
+        "pub macro choose = value: Expr => parse_quote { 1 }\n",
     );
     fixture.write(
         "right.sta",
-        "pub macro choose = value: Expr => other: Expr => quote { 2 }\n",
+        "pub macro choose = value: Expr => other: Expr => parse_quote { 2 }\n",
     );
     fixture.write(
         "main.sta",

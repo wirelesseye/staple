@@ -905,7 +905,7 @@ mod tests {
     #[test]
     fn diagnostics_do_not_include_preceding_blank_lines() {
         let source = concat!(
-            "macro what = x => quote {$x}\n",
+            "macro what = x => parse_quote {$x}\n",
             "\n",
             "\n",
             "missing\n",

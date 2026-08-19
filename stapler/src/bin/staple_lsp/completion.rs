@@ -19,6 +19,7 @@ const KEYWORDS: &[&str] = &[
     "mod",
     "mut",
     "opaque",
+    "parse_quote",
     "pub",
     "quote",
     "repr",
@@ -681,7 +682,7 @@ mod tests {
                 "pub def callable = () => 1\n",
                 "pub type alias Number = I32\n",
                 "pub trait Printable = T => {}\n",
-                "pub macro identity = value => quote { $value }\n",
+                "pub macro identity = value => parse_quote { $value }\n",
             ),
         )
         .unwrap();

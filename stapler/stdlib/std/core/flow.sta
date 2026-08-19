@@ -7,7 +7,7 @@ def if_clauses:
     Sequence (Expr, FatArrow, Expr) ->
     Expr =
 clauses => match clauses {
-    Sequence () => quote { () },
+    Sequence () => parse_quote { () },
     Sequence (
         first: (Expr, FatArrow, Expr),
         rest: Sequence (Expr, FatArrow, Expr),
@@ -17,7 +17,7 @@ clauses => match clauses {
         },
         (condition, _, branch) => {
             let otherwise = if_clauses rest
-            quote {
+            parse_quote {
                 match $condition satisfies Bool {
                     True() => $branch,
                     False() => $otherwise,
@@ -35,7 +35,7 @@ pub macro if =
 pub macro while =
     condition: Expr =>
     body: Expr =>
-    quote {
+    parse_quote {
         loop {
             match $condition satisfies Bool {
                 True() => $body,
@@ -49,7 +49,7 @@ pub macro for =
     _: Ident "in" =>
     source: Expr =>
     body: Expr =>
-    quote {
+    parse_quote {
         {
             var iterator = IntoIterator.into_iterator $source
             loop {

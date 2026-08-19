@@ -2612,7 +2612,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )),
             Expression::Quote(quote) => Err(Diagnostic::new(
                 quote.syntax.span.clone(),
-                "unexpanded `quote` expression",
+                format!("unexpanded `{}` expression", quote.kind.name()),
             )),
             Expression::Splice(splice) => Err(Diagnostic::new(
                 splice.syntax.span.clone(),

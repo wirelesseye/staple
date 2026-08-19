@@ -23,6 +23,7 @@ enum MacroKind {
     User(Expression),
     CString,
     Quote,
+    ParseQuote,
 }
 
 #[derive(Clone)]
@@ -526,6 +527,10 @@ impl MacroExpander {
                             && declaration.name == "quote"
                         {
                             MacroKind::Quote
+                        } else if Some(source_module.id) == syntax
+                            && declaration.name == "parse_quote"
+                        {
+                            MacroKind::ParseQuote
                         } else if Some(source_module.id) == cinterop
                             && declaration.name == "c_string"
                         {
@@ -536,7 +541,7 @@ impl MacroExpander {
                             MacroKind::User(Expression::Product(crate::ProductExpression::empty()))
                         };
                         let (arity, mut parameters, mut result) =
-                            if matches!(kind, MacroKind::Quote) {
+                            if matches!(kind, MacroKind::Quote | MacroKind::ParseQuote) {
                                 (
                                     1,
                                     vec![MetaType::Delimited(
@@ -901,7 +906,7 @@ impl MacroExpander {
         let mut groups = HashMap::<(ModuleId, String, bool), Vec<MacroDefinition>>::new();
         for definition in self.definitions.values() {
             if !definition.declaration.type_parameters.is_empty()
-                && !matches!(definition.kind, MacroKind::Quote)
+                && !matches!(definition.kind, MacroKind::ParseQuote)
             {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
@@ -954,7 +959,7 @@ impl MacroExpander {
                 ));
             }
             if let Some(annotation) = &definition.declaration.annotation
-                && !matches!(definition.kind, MacroKind::Quote)
+                && !matches!(definition.kind, MacroKind::ParseQuote)
                 && !valid_macro_annotation(annotation)
             {
                 self.diagnostics.push(Diagnostic::new(
@@ -1104,7 +1109,13 @@ impl MacroExpander {
                 MacroKind::Quote if !valid_quote_declaration(&definition.declaration) => {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
-                        "compiler-provided macro `quote` must have signature `T => QuoteResult T => Braced Syntax -> T`",
+                        "compiler-provided macro `quote` must have signature `Braced Syntax -> Syntax`",
+                    ));
+                }
+                MacroKind::ParseQuote if !valid_parse_quote_declaration(&definition.declaration) => {
+                    self.diagnostics.push(Diagnostic::new(
+                        definition.declaration.syntax.span.clone(),
+                        "compiler-provided macro `parse_quote` must have signature `T => ParseQuoteResult T => Braced Syntax -> T`",
                     ));
                 }
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
@@ -1135,6 +1146,19 @@ impl MacroExpander {
                     self.diagnostics.push(Diagnostic::new(
                         body.syntax().span.clone(),
                         format!("macro `{}` must return `Syntax`", definition.key.name),
+                    ));
+                }
+                MacroKind::User(body)
+                    if quote_result_type(&definition.result)
+                        && quote_at_tail(body, definition.arity) =>
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        body.syntax().span.clone(),
+                        format!(
+                            "macro `{}` declares result `{}`, but its body ends in `quote`, which always returns opaque `Syntax`; use `parse_quote` instead",
+                            definition.key.name,
+                            format_meta_type(&definition.result)
+                        ),
                     ));
                 }
                 MacroKind::User(body)
@@ -1741,8 +1765,51 @@ impl MacroExpander {
                     freshen_item(self, generated, module, mark);
                 }
                 if items.len() == 1 {
-                    *item = items.remove(0);
+                    let mut generated = items.remove(0);
+                    if !arguments[consumed_count..].is_empty() {
+                        let Item::Statement(statement) = &generated else {
+                            self.diagnostics.push(Diagnostic::new(
+                                expression.syntax().span.clone(),
+                                format!(
+                                    "item-producing macro `{}` cannot have excess arguments",
+                                    key.name
+                                ),
+                            ));
+                            self.expansion_stack.pop();
+                            return true;
+                        };
+                        let Statement::Expression(mut result) = statement.as_ref().clone() else {
+                            self.diagnostics.push(Diagnostic::new(
+                                expression.syntax().span.clone(),
+                                format!(
+                                    "item-producing macro `{}` cannot have excess arguments",
+                                    key.name
+                                ),
+                            ));
+                            self.expansion_stack.pop();
+                            return true;
+                        };
+                        for argument in &arguments[consumed_count..] {
+                            let mut syntax = result.syntax().clone();
+                            syntax.id = self.fresh_id();
+                            result = Expression::Call(crate::CallExpression {
+                                syntax,
+                                callee: Box::new(result),
+                                argument: Box::new((*argument).clone()),
+                            });
+                        }
+                        generated = Item::Statement(Box::new(Statement::Expression(result)));
+                    }
+                    *item = generated;
                     self.expand_item(module, item, depth + 1);
+                } else if !arguments[consumed_count..].is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        format!(
+                            "item-producing macro `{}` cannot have excess arguments",
+                            key.name
+                        ),
+                    ));
                 } else {
                     self.emitted_items = Some(items);
                 }
@@ -2044,7 +2111,10 @@ impl MacroExpander {
             Expression::Quote(quote) => {
                 self.diagnostics.push(Diagnostic::new(
                     quote.syntax.span.clone(),
-                    "`quote` is only available in a macro body or compile-time helper",
+                    format!(
+                        "`{}` is only available in a macro body or compile-time helper",
+                        quote.kind.name()
+                    ),
                 ));
                 Expression::Quote(quote)
             }
@@ -2267,6 +2337,13 @@ impl MacroExpander {
                 ));
                 None
             }
+            MacroKind::ParseQuote => {
+                self.diagnostics.push(Diagnostic::new(
+                    call_span,
+                    "`parse_quote` may only be evaluated inside a macro body",
+                ));
+                None
+            }
             MacroKind::User(body) => {
                 let previous_context = if quote_result_type(&definition.result) {
                     self.quote_context.replace(definition.result.clone())
@@ -2462,12 +2539,13 @@ impl MacroExpander {
             Expression::Satisfies(satisfies) => {
                 if let Some(expected) = meta_type(&satisfies.ty)
                     && let Expression::Quote(quote) = satisfies.value.as_ref()
+                    && quote.kind == crate::QuoteKind::ParseQuote
                 {
                     if !quote_result_type(&expected) {
                         self.diagnostics.push(Diagnostic::new(
                             satisfies.ty.syntax().span.clone(),
                             format!(
-                                "{} does not satisfy `QuoteResult`",
+                                "{} does not satisfy `ParseQuoteResult`",
                                 format_meta_type(&expected)
                             ),
                         ));
@@ -2483,7 +2561,19 @@ impl MacroExpander {
                 self.eval_expression(module, &satisfies.value, environment)
             }
             Expression::Quote(quote) => {
-                let expected = self.quote_context.clone().unwrap_or(MetaType::Syntax);
+                let expected = match quote.kind {
+                    crate::QuoteKind::Quote => MetaType::Syntax,
+                    crate::QuoteKind::ParseQuote => match self.quote_context.clone() {
+                        Some(expected) => expected,
+                        None => {
+                            self.diagnostics.push(Diagnostic::new(
+                                quote.syntax.span.clone(),
+                                "`parse_quote` requires a contextual syntax type; annotate the binding, use `satisfies`, or declare the macro's result type",
+                            ));
+                            return None;
+                        }
+                    },
+                };
                 self.instantiate_contextual_quote(module, quote, environment, &expected)
             }
             Expression::Splice(splice) => {
@@ -2566,6 +2656,7 @@ impl MacroExpander {
                         _ => None,
                     };
                     let value = if let Expression::Quote(quote) = &element.value
+                        && quote.kind == crate::QuoteKind::ParseQuote
                         && let Some(expected) = sequence_element
                     {
                         self.instantiate_contextual_quote(module, quote, environment, &expected)?
@@ -2842,12 +2933,13 @@ impl MacroExpander {
                             let value = if let Some(expected) =
                                 binding.annotation.as_ref().and_then(meta_type)
                                 && let Expression::Quote(quote) = value
+                                && quote.kind == crate::QuoteKind::ParseQuote
                             {
                                 if !quote_result_type(&expected) {
                                     self.diagnostics.push(Diagnostic::new(
                                         binding.syntax.span.clone(),
                                         format!(
-                                            "{} does not satisfy `QuoteResult`",
+                                            "{} does not satisfy `ParseQuoteResult`",
                                             format_meta_type(&expected)
                                         ),
                                     ));
@@ -2870,6 +2962,7 @@ impl MacroExpander {
                         }
                         Statement::Assignment(assignment) => {
                             let value = if let Expression::Quote(quote) = &assignment.value
+                                && quote.kind == crate::QuoteKind::ParseQuote
                                 && matches!(
                                     &assignment.target,
                                     Expression::Access(access)
@@ -3549,18 +3642,25 @@ impl MacroExpander {
         let quote_is_imported =
             self.scopes[module.0]
                 .macros
-                .get("quote")
+                .get(quote.kind.name())
                 .is_some_and(|definitions| {
                     definitions.iter().any(|key| {
-                        self.definitions
-                            .get(key)
-                            .is_some_and(|definition| matches!(definition.kind, MacroKind::Quote))
+                        self.definitions.get(key).is_some_and(|definition| {
+                            matches!(
+                                (&definition.kind, quote.kind),
+                                (MacroKind::Quote, crate::QuoteKind::Quote)
+                                    | (MacroKind::ParseQuote, crate::QuoteKind::ParseQuote)
+                            )
+                        })
                     })
                 });
         if !quote_is_imported {
             self.diagnostics.push(Diagnostic::new(
                 quote.syntax.span.clone(),
-                "`quote` requires an explicit import from `std.syntax`",
+                format!(
+                    "`{}` requires an explicit import from `std.syntax`",
+                    quote.kind.name()
+                ),
             ));
             return None;
         }
@@ -4876,12 +4976,12 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
 }
 
 fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
-    if matches!(definition.kind, MacroKind::Quote) {
+    if matches!(definition.kind, MacroKind::ParseQuote) {
         return ResolvedMacro {
             declaration: definition.declaration.syntax.id,
             name: definition.key.name.clone(),
             modifier: false,
-            signature: "T => QuoteResult T => Braced Syntax -> T".to_owned(),
+            signature: "T => ParseQuoteResult T => Braced Syntax -> T".to_owned(),
         };
     }
     let parameters = format_meta_signature(&definition.parameters);
@@ -4983,6 +5083,10 @@ fn inferred_macro_signature(value: Option<&Expression>) -> (Vec<MetaType>, MetaT
 
 fn inferred_result_meta_type(expression: &Expression) -> MetaType {
     match expression {
+        // `quote` always returns opaque `Syntax`, regardless of what its
+        // contents would otherwise parse as; only `parse_quote` infers a
+        // result from the quoted template's shape.
+        Expression::Quote(quote) if quote.kind == crate::QuoteKind::Quote => MetaType::Syntax,
         Expression::Quote(quote) => match &quote.template {
             crate::QuoteTemplate::Expression(_) => MetaType::Expr,
             crate::QuoteTemplate::Item(_) => MetaType::Item,
@@ -5267,6 +5371,37 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
     }
 }
 
+/// True when a macro body's tail position — through curried parameters,
+/// `satisfies`, `match` arms, and a block's trailing expression — is a bare
+/// `quote { ... }`. `quote` always produces opaque `Syntax`, so it can never
+/// satisfy a concrete syntax result type such as `Expr`.
+fn quote_at_tail(expression: &Expression, arity: usize) -> bool {
+    if arity > 0 {
+        return match expression {
+            Expression::Function(function) => quote_at_tail(&function.body, arity - 1),
+            Expression::Satisfies(satisfies) => quote_at_tail(&satisfies.value, arity),
+            _ => false,
+        };
+    }
+    match expression {
+        Expression::Quote(quote) => quote.kind == crate::QuoteKind::Quote,
+        Expression::Satisfies(satisfies) => quote_at_tail(&satisfies.value, 0),
+        Expression::Match(match_) => match_
+            .arms
+            .iter()
+            .any(|arm| quote_at_tail(&arm.body, 0)),
+        Expression::Block(block) => block
+            .statements
+            .last()
+            .is_some_and(|statement| match statement {
+                Statement::Expression(expression) => quote_at_tail(expression, 0),
+                Statement::Return(return_) => quote_at_tail(&return_.value, 0),
+                _ => false,
+            }),
+        _ => false,
+    }
+}
+
 fn directly_evaluates_resource(expression: &Expression, arity: usize) -> bool {
     if arity > 0 {
         return match expression {
@@ -5316,20 +5451,42 @@ fn invalid_raw_syntax_shape(meta: &MetaType) -> bool {
     }
 }
 
+/// Types a `parse_quote` result may satisfy `ParseQuoteResult` as. Excludes
+/// `Syntax`: an opaque, unparsed fragment is `quote`'s result, not a
+/// syntax node `parse_quote` can produce.
 fn quote_result_type(meta: &MetaType) -> bool {
     match meta {
-        MetaType::Syntax
-        | MetaType::SyntaxNode
-        | MetaType::Expr
-        | MetaType::Type
-        | MetaType::Pattern
+        MetaType::SyntaxNode | MetaType::Expr | MetaType::Type | MetaType::Pattern
         | MetaType::Item => true,
         MetaType::Sequence(element) => **element == MetaType::Item,
         _ => false,
     }
 }
 
+fn braced_syntax_parameter(function: &crate::FunctionType) -> bool {
+    matches!(
+        function.parameter.as_ref(),
+        Type::Application(application)
+            if matches!(application.callee.as_ref(), Type::Named(name) if name.namespace.is_none() && name.name == "Braced")
+                && matches!(unwrap_singleton_product(&application.argument), Type::Named(name) if name.namespace.is_none() && name.name == "Syntax")
+    )
+}
+
 fn valid_quote_declaration(declaration: &MacroDeclaration) -> bool {
+    if !declaration.type_parameters.is_empty() || !declaration.trait_bounds.is_empty() {
+        return false;
+    }
+    let Some(Type::Function(function)) = declaration.annotation.as_ref() else {
+        return false;
+    };
+    braced_syntax_parameter(function)
+        && matches!(
+            function.result.as_ref(),
+            Type::Named(result) if result.namespace.is_none() && result.name == "Syntax"
+        )
+}
+
+fn valid_parse_quote_declaration(declaration: &MacroDeclaration) -> bool {
     let [crate::TypeParameterPattern::Binding(parameter)] = declaration.type_parameters.as_slice()
     else {
         return false;
@@ -5341,7 +5498,7 @@ fn valid_quote_declaration(declaration: &MacroDeclaration) -> bool {
         return false;
     };
     if bound.trait_name.namespace.is_some()
-        || bound.trait_name.name != "QuoteResult"
+        || bound.trait_name.name != "ParseQuoteResult"
         || !matches!(bound.arguments.as_slice(), [Type::Named(argument)] if argument.namespace.is_none() && argument.name == "T")
     {
         return false;
@@ -5349,15 +5506,11 @@ fn valid_quote_declaration(declaration: &MacroDeclaration) -> bool {
     let Some(Type::Function(function)) = declaration.annotation.as_ref() else {
         return false;
     };
-    matches!(
-        function.parameter.as_ref(),
-        Type::Application(application)
-            if matches!(application.callee.as_ref(), Type::Named(name) if name.namespace.is_none() && name.name == "Braced")
-                && matches!(unwrap_singleton_product(&application.argument), Type::Named(name) if name.namespace.is_none() && name.name == "Syntax")
-    ) && matches!(
-        function.result.as_ref(),
-        Type::Named(result) if result.namespace.is_none() && result.name == "T"
-    )
+    braced_syntax_parameter(function)
+        && matches!(
+            function.result.as_ref(),
+            Type::Named(result) if result.namespace.is_none() && result.name == "T"
+        )
 }
 
 fn valid_macro_parameter_patterns(expression: &Expression, arity: usize) -> bool {

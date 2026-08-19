@@ -1023,7 +1023,7 @@ mod tests {
             "use tools\n",
             "type alias Item = I32\n",
             "trait Show = T => { show: T -> String }\n",
-            "macro identity = value => quote { $value }\n",
+            "macro identity = value => parse_quote { $value }\n",
             "def project: T => T -> T = value => (field: value).field\n",
             "mod child { def nested = () => 1 }\n",
             "type Clock = I32\n",
@@ -1086,15 +1086,15 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dependency.sta"),
-            "use std.syntax (quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => quote { $value }\n",
+            "use std.syntax (parse_quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => parse_quote { $value }\n",
         )
         .unwrap();
         let source = concat!(
-            "use std.syntax (quote, Expr, CallExpr, Item)\n",
+            "use std.syntax (parse_quote, Expr, CallExpr, Item)\n",
             "use dependency\n",
-            "macro choose: Expr -> Expr = _: Expr => quote { 1 }\n",
-            "macro choose: CallExpr -> Expr = _: CallExpr => quote { 2 }\n",
-            "macro inferred = value => quote { $value }\n",
+            "macro choose: Expr -> Expr = _: Expr => parse_quote { 1 }\n",
+            "macro choose: CallExpr -> Expr = _: CallExpr => parse_quote { 2 }\n",
+            "macro inferred = value => parse_quote { $value }\n",
             "macro @identity: Item -> Item = item: Item => item\n",
             "let selected = choose (discarded 0)\n",
             "let inferred_value = inferred 4\n",
@@ -1236,7 +1236,7 @@ mod tests {
                 "pub def callable = () => 1\n",
                 "pub type alias Number = I32\n",
                 "pub trait Printable = T => {}\n",
-                "pub macro identity = value => quote { $value }\n",
+                "pub macro identity = value => parse_quote { $value }\n",
             ),
         )
         .unwrap();

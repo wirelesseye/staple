@@ -23,11 +23,11 @@ visibility => entries => match entries {
         rest: Sequence (Ident String, Optional Type),
     ) => match first {
         (variant: Ident String, None) => Sequence (
-            first: quote { $visibility type $variant },
+            first: parse_quote { $visibility type $variant },
             rest: typegroup_items visibility rest,
         ),
         (variant: Ident String, Some underlying) => Sequence (
-            first: quote { $visibility type $variant = $underlying },
+            first: parse_quote { $visibility type $variant = $underlying },
             rest: typegroup_items visibility rest,
         ),
     },
@@ -45,11 +45,11 @@ visibility => parameters => entries => match entries {
         rest: Sequence (Ident String, Optional Type),
     ) => match first {
         (variant: Ident String, None) => Sequence (
-            first: quote { $visibility type $variant },
+            first: parse_quote { $visibility type $variant },
             rest: typegroup_generic_items visibility parameters rest,
         ),
         (variant: Ident String, Some underlying) => Sequence (
-            first: quote { $visibility type $variant = $parameters... => $underlying },
+            first: parse_quote { $visibility type $variant = $parameters... => $underlying },
             rest: typegroup_generic_items visibility parameters rest,
         ),
     },
@@ -65,12 +65,12 @@ group => entries => match entries {
         rest: Sequence (Ident String, Optional Type),
     ) => match first {
         (variant: Ident String, _) => {
-            let head: Type = quote { $group.$variant }
+            let head: Type = parse_quote { $group.$variant }
             match rest {
                 Sequence () => head,
                 _ => {
                     let tail = typegroup_sum group rest
-                    quote { $head | $tail } satisfies Type
+                    parse_quote { $head | $tail } satisfies Type
                 },
             }
         },
@@ -87,12 +87,12 @@ callee => parameters => match parameters {
         rest: Sequence Ident String,
     ) => match rest {
         Sequence () => {
-            let argument: Type = quote { $first }
-            quote { $callee $argument } satisfies Type
+            let argument: Type = parse_quote { $first }
+            parse_quote { $callee $argument } satisfies Type
         },
         _ => {
             let arguments = Parenthesized parameters
-            quote { $callee $arguments } satisfies Type
+            parse_quote { $callee $arguments } satisfies Type
         },
     }
 }
@@ -108,7 +108,7 @@ group => parameters => entries => match entries {
         rest: Sequence (Ident String, Optional Type),
     ) => match first {
         (variant: Ident String, underlying) => {
-            let constructor: Type = quote { $group.$variant }
+            let constructor: Type = parse_quote { $group.$variant }
             let head: Type = match underlying {
                 None => constructor,
                 Some _ => typegroup_apply_parameters constructor parameters,
@@ -117,7 +117,7 @@ group => parameters => entries => match entries {
                 Sequence () => head,
                 _ => {
                     let tail = typegroup_generic_sum group parameters rest
-                    quote { $head | $tail } satisfies Type
+                    parse_quote { $head | $tail } satisfies Type
                 },
             }
         },
@@ -138,7 +138,7 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match body {
         let public_visibility = typegroup_public_visibility visibility
         let items = typegroup_items item_visibility elements
         let sum: Type = typegroup_sum group elements
-        quote {
+        parse_quote {
             $public_visibility mod $group {
                 $items...
             }
@@ -168,7 +168,7 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match (
         let public_visibility = typegroup_public_visibility visibility
         let items = typegroup_generic_items item_visibility parameters elements
         let sum: Type = typegroup_generic_sum group parameters elements
-        quote {
+        parse_quote {
             $public_visibility mod $group {
                 $items...
             }
@@ -203,7 +203,7 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match (
         let public_visibility = typegroup_public_visibility visibility
         let items = typegroup_generic_items item_visibility parameters elements
         let sum: Type = typegroup_generic_sum group parameters elements
-        quote {
+        parse_quote {
             $public_visibility mod $group {
                 $items...
             }

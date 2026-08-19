@@ -530,17 +530,17 @@ fn parses_opaque_macro_declarations() {
 
 #[test]
 fn parses_the_generic_contextual_quote_signature() {
-    let source = "pub macro quote: T => QuoteResult T => Braced Syntax -> T\n";
+    let source = "pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T\n";
     let root = parse(source).expect("generic primitive macro signature should parse");
     assert_eq!(root.text(), source);
     assert!(matches!(
         root.items[0],
         Item::MacroDeclaration(ref declaration)
-            if declaration.name == "quote"
+            if declaration.name == "parse_quote"
                 && declaration.type_parameters.len() == 1
                 && declaration.type_parameters[0].names() == ["T"]
                 && declaration.trait_bounds.len() == 1
-                && declaration.trait_bounds[0].trait_name.name == "QuoteResult"
+                && declaration.trait_bounds[0].trait_name.name == "ParseQuoteResult"
                 && declaration.annotation.is_some()
     ));
 }

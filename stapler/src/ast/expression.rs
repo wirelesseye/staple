@@ -83,8 +83,27 @@ pub struct WithResourceExpression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QuoteExpression {
     pub syntax: Syntax,
+    pub kind: QuoteKind,
     pub contents: Syntax,
     pub template: QuoteTemplate,
+}
+
+/// Distinguishes the two compiler-provided quotation macros: `quote`, which
+/// always produces an opaque `Syntax` fragment, and `parse_quote`, which
+/// parses into whatever syntax category is expected at the call site.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuoteKind {
+    Quote,
+    ParseQuote,
+}
+
+impl QuoteKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            QuoteKind::Quote => "quote",
+            QuoteKind::ParseQuote => "parse_quote",
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

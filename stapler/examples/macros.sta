@@ -5,6 +5,7 @@
 use std.io println
 use std.syntax (
     quote,
+    parse_quote,
     Expr,
     Type,
     Pattern,
@@ -84,7 +85,7 @@ macro replace_argument = value: CallExpr => replacement: Expr => {
     let original = value
     let mut changed = value
     changed.argument = replacement
-    quote { ($original, $changed) }
+    parse_quote { ($original, $changed) }
 }
 
 macro call_increment = value: Expr => {
@@ -98,7 +99,7 @@ let constructed: I32 = call_increment 41
 
 // A top-level macro can generate several items in source order. Sequence Item
 // is also the type used by repeated `$items...` splices inside item lists.
-macro generate_pair: Expr -> Sequence Item = value => quote {
+macro generate_pair: Expr -> Sequence Item = value => parse_quote {
     let first_generated: I32 = $value
     let second_generated: I32 = first_generated + 1
 }
@@ -110,7 +111,7 @@ generate_pair 41
 // The closest modifier runs first; here @replace discards the definition and
 // @identity passes its generated replacement through unchanged.
 macro @identity: Item -> Item = item => item
-macro @replace: Expr -> Item -> Item = value => item => quote {
+macro @replace: Expr -> Item -> Item = value => item => parse_quote {
     let replaced: I32 = $value
 }
 
@@ -124,7 +125,7 @@ macro define_alias: MacroCallVisibility -> Ident String -> Type -> Item =
     visibility =>
     name =>
     ty =>
-    quote { $visibility type alias $name = $ty }
+    parse_quote { $visibility type alias $name = $ty }
 
 pub define_alias PublicAnswer I32
 let public_answer: PublicAnswer = 42

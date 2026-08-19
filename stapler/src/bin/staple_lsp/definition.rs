@@ -806,8 +806,8 @@ mod tests {
     #[test]
     fn indexes_function_and_modifier_macro_invocations() {
         let source = concat!(
-            "use std.syntax quote\n",
-            "macro identity: Expr -> Expr = value => quote { $value }\n",
+            "use std.syntax parse_quote\n",
+            "macro identity: Expr -> Expr = value => parse_quote { $value }\n",
             "macro @keep: Item -> Item = item => item\n",
             "let answer = identity 42\n",
             "@keep\n",
@@ -885,7 +885,7 @@ mod tests {
             "    Hello\n",
             "}\n",
             "\n",
-            "macro what = x => quote {$x}\n",
+            "macro what = x => parse_quote {$x}\n",
             "\n",
             "def main = () => {\n",
             "    let x = 3\n",

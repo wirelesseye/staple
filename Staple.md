@@ -62,7 +62,7 @@ work with structured syntax instead of assembling source-code strings.
 Expression macros transform compiler-owned syntax values before ordinary name
 resolution and type checking. The syntax API is declared by `std.syntax` and is
 not part of the `std.core` prelude, so modules using it must import the required
-names explicitly, for example `use std.syntax (quote, Expr, SyntaxNode)`.
+names explicitly, for example `use std.syntax (parse_quote, Expr, SyntaxNode)`.
 Examples below assume the syntax names they use have been imported.
 
 `Syntax` is an opaque, arbitrary lossless syntax fragment. It preserves source
@@ -78,7 +78,7 @@ function. Every parameter consumes one atomic syntax unit; an omitted parameter
 type means `SyntaxNode`, not opaque `Syntax`:
 
 ```staple
-macro choose = condition => then => else => quote {
+macro choose = condition => then => else => parse_quote {
     match $condition {
         True => $then,
         False => $else,
@@ -102,7 +102,7 @@ macro conditional =
     then_branch: Expr =>
     _: Ident "else" =>
     else_branch: Expr =>
-    quote {
+    parse_quote {
         match $condition {
             True => $then_branch,
             False => $else_branch,
@@ -177,26 +177,42 @@ narrower than `SyntaxNode`, and `SyntaxNode` is narrower than opaque `Syntax`.
 `Type`, `Pattern`, and `Expr` remain mutually incomparable where their source
 grammars overlap.
 
-The braces in `quote { syntax }` delimit an opaque source fragment and are not
-part of the result. `quote` substitutes splices first, then interprets the whole
-fragment according to its expected result type. Its compiler-provided contract
-is:
+The braces in `quote { syntax }` and `parse_quote { syntax }` delimit an
+opaque source fragment and are not part of the result. Both substitute
+splices first. `quote` always returns the substituted fragment as opaque
+`Syntax`, without parsing it. `parse_quote` additionally interprets the
+fragment according to its expected result type. Their compiler-provided
+contracts are:
 
 ```staple
-pub macro quote: T => QuoteResult T => Braced Syntax -> T
+pub macro quote: Braced Syntax -> Syntax
+pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T
 ```
 
-`QuoteResult` is a sealed compiler capability implemented only for `Syntax`,
-`SyntaxNode`, `Expr`, `Type`, `Pattern`, `Item`, and `Sequence Item`. An expected
-`Syntax` returns the substituted fragment without parsing it. `SyntaxNode`
-requires exactly one shortest structural node. The grammatical categories parse
-the complete fragment in their respective contexts, while `Sequence Item`
-parses zero or more complete items in source order. An unconstrained quotation
-defaults to `Syntax`; annotations, `satisfies`, declared helper or macro result
-types, and other typed compile-time boundaries provide contextual result types.
+`ParseQuoteResult` is a sealed compiler capability implemented only for
+`SyntaxNode`, `Expr`, `Type`, `Pattern`, `Item`, and `Sequence Item` — never
+for `Syntax`, which is `quote`'s own always-opaque result, not a syntax node
+`parse_quote` can produce. `SyntaxNode` requires exactly one shortest
+structural node. The grammatical categories parse the complete fragment in
+their respective contexts, while `Sequence Item` parses zero or more complete
+items in source order. Annotations, `satisfies`, declared helper or macro
+result types, and other typed compile-time boundaries provide `parse_quote`'s
+contextual result type; requesting `Syntax` through any of them is rejected. A
+`parse_quote` reached with no contextual type at all — for example inside an
+untyped compile-time helper — is rejected the same way. This contextual
+selection is specific to `parse_quote`: wrapping a `quote` fragment in
+`satisfies` or a typed binding does not reinterpret it, since `quote` always
+returns opaque `Syntax`.
+
+A macro's declared or inferred result is also checked against its body: when
+that result is a concrete syntax type — `SyntaxNode`, `Expr`, `Type`,
+`Pattern`, `Item`, or `Sequence Item` — but the body's tail expression is a
+bare `quote { ... }`, the mismatch is rejected at the declaration, since
+`quote` can only ever produce opaque `Syntax`. Replacing that `quote` with
+`parse_quote` resolves it.
 
 Opaque fragments may contain empty input, punctuation, comments, or temporarily
-malformed grammar and may be spliced into a later quotation for contextual
+malformed grammar and may be spliced into a later `parse_quote` for contextual
 interpretation. A raw `Syntax` result entering ordinary expression or item
 source is reparsed for that placement. `$name` splices a captured value while
 preserving its hygiene. `$items...` splices a `Sequence Item` in an item-list
@@ -210,7 +226,7 @@ macro replace_argument = value: CallExpr => replacement: Expr => {
     let original = value
     let mut changed = value
     changed.argument = replacement
-    quote { ($original, $changed) }
+    parse_quote { ($original, $changed) }
 }
 
 macro build_call = _: Expr => {
@@ -231,7 +247,7 @@ expression-statement item:
 
 ```staple
 macro define_answer: Expr -> Item =
-    value => quote {
+    value => parse_quote {
         def answer = () => $value
     }
 
@@ -253,7 +269,7 @@ and applied immediately before a resolver-safe definition:
 macro @identity: Item -> Item = item => item
 
 macro @replace: Expr -> Item -> Item =
-    value => item => quote { let generated = $value }
+    value => item => parse_quote { let generated = $value }
 
 @identity
 @replace(42)
@@ -290,7 +306,7 @@ the first parameter of a function-style macro:
 macro define_alias =
     vis: MacroCallVisibility =>
     ty: Type =>
-    quote { $vis type alias Generated = $ty }
+    parse_quote { $vis type alias Generated = $ty }
 
 pub define_alias I32
 ```
@@ -335,12 +351,12 @@ its item.
 Quotations may contain multiple items and return `Sequence Item`. Such a
 sequence can replace a top-level macro invocation or be inserted into an inline
 module with `$items...`. Identifier syntax may be spliced into generated module
-and type names. Type quotations are selected contextually by an annotated
-compile-time binding or `satisfies Type`:
+and type names. `parse_quote` type quotations are selected contextually by an
+annotated compile-time binding or `satisfies Type`:
 
 ```staple
-let alternative: Type = quote { $group.$variant }
-quote { $left | $right } satisfies Type
+let alternative: Type = parse_quote { $group.$variant }
+parse_quote { $left | $right } satisfies Type
 ```
 
 The standard `typegroup` macro combines these facilities:
@@ -406,16 +422,18 @@ mutable local cells, products, matches, literals, recursion, and pure integer
 operations. It rejects external or runtime-only effects. Expansion is limited
 to 128 nested macros and each top-level invocation is limited to 1,000,000
 evaluation steps. Syntax
-values are compile-time-only. This release supports contextual expression,
-type, pattern, item, and item-sequence quotation; opaque fragments; structured
-identifier and call expressions; scalar splices; and repeated item splices.
+values are compile-time-only. This release supports `parse_quote`-driven
+contextual expression, type, pattern, item, and item-sequence quotation;
+`quote`'s opaque fragments; structured identifier and call expressions;
+scalar splices; and repeated item splices.
 It also supports opaque item input through modifier macros and atomic visibility
 syntax. General repeated expression, type, and pattern splices,
 function-style item input, item inspection, and structured access to other
 expression forms remain future work.
 
 Compiler-provided macros use typed bodyless contracts. `std.syntax` declares
-`pub macro quote: T => QuoteResult T => Braced Syntax -> T`, and
+`pub macro quote: Braced Syntax -> Syntax` and
+`pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T`, and
 `std.cinterop` declares `pub macro c_string: Expr -> Expr`. Neither module is
 re-exported by `std.core`; their APIs require explicit imports.
 

@@ -1059,7 +1059,7 @@ impl TypeChecker {
             .copied();
         self.copy_trait = module.standard_trait("Copy");
         self.sized_trait = module.standard_trait("Sized");
-        self.quote_result_trait = module.standard_trait("QuoteResult");
+        self.quote_result_trait = module.standard_trait("ParseQuoteResult");
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
         self.index_trait = module.standard_trait("Index");
@@ -1218,7 +1218,7 @@ impl TypeChecker {
                     && quote_result.declaration.members.is_empty() => {}
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
-                "standard library must declare public empty trait `QuoteResult`",
+                "standard library must declare public empty trait `ParseQuoteResult`",
             )),
         }
         match self.drop_trait.and_then(|id| module.traits().get(&id)) {
@@ -1408,7 +1408,7 @@ impl TypeChecker {
             if Some(implementation.trait_id) == self.quote_result_trait {
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "`QuoteResult` is compiler-defined and cannot be implemented explicitly",
+                    "`ParseQuoteResult` is compiler-defined and cannot be implemented explicitly",
                 ));
                 continue;
             }
