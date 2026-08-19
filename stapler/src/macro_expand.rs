@@ -3702,18 +3702,20 @@ impl MacroExpander {
             return Some(Value::Syntax(SyntaxValue::Items(Vec::new())));
         }
 
-        if *expected == MetaType::SyntaxNode
-            && !quote
-                .contents
-                .tokens()
-                .iter()
-                .any(|token| token.kind == crate::TokenKind::Dollar)
+        if matches!(
+            expected,
+            MetaType::SyntaxNode | MetaType::Comma | MetaType::Equals | MetaType::FatArrow
+        ) && !quote
+            .contents
+            .tokens()
+            .iter()
+            .any(|token| token.kind == crate::TokenKind::Dollar)
         {
             let values = match_sequence_contents(
                 &quote.contents,
                 0,
                 quote.contents.tokens().len(),
-                &MetaType::SyntaxNode,
+                expected,
                 &mut self.next_syntax_id,
             );
             let Some(mut values) = values else {
@@ -5456,8 +5458,14 @@ fn invalid_raw_syntax_shape(meta: &MetaType) -> bool {
 /// syntax node `parse_quote` can produce.
 fn quote_result_type(meta: &MetaType) -> bool {
     match meta {
-        MetaType::SyntaxNode | MetaType::Expr | MetaType::Type | MetaType::Pattern
-        | MetaType::Item => true,
+        MetaType::SyntaxNode
+        | MetaType::Expr
+        | MetaType::Type
+        | MetaType::Pattern
+        | MetaType::Item
+        | MetaType::Comma
+        | MetaType::Equals
+        | MetaType::FatArrow => true,
         MetaType::Sequence(element) => **element == MetaType::Item,
         _ => false,
     }

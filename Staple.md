@@ -190,9 +190,10 @@ pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T
 ```
 
 `ParseQuoteResult` is a sealed compiler capability implemented only for
-`SyntaxNode`, `Expr`, `Type`, `Pattern`, `Item`, and `Sequence Item` — never
-for `Syntax`, which is `quote`'s own always-opaque result, not a syntax node
-`parse_quote` can produce. `SyntaxNode` requires exactly one shortest
+`SyntaxNode`, `Expr`, `Type`, `Pattern`, `Item`, `Sequence Item`, `Comma`,
+`Equals`, and `FatArrow` — never for `Syntax`, which is `quote`'s own
+always-opaque result, not a syntax node `parse_quote` can produce.
+`SyntaxNode` requires exactly one shortest
 structural node. The grammatical categories parse the complete fragment in
 their respective contexts, while `Sequence Item` parses zero or more complete
 items in source order. Annotations, `satisfies`, declared helper or macro
@@ -206,8 +207,9 @@ returns opaque `Syntax`.
 
 A macro's declared or inferred result is also checked against its body: when
 that result is a concrete syntax type — `SyntaxNode`, `Expr`, `Type`,
-`Pattern`, `Item`, or `Sequence Item` — but the body's tail expression is a
-bare `quote { ... }`, the mismatch is rejected at the declaration, since
+`Pattern`, `Item`, `Sequence Item`, `Comma`, `Equals`, or `FatArrow` — but the
+body's tail expression is a bare `quote { ... }`, the mismatch is rejected at
+the declaration, since
 `quote` can only ever produce opaque `Syntax`. Replacing that `quote` with
 `parse_quote` resolves it.
 

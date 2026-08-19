@@ -2994,6 +2994,25 @@ fn equals_and_fat_arrow_are_structured_syntax_nodes() {
 }
 
 #[test]
+fn parse_quote_produces_punctuation_result_types() {
+    let module = type_check(concat!(
+        "macro punctuated: Expr -> Expr = _: Expr => {\n",
+        "    let comma: Comma = parse_quote { , }\n",
+        "    let equals: Equals = parse_quote { = }\n",
+        "    let arrow: FatArrow = parse_quote { => }\n",
+        "    match (comma, equals, arrow) {\n",
+        "        (Comma, Equals, FatArrow) => parse_quote { 42 },\n",
+        "    }\n",
+        "}\n",
+        "let result: I32 = punctuated (0)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("comma, equals, and fat-arrow parse_quote results should construct");
+}
+
+#[test]
 fn rejects_legacy_typegroup_call_syntax() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for source in [
