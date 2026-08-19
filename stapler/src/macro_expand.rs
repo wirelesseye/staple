@@ -49,6 +49,11 @@ struct SelectedMacro {
     consumed: usize,
 }
 
+enum ModifierChainResult {
+    Item(Item),
+    Items(Vec<Item>),
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 enum MetaType {
     Syntax,
@@ -1047,11 +1052,13 @@ impl MacroExpander {
                     ),
                     _ => false,
                 };
-                if !valid_parameters || definition.result != MetaType::Item {
+                let valid_result = matches!(definition.result, MetaType::Item | MetaType::Syntax)
+                    || matches!(&definition.result, MetaType::Sequence(inner) if **inner == MetaType::Item);
+                if !valid_parameters || !valid_result {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
                         format!(
-                            "modifier macro `@{}` must have signature `Item -> Item` or `(Expr | Type | Pattern) -> Item -> Item`",
+                            "modifier macro `@{}` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `(Expr | Type | Pattern) ->` argument",
                             definition.key.name
                         ),
                     ));
@@ -1207,9 +1214,15 @@ impl MacroExpander {
             if depth == 0 {
                 self.steps = 0;
             }
-            if let Some(expanded) = self.apply_modifier_chain(module, modified, depth) {
-                *item = expanded;
-                self.expand_item(module, item, depth + 1);
+            match self.apply_modifier_chain(module, modified, depth) {
+                Some(ModifierChainResult::Item(expanded)) => {
+                    *item = expanded;
+                    self.expand_item(module, item, depth + 1);
+                }
+                Some(ModifierChainResult::Items(items)) => {
+                    self.emitted_items = Some(items);
+                }
+                None => {}
             }
             return;
         }
@@ -1383,10 +1396,19 @@ impl MacroExpander {
         module: ModuleId,
         modified: crate::ModifiedItem,
         depth: usize,
-    ) -> Option<Item> {
+    ) -> Option<ModifierChainResult> {
         let mut current = *modified.item;
         if let Item::Modified(nested) = current {
-            current = self.apply_modifier_chain(module, nested, depth + 1)?;
+            match self.apply_modifier_chain(module, nested, depth + 1)? {
+                ModifierChainResult::Item(item) => current = item,
+                ModifierChainResult::Items(_) => {
+                    self.diagnostics.push(Diagnostic::new(
+                        modified.syntax.span,
+                        "modifier macro chain produced multiple items, which is only allowed for the outermost modifier applied to an item",
+                    ));
+                    return None;
+                }
+            }
         }
         if let Item::VisibilityMacroInvocation(invocation) = current {
             current = self.expand_visibility_macro_invocation(module, invocation, depth + 1)?;
@@ -1399,7 +1421,10 @@ impl MacroExpander {
             return None;
         }
 
-        for invocation in modified.modifiers.into_iter().rev() {
+        let modifiers = modified.modifiers.into_iter().rev().collect::<Vec<_>>();
+        let last_index = modifiers.len().saturating_sub(1);
+        for (index, invocation) in modifiers.into_iter().enumerate() {
+            let is_last = index == last_index;
             if depth >= MAX_EXPANSION_DEPTH {
                 self.diagnostics.push(Diagnostic::new(
                     invocation.syntax.span.clone(),
@@ -1438,12 +1463,13 @@ impl MacroExpander {
             self.expansion_stack.push(key.clone());
             let diagnostic_start = self.diagnostics.len();
             let result = self.invoke_modifier(
+                module,
                 &definition,
                 argument,
                 current,
                 invocation.syntax.span.clone(),
             );
-            let Some(mut result) = result else {
+            let Some(mut items) = result else {
                 self.expansion_stack.pop();
                 if self.diagnostics.len() > diagnostic_start {
                     self.diagnostics.push(Diagnostic::new(
@@ -1453,26 +1479,59 @@ impl MacroExpander {
                 }
                 return None;
             };
-            if let Item::Modified(nested) = result {
-                let expanded = self.apply_modifier_chain(module, nested, depth + 1);
+            if items.len() == 1 && matches!(items[0], Item::Modified(_)) {
+                let Item::Modified(nested) = items.pop().unwrap() else {
+                    unreachable!()
+                };
+                let nested_result = self.apply_modifier_chain(module, nested, depth + 1);
                 self.expansion_stack.pop();
-                result = expanded?;
+                match nested_result? {
+                    ModifierChainResult::Item(item) => items = vec![item],
+                    ModifierChainResult::Items(multiple) => {
+                        if !is_last {
+                            self.diagnostics.push(Diagnostic::new(
+                                invocation.syntax.span.clone(),
+                                format!(
+                                    "modifier macro `@{}` produced multiple items, which is only allowed for the outermost modifier in the chain",
+                                    key.name
+                                ),
+                            ));
+                            return None;
+                        }
+                        return Some(ModifierChainResult::Items(multiple));
+                    }
+                }
             } else {
                 self.expansion_stack.pop();
             }
-            if !modifier_target_supported(&result) {
+            if items.len() == 1 {
+                let result = items.pop().unwrap();
+                if !modifier_target_supported(&result) {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span.clone(),
+                        format!(
+                            "modifier macro `@{}` produced an unsupported item kind",
+                            key.name
+                        ),
+                    ));
+                    return None;
+                }
+                current = result;
+            } else if is_last {
+                return Some(ModifierChainResult::Items(items));
+            } else {
                 self.diagnostics.push(Diagnostic::new(
                     invocation.syntax.span.clone(),
                     format!(
-                        "modifier macro `@{}` produced an unsupported item kind",
-                        key.name
+                        "modifier macro `@{}` produced {} items, which is only allowed for the outermost modifier in the chain",
+                        key.name,
+                        items.len()
                     ),
                 ));
                 return None;
             }
-            current = result;
         }
-        Some(current)
+        Some(ModifierChainResult::Item(current))
     }
 
     fn resolve_modifier(
@@ -1633,15 +1692,20 @@ impl MacroExpander {
 
     fn invoke_modifier(
         &mut self,
+        module: ModuleId,
         definition: &MacroDefinition,
         argument: Option<SyntaxValue>,
         item: Item,
         call_span: Span,
-    ) -> Option<Item> {
+    ) -> Option<Vec<Item>> {
         let MacroKind::User(body) = &definition.kind else {
             unreachable!("compiler-provided macros cannot be modifiers")
         };
-        let previous_context = self.quote_context.replace(MetaType::Item);
+        let previous_context = if quote_result_type(&definition.result) {
+            self.quote_context.replace(definition.result.clone())
+        } else {
+            self.quote_context.take()
+        };
         let evaluated = (|| {
             let mut value =
                 self.eval_expression(definition.key.module, body, &mut Environment::new())?;
@@ -1657,12 +1721,34 @@ impl MacroExpander {
         self.quote_context = previous_context;
         let value = evaluated?;
         match value {
-            Value::Syntax(SyntaxValue::Item(item)) => Some(*item),
+            Value::Syntax(SyntaxValue::Item(item)) => Some(vec![*item]),
+            Value::Syntax(SyntaxValue::Items(items)) => Some(items),
+            Value::Syntax(SyntaxValue::Raw(raw)) => {
+                let Ok(mut items) =
+                    crate::parser::parse_item_list_fragment(&raw, &mut self.next_syntax_id)
+                else {
+                    self.diagnostics.push(Diagnostic::new(
+                        definition.declaration.syntax.span.clone(),
+                        format!(
+                            "modifier macro `@{}` produced a syntax fragment that is not valid in item position",
+                            definition.key.name
+                        ),
+                    ));
+                    return None;
+                };
+                let mark = self.next_mark;
+                self.next_mark += 1;
+                for generated in &mut items {
+                    alpha_rename_item(generated, mark);
+                    freshen_item(self, generated, module, mark);
+                }
+                Some(items)
+            }
             Value::Syntax(syntax) => {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
                     format!(
-                        "modifier macro `@{}` must return `Item`, but returned {} syntax",
+                        "modifier macro `@{}` must return `Item`, `Sequence Item`, or `Syntax`, but returned {} syntax",
                         definition.key.name,
                         syntax_category(&syntax)
                     ),
@@ -1673,7 +1759,7 @@ impl MacroExpander {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
                     format!(
-                        "modifier macro `@{}` did not return `Item`",
+                        "modifier macro `@{}` did not return `Item`, `Sequence Item`, or `Syntax`",
                         definition.key.name
                     ),
                 ));

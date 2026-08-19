@@ -2882,6 +2882,84 @@ fn expands_modifier_lists_generated_by_item_macros() {
 }
 
 #[test]
+fn modifier_macro_produces_multiple_items_as_the_outermost_modifier() {
+    let module = type_check(concat!(
+        "macro @split: Item -> Sequence Item = _ => parse_quote {\n",
+        "    let first: I32 = 1\n",
+        "    let second: I32 = 2\n",
+        "}\n",
+        "@split\n",
+        "let original: I32 = 0\n",
+        "let result: I32 = first + second\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("modifier producing a Sequence Item result should compile");
+}
+
+#[test]
+fn modifier_macro_produces_multiple_items_via_raw_syntax() {
+    let module = type_check(concat!(
+        "macro @spread: Item -> Syntax = _ => quote {\n",
+        "    let a: I32 = 1\n",
+        "    let b: I32 = 2\n",
+        "}\n",
+        "@spread\n",
+        "let original: I32 = 0\n",
+        "let result: I32 = a + b\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("modifier producing raw Syntax that reparses to multiple items should compile");
+}
+
+#[test]
+fn modifier_macro_deletes_its_target_by_producing_zero_items() {
+    let module = type_check(concat!(
+        "macro @delete: Item -> Sequence Item = _ => parse_quote {}\n",
+        "@delete\n",
+        "let removed: I32 = 0\n",
+        "let result: I32 = 1\n",
+    ));
+    assert!(!module.resolved().syntax().items.iter().any(|item| {
+        matches!(item, Item::Statement(statement)
+            if matches!(statement.as_ref(), Statement::Binding(binding)
+                if binding.name == "removed"))
+    }));
+}
+
+#[test]
+fn diagnoses_non_outermost_modifier_producing_multiple_items() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let source = concat!(
+        "macro @outer: Item -> Item = item => item\n",
+        "macro @inner: Item -> Sequence Item = _ => parse_quote {\n",
+        "    let first: I32 = 1\n",
+        "    let second: I32 = 2\n",
+        "}\n",
+        "@outer\n",
+        "@inner\n",
+        "let original: I32 = 0\n",
+    );
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(&with_syntax_imports(source), root)
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("a non-outermost modifier producing multiple items should be diagnosed");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "modifier macro `@inner` produced 2 items, which is only allowed for the outermost modifier in the chain"
+        }),
+        "expected non-outermost multi-item diagnostic, found {diagnostics:#?}"
+    );
+}
+
+#[test]
 fn expands_visibility_aware_macros_and_contextual_visibility_splices() {
     let module = type_check(concat!(
         "def normalize_visibility: Visibility -> Visibility = value => value\n",
@@ -3321,7 +3399,7 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
     for (source, expected) in [
         (
             "macro @invalid: SyntaxNode -> Item -> Item = value => item => item\n",
-            "modifier macro `@invalid` must have signature `Item -> Item` or `(Expr | Type | Pattern) -> Item -> Item`",
+            "modifier macro `@invalid` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `(Expr | Type | Pattern) ->` argument",
         ),
         (
             "macro @required: Expr -> Item -> Item = value => item => item\n@required\nlet value = 1\n",

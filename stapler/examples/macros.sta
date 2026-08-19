@@ -119,6 +119,18 @@ macro @replace: Expr -> Item -> Item = value => item => parse_quote {
 @replace(42)
 def discarded = () => 0
 
+// A modifier declared `Item -> Sequence Item` or `Item -> Syntax` may expand
+// into zero, one, or many items instead of exactly one, as long as it is the
+// outermost modifier applied to the item (the last one in the chain, with no
+// further modifier left to consume its result).
+macro @duplicate: Item -> Sequence Item = _ => parse_quote {
+    let duplicated_first: I32 = 1
+    let duplicated_second: I32 = 2
+}
+
+@duplicate
+def duplicated_original = () => 0
+
 // MacroCallVisibility receives Private, Public, or PublicRepr from the call
 // prefix. Identifier and type syntax can be spliced into declaration positions.
 macro define_alias: MacroCallVisibility -> Ident String -> Type -> Item =

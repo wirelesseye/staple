@@ -280,12 +280,13 @@ macro @replace: Expr -> Item -> Item =
 def original = () => 0
 ```
 
-A modifier has signature `Item -> Item`, or accepts one optional explicit
-`Expr`, `Type`, or `Pattern` argument before the compiler-supplied item. The
-explicit argument is always delimited by parentheses, including an expression
+A modifier has signature `Item -> Item`, `Item -> Sequence Item`, or
+`Item -> Syntax`, optionally preceded by one optional explicit `Expr`, `Type`,
+or `Pattern` argument before the compiler-supplied item. The explicit
+argument is always delimited by parentheses, including an expression
 argument. `Ident`, `CallExpr`, and `UnstructuredExpr` may be used as narrower
 expression parameter types. `SyntaxNode`, opaque `Syntax`, and `Item` are not
-valid explicit modifier arguments. The modifier must return exactly one `Item`.
+valid explicit modifier arguments.
 
 Modifier lists are part of item syntax. The closest modifier runs first, so
 `@outer @inner def ...` expands as `outer(inner(def ...))`. A modifier may
@@ -295,6 +296,19 @@ the surrounding chain continues. Modifiers may target `let`, `def`, `type`,
 `use`, `mod`, or `macro` declarations. Modifier and function-style macro names
 occupy separate namespaces, and imports, renames, namespaces, and re-exports
 carry both.
+
+A modifier declared `Item -> Item` must return exactly one `Item`, as before.
+A modifier declared `Item -> Sequence Item` or `Item -> Syntax` may instead
+expand to zero, one, or many items — reusing the same reparse and splice
+machinery as an item-producing function-style macro — but only when that
+modifier is the **outermost** one applied to the item, i.e. the last
+application in the chain, with no further modifier left to consume its
+result. Every other position — a modifier that still has to feed an outer
+modifier in the same chain, including one reached through a returned item's
+own nested modifier chain — must still resolve to exactly one item; producing
+zero or several there is rejected. A zero-item result at the outermost
+position deletes the item entirely, matching how an item-producing
+function-style macro invocation with no replacement behaves.
 
 `Item` remains structurally opaque: a modifier can preserve, replace, choose,
 or pass its input through compile-time helpers, but cannot inspect item fields
