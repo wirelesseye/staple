@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, Module,
-    ModuleId, Pattern, PatternBindingKind, Program, Span, Statement, SyntaxId, Type,
+    ModuleId, Pattern, PatternBindingKind, Program, Span, Statement, Submodule, SyntaxId, Type,
     TypeDeclaration, TypeParameterPattern, UseKind, Visibility,
 };
 
@@ -690,7 +690,8 @@ fn export_interface_item(
 #[derive(Default)]
 pub struct NameResolver {
     scopes: Vec<HashMap<String, SymbolId>>,
-    namespaces: HashMap<String, ModuleId>,
+    namespaces: Vec<HashMap<String, ModuleId>>,
+    submodule_ids: HashMap<SyntaxId, ModuleId>,
     imported_types: HashMap<String, TypeId>,
     imported_macros: HashMap<String, Vec<MacroId>>,
     imported_traits: HashMap<String, TraitId>,
@@ -822,6 +823,7 @@ impl NameResolver {
             .unwrap_or(0)
             + 1;
         self.collect_interfaces(&program);
+        self.submodule_ids = program.child_modules().clone();
         self.visible_module_definitions = vec![HashMap::new(); program.modules().len()];
         self.build_definition_context_values(&program);
         self.collect_standard_library_contract(&program);
@@ -842,6 +844,7 @@ impl NameResolver {
             self.prelude_traits.clear();
             self.prelude_namespaces.clear();
             self.push_scope();
+            self.namespaces.push(HashMap::new());
             self.install_root_namespaces(&program, source_module.id);
             self.install_child_namespaces(&program, source_module.id);
             self.install_prelude(&program, source_module.id);
@@ -852,6 +855,7 @@ impl NameResolver {
             for item in &source_module.syntax.items {
                 self.resolve_item(item);
             }
+            self.namespaces.pop();
             self.pop_scope();
         }
 
@@ -1482,7 +1486,8 @@ impl NameResolver {
                         | Statement::Return(_)
                         | Statement::Break(_)
                         | Statement::Continue(_)
-                        | Statement::Expression(_) => {}
+                        | Statement::Expression(_)
+                        | Statement::Submodule(_) => {}
                     },
                     Item::Submodule(submodule) => {
                         if submodule.visibility == Visibility::Public
@@ -1710,7 +1715,12 @@ impl NameResolver {
                         .last()
                         .expect("use path is nonempty")
                         .clone();
-                    if self.namespaces.insert(name.clone(), imported).is_some()
+                    if self
+                        .namespaces
+                        .last_mut()
+                        .expect("resolver namespace scope")
+                        .insert(name.clone(), imported)
+                        .is_some()
                         || self.current_scope().contains_key(&name)
                     {
                         self.duplicate_import(&name, declaration.syntax.span.clone());
@@ -1813,6 +1823,8 @@ impl NameResolver {
             };
             if self
                 .namespaces
+                .last_mut()
+                .expect("resolver namespace scope")
                 .insert(submodule.name.clone(), child)
                 .is_some()
             {
@@ -1823,7 +1835,10 @@ impl NameResolver {
 
     fn install_root_namespaces(&mut self, program: &Program, module: ModuleId) {
         for (namespace, target) in program.root_qualified_modules(module) {
-            self.namespaces.insert(namespace.to_owned(), target);
+            self.namespaces
+                .last_mut()
+                .expect("resolver namespace scope")
+                .insert(namespace.to_owned(), target);
         }
     }
 
@@ -1915,7 +1930,9 @@ impl NameResolver {
     }
 
     fn insert_imported_value(&mut self, name: String, symbol: SymbolId, span: Span) {
-        if self.current_scope().contains_key(&name) || self.namespaces.contains_key(&name) {
+        if self.current_scope().contains_key(&name)
+            || self.namespaces.iter().any(|frame| frame.contains_key(&name))
+        {
             self.duplicate_import(&name, span);
         } else {
             self.current_scope_mut().insert(name, symbol);
@@ -1932,7 +1949,7 @@ impl NameResolver {
 
     fn insert_imported_macro(&mut self, name: String, id: Vec<MacroId>, span: Span) {
         if self.current_scope().contains_key(&name)
-            || self.namespaces.contains_key(&name)
+            || self.namespaces.iter().any(|frame| frame.contains_key(&name))
             || self.imported_macros.insert(name.clone(), id).is_some()
         {
             self.duplicate_import(&name, span);
@@ -1950,7 +1967,12 @@ impl NameResolver {
     }
 
     fn insert_imported_namespace(&mut self, name: String, module: ModuleId, span: Span) {
-        if self.namespaces.insert(name.clone(), module).is_some()
+        if self
+            .namespaces
+            .last_mut()
+            .expect("resolver namespace scope")
+            .insert(name.clone(), module)
+            .is_some()
             || self.current_scope().contains_key(&name)
         {
             self.duplicate_import(&name, span);
@@ -2080,7 +2102,7 @@ impl NameResolver {
         for (name, id) in &self.prelude_namespaces {
             insert(name, DefinitionId::Module(*id));
         }
-        for (name, id) in &self.namespaces {
+        for (name, id) in self.namespaces.iter().flatten() {
             insert(name, DefinitionId::Module(*id));
         }
         self.visible_module_definitions[module.0] = visible;
@@ -2433,6 +2455,7 @@ impl NameResolver {
                 }
             }
             Statement::Expression(expression) => self.resolve_expression(expression, None, None),
+            Statement::Submodule(_) => {}
         }
     }
 
@@ -3129,17 +3152,44 @@ impl NameResolver {
 
     fn resolve_block(&mut self, block: &BlockExpression) {
         self.push_scope();
+        self.namespaces.push(HashMap::new());
         for statement in &block.statements {
-            if let Statement::Binding(binding) = statement
-                && binding.kind == BindingKind::Def
-            {
-                self.declare_fresh(binding);
+            match statement {
+                Statement::Binding(binding) if binding.kind == BindingKind::Def => {
+                    self.declare_fresh(binding);
+                }
+                Statement::Submodule(submodule) => self.declare_block_namespace(submodule),
+                _ => {}
             }
         }
         for statement in &block.statements {
             self.resolve_statement(statement);
         }
+        self.namespaces.pop();
         self.pop_scope();
+    }
+
+    fn declare_block_namespace(&mut self, submodule: &Submodule) {
+        let Some(&module) = self.submodule_ids.get(&submodule.syntax.id) else {
+            return;
+        };
+        if self.current_scope().contains_key(&submodule.name)
+            || self
+                .namespaces
+                .last()
+                .expect("resolver namespace scope")
+                .contains_key(&submodule.name)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                submodule.syntax.span.clone(),
+                format!("duplicate definition of `{}`", submodule.name),
+            ));
+            return;
+        }
+        self.namespaces
+            .last_mut()
+            .expect("resolver namespace scope")
+            .insert(submodule.name.clone(), module);
     }
 
     fn declare_pattern(&mut self, pattern: &Pattern) {
@@ -3290,7 +3340,9 @@ impl NameResolver {
     }
 
     fn declare_symbol(&mut self, name: &str, syntax: SyntaxId, span: Span, symbol: SymbolId) {
-        if self.current_scope().contains_key(name) || self.namespaces.contains_key(name) {
+        if self.current_scope().contains_key(name)
+            || self.namespaces.iter().any(|frame| frame.contains_key(name))
+        {
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!("duplicate definition of `{name}`"),
@@ -3312,8 +3364,9 @@ impl NameResolver {
 
     fn lookup_namespace(&self, name: &str) -> Option<ModuleId> {
         self.namespaces
-            .get(name)
-            .copied()
+            .iter()
+            .rev()
+            .find_map(|frame| frame.get(name).copied())
             .or_else(|| self.prelude_namespaces.get(name).copied())
     }
 
@@ -3422,7 +3475,8 @@ impl<'a> InitializationAnalyzer<'a> {
                     | Statement::Return(_)
                     | Statement::Break(_)
                     | Statement::Continue(_)
-                    | Statement::Expression(_) => {}
+                    | Statement::Expression(_)
+                    | Statement::Submodule(_) => {}
                 }
             }
         }
@@ -3510,6 +3564,7 @@ impl<'a> InitializationAnalyzer<'a> {
             }
             Statement::Continue(_) => {}
             Statement::Expression(expression) => self.expression(expression, local, outer),
+            Statement::Submodule(_) => {}
         }
     }
 

@@ -263,12 +263,12 @@ define_answer 42
 ```
 
 Item-producing macros may generate statements, type declarations, extern
-blocks, trait declarations, and trait implementations. Generated `use`, `mod`,
-and `macro` declarations are rejected because they would require rebuilding
-expansion and loading scopes. An item result is invalid in bindings, function
-bodies, blocks, call arguments, and every other expression position. `Item`
-values may be passed between compile-time helpers. Function-style macros cannot
-accept `Item` parameters.
+blocks, trait declarations, trait implementations, `use` declarations, and
+submodules (`mod`). Generated `macro` declarations are rejected because they
+would require rebuilding expansion and loading scopes. An item result is
+invalid in bindings, function bodies, blocks, call arguments, and every other
+expression position. `Item` values may be passed between compile-time helpers.
+Function-style macros cannot accept `Item` parameters.
 
 Modifier macros are the item-input form. They are declared with `macro @name`
 and applied immediately before a resolver-safe definition:

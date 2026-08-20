@@ -128,6 +128,7 @@ pub enum Statement {
     Break(BreakStatement),
     Continue(ContinueStatement),
     Expression(Expression),
+    Submodule(Submodule),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

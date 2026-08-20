@@ -302,6 +302,16 @@ impl Collector<'_> {
             }
             Statement::Expression(value) => self.expression(value, module_index),
             Statement::Continue(_) => {}
+            Statement::Submodule(value) => {
+                if let Some(id) = self
+                    .typed
+                    .resolved()
+                    .program()
+                    .child_module(value.syntax.id)
+                {
+                    self.module(&value.module, id);
+                }
+            }
         }
     }
 

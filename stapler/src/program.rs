@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::parser::parse_with_syntax_ids;
 use crate::{
-    Item, Module, SourceLocation, Span, Syntax, SyntaxId, TokenKind, UseDeclaration, UseKind,
-    Visibility,
+    BlockExpression, Expression, Item, Module, SourceLocation, Span, Statement, Submodule,
+    Syntax, SyntaxId, TokenKind, UseDeclaration, UseKind, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -156,6 +156,28 @@ impl Program {
             self.child_modules.insert(declaration.syntax.id, id);
             self.collect_single_submodules(id);
         }
+
+        let mut block_declarations = Vec::new();
+        find_block_submodules(&self.modules[parent.0].syntax.items, &mut block_declarations);
+        for declaration in block_declarations {
+            let id = ModuleId(self.modules.len());
+            let qualified_name = format!(
+                "{}.{}",
+                self.modules[parent.0].qualified_name, declaration.name
+            );
+            self.modules.push(SourceModule {
+                id,
+                path: self.modules[parent.0].path.clone(),
+                syntax: declaration.module,
+                parent: Some(parent),
+                name: Some(declaration.name.clone()),
+                visibility: declaration.visibility,
+                qualified_name,
+            });
+            self.children.push(HashMap::new());
+            self.child_modules.insert(declaration.syntax.id, id);
+            self.collect_single_submodules(id);
+        }
     }
 
     fn resolve_single_inline_imports(&mut self) {
@@ -301,6 +323,10 @@ impl Program {
 
     pub fn child_module(&self, submodule_syntax: SyntaxId) -> Option<ModuleId> {
         self.child_modules.get(&submodule_syntax).copied()
+    }
+
+    pub(crate) fn child_modules(&self) -> &HashMap<SyntaxId, ModuleId> {
+        &self.child_modules
     }
 
     pub fn child_named(&self, module: ModuleId, name: &str) -> Option<ModuleId> {
@@ -542,6 +568,25 @@ impl ProgramLoader {
             });
             self.children.push(HashMap::new());
             self.children[parent.0].insert(declaration.name, id);
+            self.child_modules.insert(declaration.syntax.id, id);
+            self.insert_submodules(id, path.clone(), qualified_name)?;
+        }
+
+        let mut block_declarations = Vec::new();
+        find_block_submodules(&self.modules[parent.0].syntax.items, &mut block_declarations);
+        for declaration in block_declarations {
+            let id = ModuleId(self.modules.len());
+            let qualified_name = format!("{parent_name}.{}", declaration.name);
+            self.modules.push(SourceModule {
+                id,
+                path: path.clone(),
+                syntax: declaration.module,
+                parent: Some(parent),
+                name: Some(declaration.name.clone()),
+                visibility: declaration.visibility,
+                qualified_name: qualified_name.clone(),
+            });
+            self.children.push(HashMap::new());
             self.child_modules.insert(declaration.syntax.id, id);
             self.insert_submodules(id, path.clone(), qualified_name)?;
         }
@@ -977,6 +1022,133 @@ fn root_scan_ignored_ranges(item: &Item, ranges: &mut Vec<Range<usize>>) {
         Item::Modified(modified) => root_scan_ignored_ranges(&modified.item, ranges),
         Item::VisibilitySplice(splice) => root_scan_ignored_ranges(&splice.item, ranges),
         _ => {}
+    }
+}
+
+/// Finds `mod` declarations nested inside block expressions anywhere in
+/// `items`, without descending into an `Item::Submodule`'s own body (that
+/// case is already handled by the caller's top-level scan and recursion).
+fn find_block_submodules(items: &[Item], out: &mut Vec<Submodule>) {
+    for item in items {
+        find_block_submodules_in_item(item, out);
+    }
+}
+
+fn find_block_submodules_in_item(item: &Item, out: &mut Vec<Submodule>) {
+    match item {
+        Item::Modified(modified) => find_block_submodules_in_item(&modified.item, out),
+        Item::VisibilityMacroInvocation(invocation) => {
+            find_block_submodules_in_expression(&invocation.expression, out)
+        }
+        Item::VisibilitySplice(splice) => find_block_submodules_in_item(&splice.item, out),
+        Item::RepeatedItemSplice(_)
+        | Item::UseDeclaration(_)
+        | Item::Submodule(_)
+        | Item::TypeDeclaration(_) => {}
+        Item::ExternBlock(block) => {
+            for binding in &block.bindings {
+                if let Some(value) = &binding.value {
+                    find_block_submodules_in_expression(value, out);
+                }
+            }
+        }
+        Item::MacroDeclaration(declaration) => {
+            if let Some(value) = &declaration.value {
+                find_block_submodules_in_expression(value, out);
+            }
+        }
+        Item::TraitDeclaration(declaration) => {
+            for member in &declaration.members {
+                if let Some(default) = &member.default {
+                    find_block_submodules_in_expression(default, out);
+                }
+            }
+        }
+        Item::TraitImplementation(implementation) => {
+            for member in &implementation.members {
+                find_block_submodules_in_expression(&member.value, out);
+            }
+        }
+        Item::Statement(statement) => find_block_submodules_in_statement(statement, out),
+    }
+}
+
+fn find_block_submodules_in_statement(statement: &Statement, out: &mut Vec<Submodule>) {
+    match statement {
+        Statement::Binding(binding) => {
+            if let Some(value) = &binding.value {
+                find_block_submodules_in_expression(value, out);
+            }
+        }
+        Statement::PatternBinding(binding) => {
+            find_block_submodules_in_expression(&binding.value, out)
+        }
+        Statement::Assignment(assignment) => {
+            find_block_submodules_in_expression(&assignment.target, out);
+            find_block_submodules_in_expression(&assignment.value, out);
+        }
+        Statement::Return(statement) => find_block_submodules_in_expression(&statement.value, out),
+        Statement::Break(statement) => {
+            if let Some(value) = &statement.value {
+                find_block_submodules_in_expression(value, out);
+            }
+        }
+        Statement::Continue(_) => {}
+        Statement::Expression(expression) => find_block_submodules_in_expression(expression, out),
+        Statement::Submodule(submodule) => out.push(submodule.clone()),
+    }
+}
+
+fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Submodule>) {
+    match expression {
+        Expression::Function(function) => {
+            find_block_submodules_in_expression(&function.body, out)
+        }
+        Expression::Satisfies(satisfies) => {
+            find_block_submodules_in_expression(&satisfies.value, out)
+        }
+        Expression::Match(match_) => {
+            find_block_submodules_in_expression(&match_.subject, out);
+            for arm in &match_.arms {
+                find_block_submodules_in_expression(&arm.body, out);
+            }
+        }
+        Expression::Loop(loop_) => find_block_submodules_in_block(&loop_.body, out),
+        Expression::Resource(_) => {}
+        Expression::With(with) => {
+            find_block_submodules_in_expression(&with.value, out);
+            find_block_submodules_in_block(&with.body, out);
+        }
+        Expression::Block(block) => find_block_submodules_in_block(block, out),
+        Expression::Product(product) => {
+            for element in &product.elements {
+                find_block_submodules_in_expression(&element.value, out);
+            }
+        }
+        Expression::Call(call) => {
+            find_block_submodules_in_expression(&call.callee, out);
+            find_block_submodules_in_expression(&call.argument, out);
+        }
+        Expression::Access(access) => find_block_submodules_in_expression(&access.value, out),
+        Expression::Index(index) => {
+            find_block_submodules_in_expression(&index.value, out);
+            find_block_submodules_in_expression(&index.index, out);
+        }
+        Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
+        | Expression::Quote(_)
+        | Expression::Splice(_)
+        | Expression::Name(_)
+        | Expression::String(_)
+        | Expression::CString(_)
+        | Expression::Integer(_)
+        | Expression::Float(_) => {}
+    }
+}
+
+fn find_block_submodules_in_block(block: &BlockExpression, out: &mut Vec<Submodule>) {
+    for statement in &block.statements {
+        find_block_submodules_in_statement(statement, out);
     }
 }
 

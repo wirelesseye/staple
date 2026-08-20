@@ -389,6 +389,16 @@ impl<'a> Classifier<'a> {
             }
             Statement::Continue(_) => {}
             Statement::Expression(value) => self.expression(value, resolved),
+            Statement::Submodule(value) => {
+                self.mark_first(
+                    &value.syntax,
+                    &value.name,
+                    NAMESPACE,
+                    DECLARATION | DEFINITION | READONLY,
+                    1,
+                );
+                self.module(&value.module, resolved);
+            }
         }
     }
 

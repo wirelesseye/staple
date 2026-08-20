@@ -154,6 +154,12 @@ impl DeclarationCollector<'_> {
                 }
             }
             Statement::Continue(_) => {}
+            Statement::Submodule(value) => {
+                if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
+                    self.insert(DefinitionId::Module(id), &value.syntax, &value.name);
+                }
+                self.module(&value.module);
+            }
         }
     }
 
@@ -449,6 +455,17 @@ impl Collector<'_> {
             }
             Statement::Continue(_) => {}
             Statement::Expression(value) => self.expression(value),
+            Statement::Submodule(value) => {
+                if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
+                    self.add(
+                        &value.syntax,
+                        &value.name,
+                        &[DefinitionId::Module(id)],
+                        false,
+                    );
+                }
+                self.module(&value.module);
+            }
         }
     }
 

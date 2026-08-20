@@ -462,6 +462,45 @@ fn parses_recursive_inline_submodules_losslessly() {
 }
 
 #[test]
+fn parses_block_scoped_submodules_losslessly() {
+    let source = "let x = {\n    mod foo { pub def value = 42 }\n    0\n}\n";
+    let root = parse(source).expect("block-scoped submodules should parse");
+    assert_eq!(root.text(), source);
+    let Statement::Binding(binding) = statement(&root.items[0]) else {
+        panic!("expected binding")
+    };
+    let Some(Expression::Block(block)) = &binding.value else {
+        panic!("expected block value")
+    };
+    let Statement::Submodule(submodule) = &block.statements[0] else {
+        panic!("expected block-scoped submodule");
+    };
+    assert_eq!(submodule.name, "foo");
+    assert_eq!(submodule.visibility, Visibility::Private);
+    assert!(matches!(submodule.module.items[0], Item::Statement(_)));
+    assert!(matches!(block.statements[1], Statement::Expression(_)));
+
+    // A block statement never carries a visibility modifier: `pub` is
+    // parsed as its own (separately invalid, once resolved) expression
+    // statement rather than attaching to the `mod` that follows it.
+    let root = parse("{ pub mod foo {} }\n").expect("adjacent statements should parse");
+    let Item::Statement(statement) = &root.items[0] else {
+        panic!("expected statement");
+    };
+    let Statement::Expression(Expression::Block(block)) = statement.as_ref() else {
+        panic!("expected block expression");
+    };
+    assert!(matches!(
+        block.statements[0],
+        Statement::Expression(Expression::VisibilityArgument(_))
+    ));
+    let Statement::Submodule(submodule) = &block.statements[1] else {
+        panic!("expected block-scoped submodule");
+    };
+    assert_eq!(submodule.visibility, Visibility::Private);
+}
+
+#[test]
 fn parses_namespace_qualified_types() {
     let root = parse("let value: types.Number = 1\n").expect("qualified type should parse");
     let Statement::Binding(binding) = statement(&root.items[0]) else {

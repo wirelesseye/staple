@@ -118,6 +118,9 @@ impl Collector<'_> {
             }
             Statement::Continue(_) => {}
             Statement::Expression(expression) => self.collect_expression_declarations(expression),
+            Statement::Submodule(submodule) => {
+                self.collect_module_declarations(&submodule.module)
+            }
         }
     }
 
@@ -502,6 +505,11 @@ impl Collector<'_> {
             }
             Statement::Continue(_) => {}
             Statement::Expression(expression) => self.expression(expression),
+            Statement::Submodule(submodule) => {
+                for item in &submodule.module.items {
+                    self.item(item);
+                }
+            }
         }
     }
 

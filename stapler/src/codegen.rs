@@ -1338,6 +1338,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(())
             }
+            Statement::Submodule(_) => Ok(()),
         }
     }
 
@@ -1783,6 +1784,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(Some(value))
             }
+            Statement::Submodule(_) => Ok(None),
         }
     }
 

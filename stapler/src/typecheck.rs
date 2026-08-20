@@ -2710,6 +2710,7 @@ impl TypeChecker {
                 Statement::Expression(value) => {
                     self.expression_resources_now(module, value, current)
                 }
+                Statement::Submodule(_) => CheckedResourceSet::default(),
             };
             let alias = self.statement_parameter_ref_alias(module, statement, current);
             resources = resources.union(&contribution);
@@ -2922,6 +2923,7 @@ impl TypeChecker {
                         value.syntax(),
                         self.expression_resources_now(module, value, &no_parameters),
                     )),
+                    Statement::Submodule(_) => None,
                 }
                 .unwrap_or((&source_module.syntax.syntax, CheckedResourceSet::default()));
                 let required = if is_entry_module {
@@ -3102,6 +3104,7 @@ impl TypeChecker {
                 .is_some_and(|value| self.refresh_expression_function_types(module, value)),
             Statement::Continue(_) => false,
             Statement::Expression(value) => self.refresh_expression_function_types(module, value),
+            Statement::Submodule(_) => false,
         }
     }
 
@@ -3404,6 +3407,7 @@ impl TypeChecker {
                 target_parameters,
                 current_module,
             ),
+            Statement::Submodule(_) => {}
         }
     }
 
@@ -3805,6 +3809,7 @@ impl TypeChecker {
                 CheckedType::empty_product()
             }
             Statement::Expression(expression) => self.check_expression(module, expression),
+            Statement::Submodule(_) => CheckedType::empty_product(),
         }
     }
 

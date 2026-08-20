@@ -363,6 +363,164 @@ fn unknown_names_report_private_glob_candidates() {
 }
 
 #[test]
+fn block_scoped_submodules_are_reachable_within_their_block() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let result: I32 = {\n",
+            "    mod inner { pub let answer: I32 = 42 }\n",
+            "    inner.answer\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("a block-scoped submodule's public items should be reachable via qualified access");
+}
+
+#[test]
+fn block_scoped_submodules_see_the_enclosing_modules_top_level_items_via_super() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let root_value: I32 = 41\n",
+            "{\n",
+            "    mod inner {\n",
+            "        use super root_value\n",
+            "        pub let answer: I32 = root_value + 1\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("`use super` from a block-scoped submodule should see the enclosing module's top-level items");
+}
+
+#[test]
+fn block_scoped_submodule_names_are_not_visible_outside_their_block() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "{\n",
+            "    mod inner { pub let answer: I32 = 42 }\n",
+            "    let x: I32 = inner.answer\n",
+            "}\n",
+            "let leaked: I32 = inner.answer\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("a block-scoped submodule's name should not escape its block");
+    assert!(error.contains("inner"));
+}
+
+#[test]
+fn block_scoped_submodules_do_not_see_the_enclosing_blocks_locals() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "{\n",
+            "    let local_value: I32 = 1\n",
+            "    mod inner {\n",
+            "        use super local_value\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("`super` from a block-scoped submodule should not see local bindings");
+    assert!(error.contains("local_value"));
+}
+
+#[test]
+fn sibling_blocks_may_reuse_the_same_submodule_name() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let a: I32 = {\n",
+            "    mod foo { pub let value: I32 = 1 }\n",
+            "    foo.value\n",
+            "}\n",
+            "let b: I32 = {\n",
+            "    mod foo { pub let value: I32 = 2 }\n",
+            "    foo.value\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("sibling blocks should not conflict over reusing a submodule name");
+}
+
+#[test]
+fn duplicate_submodule_names_in_the_same_block_are_rejected() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let x: I32 = {\n",
+            "    mod foo { pub let value: I32 = 1 }\n",
+            "    mod foo { pub let value: I32 = 2 }\n",
+            "    foo.value\n",
+            "}\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("redeclaring a submodule name in the same block should be rejected");
+    assert!(error.contains("duplicate definition of `foo`"));
+}
+
+#[test]
+fn block_scoped_submodules_initialize_exactly_once() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let result: I32 = {\n",
+            "    mod inner { pub let answer: I32 = 42 }\n",
+            "    inner.answer\n",
+            "}\n",
+        ),
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("block-scoped submodule should compile");
+    let init_symbols = llvm
+        .lines()
+        .filter(|line| line.trim_start().starts_with("define"))
+        .filter_map(|line| {
+            line.split("@__staple_init_")
+                .nth(1)
+                .and_then(|rest| rest.split('(').next())
+        })
+        .collect::<Vec<_>>();
+    assert!(!init_symbols.is_empty());
+    for symbol in init_symbols {
+        let needle = format!("call void @__staple_init_{symbol}()");
+        assert_eq!(
+            llvm.matches(&needle).count(),
+            1,
+            "module `{symbol}` should initialize exactly once",
+        );
+    }
+}
+
+#[test]
 fn inline_glob_reexports_types_traits_and_macros() {
     let fixture = Fixture::new();
     fixture.write(

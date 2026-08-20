@@ -346,6 +346,7 @@ impl<'a> OwnershipChecker<'a> {
                 false
             }
             Statement::Expression(expression) => self.check_expression(expression, true),
+            Statement::Submodule(_) => true,
         }
     }
 

@@ -2049,6 +2049,10 @@ impl MacroExpander {
             Statement::Expression(expression) => {
                 *expression = self.expand_expression(module, expression.clone(), depth);
             }
+            // A block-scoped `mod` is its own flat `SourceModule`, expanded
+            // independently when the top-level driver reaches it — mirrors
+            // the `Item::Submodule(_) => {}` catch-all in `expand_item`.
+            Statement::Submodule(_) => {}
         }
     }
 
@@ -3148,6 +3152,13 @@ impl MacroExpander {
                             self.diagnostics.push(Diagnostic::new(
                                 continue_.syntax.span.clone(),
                                 "`continue` is not supported during compile-time evaluation",
+                            ));
+                            return None;
+                        }
+                        Statement::Submodule(submodule) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                submodule.syntax.span.clone(),
+                                "`mod` is not supported during compile-time evaluation",
                             ));
                             return None;
                         }
@@ -5553,7 +5564,8 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
                     | Statement::PatternBinding(_)
                     | Statement::Assignment(_)
                     | Statement::Break(_)
-                    | Statement::Continue(_) => true,
+                    | Statement::Continue(_)
+                    | Statement::Submodule(_) => true,
                 })
         }
         Expression::Function(_)
@@ -6209,6 +6221,10 @@ fn substitute_statement(
         Statement::Expression(expression) => {
             *expression = substitute_splices(expression, environment, diagnostics)?
         }
+        Statement::Submodule(submodule) => {
+            substitute_identifier(&mut submodule.name, environment, diagnostics)?;
+            substitute_item_list(&mut submodule.module.items, environment, diagnostics)?;
+        }
     }
     Some(())
 }
@@ -6273,6 +6289,7 @@ fn statement_syntax(statement: &Statement) -> &Syntax {
         Statement::Break(value) => &value.syntax,
         Statement::Continue(value) => &value.syntax,
         Statement::Expression(value) => value.syntax(),
+        Statement::Submodule(value) => &value.syntax,
     }
 }
 
@@ -6942,6 +6959,11 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
             Statement::Expression(expression) => {
                 alpha_rename_expression(expression, mark, &mut scopes)
             }
+            Statement::Submodule(submodule) => {
+                for item in &mut submodule.module.items {
+                    alpha_rename_item(item, mark);
+                }
+            }
         },
         Item::TypeDeclaration(_) => {}
         Item::Submodule(submodule) => {
@@ -7091,6 +7113,10 @@ fn alpha_rename_block(
             }
             Statement::Continue(_) => {}
             Statement::Expression(expression) => alpha_rename_expression(expression, mark, scopes),
+            // A submodule's body can never reference the enclosing block's
+            // local bindings, so there's nothing here for value-identifier
+            // hygiene to rename.
+            Statement::Submodule(_) => {}
         }
     }
     scopes.pop();
@@ -7191,6 +7217,13 @@ fn freshen_statement(
             expander.freshen_syntax(&mut continue_.syntax, module, mark);
         }
         Statement::Expression(expression) => expander.freshen_expression(expression, module, mark),
+        Statement::Submodule(submodule) => {
+            expander.freshen_syntax(&mut submodule.syntax, module, mark);
+            expander.freshen_syntax(&mut submodule.module.syntax, module, mark);
+            for item in &mut submodule.module.items {
+                freshen_item(expander, item, module, mark);
+            }
+        }
     }
 }
 
