@@ -123,7 +123,11 @@ as `Sequence ()` or `Sequence (first: T, rest: Sequence T)`. `Sequence
 SyntaxNode` uses shortest structural atoms, treating a nested balanced delimiter
 as one atom. In contrast, `Parenthesized Syntax`, `Bracketed Syntax`, and
 `Braced Syntax` capture their entire contents as one opaque fragment, including
-trivia and syntax that is not yet structurally supported.
+trivia and syntax that is not yet structurally supported. A single fixed
+content never needs the grouping parens that separate multiple ones, so
+`Parenthesized Expr` and `Parenthesized (Expr)` are read identically; the
+parens are required only once there is more than one fixed element, as in
+`Parenthesized (Ident String, Ident String)`.
 
 `Comma` is singleton syntax and may be matched explicitly, as in
 `Parenthesized (Ident String, Comma, Ident String)`. A homogeneous sequence
@@ -272,7 +276,7 @@ and applied immediately before a resolver-safe definition:
 ```staple
 macro @identity: Item -> Item = item => item
 
-macro @replace: Expr -> Item -> Item =
+macro @replace: Parenthesized Expr -> Item -> Item =
     value => item => parse_quote { let generated = $value }
 
 @identity
@@ -281,10 +285,12 @@ def original = () => 0
 ```
 
 A modifier has signature `Item -> Item`, `Item -> Sequence Item`, or
-`Item -> Syntax`, optionally preceded by one optional explicit `Expr`, `Type`,
-or `Pattern` argument before the compiler-supplied item. The explicit
-argument is always delimited by parentheses, including an expression
-argument. `Ident`, `CallExpr`, and `UnstructuredExpr` may be used as narrower
+`Item -> Syntax`, optionally preceded by one optional explicit
+`Parenthesized Expr`, `Parenthesized Type`, or `Parenthesized Pattern`
+argument before the compiler-supplied item. `Parenthesized` is required
+because the explicit argument is always delimited by parentheses, including
+an expression argument, matching how every other delimited macro argument is
+declared. `Ident`, `CallExpr`, and `UnstructuredExpr` may be used as narrower
 expression parameter types. `SyntaxNode`, opaque `Syntax`, and `Item` are not
 valid explicit modifier arguments.
 

@@ -2851,8 +2851,8 @@ fn expands_item_modifier_macros_with_nearest_modifier_first() {
 fn modifier_arguments_support_expression_type_and_pattern_syntax() {
     let module = type_check(concat!(
         "macro @value = value => _ => parse_quote { let generated: I32 = $value }\n",
-        "macro @typed: Type -> Item -> Item = ty => _ => parse_quote { let typed: $ty = 1 }\n",
-        "macro @bind: Pattern -> Item -> Item = pattern => _ => parse_quote { let $pattern = (40, 2) }\n",
+        "macro @typed: Parenthesized (Type) -> Item -> Item = ty => _ => parse_quote { let typed: $ty = 1 }\n",
+        "macro @bind: Parenthesized (Pattern) -> Item -> Item = pattern => _ => parse_quote { let $pattern = (40, 2) }\n",
         "@value(42)\n",
         "let replaced = 0\n",
         "@typed(I32)\n",
@@ -3448,10 +3448,10 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
     for (source, expected) in [
         (
             "macro @invalid: SyntaxNode -> Item -> Item = value => item => item\n",
-            "modifier macro `@invalid` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `(Expr | Type | Pattern) ->` argument",
+            "modifier macro `@invalid` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `Parenthesized (Expr | Type | Pattern) ->` argument",
         ),
         (
-            "macro @required: Expr -> Item -> Item = value => item => item\n@required\nlet value = 1\n",
+            "macro @required: Parenthesized (Expr) -> Item -> Item = value => item => item\n@required\nlet value = 1\n",
             "modifier macro `@required` requires a parenthesized argument",
         ),
         (

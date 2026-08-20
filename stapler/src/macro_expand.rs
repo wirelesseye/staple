@@ -593,8 +593,14 @@ impl MacroExpander {
                                 (arity, parameters, result)
                             };
                         if declaration.modifier && declaration.annotation.is_none() {
-                            if parameters.len() == 2 && parameters[0] == MetaType::SyntaxNode {
-                                parameters[0] = MetaType::Expr;
+                            if parameters.len() == 2 {
+                                if parameters[0] == MetaType::SyntaxNode {
+                                    parameters[0] = MetaType::Expr;
+                                }
+                                parameters[0] = MetaType::Delimited(
+                                    DelimiterKind::Parenthesized,
+                                    DelimitedMetaContents::Fixed(vec![parameters[0].clone()]),
+                                );
                             }
                             if let Some(last) = parameters.last_mut() {
                                 *last = MetaType::Item;
@@ -1034,8 +1040,15 @@ impl MacroExpander {
                         && index + 1 == parameters.len()
                         && *declared == MetaType::Item
                         && body_parameter == Some(MetaType::SyntaxNode);
+                    let effective_declared =
+                        if definition.key.modifier && index + 1 != parameters.len() {
+                            modifier_argument_meta_type(declared).unwrap_or(declared)
+                        } else {
+                            declared
+                        };
                     if !implicit_modifier_item
-                        && body_parameter.is_some_and(|body_parameter| body_parameter != *declared)
+                        && body_parameter
+                            .is_some_and(|body_parameter| body_parameter != *effective_declared)
                     {
                         self.diagnostics.push(Diagnostic::new(
                             body.syntax().span.clone(),
@@ -1057,15 +1070,19 @@ impl MacroExpander {
                 }
                 let valid_parameters = match definition.parameters.as_slice() {
                     [MetaType::Item] => true,
-                    [argument, MetaType::Item] => matches!(
-                        argument,
-                        MetaType::Expr
-                            | MetaType::Ident(_)
-                            | MetaType::CallExpr
-                            | MetaType::UnstructuredExpr
-                            | MetaType::Type
-                            | MetaType::Pattern
-                    ),
+                    [leading, MetaType::Item] => {
+                        modifier_argument_meta_type(leading).is_some_and(|argument| {
+                            matches!(
+                                argument,
+                                MetaType::Expr
+                                    | MetaType::Ident(_)
+                                    | MetaType::CallExpr
+                                    | MetaType::UnstructuredExpr
+                                    | MetaType::Type
+                                    | MetaType::Pattern
+                            )
+                        })
+                    }
                     _ => false,
                 };
                 let valid_result = matches!(definition.result, MetaType::Item | MetaType::Syntax)
@@ -1074,7 +1091,7 @@ impl MacroExpander {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
                         format!(
-                            "modifier macro `@{}` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `(Expr | Type | Pattern) ->` argument",
+                            "modifier macro `@{}` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `Parenthesized (Expr | Type | Pattern) ->` argument",
                             definition.key.name
                         ),
                     ));
@@ -1639,8 +1656,9 @@ impl MacroExpander {
             .filter(
                 |definition| match (&invocation.argument, definition.parameters.as_slice()) {
                     (None, [MetaType::Item]) => true,
-                    (Some(argument), [expected, MetaType::Item]) => {
-                        modifier_argument_matches(expected, argument)
+                    (Some(argument), [leading, MetaType::Item]) => {
+                        modifier_argument_meta_type(leading)
+                            .is_some_and(|expected| modifier_argument_matches(expected, argument))
                     }
                     _ => false,
                 },
@@ -1693,7 +1711,9 @@ impl MacroExpander {
             return None;
         };
         let argument = match (&invocation.argument, definition.parameters.as_slice()) {
-            (Some(argument), [expected, MetaType::Item]) => {
+            (Some(argument), [leading, MetaType::Item]) => {
+                let expected = modifier_argument_meta_type(leading)
+                    .expect("selected modifier signature must match its invocation");
                 Some(self.modifier_argument_value(expected, argument)?)
             }
             (None, [MetaType::Item]) => None,
@@ -4322,11 +4342,11 @@ fn delimiter_kind(name: &str) -> Option<DelimiterKind> {
 }
 
 fn delimiter_contents_meta(ty: &Type) -> Option<DelimitedMetaContents> {
-    if meta_type(ty) == Some(MetaType::Syntax) {
-        return Some(DelimitedMetaContents::Fixed(vec![MetaType::Syntax]));
-    }
+    // A single element doesn't need the grouping parens that separate
+    // multiple fixed contents, so `Parenthesized Expr` is read the same as
+    // `Parenthesized (Expr)`.
     let Type::Product(product) = ty else {
-        return None;
+        return meta_type(ty).map(|single| DelimitedMetaContents::Fixed(vec![single]));
     };
     if product.elements.len() == 1
         && !product.elements[0].spread
@@ -4923,6 +4943,21 @@ fn private_visibility() -> VisibilitySyntax {
     VisibilitySyntax {
         syntax: Syntax::compiler(),
         kind: VisibilityKind::Private,
+    }
+}
+
+/// Unwraps a modifier's declared leading-argument type, which must be
+/// spelled `Parenthesized (...)` to match how every other delimited macro
+/// argument is declared, down to the single meta type it wraps.
+fn modifier_argument_meta_type(declared: &MetaType) -> Option<&MetaType> {
+    let MetaType::Delimited(DelimiterKind::Parenthesized, DelimitedMetaContents::Fixed(inner)) =
+        declared
+    else {
+        return None;
+    };
+    match inner.as_slice() {
+        [expected] => Some(expected),
+        _ => None,
     }
 }
 

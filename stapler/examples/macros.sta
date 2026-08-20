@@ -107,11 +107,12 @@ macro generate_pair: Expr -> Sequence Item = value => parse_quote {
 generate_pair 41
 
 // Modifier macros receive one opaque Item from the compiler. An optional
-// explicit Expr, Type, or Pattern argument is always written in parentheses.
-// The closest modifier runs first; here @replace discards the definition and
-// @identity passes its generated replacement through unchanged.
+// explicit Parenthesized Expr, Parenthesized Type, or Parenthesized Pattern
+// argument is always written in parentheses. The closest modifier runs
+// first; here @replace discards the definition and @identity passes its
+// generated replacement through unchanged.
 macro @identity: Item -> Item = item => item
-macro @replace: Expr -> Item -> Item = value => item => parse_quote {
+macro @replace: Parenthesized Expr -> Item -> Item = value => item => parse_quote {
     let replaced: I32 = $value
 }
 

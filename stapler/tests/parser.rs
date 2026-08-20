@@ -667,7 +667,7 @@ fn parses_expression_and_single_item_quotations_losslessly() {
 fn parses_modifier_macro_definitions_and_item_modifiers_losslessly() {
     let source = concat!(
         "macro @identity: Item -> Item = item => item\n",
-        "macro @replace: Expr -> Item -> Item = value => item => quote { let generated = $value }\n",
+        "macro @replace: Parenthesized (Expr) -> Item -> Item = value => item => quote { let generated = $value }\n",
         "@identity\n",
         "@replace(42)\n",
         "def original = () => 0\n",
