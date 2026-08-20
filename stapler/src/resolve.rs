@@ -692,6 +692,8 @@ pub struct NameResolver {
     scopes: Vec<HashMap<String, SymbolId>>,
     namespaces: Vec<HashMap<String, ModuleId>>,
     submodule_ids: HashMap<SyntaxId, ModuleId>,
+    block_types: Vec<HashMap<String, TypeId>>,
+    type_ids_by_syntax: HashMap<SyntaxId, TypeId>,
     imported_types: HashMap<String, TypeId>,
     imported_macros: HashMap<String, Vec<MacroId>>,
     imported_traits: HashMap<String, TraitId>,
@@ -831,6 +833,7 @@ impl NameResolver {
             self.current_module = source_module.id;
             self.scopes.clear();
             self.namespaces.clear();
+            self.block_types.clear();
             self.imported_types.clear();
             self.imported_macros.clear();
             self.imported_traits.clear();
@@ -1344,56 +1347,7 @@ impl NameResolver {
                         }
                     }
                     Item::TypeDeclaration(declaration) => {
-                        let id = TypeId(self.type_declarations.len());
-                        if self.declared_types[source_module.id.0]
-                            .insert(declaration.name.clone(), id)
-                            .is_some()
-                        {
-                            self.diagnostics.push(Diagnostic::new(
-                                declaration.syntax.span.clone(),
-                                format!("duplicate type definition of `{}`", declaration.name),
-                            ));
-                        }
-                        self.type_declarations.insert(id, declaration.clone());
-                        self.type_modules.insert(id, source_module.id);
-                        if (declaration.kind == crate::TypeDeclarationKind::Distinct
-                            && declaration.underlying.is_some())
-                            || declaration.kind == crate::TypeDeclarationKind::Singleton
-                        {
-                            let symbol = SymbolId(self.next_symbol_id);
-                            self.next_symbol_id += 1;
-                            self.symbol_owners.insert(symbol, None);
-                            self.type_constructor_symbols.insert(id, symbol);
-                            self.module_values[source_module.id.0]
-                                .insert(declaration.name.clone(), symbol);
-                            if declaration.kind == crate::TypeDeclarationKind::Singleton {
-                                self.singleton_values.insert(symbol, id);
-                            } else {
-                                self.constructors.insert(symbol, id);
-                            }
-                            if declaration.representation_visibility == Visibility::Public
-                                || (declaration.kind == crate::TypeDeclarationKind::Singleton
-                                    && declaration.visibility == Visibility::Public)
-                            {
-                                self.insert_public_value(
-                                    source_module.id,
-                                    &declaration.name,
-                                    symbol,
-                                    declaration.syntax.span.clone(),
-                                );
-                            }
-                        }
-                        let qualified = if self.multiple_modules {
-                            format!("m{}.{}", source_module.id.0, declaration.name)
-                        } else {
-                            declaration.name.clone()
-                        };
-                        self.type_names.insert(id, qualified);
-                        if declaration.visibility == Visibility::Public {
-                            self.interfaces[source_module.id.0]
-                                .types
-                                .insert(declaration.name.clone(), id);
-                        }
+                        self.register_type_declaration(source_module.id, declaration, true);
                     }
                     Item::MacroDeclaration(declaration) => {
                         let id = MacroId(self.next_macro_id);
@@ -1487,7 +1441,8 @@ impl NameResolver {
                         | Statement::Break(_)
                         | Statement::Continue(_)
                         | Statement::Expression(_)
-                        | Statement::Submodule(_) => {}
+                        | Statement::Submodule(_)
+                        | Statement::TypeDeclaration(_) => {}
                     },
                     Item::Submodule(submodule) => {
                         if submodule.visibility == Visibility::Public
@@ -1505,8 +1460,78 @@ impl NameResolver {
                     | Item::UseDeclaration(_) => {}
                 }
             }
+            let mut block_type_declarations = Vec::new();
+            find_block_type_declarations(&source_module.syntax.items, &mut block_type_declarations);
+            for declaration in block_type_declarations {
+                self.register_type_declaration(source_module.id, declaration, false);
+            }
         }
         self.collect_reexports(program);
+    }
+
+    fn register_type_declaration(
+        &mut self,
+        module: ModuleId,
+        declaration: &TypeDeclaration,
+        top_level: bool,
+    ) -> TypeId {
+        let id = TypeId(self.type_declarations.len());
+        self.type_ids_by_syntax.insert(declaration.syntax.id, id);
+        // A block-scoped type's name is only ever looked up through
+        // `block_types` (installed by `declare_block_type`), never through
+        // this module-wide map — inserting it here too would make sibling
+        // blocks reusing the same type name collide with each other, the
+        // same way block-scoped `mod` avoids `children[parent]`.
+        if top_level
+            && self.declared_types[module.0]
+                .insert(declaration.name.clone(), id)
+                .is_some()
+        {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("duplicate type definition of `{}`", declaration.name),
+            ));
+        }
+        self.type_declarations.insert(id, declaration.clone());
+        self.type_modules.insert(id, module);
+        if (declaration.kind == crate::TypeDeclarationKind::Distinct
+            && declaration.underlying.is_some())
+            || declaration.kind == crate::TypeDeclarationKind::Singleton
+        {
+            let symbol = SymbolId(self.next_symbol_id);
+            self.next_symbol_id += 1;
+            self.symbol_owners.insert(symbol, None);
+            self.type_constructor_symbols.insert(id, symbol);
+            self.module_values[module.0].insert(declaration.name.clone(), symbol);
+            if declaration.kind == crate::TypeDeclarationKind::Singleton {
+                self.singleton_values.insert(symbol, id);
+            } else {
+                self.constructors.insert(symbol, id);
+            }
+            if declaration.representation_visibility == Visibility::Public
+                || (declaration.kind == crate::TypeDeclarationKind::Singleton
+                    && declaration.visibility == Visibility::Public)
+            {
+                self.insert_public_value(
+                    module,
+                    &declaration.name,
+                    symbol,
+                    declaration.syntax.span.clone(),
+                );
+            }
+        }
+        let qualified = if self.multiple_modules {
+            format!("m{}.{}", module.0, declaration.name)
+        } else {
+            declaration.name.clone()
+        };
+        self.type_names.insert(id, qualified);
+        if declaration.visibility == Visibility::Public {
+            self.interfaces[module.0]
+                .types
+                .insert(declaration.name.clone(), id);
+        }
+        id
     }
 
     fn build_definition_context_values(&mut self, program: &Program) {
@@ -2108,6 +2133,66 @@ impl NameResolver {
         self.visible_module_definitions[module.0] = visible;
     }
 
+    fn resolve_type_declaration_body(&mut self, declaration: &TypeDeclaration) {
+        self.push_type_parameter_scope();
+        for parameter in &declaration.type_parameters {
+            self.declare_type_parameter_pattern(parameter);
+        }
+        for bound in &declaration.trait_bounds {
+            if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
+                self.trait_references.insert(bound.syntax.id, trait_id);
+            }
+            for argument in &bound.arguments {
+                self.resolve_type(argument);
+            }
+        }
+        for bound in &declaration.subtype_bounds {
+            if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                self.type_parameters.insert(bound.syntax.id, id);
+            } else {
+                self.diagnostics.push(Diagnostic::new(
+                    bound.parameter.syntax.span.clone(),
+                    format!(
+                        "unknown compile-time parameter `{}` in subtype bound",
+                        bound.parameter.name
+                    ),
+                ));
+            }
+            self.resolve_type(&bound.supertype);
+        }
+        let mut defaulted_parameters = HashSet::new();
+        for bound in &declaration.default_bounds {
+            if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                self.type_parameters.insert(bound.syntax.id, id);
+                if !defaulted_parameters.insert(id) {
+                    self.diagnostics.push(Diagnostic::new(
+                        bound.parameter.syntax.span.clone(),
+                        format!(
+                            "duplicate default type bound for compile-time parameter `{}`",
+                            bound.parameter.name
+                        ),
+                    ));
+                }
+            } else {
+                self.diagnostics.push(Diagnostic::new(
+                    bound.parameter.syntax.span.clone(),
+                    format!(
+                        "unknown compile-time parameter `{}` in default type bound",
+                        bound.parameter.name
+                    ),
+                ));
+            }
+            self.resolve_type(&bound.default);
+        }
+        if let Some(underlying) = &declaration.underlying {
+            self.resolve_type(underlying);
+            if declaration.representation_visibility == Visibility::Public {
+                self.validate_public_representation(underlying);
+            }
+        }
+        self.pop_type_parameter_scope();
+    }
+
     fn resolve_item(&mut self, item: &Item) {
         match item {
             Item::Modified(_)
@@ -2124,63 +2209,7 @@ impl NameResolver {
                 }
             }
             Item::TypeDeclaration(declaration) => {
-                self.push_type_parameter_scope();
-                for parameter in &declaration.type_parameters {
-                    self.declare_type_parameter_pattern(parameter);
-                }
-                for bound in &declaration.trait_bounds {
-                    if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
-                        self.trait_references.insert(bound.syntax.id, trait_id);
-                    }
-                    for argument in &bound.arguments {
-                        self.resolve_type(argument);
-                    }
-                }
-                for bound in &declaration.subtype_bounds {
-                    if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
-                        self.type_parameters.insert(bound.syntax.id, id);
-                    } else {
-                        self.diagnostics.push(Diagnostic::new(
-                            bound.parameter.syntax.span.clone(),
-                            format!(
-                                "unknown compile-time parameter `{}` in subtype bound",
-                                bound.parameter.name
-                            ),
-                        ));
-                    }
-                    self.resolve_type(&bound.supertype);
-                }
-                let mut defaulted_parameters = HashSet::new();
-                for bound in &declaration.default_bounds {
-                    if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
-                        self.type_parameters.insert(bound.syntax.id, id);
-                        if !defaulted_parameters.insert(id) {
-                            self.diagnostics.push(Diagnostic::new(
-                                bound.parameter.syntax.span.clone(),
-                                format!(
-                                    "duplicate default type bound for compile-time parameter `{}`",
-                                    bound.parameter.name
-                                ),
-                            ));
-                        }
-                    } else {
-                        self.diagnostics.push(Diagnostic::new(
-                            bound.parameter.syntax.span.clone(),
-                            format!(
-                                "unknown compile-time parameter `{}` in default type bound",
-                                bound.parameter.name
-                            ),
-                        ));
-                    }
-                    self.resolve_type(&bound.default);
-                }
-                if let Some(underlying) = &declaration.underlying {
-                    self.resolve_type(underlying);
-                    if declaration.representation_visibility == Visibility::Public {
-                        self.validate_public_representation(underlying);
-                    }
-                }
-                self.pop_type_parameter_scope();
+                self.resolve_type_declaration_body(declaration);
             }
             Item::MacroDeclaration(declaration) => {
                 let _ = declaration;
@@ -2456,6 +2485,9 @@ impl NameResolver {
             }
             Statement::Expression(expression) => self.resolve_expression(expression, None, None),
             Statement::Submodule(_) => {}
+            Statement::TypeDeclaration(declaration) => {
+                self.resolve_type_declaration_body(declaration);
+            }
         }
     }
 
@@ -2962,6 +2994,12 @@ impl NameResolver {
                                 .copied()
                         })
                         .or_else(|| {
+                            self.block_types
+                                .iter()
+                                .rev()
+                                .find_map(|frame| frame.get(&named.name).copied())
+                        })
+                        .or_else(|| {
                             self.declared_types[self.current_module.0]
                                 .get(&named.name)
                                 .copied()
@@ -3153,18 +3191,21 @@ impl NameResolver {
     fn resolve_block(&mut self, block: &BlockExpression) {
         self.push_scope();
         self.namespaces.push(HashMap::new());
+        self.block_types.push(HashMap::new());
         for statement in &block.statements {
             match statement {
                 Statement::Binding(binding) if binding.kind == BindingKind::Def => {
                     self.declare_fresh(binding);
                 }
                 Statement::Submodule(submodule) => self.declare_block_namespace(submodule),
+                Statement::TypeDeclaration(declaration) => self.declare_block_type(declaration),
                 _ => {}
             }
         }
         for statement in &block.statements {
             self.resolve_statement(statement);
         }
+        self.block_types.pop();
         self.namespaces.pop();
         self.pop_scope();
     }
@@ -3190,6 +3231,39 @@ impl NameResolver {
             .last_mut()
             .expect("resolver namespace scope")
             .insert(submodule.name.clone(), module);
+    }
+
+    fn declare_block_type(&mut self, declaration: &TypeDeclaration) {
+        let Some(&id) = self.type_ids_by_syntax.get(&declaration.syntax.id) else {
+            return;
+        };
+        if self
+            .block_types
+            .last()
+            .expect("resolver type scope")
+            .contains_key(&declaration.name)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("duplicate type definition of `{}`", declaration.name),
+            ));
+            return;
+        }
+        self.block_types
+            .last_mut()
+            .expect("resolver type scope")
+            .insert(declaration.name.clone(), id);
+        if let Some(&symbol) = self.type_constructor_symbols.get(&id) {
+            if self.current_scope().contains_key(&declaration.name) {
+                self.diagnostics.push(Diagnostic::new(
+                    declaration.syntax.span.clone(),
+                    format!("duplicate definition of `{}`", declaration.name),
+                ));
+            } else {
+                self.current_scope_mut()
+                    .insert(declaration.name.clone(), symbol);
+            }
+        }
     }
 
     fn declare_pattern(&mut self, pattern: &Pattern) {
@@ -3476,7 +3550,8 @@ impl<'a> InitializationAnalyzer<'a> {
                     | Statement::Break(_)
                     | Statement::Continue(_)
                     | Statement::Expression(_)
-                    | Statement::Submodule(_) => {}
+                    | Statement::Submodule(_)
+                    | Statement::TypeDeclaration(_) => {}
                 }
             }
         }
@@ -3565,6 +3640,7 @@ impl<'a> InitializationAnalyzer<'a> {
             Statement::Continue(_) => {}
             Statement::Expression(expression) => self.expression(expression, local, outer),
             Statement::Submodule(_) => {}
+            Statement::TypeDeclaration(_) => {}
         }
     }
 
@@ -3720,6 +3796,150 @@ impl<'a> InitializationAnalyzer<'a> {
             }
             Pattern::Nominal(pattern) => self.set_pattern_state(&pattern.argument, state, states),
         }
+    }
+}
+
+/// Finds `type` declarations nested inside block expressions anywhere in
+/// `items`, without descending into an `Item::Submodule`'s own body (that
+/// submodule is a separate flat `SourceModule`, visited independently by
+/// `collect_interfaces`'s own per-module loop).
+fn find_block_type_declarations<'a>(items: &'a [Item], out: &mut Vec<&'a TypeDeclaration>) {
+    for item in items {
+        find_block_type_declarations_in_item(item, out);
+    }
+}
+
+fn find_block_type_declarations_in_item<'a>(item: &'a Item, out: &mut Vec<&'a TypeDeclaration>) {
+    match item {
+        Item::Modified(modified) => find_block_type_declarations_in_item(&modified.item, out),
+        Item::VisibilityMacroInvocation(invocation) => {
+            find_block_type_declarations_in_expression(&invocation.expression, out)
+        }
+        Item::VisibilitySplice(splice) => find_block_type_declarations_in_item(&splice.item, out),
+        Item::RepeatedItemSplice(_)
+        | Item::UseDeclaration(_)
+        | Item::Submodule(_)
+        | Item::TypeDeclaration(_) => {}
+        Item::ExternBlock(block) => {
+            for binding in &block.bindings {
+                if let Some(value) = &binding.value {
+                    find_block_type_declarations_in_expression(value, out);
+                }
+            }
+        }
+        Item::MacroDeclaration(declaration) => {
+            if let Some(value) = &declaration.value {
+                find_block_type_declarations_in_expression(value, out);
+            }
+        }
+        Item::TraitDeclaration(declaration) => {
+            for member in &declaration.members {
+                if let Some(default) = &member.default {
+                    find_block_type_declarations_in_expression(default, out);
+                }
+            }
+        }
+        Item::TraitImplementation(implementation) => {
+            for member in &implementation.members {
+                find_block_type_declarations_in_expression(&member.value, out);
+            }
+        }
+        Item::Statement(statement) => find_block_type_declarations_in_statement(statement, out),
+    }
+}
+
+fn find_block_type_declarations_in_statement<'a>(
+    statement: &'a Statement,
+    out: &mut Vec<&'a TypeDeclaration>,
+) {
+    match statement {
+        Statement::Binding(binding) => {
+            if let Some(value) = &binding.value {
+                find_block_type_declarations_in_expression(value, out);
+            }
+        }
+        Statement::PatternBinding(binding) => {
+            find_block_type_declarations_in_expression(&binding.value, out)
+        }
+        Statement::Assignment(assignment) => {
+            find_block_type_declarations_in_expression(&assignment.target, out);
+            find_block_type_declarations_in_expression(&assignment.value, out);
+        }
+        Statement::Return(statement) => {
+            find_block_type_declarations_in_expression(&statement.value, out)
+        }
+        Statement::Break(statement) => {
+            if let Some(value) = &statement.value {
+                find_block_type_declarations_in_expression(value, out);
+            }
+        }
+        Statement::Continue(_) => {}
+        Statement::Expression(expression) => {
+            find_block_type_declarations_in_expression(expression, out)
+        }
+        Statement::Submodule(_) => {}
+        Statement::TypeDeclaration(declaration) => out.push(declaration),
+    }
+}
+
+fn find_block_type_declarations_in_expression<'a>(
+    expression: &'a Expression,
+    out: &mut Vec<&'a TypeDeclaration>,
+) {
+    match expression {
+        Expression::Function(function) => {
+            find_block_type_declarations_in_expression(&function.body, out)
+        }
+        Expression::Satisfies(satisfies) => {
+            find_block_type_declarations_in_expression(&satisfies.value, out)
+        }
+        Expression::Match(match_) => {
+            find_block_type_declarations_in_expression(&match_.subject, out);
+            for arm in &match_.arms {
+                find_block_type_declarations_in_expression(&arm.body, out);
+            }
+        }
+        Expression::Loop(loop_) => find_block_type_declarations_in_block(&loop_.body, out),
+        Expression::Resource(_) => {}
+        Expression::With(with) => {
+            find_block_type_declarations_in_expression(&with.value, out);
+            find_block_type_declarations_in_block(&with.body, out);
+        }
+        Expression::Block(block) => find_block_type_declarations_in_block(block, out),
+        Expression::Product(product) => {
+            for element in &product.elements {
+                find_block_type_declarations_in_expression(&element.value, out);
+            }
+        }
+        Expression::Call(call) => {
+            find_block_type_declarations_in_expression(&call.callee, out);
+            find_block_type_declarations_in_expression(&call.argument, out);
+        }
+        Expression::Access(access) => {
+            find_block_type_declarations_in_expression(&access.value, out)
+        }
+        Expression::Index(index) => {
+            find_block_type_declarations_in_expression(&index.value, out);
+            find_block_type_declarations_in_expression(&index.index, out);
+        }
+        Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
+        | Expression::Quote(_)
+        | Expression::Splice(_)
+        | Expression::Name(_)
+        | Expression::String(_)
+        | Expression::CString(_)
+        | Expression::Integer(_)
+        | Expression::Float(_) => {}
+    }
+}
+
+fn find_block_type_declarations_in_block<'a>(
+    block: &'a BlockExpression,
+    out: &mut Vec<&'a TypeDeclaration>,
+) {
+    for statement in &block.statements {
+        find_block_type_declarations_in_statement(statement, out);
     }
 }
 

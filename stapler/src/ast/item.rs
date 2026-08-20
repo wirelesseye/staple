@@ -129,6 +129,7 @@ pub enum Statement {
     Continue(ContinueStatement),
     Expression(Expression),
     Submodule(Submodule),
+    TypeDeclaration(TypeDeclaration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

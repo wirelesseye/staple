@@ -312,6 +312,7 @@ impl Collector<'_> {
                     self.module(&value.module, id);
                 }
             }
+            Statement::TypeDeclaration(_) => {}
         }
     }
 

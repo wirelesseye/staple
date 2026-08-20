@@ -693,6 +693,9 @@ impl Grammar {
             Some(TokenKind::Mod) => self
                 .parse_submodule(visibility, start.unwrap_or(self.position))
                 .map(Statement::Submodule),
+            Some(TokenKind::Type) => self
+                .parse_type_declaration(visibility, Visibility::Private, start.unwrap_or(self.position))
+                .map(Statement::TypeDeclaration),
             _ if visibility == Visibility::Public => {
                 Err(self.error("`pub` must modify a declaration"))
             }

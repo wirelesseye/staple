@@ -501,6 +501,45 @@ fn parses_block_scoped_submodules_losslessly() {
 }
 
 #[test]
+fn parses_block_scoped_type_declarations_losslessly() {
+    let source = "let x = {\n    type Wrapped = I32\n    0\n}\n";
+    let root = parse(source).expect("block-scoped type declarations should parse");
+    assert_eq!(root.text(), source);
+    let Statement::Binding(binding) = statement(&root.items[0]) else {
+        panic!("expected binding")
+    };
+    let Some(Expression::Block(block)) = &binding.value else {
+        panic!("expected block value")
+    };
+    let Statement::TypeDeclaration(declaration) = &block.statements[0] else {
+        panic!("expected block-scoped type declaration");
+    };
+    assert_eq!(declaration.name, "Wrapped");
+    assert_eq!(declaration.kind, TypeDeclarationKind::Distinct);
+    assert_eq!(declaration.visibility, Visibility::Private);
+    assert!(matches!(block.statements[1], Statement::Expression(_)));
+
+    // Same as block-scoped `mod`: `pub` never attaches to a block statement,
+    // it parses as its own separate (later invalid) expression statement.
+    let root = parse("{ pub type Foo = I32 }\n").expect("adjacent statements should parse");
+    let Item::Statement(statement) = &root.items[0] else {
+        panic!("expected statement");
+    };
+    let Statement::Expression(Expression::Block(block)) = statement.as_ref() else {
+        panic!("expected block expression");
+    };
+    assert!(matches!(
+        block.statements[0],
+        Statement::Expression(Expression::VisibilityArgument(_))
+    ));
+    let Statement::TypeDeclaration(declaration) = &block.statements[1] else {
+        panic!("expected block-scoped type declaration");
+    };
+    assert_eq!(declaration.visibility, Visibility::Private);
+    assert_eq!(declaration.representation_visibility, Visibility::Private);
+}
+
+#[test]
 fn parses_namespace_qualified_types() {
     let root = parse("let value: types.Number = 1\n").expect("qualified type should parse");
     let Statement::Binding(binding) = statement(&root.items[0]) else {

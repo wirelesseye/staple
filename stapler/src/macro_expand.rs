@@ -2053,6 +2053,9 @@ impl MacroExpander {
             // independently when the top-level driver reaches it — mirrors
             // the `Item::Submodule(_) => {}` catch-all in `expand_item`.
             Statement::Submodule(_) => {}
+            // Types carry no runtime macro calls to expand — mirrors the
+            // `Item::TypeDeclaration(_) => {}` catch-all in `expand_item`.
+            Statement::TypeDeclaration(_) => {}
         }
     }
 
@@ -3159,6 +3162,13 @@ impl MacroExpander {
                             self.diagnostics.push(Diagnostic::new(
                                 submodule.syntax.span.clone(),
                                 "`mod` is not supported during compile-time evaluation",
+                            ));
+                            return None;
+                        }
+                        Statement::TypeDeclaration(declaration) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                declaration.syntax.span.clone(),
+                                "type declarations are not supported during compile-time evaluation",
                             ));
                             return None;
                         }
@@ -5565,7 +5575,8 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
                     | Statement::Assignment(_)
                     | Statement::Break(_)
                     | Statement::Continue(_)
-                    | Statement::Submodule(_) => true,
+                    | Statement::Submodule(_)
+                    | Statement::TypeDeclaration(_) => true,
                 })
         }
         Expression::Function(_)
@@ -6225,6 +6236,26 @@ fn substitute_statement(
             substitute_identifier(&mut submodule.name, environment, diagnostics)?;
             substitute_item_list(&mut submodule.module.items, environment, diagnostics)?;
         }
+        Statement::TypeDeclaration(declaration) => {
+            substitute_identifier(&mut declaration.name, environment, diagnostics)?;
+            substitute_type_parameter_list(
+                &mut declaration.type_parameters,
+                environment,
+                diagnostics,
+            )?;
+            for bound in &mut declaration.trait_bounds {
+                substitute_trait_bound(bound, environment, diagnostics)?;
+            }
+            for bound in &mut declaration.subtype_bounds {
+                substitute_subtype_bound(bound, environment, diagnostics)?;
+            }
+            for bound in &mut declaration.default_bounds {
+                substitute_default_bound(bound, environment, diagnostics)?;
+            }
+            if let Some(underlying) = &mut declaration.underlying {
+                substitute_type(underlying, environment, diagnostics)?;
+            }
+        }
     }
     Some(())
 }
@@ -6290,6 +6321,7 @@ fn statement_syntax(statement: &Statement) -> &Syntax {
         Statement::Continue(value) => &value.syntax,
         Statement::Expression(value) => value.syntax(),
         Statement::Submodule(value) => &value.syntax,
+        Statement::TypeDeclaration(value) => &value.syntax,
     }
 }
 
@@ -6964,6 +6996,7 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
                     alpha_rename_item(item, mark);
                 }
             }
+            Statement::TypeDeclaration(_) => {}
         },
         Item::TypeDeclaration(_) => {}
         Item::Submodule(submodule) => {
@@ -7117,6 +7150,9 @@ fn alpha_rename_block(
             // local bindings, so there's nothing here for value-identifier
             // hygiene to rename.
             Statement::Submodule(_) => {}
+            // Likewise, a type declaration's bounds/underlying type reference
+            // type parameters and other types, never value identifiers.
+            Statement::TypeDeclaration(_) => {}
         }
     }
     scopes.pop();
@@ -7222,6 +7258,24 @@ fn freshen_statement(
             expander.freshen_syntax(&mut submodule.module.syntax, module, mark);
             for item in &mut submodule.module.items {
                 freshen_item(expander, item, module, mark);
+            }
+        }
+        Statement::TypeDeclaration(declaration) => {
+            expander.freshen_syntax(&mut declaration.syntax, module, mark);
+            for parameter in &mut declaration.type_parameters {
+                freshen_type_parameter(expander, parameter, module, mark);
+            }
+            for bound in &mut declaration.trait_bounds {
+                freshen_trait_bound(expander, bound, module, mark);
+            }
+            for bound in &mut declaration.subtype_bounds {
+                freshen_subtype_bound(expander, bound, module, mark);
+            }
+            for bound in &mut declaration.default_bounds {
+                freshen_default_bound(expander, bound, module, mark);
+            }
+            if let Some(underlying) = &mut declaration.underlying {
+                freshen_type(expander, underlying, module, mark);
             }
         }
     }

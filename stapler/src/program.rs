@@ -1096,6 +1096,7 @@ fn find_block_submodules_in_statement(statement: &Statement, out: &mut Vec<Submo
         Statement::Continue(_) => {}
         Statement::Expression(expression) => find_block_submodules_in_expression(expression, out),
         Statement::Submodule(submodule) => out.push(submodule.clone()),
+        Statement::TypeDeclaration(_) => {}
     }
 }
 

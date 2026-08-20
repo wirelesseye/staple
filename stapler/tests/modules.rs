@@ -521,6 +521,129 @@ fn block_scoped_submodules_initialize_exactly_once() {
 }
 
 #[test]
+fn block_scoped_type_declarations_are_usable_within_their_block() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let result: I32 = {\n",
+            "    type Wrapped = I32\n",
+            "    let value: Wrapped = Wrapped 42\n",
+            "    match value { Wrapped inner => inner }\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("a block-scoped type's name and constructor should be usable within its block");
+}
+
+#[test]
+fn block_scoped_type_names_are_not_visible_outside_their_block() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "{\n",
+            "    type Wrapped = I32\n",
+            "    let value: Wrapped = Wrapped 42\n",
+            "}\n",
+            "let leaked: Wrapped = Wrapped 1\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("a block-scoped type's name should not escape its block");
+    assert!(error.contains("Wrapped"));
+}
+
+#[test]
+fn block_scoped_types_shadow_module_level_types_of_the_same_name() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "type Wrapped = I32\n",
+            "let result: Bool = {\n",
+            "    type Wrapped = Bool\n",
+            "    let value: Wrapped = Wrapped True\n",
+            "    match value { Wrapped inner => inner }\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("a block-scoped type should shadow a module-level type of the same name");
+}
+
+#[test]
+fn sibling_blocks_may_reuse_the_same_type_name() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let a: I32 = {\n",
+            "    type Wrapped = I32\n",
+            "    let value: Wrapped = Wrapped 1\n",
+            "    match value { Wrapped inner => inner }\n",
+            "}\n",
+            "let b: Bool = {\n",
+            "    type Wrapped = Bool\n",
+            "    let value: Wrapped = Wrapped True\n",
+            "    match value { Wrapped inner => inner }\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("sibling blocks should not conflict over reusing a type name");
+}
+
+#[test]
+fn duplicate_type_names_in_the_same_block_are_rejected() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let x: I32 = {\n",
+            "    type Foo = I32\n",
+            "    type Foo = Bool\n",
+            "    0\n",
+            "}\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("redeclaring a type name in the same block should be rejected");
+    assert!(error.contains("duplicate type definition of `Foo`"));
+}
+
+#[test]
+fn block_scoped_types_in_generic_functions_monomorphize_per_call_site() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "def wrap: T => T -> T = value => {\n",
+            "    type Boxed = T\n",
+            "    match Boxed value { Boxed inner => inner }\n",
+            "}\n",
+            "wrap 1\n",
+            "wrap True\n",
+        ),
+    );
+
+    fixture.compile().expect(
+        "a block-scoped type referencing its enclosing function's type parameter should monomorphize per call site",
+    );
+}
+
+#[test]
 fn inline_glob_reexports_types_traits_and_macros() {
     let fixture = Fixture::new();
     fixture.write(

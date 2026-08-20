@@ -160,6 +160,12 @@ impl DeclarationCollector<'_> {
                 }
                 self.module(&value.module);
             }
+            Statement::TypeDeclaration(value) => {
+                self.declaration(&value.syntax, &value.name);
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter);
+                }
+            }
         }
     }
 
@@ -465,6 +471,18 @@ impl Collector<'_> {
                     );
                 }
                 self.module(&value.module);
+            }
+            Statement::TypeDeclaration(value) => {
+                self.add_resolved(&value.syntax, &value.name, false);
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter);
+                }
+                for bound in &value.trait_bounds {
+                    self.trait_bound(bound);
+                }
+                if let Some(underlying) = &value.underlying {
+                    self.ty(underlying);
+                }
             }
         }
     }

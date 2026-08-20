@@ -399,6 +399,18 @@ impl<'a> Classifier<'a> {
                 );
                 self.module(&value.module, resolved);
             }
+            Statement::TypeDeclaration(value) => {
+                self.mark_declaration(&value.syntax, &value.name, TYPE, None, resolved);
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter, resolved);
+                }
+                for bound in &value.trait_bounds {
+                    self.trait_bound(bound, resolved);
+                }
+                if let Some(ty) = &value.underlying {
+                    self.ty(ty, resolved);
+                }
+            }
         }
     }
 
