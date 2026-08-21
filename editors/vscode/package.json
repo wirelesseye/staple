@@ -34,23 +34,6 @@
         "path": "./syntaxes/staple.tmLanguage.json"
       }
     ],
-    "semanticTokenTypes": [
-      {
-        "id": "stapleMacro",
-        "superType": "macro",
-        "description": "A Staple compile-time macro"
-      }
-    ],
-    "semanticTokenScopes": [
-      {
-        "language": "staple",
-        "scopes": {
-          "stapleMacro": [
-            "entity.name.macro.staple"
-          ]
-        }
-      }
-    ],
     "configuration": {
       "title": "Staple",
       "properties": {

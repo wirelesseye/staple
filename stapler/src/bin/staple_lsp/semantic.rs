@@ -30,7 +30,7 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenType::TYPE,
             SemanticTokenType::TYPE_PARAMETER,
             SemanticTokenType::INTERFACE,
-            SemanticTokenType::new("stapleMacro"),
+            SemanticTokenType::MACRO,
             SemanticTokenType::FUNCTION,
             SemanticTokenType::PARAMETER,
             SemanticTokenType::VARIABLE,
@@ -1038,7 +1038,7 @@ mod tests {
         );
         assert_eq!(
             legend.token_types[MACRO as usize],
-            SemanticTokenType::new("stapleMacro")
+            SemanticTokenType::MACRO
         );
         assert_eq!(
             legend.token_modifiers[0],
