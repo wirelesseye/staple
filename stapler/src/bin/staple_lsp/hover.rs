@@ -471,7 +471,7 @@ impl Collector<'_> {
             declaration
                 .underlying
                 .as_ref()
-                .map(|ty| ty.syntax().text().trim().to_owned())
+                .map(|ty| ty.to_string())
                 .unwrap_or_else(|| match declaration.kind {
                     TypeDeclarationKind::Opaque => "opaque".to_owned(),
                     TypeDeclarationKind::Singleton => "()".to_owned(),

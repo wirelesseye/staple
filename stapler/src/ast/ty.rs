@@ -1,3 +1,5 @@
+use std::fmt;
+
 use super::{SpliceExpression, Syntax};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +29,101 @@ impl Type {
             Self::Splice(ty) => &ty.syntax,
         }
     }
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Inferred(_) => formatter.write_str("_"),
+            Self::StringLiteral(literal) => formatter.write_str(&literal.literal),
+            Self::Named(named) => match &named.namespace {
+                Some(namespace) => write!(formatter, "{namespace}.{}", named.name),
+                None => formatter.write_str(&named.name),
+            },
+            Self::Product(product) => {
+                formatter.write_str("(")?;
+                for (index, element) in product.elements.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(", ")?;
+                    }
+                    if element.spread {
+                        formatter.write_str("...")?;
+                    } else if let Some(name) = &element.name {
+                        write!(formatter, "{name}: ")?;
+                    }
+                    write!(formatter, "{}", element.ty)?;
+                }
+                if product.variadic {
+                    if !product.elements.is_empty() {
+                        formatter.write_str(", ")?;
+                    }
+                    formatter.write_str("...")?;
+                }
+                formatter.write_str(")")
+            }
+            Self::Sum(sum) => {
+                for (index, alternative) in sum.alternatives.iter().enumerate() {
+                    if index > 0 {
+                        formatter.write_str(" | ")?;
+                    }
+                    write!(formatter, "{alternative}")?;
+                }
+                Ok(())
+            }
+            Self::Function(function) => {
+                if function.resources.resources.is_empty() && function.resources.mutations.is_empty()
+                {
+                    write!(formatter, "{} -> {}", function.parameter, function.result)
+                } else {
+                    write!(
+                        formatter,
+                        "{} ->{} {}",
+                        function.parameter,
+                        format_resource_set(&function.resources),
+                        function.result
+                    )
+                }
+            }
+            Self::Application(application) => {
+                write!(formatter, "{}", application.callee)?;
+                format_type_argument(formatter, &application.argument)
+            }
+            Self::Repeated(repeated) => match &repeated.count {
+                Some(count) => write!(formatter, "{}[{count}]", repeated.element),
+                None => write!(formatter, "{}[]", repeated.element),
+            },
+            Self::Splice(splice) => {
+                write!(formatter, "${}", splice.name)?;
+                if splice.repeated {
+                    formatter.write_str("...")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &Type) -> fmt::Result {
+    if matches!(argument, Type::Sum(_) | Type::Function(_)) {
+        write!(formatter, " ({argument})")
+    } else {
+        write!(formatter, " {argument}")
+    }
+}
+
+fn format_resource_set(resources: &ResourceSet) -> String {
+    let mut entries = Vec::new();
+    for mutation in &resources.mutations {
+        entries.push(match &mutation.target {
+            MutationTargetKind::Whole => "mut".to_string(),
+            MutationTargetKind::Element(index) => format!("mut {index}"),
+            MutationTargetKind::Named(name) => format!("mut {name}"),
+        });
+    }
+    for resource in &resources.resources {
+        entries.push(resource.to_string());
+    }
+    format!("{{{}}}", entries.join(", "))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
