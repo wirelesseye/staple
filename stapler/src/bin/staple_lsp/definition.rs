@@ -291,6 +291,21 @@ impl DeclarationCollector<'_> {
     }
 
     fn insert(&mut self, definition: DefinitionId, syntax: &Syntax, name: &str) {
+        if let Some(Span::User { source, range, .. }) = syntax.identifier_origin(name, false) {
+            let range = range.clone();
+            self.targets.insert(
+                definition,
+                DefinitionTarget {
+                    path: source
+                        .as_deref()
+                        .map(PathBuf::from)
+                        .unwrap_or_else(|| self.path.clone()),
+                    range: range.clone(),
+                    selection_range: range,
+                },
+            );
+            return;
+        }
         let selection_range =
             token_range(syntax, name, false).unwrap_or_else(|| syntax_range(syntax));
         self.targets.insert(
@@ -954,6 +969,7 @@ mod tests {
             "macro what = x => parse_quote {$x}\n",
             "\n",
             "def main = () => {\n",
+            "    let generated = A.Hello\n",
             "    let x = 3\n",
             "    let y: I32 = x + 30\n",
             "    let condition: Bool = True\n",
@@ -1005,6 +1021,36 @@ mod tests {
                         .any(|target| target.path.ends_with(target_path))
             }));
         }
+
+        let variant = source.find("Hello").unwrap();
+        let reference = source.find("A.Hello").unwrap() + 2;
+        assert!(
+            entries.iter().any(|entry| {
+                entry.range == (reference..reference + "Hello".len())
+                    && entry.targets.iter().any(|target| {
+                        target.path.ends_with(path.file_name().unwrap())
+                            && target.range == (variant..variant + "Hello".len())
+                            && target.selection_range == (variant..variant + "Hello".len())
+                    })
+            }),
+            "missing generated variant origin: {entries:?}"
+        );
+
+        let boolean = std::fs::read_to_string(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib/std/core/boolean.sta"),
+        )
+        .unwrap();
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "True"
+                    && entry.targets.iter().any(|target| {
+                        target.path.ends_with("boolean.sta")
+                            && &boolean[target.selection_range.clone()] == "True"
+                            && target.range == target.selection_range
+                    })
+            }),
+            "missing Bool variant origin: {entries:?}"
+        );
     }
 
     #[test]

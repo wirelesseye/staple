@@ -120,6 +120,7 @@ pub struct Syntax {
     pub(crate) token_range: Range<usize>,
     pub(crate) definition_module: Option<usize>,
     pub(crate) expansion_mark: Option<u64>,
+    pub(crate) identifier_origins: Vec<(String, Span)>,
 }
 
 impl Syntax {
@@ -142,6 +143,7 @@ impl Syntax {
             token_range: 0..0,
             definition_module: None,
             expansion_mark: None,
+            identifier_origins: Vec::new(),
         }
     }
 
@@ -153,6 +155,7 @@ impl Syntax {
             token_range: 0..0,
             definition_module: None,
             expansion_mark: None,
+            identifier_origins: Vec::new(),
         }
     }
 
@@ -164,5 +167,42 @@ impl Syntax {
 
     pub(crate) fn definition_module(&self) -> Option<usize> {
         self.definition_module
+    }
+
+    pub(crate) fn record_identifier_origin(&mut self, name: String, syntax: &Syntax) {
+        if let Some(origin) = syntax.identifier_origin(&name, false) {
+            self.identifier_origins.push((name, origin.clone()));
+            return;
+        }
+        let Some(token) = syntax
+            .tokens()
+            .iter()
+            .find(|token| !token.kind.is_trivia() && token.text == name)
+        else {
+            return;
+        };
+        let Span::User { source, .. } = &syntax.span else {
+            return;
+        };
+        self.identifier_origins.push((
+            name,
+            Span::User {
+                source: source.clone(),
+                range: token.span.clone(),
+                location: None,
+            },
+        ));
+    }
+
+    pub fn identifier_origin(&self, name: &str, last: bool) -> Option<&Span> {
+        let mut origins = self
+            .identifier_origins
+            .iter()
+            .filter(|(origin_name, _)| origin_name == name);
+        if last {
+            origins.last().map(|(_, span)| span)
+        } else {
+            origins.next().map(|(_, span)| span)
+        }
     }
 }

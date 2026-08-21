@@ -6427,11 +6427,21 @@ fn substitute_statement(
             *expression = substitute_splices(expression, environment, diagnostics)?
         }
         Item::Submodule(submodule) => {
-            substitute_identifier(&mut submodule.name, environment, diagnostics)?;
+            substitute_identifier(
+                &mut submodule.name,
+                &mut submodule.syntax,
+                environment,
+                diagnostics,
+            )?;
             substitute_item_list(&mut submodule.module.items, environment, diagnostics)?;
         }
         Item::TypeDeclaration(declaration) => {
-            substitute_identifier(&mut declaration.name, environment, diagnostics)?;
+            substitute_identifier(
+                &mut declaration.name,
+                &mut declaration.syntax,
+                environment,
+                diagnostics,
+            )?;
             substitute_type_parameter_list(
                 &mut declaration.type_parameters,
                 environment,
@@ -6452,7 +6462,12 @@ fn substitute_statement(
         }
         Item::UseDeclaration(declaration) => {
             for component in &mut declaration.path {
-                substitute_identifier(component, environment, diagnostics)?;
+                substitute_identifier(
+                    component,
+                    &mut declaration.syntax,
+                    environment,
+                    diagnostics,
+                )?;
             }
         }
         _ => unreachable!("unsupported item reached statement substitution"),
@@ -6773,9 +6788,14 @@ fn substitute_type(
         }
         Type::Named(named) => {
             if let Some(namespace) = &mut named.namespace {
-                substitute_identifier(namespace, environment, diagnostics)?;
+                substitute_identifier(namespace, &mut named.syntax, environment, diagnostics)?;
             }
-            substitute_identifier(&mut named.name, environment, diagnostics)?;
+            substitute_identifier(
+                &mut named.name,
+                &mut named.syntax,
+                environment,
+                diagnostics,
+            )?;
         }
         Type::Inferred(_) | Type::StringLiteral(_) => {}
         Type::Splice(_) => unreachable!(),
@@ -6912,9 +6932,19 @@ fn substitute_item(
         }
         Item::TraitDeclaration(declaration) => {
             for dependency in &mut declaration.functional_dependencies {
-                substitute_identifier(&mut dependency.dependent.name, environment, diagnostics)?;
+                substitute_identifier(
+                    &mut dependency.dependent.name,
+                    &mut dependency.dependent.syntax,
+                    environment,
+                    diagnostics,
+                )?;
                 for determinant in &mut dependency.determinants {
-                    substitute_identifier(&mut determinant.name, environment, diagnostics)?;
+                    substitute_identifier(
+                        &mut determinant.name,
+                        &mut determinant.syntax,
+                        environment,
+                        diagnostics,
+                    )?;
                 }
             }
             for prerequisite in &mut declaration.prerequisites {
@@ -6951,7 +6981,12 @@ fn substitute_item(
             substitute_statement(statement, environment, diagnostics)?;
         }
         Item::TypeDeclaration(declaration) => {
-            substitute_identifier(&mut declaration.name, environment, diagnostics)?;
+            substitute_identifier(
+                &mut declaration.name,
+                &mut declaration.syntax,
+                environment,
+                diagnostics,
+            )?;
             substitute_type_parameter_list(
                 &mut declaration.type_parameters,
                 environment,
@@ -6971,12 +7006,22 @@ fn substitute_item(
             }
         }
         Item::Submodule(submodule) => {
-            substitute_identifier(&mut submodule.name, environment, diagnostics)?;
+            substitute_identifier(
+                &mut submodule.name,
+                &mut submodule.syntax,
+                environment,
+                diagnostics,
+            )?;
             substitute_item_list(&mut submodule.module.items, environment, diagnostics)?;
         }
         Item::UseDeclaration(declaration) => {
             for component in &mut declaration.path {
-                substitute_identifier(component, environment, diagnostics)?;
+                substitute_identifier(
+                    component,
+                    &mut declaration.syntax,
+                    environment,
+                    diagnostics,
+                )?;
             }
         }
         Item::MacroDeclaration(_) => {
@@ -7149,6 +7194,7 @@ fn substitute_type_parameter_list(
 
 fn substitute_identifier(
     name: &mut String,
+    syntax: &mut Syntax,
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
@@ -7157,6 +7203,7 @@ fn substitute_identifier(
     };
     match environment.get(splice).map(EnvironmentBinding::get) {
         Some(Value::Syntax(SyntaxValue::Ident(identifier))) => {
+            syntax.record_identifier_origin(identifier.name.clone(), &identifier.syntax);
             *name = identifier.name;
             Some(())
         }

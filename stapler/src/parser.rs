@@ -2738,6 +2738,7 @@ impl Grammar {
             token_range: start..self.position,
             definition_module: None,
             expansion_mark: None,
+            identifier_origins: Vec::new(),
         }
     }
 
