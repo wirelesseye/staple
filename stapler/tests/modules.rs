@@ -644,6 +644,265 @@ fn block_scoped_types_in_generic_functions_monomorphize_per_call_site() {
 }
 
 #[test]
+fn block_scoped_use_namespace_is_usable_within_its_block() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub let value: I32 = 42\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let result: I32 = {\n",
+            "    use library\n",
+            "    library.value\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("a block-scoped namespace use should be usable within its block");
+}
+
+#[test]
+fn block_scoped_use_glob_is_usable_within_its_block() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub let value: I32 = 42\n");
+    fixture.write(
+        "main.sta",
+        concat!("let result: I32 = {\n", "    use library *\n", "    value\n", "}\n"),
+    );
+
+    fixture
+        .compile()
+        .expect("a block-scoped glob use should be usable within its block");
+}
+
+#[test]
+fn block_scoped_use_selected_is_usable_within_its_block() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub let a: I32 = 1\npub let b: I32 = 2\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let result: I32 = {\n",
+            "    use library (a, b)\n",
+            "    a + b\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("a block-scoped selected use should be usable within its block");
+}
+
+#[test]
+fn block_scoped_use_renamed_is_usable_within_its_block() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub let value: I32 = 42\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let result: I32 = {\n",
+            "    use library value as x\n",
+            "    x\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("a block-scoped renamed use should be usable within its block");
+}
+
+#[test]
+fn block_scoped_use_of_a_macro_is_usable_within_its_block() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "library.sta",
+        "pub macro reveal = item => parse_quote { $item }\n",
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let result: I32 = {\n",
+            "    use library (reveal)\n",
+            "    reveal 42\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("a macro imported in a block should expand within that block");
+}
+
+#[test]
+fn block_scoped_use_names_are_not_visible_outside_their_block() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub let value: I32 = 42\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "{\n",
+            "    use library\n",
+            "    let x: I32 = library.value\n",
+            "}\n",
+            "let leaked: I32 = library.value\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("a block-scoped use's name should not escape its block");
+    assert!(error.contains("library"));
+}
+
+#[test]
+fn sibling_blocks_may_reuse_the_same_imported_name() {
+    let fixture = Fixture::new();
+    fixture.write("library_a.sta", "pub let value: I32 = 1\n");
+    fixture.write("library_b.sta", "pub let value: I32 = 2\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let a: I32 = {\n",
+            "    use library_a (value)\n",
+            "    value\n",
+            "}\n",
+            "let b: I32 = {\n",
+            "    use library_b (value)\n",
+            "    value\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("sibling blocks should not conflict over reusing an imported name");
+}
+
+#[test]
+fn duplicate_imports_in_the_same_block_are_rejected() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub let a: I32 = 1\npub let b: I32 = 2\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let x: I32 = {\n",
+            "    use library (a)\n",
+            "    use library b as a\n",
+            "    a\n",
+            "}\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("redeclaring an imported name in the same block should be rejected");
+    assert!(error.contains("duplicate import of `a`"));
+}
+
+#[test]
+fn block_scoped_type_and_use_of_the_same_name_are_rejected_type_first() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub type alias Foo = Bool\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let x: I32 = {\n",
+            "    type Foo = I32\n",
+            "    use library (Foo)\n",
+            "    0\n",
+            "}\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("a type and a later use of the same name in one block should be rejected");
+    assert!(error.contains("duplicate import of `Foo`"));
+}
+
+#[test]
+fn block_scoped_type_and_use_of_the_same_name_are_rejected_use_first() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub type alias Foo = Bool\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let x: I32 = {\n",
+            "    use library (Foo)\n",
+            "    type Foo = I32\n",
+            "    0\n",
+            "}\n",
+        ),
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("a use and a later type of the same name in one block should be rejected");
+    assert!(error.contains("duplicate type definition of `Foo`"));
+}
+
+#[test]
+fn block_scoped_use_super_resolves_relative_to_the_enclosing_module() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let root_value: I32 = 41\n",
+            "mod container {\n",
+            "    pub let result: I32 = {\n",
+            "        use super root_value\n",
+            "        root_value + 1\n",
+            "    }\n",
+            "}\n",
+        ),
+    );
+
+    fixture.compile().expect(
+        "`use super` from a bare block should resolve relative to the enclosing module, not the block",
+    );
+}
+
+#[test]
+fn block_scoped_use_initializes_its_target_exactly_once() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "pub let value: I32 = 42\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let result: I32 = {\n",
+            "    use library\n",
+            "    library.value\n",
+            "}\n",
+        ),
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("block-scoped use should compile");
+    let init_symbols = llvm
+        .lines()
+        .filter(|line| line.trim_start().starts_with("define"))
+        .filter_map(|line| {
+            line.split("@__staple_init_")
+                .nth(1)
+                .and_then(|rest| rest.split('(').next())
+        })
+        .collect::<Vec<_>>();
+    assert!(!init_symbols.is_empty());
+    for symbol in init_symbols {
+        let needle = format!("call void @__staple_init_{symbol}()");
+        assert_eq!(
+            llvm.matches(&needle).count(),
+            1,
+            "module `{symbol}` should initialize exactly once",
+        );
+    }
+}
+
+#[test]
 fn inline_glob_reexports_types_traits_and_macros() {
     let fixture = Fixture::new();
     fixture.write(

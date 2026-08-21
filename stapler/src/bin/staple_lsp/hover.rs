@@ -122,6 +122,7 @@ impl Collector<'_> {
                 self.collect_module_declarations(&submodule.module)
             }
             Statement::TypeDeclaration(_) => {}
+            Statement::UseDeclaration(_) => {}
         }
     }
 
@@ -512,6 +513,7 @@ impl Collector<'_> {
                 }
             }
             Statement::TypeDeclaration(declaration) => self.type_declaration(declaration),
+            Statement::UseDeclaration(declaration) => self.use_declaration(declaration),
         }
     }
 

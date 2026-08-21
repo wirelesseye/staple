@@ -540,6 +540,69 @@ fn parses_block_scoped_type_declarations_losslessly() {
 }
 
 #[test]
+fn parses_block_scoped_use_declarations_losslessly() {
+    let source = concat!(
+        "let x = {\n",
+        "    use path.to.another_module\n",
+        "    use path.to.another_module *\n",
+        "    use path.to.another_module (func, MyType)\n",
+        "    use path.to.another_module func as my_func\n",
+        "    0\n",
+        "}\n",
+    );
+    let root = parse(source).expect("block-scoped use declarations should parse");
+    assert_eq!(root.text(), source);
+    let Statement::Binding(binding) = statement(&root.items[0]) else {
+        panic!("expected binding")
+    };
+    let Some(Expression::Block(block)) = &binding.value else {
+        panic!("expected block value")
+    };
+    assert!(matches!(
+        &block.statements[0],
+        Statement::UseDeclaration(use_) if use_.kind == UseKind::Namespace
+    ));
+    assert!(matches!(
+        &block.statements[1],
+        Statement::UseDeclaration(use_) if use_.kind == UseKind::Glob
+    ));
+    assert!(matches!(
+        &block.statements[2],
+        Statement::UseDeclaration(use_)
+            if matches!(&use_.kind, UseKind::Selected(names) if names == &["func", "MyType"])
+    ));
+    assert!(matches!(
+        &block.statements[3],
+        Statement::UseDeclaration(use_)
+            if matches!(&use_.kind, UseKind::Renamed { item, alias } if item == "func" && alias == "my_func")
+    ));
+    let Statement::UseDeclaration(use_) = &block.statements[0] else {
+        panic!("expected use declaration")
+    };
+    assert_eq!(use_.visibility, Visibility::Private);
+    assert!(matches!(block.statements[4], Statement::Expression(_)));
+
+    // Same as block-scoped `mod`/`type`: `pub` never attaches to a block
+    // statement, it parses as its own separate (later invalid) expression
+    // statement.
+    let root = parse("{ pub use path.to.another_module }\n").expect("adjacent statements should parse");
+    let Item::Statement(statement) = &root.items[0] else {
+        panic!("expected statement");
+    };
+    let Statement::Expression(Expression::Block(block)) = statement.as_ref() else {
+        panic!("expected block expression");
+    };
+    assert!(matches!(
+        block.statements[0],
+        Statement::Expression(Expression::VisibilityArgument(_))
+    ));
+    let Statement::UseDeclaration(use_) = &block.statements[1] else {
+        panic!("expected block-scoped use declaration");
+    };
+    assert_eq!(use_.visibility, Visibility::Private);
+}
+
+#[test]
 fn parses_namespace_qualified_types() {
     let root = parse("let value: types.Number = 1\n").expect("qualified type should parse");
     let Statement::Binding(binding) = statement(&root.items[0]) else {

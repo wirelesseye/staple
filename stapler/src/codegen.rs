@@ -1340,6 +1340,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Statement::Submodule(_) => Ok(()),
             Statement::TypeDeclaration(_) => Ok(()),
+            Statement::UseDeclaration(_) => Ok(()),
         }
     }
 
@@ -1787,6 +1788,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Statement::Submodule(_) => Ok(None),
             Statement::TypeDeclaration(_) => Ok(None),
+            Statement::UseDeclaration(_) => Ok(None),
         }
     }
 

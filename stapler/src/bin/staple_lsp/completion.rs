@@ -313,6 +313,7 @@ impl Collector<'_> {
                 }
             }
             Statement::TypeDeclaration(_) => {}
+            Statement::UseDeclaration(_) => {}
         }
     }
 

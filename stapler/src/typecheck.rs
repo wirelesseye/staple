@@ -2712,6 +2712,7 @@ impl TypeChecker {
                 }
                 Statement::Submodule(_) => CheckedResourceSet::default(),
                 Statement::TypeDeclaration(_) => CheckedResourceSet::default(),
+                Statement::UseDeclaration(_) => CheckedResourceSet::default(),
             };
             let alias = self.statement_parameter_ref_alias(module, statement, current);
             resources = resources.union(&contribution);
@@ -2926,6 +2927,7 @@ impl TypeChecker {
                     )),
                     Statement::Submodule(_) => None,
                     Statement::TypeDeclaration(_) => None,
+                    Statement::UseDeclaration(_) => None,
                 }
                 .unwrap_or((&source_module.syntax.syntax, CheckedResourceSet::default()));
                 let required = if is_entry_module {
@@ -3108,6 +3110,7 @@ impl TypeChecker {
             Statement::Expression(value) => self.refresh_expression_function_types(module, value),
             Statement::Submodule(_) => false,
             Statement::TypeDeclaration(_) => false,
+            Statement::UseDeclaration(_) => false,
         }
     }
 
@@ -3412,6 +3415,7 @@ impl TypeChecker {
             ),
             Statement::Submodule(_) => {}
             Statement::TypeDeclaration(_) => {}
+            Statement::UseDeclaration(_) => {}
         }
     }
 
@@ -3815,6 +3819,7 @@ impl TypeChecker {
             Statement::Expression(expression) => self.check_expression(module, expression),
             Statement::Submodule(_) => CheckedType::empty_product(),
             Statement::TypeDeclaration(_) => CheckedType::empty_product(),
+            Statement::UseDeclaration(_) => CheckedType::empty_product(),
         }
     }
 

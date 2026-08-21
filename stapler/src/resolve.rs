@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, Module,
     ModuleId, Pattern, PatternBindingKind, Program, Span, Statement, Submodule, SyntaxId, Type,
-    TypeDeclaration, TypeParameterPattern, UseKind, Visibility,
+    TypeDeclaration, TypeParameterPattern, UseDeclaration, UseKind, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -595,16 +595,6 @@ struct Interface {
     namespaces: HashMap<String, ModuleId>,
 }
 
-fn is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId) -> bool {
-    while let Some(parent) = program.parent_module(module) {
-        if parent == ancestor {
-            return true;
-        }
-        module = parent;
-    }
-    false
-}
-
 fn add_private_candidate(candidates: &mut HashMap<String, Vec<String>>, name: &str, module: &str) {
     let modules = candidates.entry(name.to_owned()).or_default();
     if !modules.iter().any(|candidate| candidate == module) {
@@ -694,9 +684,11 @@ pub struct NameResolver {
     submodule_ids: HashMap<SyntaxId, ModuleId>,
     block_types: Vec<HashMap<String, TypeId>>,
     type_ids_by_syntax: HashMap<SyntaxId, TypeId>,
-    imported_types: HashMap<String, TypeId>,
-    imported_macros: HashMap<String, Vec<MacroId>>,
-    imported_traits: HashMap<String, TraitId>,
+    imported_module_ids: HashMap<SyntaxId, ModuleId>,
+    module_parents: HashMap<ModuleId, ModuleId>,
+    imported_types: Vec<HashMap<String, TypeId>>,
+    imported_macros: Vec<HashMap<String, Vec<MacroId>>>,
+    imported_traits: Vec<HashMap<String, TraitId>>,
     private_glob_values: HashMap<String, Vec<String>>,
     private_glob_types: HashMap<String, Vec<String>>,
     private_glob_traits: HashMap<String, Vec<String>>,
@@ -826,6 +818,12 @@ impl NameResolver {
             + 1;
         self.collect_interfaces(&program);
         self.submodule_ids = program.child_modules().clone();
+        self.imported_module_ids = program.imported_modules().clone();
+        self.module_parents = program
+            .modules()
+            .iter()
+            .filter_map(|module| module.parent.map(|parent| (module.id, parent)))
+            .collect();
         self.visible_module_definitions = vec![HashMap::new(); program.modules().len()];
         self.build_definition_context_values(&program);
         self.collect_standard_library_contract(&program);
@@ -848,6 +846,9 @@ impl NameResolver {
             self.prelude_namespaces.clear();
             self.push_scope();
             self.namespaces.push(HashMap::new());
+            self.imported_types.push(HashMap::new());
+            self.imported_macros.push(HashMap::new());
+            self.imported_traits.push(HashMap::new());
             self.install_root_namespaces(&program, source_module.id);
             self.install_child_namespaces(&program, source_module.id);
             self.install_prelude(&program, source_module.id);
@@ -858,6 +859,9 @@ impl NameResolver {
             for item in &source_module.syntax.items {
                 self.resolve_item(item);
             }
+            self.imported_traits.pop();
+            self.imported_macros.pop();
+            self.imported_types.pop();
             self.namespaces.pop();
             self.pop_scope();
         }
@@ -1442,7 +1446,8 @@ impl NameResolver {
                         | Statement::Continue(_)
                         | Statement::Expression(_)
                         | Statement::Submodule(_)
-                        | Statement::TypeDeclaration(_) => {}
+                        | Statement::TypeDeclaration(_)
+                        | Statement::UseDeclaration(_) => {}
                     },
                     Item::Submodule(submodule) => {
                         if submodule.visibility == Visibility::Public
@@ -1575,7 +1580,7 @@ impl NameResolver {
                     continue;
                 };
                 let interface = if use_.visibility == Visibility::Private
-                    && is_ancestor(program, imported, module.id)
+                    && self.is_ancestor(imported, module.id)
                 {
                     self.local_interface(imported)
                 } else {
@@ -1711,87 +1716,90 @@ impl NameResolver {
 
     fn install_imports(&mut self, program: &Program, module: ModuleId) {
         for item in &program.module(module).syntax.items {
-            let Item::UseDeclaration(declaration) = item else {
-                continue;
-            };
-            let Some(imported) = program.imported_module(declaration.syntax.id) else {
-                continue;
-            };
-            let interface = if declaration.visibility == Visibility::Private
-                && is_ancestor(program, imported, module)
-            {
-                self.local_interface(imported)
-            } else {
-                self.interfaces[imported.0].clone()
-            };
-            if declaration.kind == UseKind::Glob {
-                self.record_private_glob_items(imported, declaration, &interface);
+            if let Item::UseDeclaration(declaration) = item {
+                self.install_import(declaration);
             }
-            if let Some(name) = declaration.path.last() {
-                self.import_definitions
-                    .entry((declaration.syntax.id, name.clone()))
-                    .or_default()
-                    .push(DefinitionId::Module(imported));
+        }
+    }
+
+    fn is_ancestor(&self, ancestor: ModuleId, mut module: ModuleId) -> bool {
+        while let Some(&parent) = self.module_parents.get(&module) {
+            if parent == ancestor {
+                return true;
             }
-            match &declaration.kind {
-                UseKind::Namespace => {
-                    let name = declaration
-                        .path
-                        .last()
-                        .expect("use path is nonempty")
-                        .clone();
-                    if self
-                        .namespaces
-                        .last_mut()
-                        .expect("resolver namespace scope")
-                        .insert(name.clone(), imported)
-                        .is_some()
-                        || self.current_scope().contains_key(&name)
-                    {
-                        self.duplicate_import(&name, declaration.syntax.span.clone());
-                    }
+            module = parent;
+        }
+        false
+    }
+
+    fn install_import(&mut self, declaration: &UseDeclaration) {
+        let Some(imported) = self.imported_module_ids.get(&declaration.syntax.id).copied() else {
+            return;
+        };
+        let interface = if declaration.visibility == Visibility::Private
+            && self.is_ancestor(imported, self.current_module)
+        {
+            self.local_interface(imported)
+        } else {
+            self.interfaces[imported.0].clone()
+        };
+        if declaration.kind == UseKind::Glob {
+            self.record_private_glob_items(imported, declaration, &interface);
+        }
+        if let Some(name) = declaration.path.last() {
+            self.import_definitions
+                .entry((declaration.syntax.id, name.clone()))
+                .or_default()
+                .push(DefinitionId::Module(imported));
+        }
+        match &declaration.kind {
+            UseKind::Namespace => {
+                let name = declaration
+                    .path
+                    .last()
+                    .expect("use path is nonempty")
+                    .clone();
+                if self
+                    .namespaces
+                    .last_mut()
+                    .expect("resolver namespace scope")
+                    .insert(name.clone(), imported)
+                    .is_some()
+                    || self.current_scope().contains_key(&name)
+                {
+                    self.duplicate_import(&name, declaration.syntax.span.clone());
                 }
-                UseKind::Glob => {
-                    for (name, symbol) in interface.values.clone() {
-                        self.insert_imported_value(name, symbol, declaration.syntax.span.clone());
-                    }
-                    for (name, ty) in interface.types.clone() {
-                        self.insert_imported_type(name, ty, declaration.syntax.span.clone());
-                    }
-                    for (name, macro_id) in interface.macros.clone() {
-                        self.insert_imported_macro(name, macro_id, declaration.syntax.span.clone());
-                    }
-                    for (name, trait_id) in interface.traits.clone() {
-                        self.insert_imported_trait(name, trait_id, declaration.syntax.span.clone());
-                    }
-                    for (name, namespace) in interface.namespaces.clone() {
-                        self.insert_imported_namespace(
-                            name,
-                            namespace,
-                            declaration.syntax.span.clone(),
-                        );
-                    }
+            }
+            UseKind::Glob => {
+                for (name, symbol) in interface.values.clone() {
+                    self.insert_imported_value(name, symbol, declaration.syntax.span.clone());
                 }
-                UseKind::Selected(names) => {
-                    for name in names {
-                        self.record_import_definitions(
-                            declaration.syntax.id,
-                            name,
-                            name,
-                            &interface,
-                        );
-                        self.install_selected(
-                            &interface,
-                            name,
-                            name,
-                            declaration.syntax.span.clone(),
-                        );
-                    }
+                for (name, ty) in interface.types.clone() {
+                    self.insert_imported_type(name, ty, declaration.syntax.span.clone());
                 }
-                UseKind::Renamed { item, alias } => {
-                    self.record_import_definitions(declaration.syntax.id, item, alias, &interface);
-                    self.install_selected(&interface, item, alias, declaration.syntax.span.clone());
+                for (name, macro_id) in interface.macros.clone() {
+                    self.insert_imported_macro(name, macro_id, declaration.syntax.span.clone());
                 }
+                for (name, trait_id) in interface.traits.clone() {
+                    self.insert_imported_trait(name, trait_id, declaration.syntax.span.clone());
+                }
+                for (name, namespace) in interface.namespaces.clone() {
+                    self.insert_imported_namespace(
+                        name,
+                        namespace,
+                        declaration.syntax.span.clone(),
+                    );
+                }
+            }
+            UseKind::Selected(names) => {
+                for name in names {
+                    self.record_import_definitions(declaration.syntax.id, name, name, &interface);
+                    self.install_selected(&interface, name, name, declaration.syntax.span.clone());
+                }
+            }
+            UseKind::Renamed { item, alias } => {
+                self.record_import_definitions(declaration.syntax.id, item, alias, &interface);
+                self.install_selected(&interface, item, alias, declaration.syntax.span.clone());
             }
         }
     }
@@ -1966,7 +1974,16 @@ impl NameResolver {
 
     fn insert_imported_type(&mut self, name: String, ty: TypeId, span: Span) {
         if self.declared_types[self.current_module.0].contains_key(&name)
-            || self.imported_types.insert(name.clone(), ty).is_some()
+            || self
+                .block_types
+                .last()
+                .is_some_and(|frame| frame.contains_key(&name))
+            || self
+                .imported_types
+                .last_mut()
+                .expect("resolver type import scope")
+                .insert(name.clone(), ty)
+                .is_some()
         {
             self.duplicate_import(&name, span);
         }
@@ -1975,7 +1992,12 @@ impl NameResolver {
     fn insert_imported_macro(&mut self, name: String, id: Vec<MacroId>, span: Span) {
         if self.current_scope().contains_key(&name)
             || self.namespaces.iter().any(|frame| frame.contains_key(&name))
-            || self.imported_macros.insert(name.clone(), id).is_some()
+            || self
+                .imported_macros
+                .last_mut()
+                .expect("resolver macro import scope")
+                .insert(name.clone(), id)
+                .is_some()
         {
             self.duplicate_import(&name, span);
         }
@@ -1983,7 +2005,12 @@ impl NameResolver {
 
     fn insert_imported_trait(&mut self, name: String, id: TraitId, span: Span) {
         if self.declared_traits[self.current_module.0].contains_key(&name)
-            || self.imported_traits.insert(name.clone(), id).is_some()
+            || self
+                .imported_traits
+                .last_mut()
+                .expect("resolver trait import scope")
+                .insert(name.clone(), id)
+                .is_some()
         {
             self.duplicate_import(&name, span);
         } else {
@@ -2095,33 +2122,35 @@ impl NameResolver {
         for (name, symbol) in self.current_scope() {
             insert(name, DefinitionId::Symbol(*symbol));
         }
-        for names in [
-            &self.declared_types[module.0],
-            &self.imported_types,
-            &self.prelude_types,
-        ] {
-            for (name, id) in names {
-                insert(name, DefinitionId::Type(*id));
+        for (name, id) in self.declared_types[module.0]
+            .iter()
+            .chain(self.prelude_types.iter())
+        {
+            insert(name, DefinitionId::Type(*id));
+        }
+        for (name, id) in self.imported_types.iter().flatten() {
+            insert(name, DefinitionId::Type(*id));
+        }
+        for (name, id) in self.declared_traits[module.0]
+            .iter()
+            .chain(self.prelude_traits.iter())
+        {
+            insert(name, DefinitionId::Trait(*id));
+        }
+        for (name, id) in self.imported_traits.iter().flatten() {
+            insert(name, DefinitionId::Trait(*id));
+        }
+        for (name, ids) in self.declared_macros[module.0]
+            .iter()
+            .chain(self.prelude_macros.iter())
+        {
+            for id in ids {
+                insert(name, DefinitionId::Macro(*id));
             }
         }
-        for names in [
-            &self.declared_traits[module.0],
-            &self.imported_traits,
-            &self.prelude_traits,
-        ] {
-            for (name, id) in names {
-                insert(name, DefinitionId::Trait(*id));
-            }
-        }
-        for names in [
-            &self.declared_macros[module.0],
-            &self.imported_macros,
-            &self.prelude_macros,
-        ] {
-            for (name, ids) in names {
-                for id in ids {
-                    insert(name, DefinitionId::Macro(*id));
-                }
+        for (name, ids) in self.imported_macros.iter().flatten() {
+            for id in ids {
+                insert(name, DefinitionId::Macro(*id));
             }
         }
         for (name, id) in &self.prelude_namespaces {
@@ -2488,6 +2517,7 @@ impl NameResolver {
             Statement::TypeDeclaration(declaration) => {
                 self.resolve_type_declaration_body(declaration);
             }
+            Statement::UseDeclaration(_) => {}
         }
     }
 
@@ -3004,7 +3034,12 @@ impl NameResolver {
                                 .get(&named.name)
                                 .copied()
                         })
-                        .or_else(|| self.imported_types.get(&named.name).copied())
+                        .or_else(|| {
+                            self.imported_types
+                                .iter()
+                                .rev()
+                                .find_map(|frame| frame.get(&named.name).copied())
+                        })
                         .or_else(|| self.prelude_types.get(&named.name).copied())
                 };
                 if let Some(id) = resolved {
@@ -3056,7 +3091,12 @@ impl NameResolver {
             self.declared_traits[self.current_module.0]
                 .get(&name.name)
                 .copied()
-                .or_else(|| self.imported_traits.get(&name.name).copied())
+                .or_else(|| {
+                    self.imported_traits
+                        .iter()
+                        .rev()
+                        .find_map(|frame| frame.get(&name.name).copied())
+                })
                 .or_else(|| self.prelude_traits.get(&name.name).copied())
         };
         if let Some(id) = resolved {
@@ -3074,7 +3114,12 @@ impl NameResolver {
             Expression::Name(name) => self.declared_traits[self.current_module.0]
                 .get(&name.name)
                 .copied()
-                .or_else(|| self.imported_traits.get(&name.name).copied())
+                .or_else(|| {
+                    self.imported_traits
+                        .iter()
+                        .rev()
+                        .find_map(|frame| frame.get(&name.name).copied())
+                })
                 .or_else(|| self.prelude_traits.get(&name.name).copied()),
             Expression::Access(access) => {
                 let (namespace, name, _) = qualified_access_path(access)?;
@@ -3192,6 +3237,9 @@ impl NameResolver {
         self.push_scope();
         self.namespaces.push(HashMap::new());
         self.block_types.push(HashMap::new());
+        self.imported_types.push(HashMap::new());
+        self.imported_macros.push(HashMap::new());
+        self.imported_traits.push(HashMap::new());
         for statement in &block.statements {
             match statement {
                 Statement::Binding(binding) if binding.kind == BindingKind::Def => {
@@ -3199,12 +3247,16 @@ impl NameResolver {
                 }
                 Statement::Submodule(submodule) => self.declare_block_namespace(submodule),
                 Statement::TypeDeclaration(declaration) => self.declare_block_type(declaration),
+                Statement::UseDeclaration(declaration) => self.install_import(declaration),
                 _ => {}
             }
         }
         for statement in &block.statements {
             self.resolve_statement(statement);
         }
+        self.imported_traits.pop();
+        self.imported_macros.pop();
+        self.imported_types.pop();
         self.block_types.pop();
         self.namespaces.pop();
         self.pop_scope();
@@ -3242,6 +3294,10 @@ impl NameResolver {
             .last()
             .expect("resolver type scope")
             .contains_key(&declaration.name)
+            || self
+                .imported_types
+                .last()
+                .is_some_and(|frame| frame.contains_key(&declaration.name))
         {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
@@ -3451,7 +3507,12 @@ impl NameResolver {
         self.declared_macros[self.current_module.0]
             .get(name)
             .cloned()
-            .or_else(|| self.imported_macros.get(name).cloned())
+            .or_else(|| {
+                self.imported_macros
+                    .iter()
+                    .rev()
+                    .find_map(|frame| frame.get(name).cloned())
+            })
             .or_else(|| self.prelude_macros.get(name).cloned())
     }
 
@@ -3551,7 +3612,8 @@ impl<'a> InitializationAnalyzer<'a> {
                     | Statement::Continue(_)
                     | Statement::Expression(_)
                     | Statement::Submodule(_)
-                    | Statement::TypeDeclaration(_) => {}
+                    | Statement::TypeDeclaration(_)
+                    | Statement::UseDeclaration(_) => {}
                 }
             }
         }
@@ -3641,6 +3703,7 @@ impl<'a> InitializationAnalyzer<'a> {
             Statement::Expression(expression) => self.expression(expression, local, outer),
             Statement::Submodule(_) => {}
             Statement::TypeDeclaration(_) => {}
+            Statement::UseDeclaration(_) => {}
         }
     }
 
@@ -3879,6 +3942,7 @@ fn find_block_type_declarations_in_statement<'a>(
         }
         Statement::Submodule(_) => {}
         Statement::TypeDeclaration(declaration) => out.push(declaration),
+        Statement::UseDeclaration(_) => {}
     }
 }
 

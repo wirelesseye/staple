@@ -181,7 +181,7 @@ impl Program {
     }
 
     fn resolve_single_inline_imports(&mut self) {
-        let uses = self
+        let mut uses = self
             .modules
             .iter()
             .flat_map(|module| {
@@ -195,6 +195,15 @@ impl Program {
                     })
             })
             .collect::<Vec<_>>();
+        for module in &self.modules {
+            let mut block_declarations = Vec::new();
+            find_block_use_declarations(&module.syntax.items, &mut block_declarations);
+            uses.extend(
+                block_declarations
+                    .into_iter()
+                    .map(|declaration| (module.id, declaration)),
+            );
+        }
         for (source, declaration) in uses {
             let mut target = source;
             let mut index = 0;
@@ -308,6 +317,10 @@ impl Program {
 
     pub fn imported_module(&self, use_syntax: SyntaxId) -> Option<ModuleId> {
         self.imported_modules.get(&use_syntax).copied()
+    }
+
+    pub(crate) fn imported_modules(&self) -> &HashMap<SyntaxId, ModuleId> {
+        &self.imported_modules
     }
 
     pub(crate) fn root_qualified_modules(
@@ -597,7 +610,7 @@ impl ProgramLoader {
         if !self.loaded_imports.insert(module) {
             return Ok(());
         }
-        let uses = self.modules[module.0]
+        let mut uses = self.modules[module.0]
             .syntax
             .items
             .iter()
@@ -606,6 +619,7 @@ impl ProgramLoader {
                 _ => None,
             })
             .collect::<Vec<_>>();
+        find_block_use_declarations(&self.modules[module.0].syntax.items, &mut uses);
         for declaration in uses {
             match self.resolve_import(module, &declaration, root) {
                 Ok(imported) => {
@@ -1097,6 +1111,7 @@ fn find_block_submodules_in_statement(statement: &Statement, out: &mut Vec<Submo
         Statement::Expression(expression) => find_block_submodules_in_expression(expression, out),
         Statement::Submodule(submodule) => out.push(submodule.clone()),
         Statement::TypeDeclaration(_) => {}
+        Statement::UseDeclaration(_) => {}
     }
 }
 
@@ -1153,6 +1168,142 @@ fn find_block_submodules_in_block(block: &BlockExpression, out: &mut Vec<Submodu
     }
 }
 
+/// Finds `use` declarations nested inside block expressions anywhere in
+/// `items`, without descending into an `Item::Submodule`'s own body (that
+/// submodule is a separate flat `SourceModule`, visited independently by
+/// the caller's own recursion into it).
+fn find_block_use_declarations(items: &[Item], out: &mut Vec<UseDeclaration>) {
+    for item in items {
+        find_block_use_declarations_in_item(item, out);
+    }
+}
+
+fn find_block_use_declarations_in_item(item: &Item, out: &mut Vec<UseDeclaration>) {
+    match item {
+        Item::Modified(modified) => find_block_use_declarations_in_item(&modified.item, out),
+        Item::VisibilityMacroInvocation(invocation) => {
+            find_block_use_declarations_in_expression(&invocation.expression, out)
+        }
+        Item::VisibilitySplice(splice) => find_block_use_declarations_in_item(&splice.item, out),
+        Item::RepeatedItemSplice(_)
+        | Item::UseDeclaration(_)
+        | Item::Submodule(_)
+        | Item::TypeDeclaration(_) => {}
+        Item::ExternBlock(block) => {
+            for binding in &block.bindings {
+                if let Some(value) = &binding.value {
+                    find_block_use_declarations_in_expression(value, out);
+                }
+            }
+        }
+        Item::MacroDeclaration(declaration) => {
+            if let Some(value) = &declaration.value {
+                find_block_use_declarations_in_expression(value, out);
+            }
+        }
+        Item::TraitDeclaration(declaration) => {
+            for member in &declaration.members {
+                if let Some(default) = &member.default {
+                    find_block_use_declarations_in_expression(default, out);
+                }
+            }
+        }
+        Item::TraitImplementation(implementation) => {
+            for member in &implementation.members {
+                find_block_use_declarations_in_expression(&member.value, out);
+            }
+        }
+        Item::Statement(statement) => find_block_use_declarations_in_statement(statement, out),
+    }
+}
+
+fn find_block_use_declarations_in_statement(statement: &Statement, out: &mut Vec<UseDeclaration>) {
+    match statement {
+        Statement::Binding(binding) => {
+            if let Some(value) = &binding.value {
+                find_block_use_declarations_in_expression(value, out);
+            }
+        }
+        Statement::PatternBinding(binding) => {
+            find_block_use_declarations_in_expression(&binding.value, out)
+        }
+        Statement::Assignment(assignment) => {
+            find_block_use_declarations_in_expression(&assignment.target, out);
+            find_block_use_declarations_in_expression(&assignment.value, out);
+        }
+        Statement::Return(statement) => {
+            find_block_use_declarations_in_expression(&statement.value, out)
+        }
+        Statement::Break(statement) => {
+            if let Some(value) = &statement.value {
+                find_block_use_declarations_in_expression(value, out);
+            }
+        }
+        Statement::Continue(_) => {}
+        Statement::Expression(expression) => {
+            find_block_use_declarations_in_expression(expression, out)
+        }
+        Statement::Submodule(_) => {}
+        Statement::TypeDeclaration(_) => {}
+        Statement::UseDeclaration(declaration) => out.push(declaration.clone()),
+    }
+}
+
+fn find_block_use_declarations_in_expression(expression: &Expression, out: &mut Vec<UseDeclaration>) {
+    match expression {
+        Expression::Function(function) => {
+            find_block_use_declarations_in_expression(&function.body, out)
+        }
+        Expression::Satisfies(satisfies) => {
+            find_block_use_declarations_in_expression(&satisfies.value, out)
+        }
+        Expression::Match(match_) => {
+            find_block_use_declarations_in_expression(&match_.subject, out);
+            for arm in &match_.arms {
+                find_block_use_declarations_in_expression(&arm.body, out);
+            }
+        }
+        Expression::Loop(loop_) => find_block_use_declarations_in_block(&loop_.body, out),
+        Expression::Resource(_) => {}
+        Expression::With(with) => {
+            find_block_use_declarations_in_expression(&with.value, out);
+            find_block_use_declarations_in_block(&with.body, out);
+        }
+        Expression::Block(block) => find_block_use_declarations_in_block(block, out),
+        Expression::Product(product) => {
+            for element in &product.elements {
+                find_block_use_declarations_in_expression(&element.value, out);
+            }
+        }
+        Expression::Call(call) => {
+            find_block_use_declarations_in_expression(&call.callee, out);
+            find_block_use_declarations_in_expression(&call.argument, out);
+        }
+        Expression::Access(access) => {
+            find_block_use_declarations_in_expression(&access.value, out)
+        }
+        Expression::Index(index) => {
+            find_block_use_declarations_in_expression(&index.value, out);
+            find_block_use_declarations_in_expression(&index.index, out);
+        }
+        Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
+        | Expression::Quote(_)
+        | Expression::Splice(_)
+        | Expression::Name(_)
+        | Expression::String(_)
+        | Expression::CString(_)
+        | Expression::Integer(_)
+        | Expression::Float(_) => {}
+    }
+}
+
+fn find_block_use_declarations_in_block(block: &BlockExpression, out: &mut Vec<UseDeclaration>) {
+    for statement in &block.statements {
+        find_block_use_declarations_in_statement(statement, out);
+    }
+}
+
 fn initialization_order(
     modules: &[SourceModule],
     imports: &HashMap<SyntaxId, ModuleId>,
@@ -1164,6 +1315,13 @@ fn initialization_order(
             if let Item::UseDeclaration(declaration) = item
                 && let Some(imported) = imports.get(&declaration.syntax.id)
             {
+                edges[module.id.0].push(*imported);
+            }
+        }
+        let mut block_declarations = Vec::new();
+        find_block_use_declarations(&module.syntax.items, &mut block_declarations);
+        for declaration in &block_declarations {
+            if let Some(imported) = imports.get(&declaration.syntax.id) {
                 edges[module.id.0].push(*imported);
             }
         }

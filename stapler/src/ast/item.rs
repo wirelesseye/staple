@@ -130,6 +130,7 @@ pub enum Statement {
     Expression(Expression),
     Submodule(Submodule),
     TypeDeclaration(TypeDeclaration),
+    UseDeclaration(UseDeclaration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

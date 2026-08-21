@@ -3,8 +3,8 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
     MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program,
-    ResolvedMacro, Span, Statement, Syntax, SyntaxId, Type, UseKind, Visibility, VisibilityKind,
-    VisibilitySyntax,
+    ResolvedMacro, Span, Statement, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
+    VisibilityKind, VisibilitySyntax,
 };
 
 const MAX_EXPANSION_DEPTH: usize = 128;
@@ -516,6 +516,8 @@ pub(crate) fn expand_program(
 struct MacroExpander {
     definitions: HashMap<MacroKey, MacroDefinition>,
     scopes: Vec<ModuleScope>,
+    imported_modules: HashMap<SyntaxId, ModuleId>,
+    parent_modules: Vec<Option<ModuleId>>,
     diagnostics: Vec<Diagnostic>,
     next_syntax_id: usize,
     next_mark: u64,
@@ -875,6 +877,12 @@ impl MacroExpander {
         Self {
             definitions,
             scopes,
+            imported_modules: program.imported_modules().clone(),
+            parent_modules: program
+                .modules()
+                .iter()
+                .map(|module| program.parent_module(module.id))
+                .collect(),
             diagnostics: Vec::new(),
             next_syntax_id,
             next_mark: 1,
@@ -2056,6 +2064,89 @@ impl MacroExpander {
             // Types carry no runtime macro calls to expand — mirrors the
             // `Item::TypeDeclaration(_) => {}` catch-all in `expand_item`.
             Statement::TypeDeclaration(_) => {}
+            // A use declaration's path carries no runtime macro calls either
+            // — mirrors `Item::UseDeclaration(_) => {}` in `expand_item`.
+            Statement::UseDeclaration(_) => {}
+        }
+    }
+
+    fn expand_block(&mut self, module: ModuleId, block: &mut BlockExpression, depth: usize) {
+        let outer = self.scopes[module.0].clone();
+        for statement in &block.statements {
+            let Statement::UseDeclaration(declaration) = statement else {
+                continue;
+            };
+            self.install_block_import(module, declaration);
+        }
+        for statement in &mut block.statements {
+            self.expand_statement(module, statement, depth);
+        }
+        self.scopes[module.0] = outer;
+    }
+
+    fn install_block_import(&mut self, module: ModuleId, use_: &UseDeclaration) {
+        let Some(imported) = self.imported_modules.get(&use_.syntax.id).copied() else {
+            return;
+        };
+        let imported_scope = self.scopes[imported.0].clone();
+        let mut cursor = module;
+        let mut include_private = false;
+        while let Some(parent) = self.parent_modules[cursor.0] {
+            if parent == imported {
+                include_private = true;
+                break;
+            }
+            cursor = parent;
+        }
+        let visible_keys = |keys: &[MacroKey]| {
+            keys.iter()
+                .filter(|key| {
+                    include_private
+                        || self.definitions[key].declaration.visibility == Visibility::Public
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        let install = |item: &str, alias: &str, scope: &mut ModuleScope| {
+            if let Some(keys) = imported_scope.macros.get(item) {
+                let keys = visible_keys(keys);
+                if !keys.is_empty() {
+                    scope.macros.entry(alias.to_owned()).or_insert(keys);
+                }
+            }
+            if let Some(keys) = imported_scope.modifiers.get(item) {
+                let keys = visible_keys(keys);
+                if !keys.is_empty() {
+                    scope.modifiers.entry(alias.to_owned()).or_insert(keys);
+                }
+            }
+            if let Some(helper) = imported_scope.helpers.get(item)
+                && (include_private || helper.binding.visibility == Visibility::Public)
+            {
+                scope.helpers.entry(alias.to_owned()).or_insert_with(|| helper.clone());
+            }
+        };
+        let scope = &mut self.scopes[module.0];
+        match &use_.kind {
+            UseKind::Namespace => {
+                if let Some(name) = use_.path.last() {
+                    scope.namespaces.insert(name.clone(), imported);
+                }
+            }
+            UseKind::Glob => {
+                for name in imported_scope.macros.keys().chain(imported_scope.modifiers.keys()) {
+                    install(name, name, scope);
+                }
+                for name in imported_scope.helpers.keys() {
+                    install(name, name, scope);
+                }
+            }
+            UseKind::Selected(names) => {
+                for name in names {
+                    install(name, name, scope);
+                }
+            }
+            UseKind::Renamed { item, alias } => install(item, alias, scope),
         }
     }
 
@@ -2228,15 +2319,16 @@ impl MacroExpander {
                 Expression::Match(match_)
             }
             Expression::Loop(mut loop_) => {
-                for statement in &mut loop_.body.statements {
-                    self.expand_statement(module, statement, depth);
-                }
+                self.expand_block(module, &mut loop_.body, depth);
                 Expression::Loop(loop_)
             }
+            Expression::With(mut with) => {
+                with.value = Box::new(self.expand_expression(module, *with.value, depth));
+                self.expand_block(module, &mut with.body, depth);
+                Expression::With(with)
+            }
             Expression::Block(mut block) => {
-                for statement in &mut block.statements {
-                    self.expand_statement(module, statement, depth);
-                }
+                self.expand_block(module, &mut block, depth);
                 Expression::Block(block)
             }
             Expression::Product(mut product) => {
@@ -3169,6 +3261,13 @@ impl MacroExpander {
                             self.diagnostics.push(Diagnostic::new(
                                 declaration.syntax.span.clone(),
                                 "type declarations are not supported during compile-time evaluation",
+                            ));
+                            return None;
+                        }
+                        Statement::UseDeclaration(declaration) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                declaration.syntax.span.clone(),
+                                "`use` is not supported during compile-time evaluation",
                             ));
                             return None;
                         }
@@ -5576,7 +5675,8 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
                     | Statement::Break(_)
                     | Statement::Continue(_)
                     | Statement::Submodule(_)
-                    | Statement::TypeDeclaration(_) => true,
+                    | Statement::TypeDeclaration(_)
+                    | Statement::UseDeclaration(_) => true,
                 })
         }
         Expression::Function(_)
@@ -6256,6 +6356,11 @@ fn substitute_statement(
                 substitute_type(underlying, environment, diagnostics)?;
             }
         }
+        Statement::UseDeclaration(declaration) => {
+            for component in &mut declaration.path {
+                substitute_identifier(component, environment, diagnostics)?;
+            }
+        }
     }
     Some(())
 }
@@ -6322,6 +6427,7 @@ fn statement_syntax(statement: &Statement) -> &Syntax {
         Statement::Expression(value) => value.syntax(),
         Statement::Submodule(value) => &value.syntax,
         Statement::TypeDeclaration(value) => &value.syntax,
+        Statement::UseDeclaration(value) => &value.syntax,
     }
 }
 
@@ -6997,6 +7103,7 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
                 }
             }
             Statement::TypeDeclaration(_) => {}
+            Statement::UseDeclaration(_) => {}
         },
         Item::TypeDeclaration(_) => {}
         Item::Submodule(submodule) => {
@@ -7153,6 +7260,9 @@ fn alpha_rename_block(
             // Likewise, a type declaration's bounds/underlying type reference
             // type parameters and other types, never value identifiers.
             Statement::TypeDeclaration(_) => {}
+            // A use declaration's path never references local value
+            // bindings this pass tracks either.
+            Statement::UseDeclaration(_) => {}
         }
     }
     scopes.pop();
@@ -7277,6 +7387,9 @@ fn freshen_statement(
             if let Some(underlying) = &mut declaration.underlying {
                 freshen_type(expander, underlying, module, mark);
             }
+        }
+        Statement::UseDeclaration(declaration) => {
+            expander.freshen_syntax(&mut declaration.syntax, module, mark);
         }
     }
 }

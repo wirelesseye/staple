@@ -166,6 +166,7 @@ impl DeclarationCollector<'_> {
                     self.type_parameter(parameter);
                 }
             }
+            Statement::UseDeclaration(_) => {}
         }
     }
 
@@ -484,6 +485,7 @@ impl Collector<'_> {
                     self.ty(underlying);
                 }
             }
+            Statement::UseDeclaration(value) => self.use_declaration(value),
         }
     }
 

@@ -411,6 +411,25 @@ impl<'a> Classifier<'a> {
                     self.ty(ty, resolved);
                 }
             }
+            Statement::UseDeclaration(value) => {
+                for part in &value.path {
+                    self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
+                }
+                match &value.kind {
+                    UseKind::Renamed { item, alias } => {
+                        let kind = self.import_kind(value, item, resolved);
+                        self.mark_first(&value.syntax, item, kind, 0, 1);
+                        self.mark_last(&value.syntax, alias, kind, DECLARATION, 1);
+                    }
+                    UseKind::Selected(names) => {
+                        for name in names {
+                            let kind = self.import_kind(value, name, resolved);
+                            self.mark_last(&value.syntax, name, kind, 0, 1);
+                        }
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
