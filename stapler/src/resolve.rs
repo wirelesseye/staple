@@ -36,6 +36,7 @@ pub enum DefinitionId {
     TraitMethod(TraitMethodId),
     Macro(MacroId),
     Module(ModuleId),
+    CompileTime(SyntaxId),
 }
 
 #[derive(Debug, Clone)]
@@ -235,6 +236,8 @@ pub struct CompileTimeBindingInfo {
     pub kind: CompileTimeBindingKind,
     pub mutable: bool,
     pub declaration_prefix: Option<String>,
+    pub module: ModuleId,
+    pub definition: Option<DefinitionId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -311,6 +314,7 @@ pub struct ResolvedModule {
     macro_invocations: HashMap<SyntaxId, ResolvedMacro>,
     macro_declarations: HashMap<MacroId, SyntaxId>,
     macro_modules: HashMap<MacroId, ModuleId>,
+    quote_macros: HashMap<SyntaxId, MacroId>,
     constructors: HashMap<SymbolId, TypeId>,
     singleton_values: HashMap<SymbolId, TypeId>,
     type_modules: HashMap<TypeId, ModuleId>,
@@ -421,6 +425,15 @@ impl ResolvedModule {
                 definitions.push(DefinitionId::Macro(*id));
             }
         }
+        if let Some(info) = self.compile_time_binding_for(syntax_id) {
+            definitions.push(
+                info.definition
+                    .unwrap_or(DefinitionId::CompileTime(info.declaration)),
+            );
+        }
+        if let Some(id) = self.quote_macros.get(&syntax_id) {
+            definitions.push(DefinitionId::Macro(*id));
+        }
         let mut seen = HashSet::new();
         definitions.retain(|definition| seen.insert(*definition));
         definitions
@@ -462,6 +475,7 @@ impl ResolvedModule {
                         .then_some(submodule.syntax.id)
                 })
             }),
+            DefinitionId::CompileTime(syntax) => Some(syntax),
         }
     }
 
@@ -476,6 +490,10 @@ impl ResolvedModule {
                 .and_then(|trait_id| self.trait_modules.get(&trait_id).copied()),
             DefinitionId::Macro(id) => self.macro_modules.get(&id).copied(),
             DefinitionId::Module(id) => Some(id),
+            DefinitionId::CompileTime(syntax) => self
+                .compile_time_bindings
+                .get(&syntax)
+                .map(|info| info.module),
         }
     }
 
@@ -742,6 +760,7 @@ pub struct NameResolver {
     macro_calls: HashMap<SyntaxId, PrimitiveMacro>,
     macro_declarations: HashMap<MacroId, SyntaxId>,
     macro_modules: HashMap<MacroId, ModuleId>,
+    quote_macros: HashMap<SyntaxId, MacroId>,
     constructors: HashMap<SymbolId, TypeId>,
     singleton_values: HashMap<SymbolId, TypeId>,
     nominal_patterns: HashMap<SyntaxId, TypeId>,
@@ -911,6 +930,13 @@ impl NameResolver {
             for item in &source_module.syntax.items {
                 self.resolve_item(item);
             }
+            for (_, helper) in macro_analysis
+                .helpers
+                .iter()
+                .filter(|(module, _)| *module == source_module.id)
+            {
+                self.resolve_compile_time_helper_annotations(helper);
+            }
             self.imported_traits.pop();
             self.imported_macros.pop();
             self.imported_types.pop();
@@ -942,8 +968,18 @@ impl NameResolver {
         if let Some(syntax) = self.standard_library_syntax {
             standard_traits.extend(self.interfaces[syntax.0].traits.clone());
         }
-        let compile_time_bindings =
+        let mut compile_time_bindings =
             analyze_compile_time_bindings(&program, &macro_analysis.helpers);
+        for info in compile_time_bindings.values_mut() {
+            if info.kind == CompileTimeBindingKind::Builtin {
+                info.definition = self
+                    .definition_context_types
+                    .get(info.module.0)
+                    .and_then(|types| types.get(&info.name))
+                    .copied()
+                    .map(DefinitionId::Type);
+            }
+        }
         let mut resolved = ResolvedModule {
             program,
             functions: self.functions,
@@ -967,6 +1003,7 @@ impl NameResolver {
             macro_invocations: macro_analysis.invocations,
             macro_declarations: self.macro_declarations,
             macro_modules: self.macro_modules,
+            quote_macros: self.quote_macros,
             constructors: self.constructors,
             singleton_values: self.singleton_values,
             type_modules: self.type_modules,
@@ -2730,7 +2767,187 @@ impl NameResolver {
             self.resolve_pattern_types_lenient(&function.pattern);
             current = Some(function.body.as_ref());
         }
+        if let Some(value) = &declaration.value {
+            self.resolve_compile_time_expression_annotations(value);
+        }
         self.pop_type_parameter_scope();
+    }
+
+    fn resolve_compile_time_helper_annotations(&mut self, binding: &Binding) {
+        self.push_type_parameter_scope();
+        for parameter in &binding.type_parameters {
+            self.declare_type_parameter_pattern(parameter);
+        }
+        if let Some(annotation) = &binding.annotation {
+            self.resolve_type_lenient(annotation);
+        }
+        for bound in &binding.trait_bounds {
+            if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
+                self.trait_references.insert(bound.syntax.id, trait_id);
+            }
+            for argument in &bound.arguments {
+                self.resolve_type_lenient(argument);
+            }
+        }
+        if let Some(value) = &binding.value {
+            self.resolve_compile_time_expression_annotations(value);
+        }
+        self.pop_type_parameter_scope();
+    }
+
+    fn resolve_compile_time_expression_annotations(&mut self, expression: &Expression) {
+        match expression {
+            Expression::Function(value) => {
+                self.resolve_pattern_types_lenient(&value.pattern);
+                self.resolve_compile_time_expression_annotations(&value.body);
+            }
+            Expression::Satisfies(value) => {
+                self.resolve_compile_time_expression_annotations(&value.value);
+                self.resolve_type_lenient(&value.ty);
+            }
+            Expression::Match(value) => {
+                self.resolve_compile_time_expression_annotations(&value.subject);
+                for arm in &value.arms {
+                    self.resolve_pattern_types_lenient(&arm.pattern);
+                    self.resolve_compile_time_expression_annotations(&arm.body);
+                }
+            }
+            Expression::Loop(value) => for item in &value.body.items { self.resolve_compile_time_item_annotations(item); },
+            Expression::Resource(value) => self.resolve_type_lenient(&value.resource),
+            Expression::With(value) => {
+                self.resolve_type_lenient(&value.resource);
+                self.resolve_compile_time_expression_annotations(&value.value);
+                for item in &value.body.items { self.resolve_compile_time_item_annotations(item); }
+            }
+            Expression::Block(value) => for item in &value.items { self.resolve_compile_time_item_annotations(item); },
+            Expression::Product(value) => for element in &value.elements { self.resolve_compile_time_expression_annotations(&element.value); },
+            Expression::Call(value) => { self.resolve_compile_time_expression_annotations(&value.callee); self.resolve_compile_time_expression_annotations(&value.argument); }
+            Expression::Access(value) => self.resolve_compile_time_expression_annotations(&value.value),
+            Expression::Index(value) => { self.resolve_compile_time_expression_annotations(&value.value); self.resolve_compile_time_expression_annotations(&value.index); }
+            Expression::Quote(value) => {
+                if let Some(id) = self.lookup_macro(value.kind.name()).and_then(|ids| ids.first().copied()) {
+                    self.quote_macros.insert(value.syntax.id, id);
+                }
+                match &value.template {
+                crate::QuoteTemplate::Expression(value) => { self.resolve_compile_time_expression_annotations(value); self.resolve_quoted_expression(value, &mut vec![HashMap::new()]); },
+                crate::QuoteTemplate::Item(item) => { self.resolve_compile_time_item_annotations(item); self.resolve_quoted_item(item, &mut vec![HashMap::new()]); },
+                crate::QuoteTemplate::Items(items) => {
+                    let mut scopes = vec![HashMap::new()];
+                    for item in items { self.resolve_compile_time_item_annotations(item); self.resolve_quoted_item(item, &mut scopes); }
+                },
+                crate::QuoteTemplate::Raw => {}
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn resolve_compile_time_item_annotations(&mut self, item: &Item) {
+        match item {
+            Item::Binding(value) => {
+                if let Some(annotation) = &value.annotation { self.resolve_type_lenient(annotation); }
+                if let Some(expression) = &value.value { self.resolve_compile_time_expression_annotations(expression); }
+            }
+            Item::PatternBinding(value) => { self.resolve_pattern_types_lenient(&value.pattern); self.resolve_compile_time_expression_annotations(&value.value); }
+            Item::Assignment(value) => { self.resolve_compile_time_expression_annotations(&value.target); self.resolve_compile_time_expression_annotations(&value.value); }
+            Item::Return(value) => self.resolve_compile_time_expression_annotations(&value.value),
+            Item::Break(value) => if let Some(value) = &value.value { self.resolve_compile_time_expression_annotations(value); },
+            Item::Expression(value) => self.resolve_compile_time_expression_annotations(value),
+            _ => {}
+        }
+    }
+
+    fn declare_quoted_pattern(&mut self, pattern: &Pattern, scope: &mut HashMap<String, SymbolId>) {
+        match pattern {
+            Pattern::Binding(binding) => {
+                let symbol = SymbolId(self.next_symbol_id);
+                self.next_symbol_id += 1;
+                self.symbols.insert(binding.syntax.id, symbol);
+                self.symbol_declarations.insert(symbol, binding.syntax.id);
+                self.symbol_modules.insert(symbol, self.current_module);
+                scope.insert(binding.name.clone(), symbol);
+            }
+            Pattern::At(at) => {
+                self.declare_quoted_pattern(&Pattern::Binding(at.binding.as_ref().clone()), scope);
+                self.declare_quoted_pattern(&at.pattern, scope);
+            }
+            Pattern::Product(product) => for element in &product.elements { self.declare_quoted_pattern(element, scope); },
+            Pattern::Nominal(nominal) => self.declare_quoted_pattern(&nominal.argument, scope),
+            _ => {}
+        }
+    }
+
+    fn resolve_quoted_expression(&mut self, expression: &Expression, scopes: &mut Vec<HashMap<String, SymbolId>>) {
+        match expression {
+            Expression::Name(name) => {
+                if let Some(symbol) = scopes.iter().rev().find_map(|scope| scope.get(&name.name)).copied().or_else(|| self.lookup(&name.name)) {
+                    self.symbols.insert(name.syntax.id, symbol);
+                }
+            }
+            Expression::Function(value) => {
+                scopes.push(HashMap::new());
+                self.declare_quoted_pattern(&value.pattern, scopes.last_mut().unwrap());
+                self.resolve_quoted_expression(&value.body, scopes);
+                scopes.pop();
+            }
+            Expression::Match(value) => {
+                self.resolve_quoted_expression(&value.subject, scopes);
+                for arm in &value.arms {
+                    scopes.push(HashMap::new());
+                    self.declare_quoted_pattern(&arm.pattern, scopes.last_mut().unwrap());
+                    self.resolve_quoted_expression(&arm.body, scopes);
+                    scopes.pop();
+                }
+            }
+            Expression::Block(value) => {
+                scopes.push(HashMap::new());
+                for item in &value.items { self.resolve_quoted_item(item, scopes); }
+                scopes.pop();
+            }
+            Expression::Loop(value) => { scopes.push(HashMap::new()); for item in &value.body.items { self.resolve_quoted_item(item, scopes); } scopes.pop(); }
+            Expression::With(value) => { self.resolve_quoted_expression(&value.value, scopes); scopes.push(HashMap::new()); for item in &value.body.items { self.resolve_quoted_item(item, scopes); } scopes.pop(); }
+            Expression::Satisfies(value) => self.resolve_quoted_expression(&value.value, scopes),
+            Expression::Product(value) => for element in &value.elements { self.resolve_quoted_expression(&element.value, scopes); },
+            Expression::Call(value) => { self.resolve_quoted_expression(&value.callee, scopes); self.resolve_quoted_expression(&value.argument, scopes); }
+            Expression::Access(value) => {
+                if let Some(trait_id) = self.trait_id_from_expression(&value.value)
+                    && let Accessor::Name(name) = &value.accessor
+                    && let Some(method) = self.trait_member_ids.get(&(trait_id, name.clone())).copied()
+                {
+                    self.trait_method_references.insert(value.syntax.id, vec![method]);
+                    if let Expression::Name(trait_name) = value.value.as_ref() { self.trait_references.insert(trait_name.syntax.id, trait_id); }
+                } else if let Some((namespace, item, definition_module)) = qualified_access_path(value)
+                    && let Some(module) = definition_module.map(ModuleId).or_else(|| self.lookup_namespace(&namespace))
+                    && let Some(symbol) = self.interfaces[module.0].values.get(&item).copied()
+                {
+                    self.symbols.insert(value.syntax.id, symbol);
+                } else {
+                    self.resolve_quoted_expression(&value.value, scopes);
+                }
+            }
+            Expression::Index(value) => { self.resolve_quoted_expression(&value.value, scopes); self.resolve_quoted_expression(&value.index, scopes); }
+            Expression::Quote(_) | Expression::Splice(_) | Expression::Resource(_) | Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) | Expression::String(_) | Expression::CString(_) | Expression::Integer(_) | Expression::Float(_) => {}
+        }
+    }
+
+    fn resolve_quoted_item(&mut self, item: &Item, scopes: &mut Vec<HashMap<String, SymbolId>>) {
+        match item {
+            Item::Binding(binding) => {
+                if let Some(value) = &binding.value { self.resolve_quoted_expression(value, scopes); }
+                let symbol = SymbolId(self.next_symbol_id);
+                self.next_symbol_id += 1;
+                self.symbols.insert(binding.syntax.id, symbol);
+                self.symbol_declarations.insert(symbol, binding.syntax.id);
+                self.symbol_modules.insert(symbol, self.current_module);
+                scopes.last_mut().unwrap().insert(binding.name.clone(), symbol);
+            }
+            Item::PatternBinding(value) => { self.resolve_quoted_expression(&value.value, scopes); self.declare_quoted_pattern(&value.pattern, scopes.last_mut().unwrap()); }
+            Item::Assignment(value) => { self.resolve_quoted_expression(&value.target, scopes); self.resolve_quoted_expression(&value.value, scopes); }
+            Item::Expression(value) => self.resolve_quoted_expression(value, scopes),
+            Item::Return(value) => self.resolve_quoted_expression(&value.value, scopes),
+            Item::Break(value) => if let Some(value) = &value.value { self.resolve_quoted_expression(value, scopes); },
+            _ => {}
+        }
     }
 
     fn validate_trait_prerequisite_cycles(&mut self) {
@@ -3752,15 +3969,16 @@ struct InitializationAnalysis {
 struct CompileTimeScope {
     frames: Vec<HashMap<String, CompileTimeBindingInfo>>,
     occurrences: HashMap<SyntaxId, CompileTimeBindingInfo>,
+    module: ModuleId,
 }
 
 impl CompileTimeScope {
-    fn new(globals: HashMap<String, CompileTimeBindingInfo>) -> Self {
-        Self { frames: vec![globals], occurrences: HashMap::new() }
+    fn new(module: ModuleId, globals: HashMap<String, CompileTimeBindingInfo>) -> Self {
+        Self { frames: vec![globals], occurrences: HashMap::new(), module }
     }
 
     fn declare(&mut self, syntax: SyntaxId, name: String, type_display: Option<String>, kind: CompileTimeBindingKind, mutable: bool, declaration_prefix: Option<String>) {
-        let info = CompileTimeBindingInfo { declaration: syntax, name: name.clone(), type_display, kind, mutable, declaration_prefix };
+        let info = CompileTimeBindingInfo { declaration: syntax, name: name.clone(), type_display, kind, mutable, declaration_prefix, module: self.module, definition: None };
         self.frames.last_mut().unwrap().insert(name, info.clone());
         self.occurrences.insert(syntax, info);
     }
@@ -3776,9 +3994,9 @@ impl CompileTimeScope {
     }
 }
 
-fn analyze_compile_time_bindings(program: &Program, helpers: &[Binding]) -> HashMap<SyntaxId, CompileTimeBindingInfo> {
+fn analyze_compile_time_bindings(program: &Program, helpers: &[(ModuleId, Binding)]) -> HashMap<SyntaxId, CompileTimeBindingInfo> {
     let mut globals = HashMap::new();
-    for helper in helpers {
+    for (module, helper) in helpers {
         let type_display = helper.annotation.as_ref().map(ToString::to_string);
         globals.insert(helper.name.clone(), CompileTimeBindingInfo {
             declaration: helper.syntax.id,
@@ -3787,11 +4005,13 @@ fn analyze_compile_time_bindings(program: &Program, helpers: &[Binding]) -> Hash
             kind: CompileTimeBindingKind::Helper,
             mutable: false,
             declaration_prefix: Some("def".to_owned()),
+            module: *module,
+            definition: None,
         });
     }
     let mut result = HashMap::new();
-    for helper in helpers {
-        let mut scope = CompileTimeScope::new(globals.clone());
+    for (module, helper) in helpers {
+        let mut scope = CompileTimeScope::new(*module, globals.clone());
         scope.reference(helper.syntax.id, &helper.name);
         if let Some(value) = &helper.value {
             analyze_compile_expression(value, &mut scope, CompileTimeBindingKind::HelperParameter, false);
@@ -3803,7 +4023,7 @@ fn analyze_compile_time_bindings(program: &Program, helpers: &[Binding]) -> Hash
             if let Item::MacroDeclaration(declaration) = item
                 && let Some(value) = &declaration.value
             {
-                let mut scope = CompileTimeScope::new(globals.clone());
+                let mut scope = CompileTimeScope::new(source_module.id, globals.clone());
                 analyze_compile_expression(value, &mut scope, CompileTimeBindingKind::MacroParameter, false);
                 result.extend(scope.occurrences);
             }
@@ -3912,6 +4132,8 @@ fn analyze_compile_expression(expression: &Expression, scope: &mut CompileTimeSc
                     kind: CompileTimeBindingKind::Builtin,
                     mutable: false,
                     declaration_prefix: None,
+                    module: scope.module,
+                    definition: None,
                 });
             }
         }

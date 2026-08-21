@@ -132,6 +132,9 @@ impl DeclarationCollector<'_> {
             }
             Item::MacroDeclaration(value) => {
                 self.declaration(&value.syntax, &value.name);
+                if let Some(expression) = &value.value {
+                    self.expression(expression);
+                }
             }
             value @ (Item::Binding(_)
             | Item::PatternBinding(_)
@@ -233,11 +236,13 @@ impl DeclarationCollector<'_> {
                 self.expression(&value.index);
             }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
-            Expression::Quote(value) => match &value.template {
-                QuoteTemplate::Expression(expression) => self.expression(expression),
-                QuoteTemplate::Item(item) => self.item(item),
-                QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
-                QuoteTemplate::Raw => {}
+            Expression::Quote(value) => {
+                match &value.template {
+                    QuoteTemplate::Expression(expression) => self.expression(expression),
+                    QuoteTemplate::Item(item) => self.item(item),
+                    QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
+                    QuoteTemplate::Raw => {}
+                }
             },
             Expression::Splice(_)
             | Expression::Name(_)
@@ -621,15 +626,18 @@ impl Collector<'_> {
                 self.expression(&value.index);
             }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
-            Expression::Quote(value) => match &value.template {
-                QuoteTemplate::Expression(expression) => self.expression(expression),
-                QuoteTemplate::Item(item) => self.item(item),
-                QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
-                QuoteTemplate::Raw => {}
+            Expression::Quote(value) => {
+                self.add_resolved(&value.syntax, value.kind.name(), false);
+                match &value.template {
+                    QuoteTemplate::Expression(expression) => self.expression(expression),
+                    QuoteTemplate::Item(item) => self.item(item),
+                    QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
+                    QuoteTemplate::Raw => {}
+                }
             },
             Expression::Name(value) => self.add_resolved(&value.syntax, &value.name, true),
-            Expression::Splice(_)
-            | Expression::String(_)
+            Expression::Splice(value) => self.add_resolved(&value.syntax, &value.name, true),
+            Expression::String(_)
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
@@ -656,7 +664,8 @@ impl Collector<'_> {
                 self.pattern(&value.argument);
             }
             Pattern::Wildcard(value) => self.ty(&value.ty),
-            Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+            Pattern::Splice(value) => self.add_resolved(&value.syntax, &value.name, true),
+            Pattern::StringLiteral(_) => {}
         }
     }
 
@@ -995,6 +1004,58 @@ mod tests {
                         .iter()
                         .any(|target| target.path.ends_with(target_path))
             }));
+        }
+    }
+
+    #[test]
+    fn indexes_macro_and_helper_body_items_and_helper_annotations() {
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let path = stdlib.join("std/core/flow.sta");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(stdlib)
+            .load_source_at(&path, &source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(&source).unwrap();
+        let entries = entries(&module, typed.resolved(), Some(&typed));
+
+        assert_target(&source, &entries, "otherwise", "otherwise");
+        assert_target(&source, &entries, "if_clauses", "if_clauses");
+        assert_target(&source, &entries, "body", "body");
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "IntoIterator"
+                && entry.targets.iter().any(|target| target.path.ends_with("iterator.sta"))
+        }), "{entries:?}");
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "Expr"
+                && entry.targets.iter().any(|target| target.path.ends_with("syntax.sta"))
+        }), "{entries:?}");
+    }
+
+    #[test]
+    fn indexes_quote_and_parse_quote_keywords() {
+        let source = concat!(
+            "use std.syntax.(quote, parse_quote, Expr, Syntax)\n",
+            "macro raw: Expr -> Syntax = value: Expr => quote { $value }\n",
+            "macro parsed: Expr -> Expr = value: Expr => parse_quote { $value }\n",
+        );
+        let path = std::env::temp_dir().join("staple-definition-quote-keywords.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, typed.resolved(), Some(&typed));
+
+        for keyword in ["quote", "parse_quote"] {
+            assert!(entries.iter().any(|entry| {
+                &source[entry.range.clone()] == keyword
+                    && entry.targets.iter().any(|target| target.path.ends_with("syntax.sta"))
+            }), "missing definition for {keyword}: {entries:?}");
         }
     }
 

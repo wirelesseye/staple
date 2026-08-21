@@ -554,6 +554,15 @@ impl Collector<'_> {
                 CompletionItemKind::MODULE,
                 Some(format!("module {name}")),
             ),
+            DefinitionId::CompileTime(syntax) => {
+                let info = resolved.compile_time_binding_for(syntax)?;
+                let kind = match info.kind {
+                    CompileTimeBindingKind::Helper => CompletionItemKind::FUNCTION,
+                    CompileTimeBindingKind::Builtin => CompletionItemKind::CONSTRUCTOR,
+                    _ => CompletionItemKind::VARIABLE,
+                };
+                (Namespace::Value, kind, info.type_display.clone())
+            }
         };
         Some(Candidate {
             available_from,

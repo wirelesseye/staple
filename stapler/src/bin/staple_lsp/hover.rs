@@ -436,6 +436,9 @@ impl Collector<'_> {
                 )
             }),
             DefinitionId::Macro(id) => resolved.macro_for(id).map(macro_signature),
+            DefinitionId::CompileTime(syntax) => resolved
+                .compile_time_binding_for(syntax)
+                .map(compile_time_signature),
             DefinitionId::TypeParameter(_) | DefinitionId::Module(_) => None,
         }
     }
@@ -1378,6 +1381,11 @@ mod tests {
         assert!(signatures.iter().any(|entry| entry.0 == "otherwise" && entry.1.starts_with("let otherwise:")), "{signatures:?}");
         assert!(signatures.iter().any(|entry| entry.0 == "body" && entry.1.starts_with("body: Braced")), "{signatures:?}");
         assert!(signatures.iter().any(|entry| entry.0 == "if_clauses" && entry.1.starts_with("def if_clauses:")), "{signatures:?}");
+        assert!(entries.iter().any(|entry| {
+            entry.range.start < 801
+                && &source[entry.range.clone()] == "Expr"
+                && entry.signature.starts_with("type alias Expr")
+        }), "{signatures:?}");
     }
 
     #[test]

@@ -426,7 +426,7 @@ fn quote_contains_raw_splice(contents: &Syntax, environment: &Environment) -> bo
 pub(crate) struct MacroAnalysis {
     pub definitions: HashMap<SyntaxId, ResolvedMacro>,
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
-    pub helpers: Vec<Binding>,
+    pub helpers: Vec<(ModuleId, Binding)>,
 }
 
 pub(crate) fn expand_program(
@@ -940,9 +940,9 @@ impl MacroExpander {
             helpers: self
                 .scopes
                 .iter()
-                .flat_map(|scope| scope.helpers.values().map(|helper| &helper.binding))
-                .filter(|binding| binding_is_compile_time_helper(binding))
-                .cloned()
+                .flat_map(|scope| scope.helpers.values())
+                .filter(|helper| binding_is_compile_time_helper(&helper.binding))
+                .map(|helper| (helper.module, helper.binding.clone()))
                 .collect(),
         }
     }
