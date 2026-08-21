@@ -218,6 +218,25 @@ pub struct ResolvedMacro {
     pub signature: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompileTimeBindingKind {
+    MacroParameter,
+    Helper,
+    HelperParameter,
+    Local,
+    Builtin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompileTimeBindingInfo {
+    pub declaration: SyntaxId,
+    pub name: String,
+    pub type_display: Option<String>,
+    pub kind: CompileTimeBindingKind,
+    pub mutable: bool,
+    pub declaration_prefix: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum IntrinsicFunction {
     ToString {
@@ -311,6 +330,7 @@ pub struct ResolvedModule {
     trait_modules: HashMap<TraitId, ModuleId>,
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
+    compile_time_bindings: HashMap<SyntaxId, CompileTimeBindingInfo>,
 }
 
 impl ResolvedModule {
@@ -336,6 +356,13 @@ impl ResolvedModule {
 
     pub fn macro_invocation_for(&self, syntax_id: SyntaxId) -> Option<&ResolvedMacro> {
         self.macro_invocations.get(&syntax_id)
+    }
+
+    pub fn compile_time_binding_for(
+        &self,
+        syntax_id: SyntaxId,
+    ) -> Option<&CompileTimeBindingInfo> {
+        self.compile_time_bindings.get(&syntax_id)
     }
 
     pub fn macro_for(&self, id: MacroId) -> Option<&ResolvedMacro> {
@@ -915,6 +942,8 @@ impl NameResolver {
         if let Some(syntax) = self.standard_library_syntax {
             standard_traits.extend(self.interfaces[syntax.0].traits.clone());
         }
+        let compile_time_bindings =
+            analyze_compile_time_bindings(&program, &macro_analysis.helpers);
         let mut resolved = ResolvedModule {
             program,
             functions: self.functions,
@@ -957,6 +986,7 @@ impl NameResolver {
             symbol_declarations: self.symbol_declarations,
             import_definitions: self.import_definitions,
             visible_module_definitions: self.visible_module_definitions,
+            compile_time_bindings,
         };
         let analysis = InitializationAnalyzer::new(&resolved).analyze();
         if !analysis.diagnostics.is_empty() {
@@ -3716,6 +3746,215 @@ struct InitializationAnalysis {
     checked_symbols: HashSet<SymbolId>,
     checked_reads: HashSet<SyntaxId>,
     diagnostics: Vec<Diagnostic>,
+}
+
+#[derive(Clone)]
+struct CompileTimeScope {
+    frames: Vec<HashMap<String, CompileTimeBindingInfo>>,
+    occurrences: HashMap<SyntaxId, CompileTimeBindingInfo>,
+}
+
+impl CompileTimeScope {
+    fn new(globals: HashMap<String, CompileTimeBindingInfo>) -> Self {
+        Self { frames: vec![globals], occurrences: HashMap::new() }
+    }
+
+    fn declare(&mut self, syntax: SyntaxId, name: String, type_display: Option<String>, kind: CompileTimeBindingKind, mutable: bool, declaration_prefix: Option<String>) {
+        let info = CompileTimeBindingInfo { declaration: syntax, name: name.clone(), type_display, kind, mutable, declaration_prefix };
+        self.frames.last_mut().unwrap().insert(name, info.clone());
+        self.occurrences.insert(syntax, info);
+    }
+
+    fn reference(&mut self, syntax: SyntaxId, name: &str) {
+        if let Some(info) = self.frames.iter().rev().find_map(|frame| frame.get(name)).cloned() {
+            self.occurrences.insert(syntax, info);
+        }
+    }
+
+    fn lookup_type(&self, name: &str) -> Option<String> {
+        self.frames.iter().rev().find_map(|frame| frame.get(name)).and_then(|info| info.type_display.clone())
+    }
+}
+
+fn analyze_compile_time_bindings(program: &Program, helpers: &[Binding]) -> HashMap<SyntaxId, CompileTimeBindingInfo> {
+    let mut globals = HashMap::new();
+    for helper in helpers {
+        let type_display = helper.annotation.as_ref().map(ToString::to_string);
+        globals.insert(helper.name.clone(), CompileTimeBindingInfo {
+            declaration: helper.syntax.id,
+            name: helper.name.clone(),
+            type_display,
+            kind: CompileTimeBindingKind::Helper,
+            mutable: false,
+            declaration_prefix: Some("def".to_owned()),
+        });
+    }
+    let mut result = HashMap::new();
+    for helper in helpers {
+        let mut scope = CompileTimeScope::new(globals.clone());
+        scope.reference(helper.syntax.id, &helper.name);
+        if let Some(value) = &helper.value {
+            analyze_compile_expression(value, &mut scope, CompileTimeBindingKind::HelperParameter, false);
+        }
+        result.extend(scope.occurrences);
+    }
+    for source_module in program.modules() {
+        for item in &source_module.syntax.items {
+            if let Item::MacroDeclaration(declaration) = item
+                && let Some(value) = &declaration.value
+            {
+                let mut scope = CompileTimeScope::new(globals.clone());
+                analyze_compile_expression(value, &mut scope, CompileTimeBindingKind::MacroParameter, false);
+                result.extend(scope.occurrences);
+            }
+        }
+    }
+    result
+}
+
+fn compile_pattern_type(pattern: &Pattern, fallback: Option<String>) -> Option<String> {
+    crate::macro_expand::pattern_meta_type(pattern)
+        .map(|ty| crate::macro_expand::format_meta_type(&ty))
+        .or(fallback)
+}
+
+fn compile_time_builtin_signature(name: &str) -> Option<&str> {
+    match name {
+        "Ident" => Some("String -> Ident String"),
+        "CallExpr" => Some("(callee: Expr, argument: Expr) -> CallExpr"),
+        "Sequence" => Some("Element => Element -> Sequence Element"),
+        "Separated" => Some("Element => Separator => (separator: Separator, elements: Sequence Element, trailing: Bool) -> Separated Element Separator"),
+        "Parenthesized" => Some("Contents => Contents -> Parenthesized Contents"),
+        "Bracketed" => Some("Contents => Contents -> Bracketed Contents"),
+        "Braced" => Some("Contents => Contents -> Braced Contents"),
+        "Syntax" | "SyntaxNode" | "Expr" | "UnstructuredExpr" | "Type" | "Pattern"
+        | "Item" | "Visibility" | "MacroCallVisibility" | "Comma" | "Equals"
+        | "FatArrow" => Some(name),
+        _ => None,
+    }
+}
+
+fn declare_compile_pattern(pattern: &Pattern, scope: &mut CompileTimeScope, kind: CompileTimeBindingKind, fallback: Option<String>) {
+    match pattern {
+        Pattern::At(at) => {
+            let ty = compile_pattern_type(pattern, fallback.clone());
+            scope.declare(at.binding.syntax.id, at.binding.name.clone(), ty, kind, at.binding.mutable || at.binding.reassignable, None);
+            declare_compile_pattern(&at.pattern, scope, CompileTimeBindingKind::Local, fallback);
+        }
+        Pattern::Binding(binding) => {
+            let ty = compile_pattern_type(pattern, fallback);
+            scope.declare(binding.syntax.id, binding.name.clone(), ty, kind, binding.mutable || binding.reassignable, None);
+        }
+        Pattern::Product(product) => for element in &product.elements { declare_compile_pattern(element, scope, kind, None); },
+        Pattern::Nominal(nominal) => declare_compile_pattern(&nominal.argument, scope, kind, None),
+        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+    }
+}
+
+fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) -> Option<String> {
+    match expression {
+        Expression::Name(name) => scope.lookup_type(&name.name).or_else(|| matches!(name.name.as_str(), "Syntax" | "SyntaxNode" | "Expr" | "Ident" | "CallExpr" | "UnstructuredExpr" | "Type" | "Pattern" | "Item" | "Visibility" | "MacroCallVisibility" | "Comma" | "Equals" | "FatArrow").then(|| name.name.clone())),
+        Expression::Quote(quote) => Some(match quote.kind { crate::QuoteKind::Quote => "Syntax".to_owned(), crate::QuoteKind::ParseQuote => "SyntaxNode".to_owned() }),
+        Expression::String(_) => Some("String".to_owned()),
+        Expression::Integer(_) => Some("Integer".to_owned()),
+        Expression::Float(_) => Some("Float".to_owned()),
+        Expression::Satisfies(value) => Some(value.ty.to_string()),
+        Expression::Product(product) => Some(format!("({})", product.elements.iter().map(|element| compile_expression_type(&element.value, scope).unwrap_or_else(|| "?".to_owned())).collect::<Vec<_>>().join(", "))),
+        Expression::Call(call) => {
+            let callee = compile_expression_type(&call.callee, scope)?;
+            callee.split_once(" -> ").map(|(_, result)| result.to_owned())
+        }
+        Expression::Block(block) => block.items.last().and_then(|item| match item { Item::Expression(value) => compile_expression_type(value, scope), Item::Return(value) => compile_expression_type(&value.value, scope), _ => None }),
+        Expression::Match(value) => value.arms.first().and_then(|arm| compile_expression_type(&arm.body, scope)),
+        _ => None,
+    }
+}
+
+fn analyze_compile_expression(expression: &Expression, scope: &mut CompileTimeScope, parameter_kind: CompileTimeBindingKind, quoted: bool) {
+    match expression {
+        Expression::Function(function) => {
+            scope.frames.push(HashMap::new());
+            declare_compile_pattern(&function.pattern, scope, parameter_kind, None);
+            analyze_compile_expression(&function.body, scope, parameter_kind, quoted);
+            scope.frames.pop();
+        }
+        Expression::Match(value) => {
+            analyze_compile_expression(&value.subject, scope, parameter_kind, quoted);
+            let subject_type = compile_expression_type(&value.subject, scope);
+            for arm in &value.arms {
+                scope.frames.push(HashMap::new());
+                declare_compile_pattern(&arm.pattern, scope, CompileTimeBindingKind::Local, subject_type.clone());
+                analyze_compile_expression(&arm.body, scope, parameter_kind, quoted);
+                scope.frames.pop();
+            }
+        }
+        Expression::Block(block) => {
+            scope.frames.push(HashMap::new());
+            for item in &block.items { analyze_compile_item(item, scope, parameter_kind, quoted); }
+            scope.frames.pop();
+        }
+        Expression::Quote(quote) => match &quote.template {
+            crate::QuoteTemplate::Expression(value) => analyze_compile_expression(value, scope, parameter_kind, true),
+            crate::QuoteTemplate::Item(item) => analyze_compile_item(item, scope, parameter_kind, true),
+            crate::QuoteTemplate::Items(items) => for item in items { analyze_compile_item(item, scope, parameter_kind, true); },
+            crate::QuoteTemplate::Raw => {}
+        },
+        Expression::Splice(value) => scope.reference(value.syntax.id, &value.name),
+        Expression::Name(value) if !quoted => {
+            scope.reference(value.syntax.id, &value.name);
+            if !scope.occurrences.contains_key(&value.syntax.id)
+                && compile_time_builtin_signature(&value.name).is_some()
+            {
+                scope.occurrences.insert(value.syntax.id, CompileTimeBindingInfo {
+                    declaration: value.syntax.id,
+                    name: value.name.clone(),
+                    type_display: compile_time_builtin_signature(&value.name).map(str::to_owned),
+                    kind: CompileTimeBindingKind::Builtin,
+                    mutable: false,
+                    declaration_prefix: None,
+                });
+            }
+        }
+        Expression::Satisfies(value) => analyze_compile_expression(&value.value, scope, parameter_kind, quoted),
+        Expression::Product(value) => for element in &value.elements { analyze_compile_expression(&element.value, scope, parameter_kind, quoted); },
+        Expression::Call(value) => { analyze_compile_expression(&value.callee, scope, parameter_kind, quoted); analyze_compile_expression(&value.argument, scope, parameter_kind, quoted); }
+        Expression::Access(value) => analyze_compile_expression(&value.value, scope, parameter_kind, quoted),
+        Expression::Index(value) => { analyze_compile_expression(&value.value, scope, parameter_kind, quoted); analyze_compile_expression(&value.index, scope, parameter_kind, quoted); }
+        Expression::Loop(value) => for item in &value.body.items { analyze_compile_item(item, scope, parameter_kind, quoted); },
+        Expression::With(value) => { analyze_compile_expression(&value.value, scope, parameter_kind, quoted); for item in &value.body.items { analyze_compile_item(item, scope, parameter_kind, quoted); } }
+        _ => {}
+    }
+}
+
+fn analyze_compile_item(item: &Item, scope: &mut CompileTimeScope, parameter_kind: CompileTimeBindingKind, quoted: bool) {
+    if quoted {
+        match item {
+            Item::Expression(value) => analyze_compile_expression(value, scope, parameter_kind, true),
+            Item::Binding(binding) => if let Some(value) = &binding.value { analyze_compile_expression(value, scope, parameter_kind, true); },
+            Item::PatternBinding(binding) => analyze_compile_expression(&binding.value, scope, parameter_kind, true),
+            _ => {}
+        }
+        return;
+    }
+    match item {
+        Item::Binding(binding) => {
+            if let Some(value) = &binding.value { analyze_compile_expression(value, scope, parameter_kind, false); }
+            let ty = binding.annotation.as_ref().map(ToString::to_string).or_else(|| binding.value.as_ref().and_then(|value| compile_expression_type(value, scope)));
+            let mut prefix = binding.keyword().to_owned();
+            if binding.mutable { prefix.push_str(" mut"); }
+            scope.declare(binding.syntax.id, binding.name.clone(), ty, CompileTimeBindingKind::Local, binding.mutable || binding.reassignable, Some(prefix));
+        }
+        Item::PatternBinding(binding) => {
+            analyze_compile_expression(&binding.value, scope, parameter_kind, false);
+            let ty = compile_expression_type(&binding.value, scope);
+            declare_compile_pattern(&binding.pattern, scope, CompileTimeBindingKind::Local, ty);
+        }
+        Item::Assignment(value) => { analyze_compile_expression(&value.target, scope, parameter_kind, false); analyze_compile_expression(&value.value, scope, parameter_kind, false); }
+        Item::Expression(value) => analyze_compile_expression(value, scope, parameter_kind, false),
+        Item::Return(value) => analyze_compile_expression(&value.value, scope, parameter_kind, false),
+        Item::Break(value) => if let Some(value) = &value.value { analyze_compile_expression(value, scope, parameter_kind, false); },
+        _ => {}
+    }
 }
 
 struct InitializationAnalyzer<'a> {

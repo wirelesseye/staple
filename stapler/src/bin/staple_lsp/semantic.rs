@@ -504,9 +504,15 @@ impl<'a> Classifier<'a> {
     }
 
     fn binding(&mut self, binding: &Binding, resolved: Option<&ResolvedModule>) {
-        let kind = resolved
+        let compile_time = resolved.and_then(|module| module.compile_time_binding_for(binding.syntax.id));
+        let kind = compile_time.map(|info| match info.kind {
+            CompileTimeBindingKind::Helper => FUNCTION,
+            CompileTimeBindingKind::MacroParameter | CompileTimeBindingKind::HelperParameter => PARAMETER,
+                CompileTimeBindingKind::Local => VARIABLE,
+                CompileTimeBindingKind::Builtin => TYPE,
+        }).or_else(|| resolved
             .and_then(|module| module.symbol_for(binding.syntax.id))
-            .map(|symbol| self.value_symbol_kind(symbol))
+            .map(|symbol| self.value_symbol_kind(symbol)))
             .unwrap_or(VARIABLE);
         let modifiers = DECLARATION
             | DEFINITION
@@ -651,13 +657,31 @@ impl<'a> Classifier<'a> {
                     QuoteTemplate::Raw => {}
                 }
             }
-            Expression::Splice(value) => self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1),
+            Expression::Splice(value) => {
+                let kind = resolved.and_then(|module| module.compile_time_binding_for(value.syntax.id)).map(|info| match info.kind {
+                    CompileTimeBindingKind::MacroParameter | CompileTimeBindingKind::HelperParameter => PARAMETER,
+                    CompileTimeBindingKind::Helper => FUNCTION,
+                    CompileTimeBindingKind::Local => VARIABLE,
+                    CompileTimeBindingKind::Builtin => TYPE,
+                }).unwrap_or(VARIABLE);
+                self.mark_last(&value.syntax, &value.name, kind, READONLY, 1);
+            }
             Expression::Name(value) => {
                 if resolved
                     .and_then(|module| module.macro_invocation_for(value.syntax.id))
                     .is_some()
                 {
                     self.mark_last(&value.syntax, &value.name, MACRO, READONLY, 2);
+                    return;
+                }
+                if let Some(info) = resolved.and_then(|module| module.compile_time_binding_for(value.syntax.id)) {
+                    let kind = match info.kind {
+                        CompileTimeBindingKind::MacroParameter | CompileTimeBindingKind::HelperParameter => PARAMETER,
+                        CompileTimeBindingKind::Helper => FUNCTION,
+                        CompileTimeBindingKind::Local => VARIABLE,
+                        CompileTimeBindingKind::Builtin => TYPE,
+                    };
+                    self.mark_last(&value.syntax, &value.name, kind, modifiers | if info.mutable { 0 } else { READONLY }, 2);
                     return;
                 }
                 let kind = resolved
@@ -712,6 +736,12 @@ impl<'a> Classifier<'a> {
                     self.mark_last(&value.syntax, &value.name, TYPE, READONLY, 1);
                     return;
                 }
+                let kind = resolved.and_then(|module| module.compile_time_binding_for(value.syntax.id)).map(|info| match info.kind {
+                    CompileTimeBindingKind::MacroParameter | CompileTimeBindingKind::HelperParameter => PARAMETER,
+                    CompileTimeBindingKind::Helper => FUNCTION,
+                        CompileTimeBindingKind::Local => VARIABLE,
+                        CompileTimeBindingKind::Builtin => TYPE,
+                }).unwrap_or(kind);
                 self.mark_last(
                     &value.syntax,
                     &value.name,
@@ -1384,6 +1414,28 @@ mod tests {
         }
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn classifies_macro_meta_locals_parameters_and_helpers() {
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let path = stdlib.join("std/core/flow.sta");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(stdlib)
+            .load_source_at(&path, &source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(&source).unwrap();
+        let labels = labels(
+            &source,
+            &tokens(&source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
+
+        assert!(labels.iter().filter(|token| **token == ("body", PARAMETER)).count() >= 2, "{labels:?}");
+        assert!(labels.iter().filter(|token| **token == ("otherwise", VARIABLE)).count() >= 2, "{labels:?}");
+        assert!(labels.iter().any(|token| *token == ("if_clauses", FUNCTION)), "{labels:?}");
     }
 
     fn labels<'a>(source: &'a str, tokens: &[SemanticToken]) -> Vec<(&'a str, u32)> {

@@ -71,7 +71,7 @@ fn split_modifier_chain_result(result: ModifierChainResult) -> (Option<Item>, Ve
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum MetaType {
+pub(crate) enum MetaType {
     Syntax,
     SyntaxNode,
     Expr,
@@ -93,14 +93,14 @@ enum MetaType {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum DelimiterKind {
+pub(crate) enum DelimiterKind {
     Parenthesized,
     Bracketed,
     Braced,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum DelimitedMetaContents {
+pub(crate) enum DelimitedMetaContents {
     Fixed(Vec<MetaType>),
     Sequence(Box<MetaType>),
     Separated {
@@ -426,6 +426,7 @@ fn quote_contains_raw_splice(contents: &Syntax, environment: &Environment) -> bo
 pub(crate) struct MacroAnalysis {
     pub definitions: HashMap<SyntaxId, ResolvedMacro>,
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
+    pub helpers: Vec<Binding>,
 }
 
 pub(crate) fn expand_program(
@@ -936,6 +937,13 @@ impl MacroExpander {
                 .map(|definition| (definition.declaration.syntax.id, resolved_macro(definition)))
                 .collect(),
             invocations: self.invocations.clone(),
+            helpers: self
+                .scopes
+                .iter()
+                .flat_map(|scope| scope.helpers.values().map(|helper| &helper.binding))
+                .filter(|binding| binding_is_compile_time_helper(binding))
+                .cloned()
+                .collect(),
         }
     }
 
@@ -5398,7 +5406,7 @@ fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
     }
 }
 
-fn format_meta_type(meta: &MetaType) -> String {
+pub(crate) fn format_meta_type(meta: &MetaType) -> String {
     match meta {
         MetaType::Syntax => "Syntax".to_owned(),
         MetaType::SyntaxNode => "SyntaxNode".to_owned(),
@@ -5523,7 +5531,7 @@ fn macro_body_parameter_types(expression: &Expression) -> Vec<Option<MetaType>> 
     parameters
 }
 
-fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
+pub(crate) fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
     match pattern {
         Pattern::At(at) => match &at.binding.ty {
             Type::Inferred(_) => pattern_meta_type(&at.pattern),

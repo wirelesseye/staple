@@ -579,6 +579,17 @@ impl Collector<'_> {
     }
 
     fn binding(&mut self, binding: &Binding) {
+        if let Some(info) = self
+            .typed
+            .resolved()
+            .compile_time_binding_for(binding.syntax.id)
+        {
+            self.named(
+                &binding.syntax,
+                &binding.name,
+                compile_time_signature(info),
+            );
+        }
         let value_type = self
             .typed
             .symbol_for(binding.syntax.id)
@@ -627,6 +638,14 @@ impl Collector<'_> {
                         self.named_last(&access.syntax, name, macro_signature(info));
                     }
                 }
+                _ => {}
+            }
+        }
+        if let Some(info) = self.typed.resolved().compile_time_binding_for(expression.syntax().id) {
+            let signature = compile_time_signature(info);
+            match expression {
+                Expression::Name(name) => self.named(&name.syntax, &name.name, signature),
+                Expression::Splice(splice) => self.named(&splice.syntax, &splice.name, signature),
                 _ => {}
             }
         }
@@ -703,12 +722,19 @@ impl Collector<'_> {
                 self.expression(&index.index);
             }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
-            Expression::Quote(quote) => match &quote.template {
-                QuoteTemplate::Expression(expression) => self.expression(expression),
-                QuoteTemplate::Item(item) => self.item(item),
-                QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
-                QuoteTemplate::Raw => {}
-            },
+            Expression::Quote(quote) => {
+                let signature = match quote.kind {
+                    QuoteKind::Quote => "macro quote: Braced Syntax -> Syntax",
+                    QuoteKind::ParseQuote => "macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T",
+                };
+                self.named(&quote.syntax, quote.kind.name(), signature.to_owned());
+                match &quote.template {
+                    QuoteTemplate::Expression(expression) => self.expression(expression),
+                    QuoteTemplate::Item(item) => self.item(item),
+                    QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
+                    QuoteTemplate::Raw => {}
+                }
+            }
             Expression::Splice(_)
             | Expression::Name(_)
             | Expression::String(_)
@@ -719,6 +745,14 @@ impl Collector<'_> {
     }
 
     fn pattern(&mut self, pattern: &Pattern) {
+        if let Some(info) = self.typed.resolved().compile_time_binding_for(pattern.syntax().id) {
+            let signature = compile_time_signature(info);
+            match pattern {
+                Pattern::Binding(binding) => self.named(&binding.syntax, &binding.name, signature),
+                Pattern::Splice(splice) => self.named(&splice.syntax, &splice.name, signature),
+                _ => {}
+            }
+        }
         if let Some(value_type) = self.typed.type_of_pattern(pattern.syntax().id) {
             let value_type = self.display_type(value_type);
             self.syntax(pattern.syntax(), value_type.clone());
@@ -861,6 +895,20 @@ impl Collector<'_> {
                 signature,
             });
         }
+    }
+}
+
+fn compile_time_signature(info: &CompileTimeBindingInfo) -> String {
+    if info.kind == CompileTimeBindingKind::Builtin {
+        return info.type_display.clone().unwrap_or_else(|| info.name.clone());
+    }
+    let name = info.declaration_prefix.as_ref().map_or_else(
+        || info.name.clone(),
+        |prefix| format!("{prefix} {}", info.name),
+    );
+    match &info.type_display {
+        Some(ty) => format!("{name}: {ty}"),
+        None => name,
     }
 }
 
@@ -1310,5 +1358,46 @@ mod tests {
         }));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn describes_macro_meta_locals_and_helpers() {
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let path = stdlib.join("std/core/flow.sta");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(stdlib)
+            .load_source_at(&path, &source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(&source).unwrap();
+        let entries = entries(&module, &typed);
+        let signatures = entries.iter().map(|entry| (&source[entry.range.clone()], entry.signature.as_str())).collect::<Vec<_>>();
+
+        assert!(signatures.iter().any(|entry| entry.0 == "otherwise" && entry.1.starts_with("let otherwise:")), "{signatures:?}");
+        assert!(signatures.iter().any(|entry| entry.0 == "body" && entry.1.starts_with("body: Braced")), "{signatures:?}");
+        assert!(signatures.iter().any(|entry| entry.0 == "if_clauses" && entry.1.starts_with("def if_clauses:")), "{signatures:?}");
+    }
+
+    #[test]
+    fn formats_compile_time_lets_and_syntax_constructors_like_source_declarations() {
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/macros.sta");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(stdlib)
+            .load_source_at(&path, &source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(&source).unwrap();
+        let entries = entries(&module, &typed);
+        let signatures = entries.iter().map(|entry| (&source[entry.range.clone()], entry.signature.as_str())).collect::<Vec<_>>();
+
+        assert!(signatures.contains(&("original", "let original: CallExpr")), "{signatures:?}");
+        assert!(signatures.contains(&("changed", "let mut changed: CallExpr")), "{signatures:?}");
+        assert!(signatures.contains(&("CallExpr", "(callee: Expr, argument: Expr) -> CallExpr")), "{signatures:?}");
+        assert!(!signatures.iter().any(|entry| entry.1.contains("<compile-time") || entry.1.contains("<macro parameter>") || entry.1.contains("<syntax category>")));
     }
 }
