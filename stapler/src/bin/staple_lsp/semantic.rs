@@ -309,6 +309,12 @@ impl<'a> Classifier<'a> {
                     DECLARATION | DEFINITION | READONLY,
                     1,
                 );
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter, resolved);
+                }
+                for bound in &value.trait_bounds {
+                    self.trait_bound(bound, resolved);
+                }
                 if let Some(annotation) = &value.annotation {
                     self.ty(annotation, resolved);
                 }
@@ -1181,6 +1187,43 @@ mod tests {
         assert!(labels.contains(&("imported", MACRO)), "labels: {labels:?}");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn classifies_macro_declaration_generics() {
+        let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let path = stdlib_root.join("std").join("syntax.sta");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(stdlib_root)
+            .load_source_at(&path, &source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(&source).unwrap();
+        let labels = labels(
+            &source,
+            &tokens(&source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
+
+        assert!(labels.contains(&("parse_quote", MACRO)), "labels: {labels:?}");
+        assert!(labels.contains(&("quote", MACRO)), "labels: {labels:?}");
+        assert!(
+            labels
+                .iter()
+                .filter(|token| **token == ("T", TYPE_PARAMETER))
+                .count()
+                >= 3,
+            "labels: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .filter(|token| **token == ("ParseQuoteResult", INTERFACE))
+                .count()
+                >= 2,
+            "labels: {labels:?}"
+        );
     }
 
     #[test]

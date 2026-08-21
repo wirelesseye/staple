@@ -293,6 +293,12 @@ impl Collector<'_> {
                         macro_signature(info),
                     );
                 }
+                for parameter in &declaration.type_parameters {
+                    self.type_parameter(parameter);
+                }
+                for bound in &declaration.trait_bounds {
+                    self.trait_bound(bound);
+                }
                 if let Some(annotation) = &declaration.annotation {
                     self.ty(annotation);
                 }
@@ -1003,6 +1009,50 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn indexes_macro_declaration_generics() {
+        let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let path = stdlib_root.join("std").join("syntax.sta");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(stdlib_root)
+            .load_source_at(&path, &source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(&source).unwrap();
+        let entries = entries(&module, &typed);
+        let signatures = entries
+            .iter()
+            .map(|entry| (&source[entry.range.clone()], entry.signature.as_str()))
+            .collect::<Vec<_>>();
+
+        assert!(
+            signatures
+                .iter()
+                .filter(|signature| **signature == ("T", "<type parameter> T"))
+                .count()
+                >= 3,
+            "signatures: {signatures:?}"
+        );
+        assert!(
+            signatures
+                .iter()
+                .filter(|(text, _)| *text == "Braced")
+                .count()
+                >= 4,
+            "signatures: {signatures:?}"
+        );
+        assert!(
+            signatures
+                .iter()
+                .filter(|(text, _)| *text == "Syntax")
+                .count()
+                >= 6,
+            "signatures: {signatures:?}"
+        );
     }
 
     #[test]

@@ -1,9 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, Module,
-    ModuleId, Pattern, PatternBindingKind, Program, Span, Submodule, SyntaxId, Type,
-    TypeDeclaration, TypeParameterPattern, UseDeclaration, UseKind, Visibility,
+    Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
+    MacroDeclaration, Module, ModuleId, Pattern, PatternBindingKind, Program, Span, Submodule,
+    SyntaxId, Type, TypeDeclaration, TypeParameterPattern, UseDeclaration, UseKind, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -2331,7 +2331,7 @@ impl NameResolver {
                 self.resolve_type_declaration_body(declaration);
             }
             Item::MacroDeclaration(declaration) => {
-                let _ = declaration;
+                self.resolve_macro_declaration(declaration);
             }
             Item::TraitDeclaration(declaration) => {
                 let Some(trait_id) = self.declared_traits[self.current_module.0]
@@ -2613,6 +2613,9 @@ impl NameResolver {
             Item::TypeDeclaration(declaration) => {
                 self.resolve_type_declaration_body(declaration);
             }
+            Item::MacroDeclaration(declaration) => {
+                self.resolve_macro_declaration(declaration);
+            }
             Item::UseDeclaration(_) => {}
             _ => {}
         }
@@ -2672,6 +2675,30 @@ impl NameResolver {
                     "`mut` and `var` bindings require an initializer",
                 ));
             }
+        }
+        self.pop_type_parameter_scope();
+    }
+
+    fn resolve_macro_declaration(&mut self, declaration: &MacroDeclaration) {
+        self.push_type_parameter_scope();
+        for parameter in &declaration.type_parameters {
+            self.declare_type_parameter_pattern(parameter);
+        }
+        if let Some(annotation) = &declaration.annotation {
+            self.resolve_type_lenient(annotation);
+        }
+        for bound in &declaration.trait_bounds {
+            if let Some(trait_id) = self.resolve_trait_name(&bound.trait_name) {
+                self.trait_references.insert(bound.syntax.id, trait_id);
+            }
+            for argument in &bound.arguments {
+                self.resolve_type_lenient(argument);
+            }
+        }
+        let mut current = declaration.value.as_ref();
+        while let Some(Expression::Function(function)) = current {
+            self.resolve_pattern_types_lenient(&function.pattern);
+            current = Some(function.body.as_ref());
         }
         self.pop_type_parameter_scope();
     }
@@ -3089,6 +3116,14 @@ impl NameResolver {
     }
 
     fn resolve_type(&mut self, ty: &Type) {
+        self.resolve_type_with(ty, true);
+    }
+
+    fn resolve_type_lenient(&mut self, ty: &Type) {
+        self.resolve_type_with(ty, false);
+    }
+
+    fn resolve_type_with(&mut self, ty: &Type, strict: bool) {
         match ty {
             Type::Named(named) => {
                 if named.namespace.is_none()
@@ -3141,7 +3176,7 @@ impl NameResolver {
                 };
                 if let Some(id) = resolved {
                     self.named_types.insert(named.syntax.id, id);
-                } else if named.name != "int" {
+                } else if strict && named.name != "int" {
                     let message =
                         unknown_item_message("type", &named.name, &self.private_glob_types);
                     self.diagnostics
@@ -3150,30 +3185,34 @@ impl NameResolver {
             }
             Type::Product(product) => {
                 for element in &product.elements {
-                    self.resolve_type(&element.ty);
+                    self.resolve_type_with(&element.ty, strict);
                 }
             }
             Type::Sum(sum) => {
                 for alternative in &sum.alternatives {
-                    self.resolve_type(alternative);
+                    self.resolve_type_with(alternative, strict);
                 }
             }
             Type::Function(function) => {
-                self.resolve_type(&function.parameter);
+                self.resolve_type_with(&function.parameter, strict);
                 for resource in &function.resources.resources {
-                    self.resolve_type(resource);
+                    self.resolve_type_with(resource, strict);
                 }
-                self.resolve_type(&function.result);
+                self.resolve_type_with(&function.result, strict);
             }
             Type::Application(application) => {
-                self.resolve_type(&application.callee);
-                self.resolve_type(&application.argument);
+                self.resolve_type_with(&application.callee, strict);
+                self.resolve_type_with(&application.argument, strict);
             }
-            Type::Repeated(repeated) => self.resolve_type(&repeated.element),
-            Type::Splice(splice) => self.diagnostics.push(Diagnostic::new(
-                splice.syntax.span.clone(),
-                "type splices are only available during macro expansion",
-            )),
+            Type::Repeated(repeated) => self.resolve_type_with(&repeated.element, strict),
+            Type::Splice(splice) => {
+                if strict {
+                    self.diagnostics.push(Diagnostic::new(
+                        splice.syntax.span.clone(),
+                        "type splices are only available during macro expansion",
+                    ));
+                }
+            }
             Type::Inferred(_) | Type::StringLiteral(_) => {}
         }
     }
@@ -3230,8 +3269,16 @@ impl NameResolver {
     }
 
     fn resolve_pattern_types(&mut self, pattern: &Pattern) {
+        self.resolve_pattern_types_with(pattern, true);
+    }
+
+    fn resolve_pattern_types_lenient(&mut self, pattern: &Pattern) {
+        self.resolve_pattern_types_with(pattern, false);
+    }
+
+    fn resolve_pattern_types_with(&mut self, pattern: &Pattern, strict: bool) {
         match pattern {
-            Pattern::Wildcard(wildcard) => self.resolve_type(&wildcard.ty),
+            Pattern::Wildcard(wildcard) => self.resolve_type_with(&wildcard.ty, strict),
             Pattern::StringLiteral(_) => {}
             Pattern::Binding(binding) => {
                 let resolution_name = binding.resolution_name.as_deref().unwrap_or(&binding.name);
@@ -3259,30 +3306,37 @@ impl NameResolver {
                         self.reassignable_symbols.remove(&pattern_symbol);
                     }
                 } else {
-                    self.resolve_type(&binding.ty);
+                    self.resolve_type_with(&binding.ty, strict);
                 }
             }
             Pattern::At(at) => {
-                self.resolve_type(&at.binding.ty);
-                self.resolve_pattern_types(&at.pattern);
+                self.resolve_type_with(&at.binding.ty, strict);
+                self.resolve_pattern_types_with(&at.pattern, strict);
             }
             Pattern::Product(product) => {
                 for element in &product.elements {
-                    self.resolve_pattern_types(element);
+                    self.resolve_pattern_types_with(element, strict);
                 }
             }
             Pattern::Nominal(pattern) => {
-                self.resolve_type(&Type::Named(crate::NamedType {
-                    syntax: pattern.syntax.clone(),
-                    namespace: pattern.namespace.clone(),
-                    name: pattern.name.clone(),
-                }));
-                self.resolve_pattern_types(&pattern.argument);
+                self.resolve_type_with(
+                    &Type::Named(crate::NamedType {
+                        syntax: pattern.syntax.clone(),
+                        namespace: pattern.namespace.clone(),
+                        name: pattern.name.clone(),
+                    }),
+                    strict,
+                );
+                self.resolve_pattern_types_with(&pattern.argument, strict);
             }
-            Pattern::Splice(splice) => self.diagnostics.push(Diagnostic::new(
-                splice.syntax.span.clone(),
-                "pattern splices are only available during macro expansion",
-            )),
+            Pattern::Splice(splice) => {
+                if strict {
+                    self.diagnostics.push(Diagnostic::new(
+                        splice.syntax.span.clone(),
+                        "pattern splices are only available during macro expansion",
+                    ));
+                }
+            }
         }
     }
 

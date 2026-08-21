@@ -376,6 +376,12 @@ impl Collector<'_> {
                 }
             }
             Item::MacroDeclaration(value) => {
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter);
+                }
+                for bound in &value.trait_bounds {
+                    self.trait_bound(bound);
+                }
                 if let Some(annotation) = &value.annotation {
                     self.ty(annotation);
                 }
