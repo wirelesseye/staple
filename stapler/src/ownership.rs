@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    Diagnostic, Expression, FunctionId, Item, Pattern, ResolvedFunction, Statement, SymbolId,
+    Diagnostic, Expression, FunctionId, Item, Pattern, ResolvedFunction, SymbolId,
     Syntax, SyntaxId, TypedModule,
 };
 
@@ -71,11 +71,8 @@ impl<'a> OwnershipChecker<'a> {
     fn check_globals(&mut self) {
         for source_module in self.module.resolved().program().modules() {
             for item in &source_module.syntax.items {
-                let Item::Statement(statement) = item else {
-                    continue;
-                };
-                match statement.as_ref() {
-                    Statement::Binding(binding) if binding.value.is_some() => {
+                match item {
+                    Item::Binding(binding) if binding.value.is_some() => {
                         let Some(symbol) = self.module.symbol_for(binding.syntax.id) else {
                             continue;
                         };
@@ -89,7 +86,7 @@ impl<'a> OwnershipChecker<'a> {
                             ));
                         }
                     }
-                    Statement::PatternBinding(binding) => {
+                    Item::PatternBinding(binding) => {
                         self.check_global_pattern(&binding.pattern);
                     }
                     _ => {}
@@ -219,7 +216,7 @@ impl<'a> OwnershipChecker<'a> {
                 self.check_expression(&Expression::Block(value.body.clone()), consume)
             }
             Expression::Block(value) => {
-                for statement in &value.statements {
+                for statement in &value.items {
                     if !self.check_statement(statement) {
                         return false;
                     }
@@ -285,9 +282,9 @@ impl<'a> OwnershipChecker<'a> {
         }
     }
 
-    fn check_statement(&mut self, statement: &Statement) -> bool {
+    fn check_statement(&mut self, statement: &Item) -> bool {
         match statement {
-            Statement::Binding(binding) => {
+            Item::Binding(binding) => {
                 if let Some(value) = &binding.value {
                     self.check_expression(value, true);
                 }
@@ -307,12 +304,12 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 true
             }
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 self.check_expression(&binding.value, true);
                 self.bind_pattern(&binding.pattern, false);
                 true
             }
-            Statement::Assignment(assignment) => {
+            Item::Assignment(assignment) => {
                 if let Expression::Index(index) = &assignment.target {
                     self.check_expression(&index.value, true);
                     self.check_expression(&index.index, true);
@@ -326,11 +323,11 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 true
             }
-            Statement::Return(statement) => {
+            Item::Return(statement) => {
                 self.check_expression(&statement.value, true);
                 false
             }
-            Statement::Break(statement) => {
+            Item::Break(statement) => {
                 if let Some(value) = &statement.value {
                     self.check_expression(value, true);
                 }
@@ -339,16 +336,17 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 false
             }
-            Statement::Continue(_) => {
+            Item::Continue(_) => {
                 if let Some(loop_) = self.loops.last_mut() {
                     loop_.back_edges.push(self.states.clone());
                 }
                 false
             }
-            Statement::Expression(expression) => self.check_expression(expression, true),
-            Statement::Submodule(_) => true,
-            Statement::TypeDeclaration(_) => true,
-            Statement::UseDeclaration(_) => true,
+            Item::Expression(expression) => self.check_expression(expression, true),
+            Item::Submodule(_) => true,
+            Item::TypeDeclaration(_) => true,
+            Item::UseDeclaration(_) => true,
+            _ => true,
         }
     }
 

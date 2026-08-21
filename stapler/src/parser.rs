@@ -341,9 +341,7 @@ impl Grammar {
                 .parse_trait_implementation(item_start)
                 .map(Item::TraitImplementation),
             Some(TokenKind::Impl) => Err(self.error("trait implementations cannot be public")),
-            _ => self
-                .parse_statement_with_visibility(visibility, Some(item_start))
-                .map(|statement| Item::Statement(Box::new(statement))),
+            _ => self.parse_statement_with_visibility(visibility, Some(item_start)),
         };
         self.newline_terminates_expression = previous;
         item
@@ -665,8 +663,23 @@ impl Grammar {
         })
     }
 
-    /// Parses a private statement in a block expression.
-    fn parse_statement(&mut self) -> Result<Statement, ParseError> {
+    /// Parses one of the item forms supported in a block expression.
+    fn parse_block_item(&mut self) -> Result<Item, ParseError> {
+        if self.at(TokenKind::Pub) {
+            return Err(self.error("public items are not supported in block expressions"));
+        }
+        if matches!(
+            self.peek(),
+            Some(
+                TokenKind::At
+                    | TokenKind::Extern
+                    | TokenKind::Macro
+                    | TokenKind::Trait
+                    | TokenKind::Impl
+            )
+        ) {
+            return Err(self.error("unsupported item in block expression"));
+        }
         self.parse_statement_with_visibility(Visibility::Private, None)
     }
 
@@ -675,7 +688,7 @@ impl Grammar {
         &mut self,
         visibility: Visibility,
         start: Option<usize>,
-    ) -> Result<Statement, ParseError> {
+    ) -> Result<Item, ParseError> {
         match self.peek() {
             Some(TokenKind::Let | TokenKind::Var) => self.parse_let_statement(visibility, start),
             Some(TokenKind::Return) if visibility == Visibility::Private => {
@@ -689,16 +702,16 @@ impl Grammar {
             }
             Some(TokenKind::Def) => self
                 .parse_binding(visibility, start)
-                .map(Statement::Binding),
+                .map(Item::Binding),
             Some(TokenKind::Mod) => self
                 .parse_submodule(visibility, start.unwrap_or(self.position))
-                .map(Statement::Submodule),
+                .map(Item::Submodule),
             Some(TokenKind::Type) => self
                 .parse_type_declaration(visibility, Visibility::Private, start.unwrap_or(self.position))
-                .map(Statement::TypeDeclaration),
+                .map(Item::TypeDeclaration),
             Some(TokenKind::Use) => self
                 .parse_use_declaration(visibility, start.unwrap_or(self.position))
-                .map(Statement::UseDeclaration),
+                .map(Item::UseDeclaration),
             _ if visibility == Visibility::Public => {
                 Err(self.error("`pub` must modify a declaration"))
             }
@@ -713,36 +726,36 @@ impl Grammar {
                     self.macro_punctuation_arguments = true;
                     let expression = self.parse_expression();
                     self.macro_punctuation_arguments = previous_macro_punctuation;
-                    return expression.map(Statement::Expression);
+                    return expression.map(Item::Expression);
                 }
                 if self.eat(TokenKind::Equals) {
                     let value = self.parse_expression()?;
-                    Ok(Statement::Assignment(Assignment {
+                    Ok(Item::Assignment(Assignment {
                         syntax: self.syntax(start),
                         target,
                         value,
                     }))
                 } else {
-                    Ok(Statement::Expression(target))
+                    Ok(Item::Expression(target))
                 }
             }
         }
     }
 
-    fn parse_return_statement(&mut self, start: Option<usize>) -> Result<Statement, ParseError> {
+    fn parse_return_statement(&mut self, start: Option<usize>) -> Result<Item, ParseError> {
         let start = start.unwrap_or(self.position);
         self.expect(TokenKind::Return, "expected `return`")?;
         if self.has_newline_before_next_token() {
             return Err(self.error("expected expression after `return`"));
         }
         let value = self.parse_expression()?;
-        Ok(Statement::Return(ReturnStatement {
+        Ok(Item::Return(ReturnStatement {
             syntax: self.syntax(start),
             value,
         }))
     }
 
-    fn parse_break_statement(&mut self, start: Option<usize>) -> Result<Statement, ParseError> {
+    fn parse_break_statement(&mut self, start: Option<usize>) -> Result<Item, ParseError> {
         let start = start.unwrap_or(self.position);
         self.expect(TokenKind::Break, "expected `break`")?;
         let value = if self.has_newline_before_next_token()
@@ -754,13 +767,13 @@ impl Grammar {
         } else {
             Some(self.parse_expression()?)
         };
-        Ok(Statement::Break(BreakStatement {
+        Ok(Item::Break(BreakStatement {
             syntax: self.syntax(start),
             value,
         }))
     }
 
-    fn parse_continue_statement(&mut self, start: Option<usize>) -> Result<Statement, ParseError> {
+    fn parse_continue_statement(&mut self, start: Option<usize>) -> Result<Item, ParseError> {
         let start = start.unwrap_or(self.position);
         self.expect(TokenKind::Continue, "expected `continue`")?;
         if !self.has_newline_before_next_token()
@@ -771,7 +784,7 @@ impl Grammar {
         {
             return Err(self.error("expected a statement boundary after `continue`"));
         }
-        Ok(Statement::Continue(ContinueStatement {
+        Ok(Item::Continue(ContinueStatement {
             syntax: self.syntax(start),
         }))
     }
@@ -780,7 +793,7 @@ impl Grammar {
         &mut self,
         visibility: Visibility,
         start: Option<usize>,
-    ) -> Result<Statement, ParseError> {
+    ) -> Result<Item, ParseError> {
         let checkpoint = self.position;
         let pattern_start = start.unwrap_or(self.position);
         let is_var = self.at(TokenKind::Var);
@@ -803,7 +816,7 @@ impl Grammar {
                 "expected `=` after destructuring pattern",
             )?;
             let value = self.parse_expression()?;
-            return Ok(Statement::PatternBinding(PatternBinding {
+            return Ok(Item::PatternBinding(PatternBinding {
                 syntax: self.syntax(pattern_start),
                 kind: if propagating {
                     PatternBindingKind::Propagating
@@ -819,7 +832,7 @@ impl Grammar {
         }
         self.position = checkpoint;
         self.parse_binding(visibility, start)
-            .map(Statement::Binding)
+            .map(Item::Binding)
     }
 
     /// Parses a namespace, glob, selected, or renamed `use` declaration.
@@ -2389,22 +2402,22 @@ impl Grammar {
         })
     }
 
-    /// Parses a brace-delimited sequence of statements.
+    /// Parses a brace-delimited sequence of items.
     fn parse_block_expression(&mut self) -> Result<BlockExpression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LBrace, "expected `{`")?;
-        let mut statements = Vec::new();
+        let mut items = Vec::new();
         while !self.at(TokenKind::RBrace) {
             if self.peek().is_none() {
                 return Err(self.error("unterminated block expression"));
             }
-            statements.push(self.parse_statement()?);
+            items.push(self.parse_block_item()?);
             self.eat(TokenKind::Semicolon);
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
         Ok(BlockExpression {
             syntax: self.syntax(start),
-            statements,
+            items,
         })
     }
 

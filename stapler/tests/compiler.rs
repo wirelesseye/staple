@@ -1,7 +1,7 @@
 use inkwell::context::Context;
 use stapler::{
     CheckedMutation, CheckedType, CodeGenerator, Item, NameResolver, ProgramLoader,
-    RecursiveConstruction, Statement, TypeChecker, parse,
+    RecursiveConstruction, TypeChecker, parse,
 };
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -2428,10 +2428,8 @@ fn generic_opaque_arguments_are_part_of_type_identity() {
 #[test]
 fn string_literals_have_the_canonical_string_type() {
     let module = type_check("\"hello\"\n");
-    let Item::Statement(statement) = &module.syntax().items[0] else {
-        panic!("expected expression statement");
-    };
-    let Statement::Expression(expression) = statement.as_ref() else {
+    let statement = &module.syntax().items[0];
+    let Item::Expression(expression) = statement else {
         panic!("expected expression statement");
     };
 
@@ -2698,10 +2696,8 @@ fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
         .items
         .iter()
         .find_map(|item| {
-            let Item::Statement(statement) = item else {
-                return None;
-            };
-            let Statement::Binding(binding) = statement.as_ref() else {
+            let statement = item;
+            let Item::Binding(binding) = statement else {
                 return None;
             };
             (binding.name == "pair").then_some(binding.value.as_ref()?)
@@ -2815,8 +2811,8 @@ fn expands_explicit_and_inferred_item_macros() {
         "let generated: Generated = Generated\n",
     ));
     assert!(module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, Item::Statement(statement)
-            if matches!(statement.as_ref(), Statement::Binding(binding)
+        matches!(item, statement
+            if matches!(statement, Item::Binding(binding)
                 if binding.name == "answer"))
     }));
     assert!(module.resolved().syntax().items.iter().any(|item| {
@@ -2841,8 +2837,8 @@ fn expands_item_modifier_macros_with_nearest_modifier_first() {
         "let result: I32 = selected\n",
     ));
     assert!(module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, Item::Statement(statement)
-            if matches!(statement.as_ref(), Statement::Binding(binding)
+        matches!(item, statement
+            if matches!(statement, Item::Binding(binding)
                 if binding.name == "selected"))
     }));
 }
@@ -2924,8 +2920,8 @@ fn modifier_macro_deletes_its_target_by_producing_zero_items() {
         "let result: I32 = 1\n",
     ));
     assert!(!module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, Item::Statement(statement)
-            if matches!(statement.as_ref(), Statement::Binding(binding)
+        matches!(item, statement
+            if matches!(statement, Item::Binding(binding)
                 if binding.name == "removed"))
     }));
 }
@@ -2944,8 +2940,8 @@ fn non_outermost_modifier_applies_the_next_modifier_to_its_first_item() {
         "let result: I32 = transformed + second\n",
     ));
     assert!(!module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, Item::Statement(statement)
-            if matches!(statement.as_ref(), Statement::Binding(binding)
+        matches!(item, statement
+            if matches!(statement, Item::Binding(binding)
                 if binding.name == "first"))
     }));
     let context = Context::create();
@@ -3368,8 +3364,8 @@ fn modifiers_compose_after_visibility_aware_item_calls() {
         "let result: I32 = generated\n",
     ));
     assert!(module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, Item::Statement(statement)
-            if matches!(statement.as_ref(), Statement::Binding(binding)
+        matches!(item, statement
+            if matches!(statement, Item::Binding(binding)
                 if binding.name == "generated"
                     && binding.visibility == stapler::Visibility::Public))
     }));
@@ -4500,10 +4496,8 @@ fn subtype_bound_call_preserves_string_literal_type() {
         "def string_identity: T => T <: String => T -> T = x => x\n",
         "string_identity \"foo\"\n",
     ));
-    let Item::Statement(statement) = &module.syntax().items[1] else {
-        panic!("expected expression statement");
-    };
-    let Statement::Expression(expression) = statement.as_ref() else {
+    let statement = &module.syntax().items[1];
+    let Item::Expression(expression) = statement else {
         panic!("expected expression statement");
     };
     assert_eq!(

@@ -29,7 +29,13 @@ pub enum Item {
     MacroDeclaration(MacroDeclaration),
     TraitDeclaration(TraitDeclaration),
     TraitImplementation(TraitImplementation),
-    Statement(Box<Statement>),
+    Binding(Binding),
+    PatternBinding(PatternBinding),
+    Assignment(Assignment),
+    Return(ReturnStatement),
+    Break(BreakStatement),
+    Continue(ContinueStatement),
+    Expression(Expression),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -116,21 +122,6 @@ pub enum UseKind {
     Glob,
     Selected(Vec<String>),
     Renamed { item: String, alias: String },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(clippy::large_enum_variant)]
-pub enum Statement {
-    Binding(Binding),
-    PatternBinding(PatternBinding),
-    Assignment(Assignment),
-    Return(ReturnStatement),
-    Break(BreakStatement),
-    Continue(ContinueStatement),
-    Expression(Expression),
-    Submodule(Submodule),
-    TypeDeclaration(TypeDeclaration),
-    UseDeclaration(UseDeclaration),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

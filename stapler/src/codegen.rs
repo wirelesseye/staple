@@ -22,9 +22,9 @@ use crate::typecheck::{
 use crate::{
     CallExpression, CheckedFunctionType, CheckedProductType, CheckedResource, CheckedResourceSet,
     CheckedType, CheckedTypeElement, Diagnostic, Expression, FloatType, FunctionId,
-    IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction, Item,
+    IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction,
     ModuleId, NumericType, Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, Span,
-    Statement, SymbolId, TypeParameterId, TypedModule,
+    Item, SymbolId, TypeParameterId, TypedModule,
 };
 
 pub struct CodeGenerator<'context> {
@@ -358,14 +358,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn declare_top_level_storage(&mut self) -> CodeGenerationResult<()> {
         for source_module in self.typed_module.resolved().program().modules() {
             for item in &source_module.syntax.items {
-                let Item::Statement(statement) = item else {
-                    continue;
-                };
-                if let Statement::PatternBinding(binding) = statement.as_ref() {
+                if let Item::PatternBinding(binding) = item {
                     self.declare_pattern_storage(source_module.id, &binding.pattern)?;
                     continue;
                 }
-                let Statement::Binding(binding) = statement.as_ref() else {
+                let Item::Binding(binding) = item else {
                     continue;
                 };
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
@@ -1252,8 +1249,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 ));
             }
             for item in &items {
-                if let Item::Statement(statement) = item {
-                    self.compile_top_level_statement(&mut environment, statement)?;
+                if matches!(
+                    item,
+                    Item::Binding(_)
+                        | Item::PatternBinding(_)
+                        | Item::Assignment(_)
+                        | Item::Return(_)
+                        | Item::Break(_)
+                        | Item::Continue(_)
+                        | Item::Expression(_)
+                ) {
+                    self.compile_top_level_statement(&mut environment, item)?;
                 }
             }
             self.builder
@@ -1266,10 +1272,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_top_level_statement(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        statement: &Statement,
+        statement: &Item,
     ) -> CodeGenerationResult<()> {
         match statement {
-            Statement::Binding(binding) => {
+            Item::Binding(binding) => {
                 let symbol = self
                     .typed_module
                     .symbol_for(binding.syntax.id)
@@ -1300,7 +1306,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.store_global_initialization_state(symbol, 2, binding.syntax.span.clone())?;
                 Ok(())
             }
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 self.store_pattern_initialization_state(&binding.pattern, 1)?;
                 let value = self.compile_expression(environment, &binding.value)?;
                 let value = value_as_basic(value).ok_or_else(|| {
@@ -1313,20 +1319,20 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.store_pattern_globals(environment, &binding.pattern)?;
                 self.store_pattern_initialization_state(&binding.pattern, 2)
             }
-            Statement::Assignment(assignment) => self.compile_assignment(environment, assignment),
-            Statement::Return(statement) => Err(Diagnostic::new(
+            Item::Assignment(assignment) => self.compile_assignment(environment, assignment),
+            Item::Return(statement) => Err(Diagnostic::new(
                 statement.syntax.span.clone(),
                 "`return` is only allowed inside a function",
             )),
-            Statement::Break(statement) => Err(Diagnostic::new(
+            Item::Break(statement) => Err(Diagnostic::new(
                 statement.syntax.span.clone(),
                 "`break` is only allowed inside a loop",
             )),
-            Statement::Continue(statement) => Err(Diagnostic::new(
+            Item::Continue(statement) => Err(Diagnostic::new(
                 statement.syntax.span.clone(),
                 "`continue` is only allowed inside a loop",
             )),
-            Statement::Expression(expression) => {
+            Item::Expression(expression) => {
                 let value = self.compile_expression(environment, expression)?;
                 let value_type = self
                     .concrete_expression_type(expression)
@@ -1338,9 +1344,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(())
             }
-            Statement::Submodule(_) => Ok(()),
-            Statement::TypeDeclaration(_) => Ok(()),
-            Statement::UseDeclaration(_) => Ok(()),
+            Item::Submodule(_) => Ok(()),
+            Item::TypeDeclaration(_) => Ok(()),
+            Item::UseDeclaration(_) => Ok(()),
+            _ => Ok(()),
         }
     }
 
@@ -1444,10 +1451,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn predeclare_checked_bindings(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        statements: &[Statement],
+        items: &[Item],
     ) -> CodeGenerationResult<()> {
-        for statement in statements {
-            let Statement::Binding(binding) = statement else {
+        for item in items {
+            let Item::Binding(binding) = item else {
                 continue;
             };
             if binding.kind != crate::BindingKind::Def {
@@ -1604,10 +1611,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_statement(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        statement: &Statement,
+        statement: &Item,
     ) -> CodeGenerationResult<Option<AnyValueEnum<'context>>> {
         match statement {
-            Statement::Binding(binding) => {
+            Item::Binding(binding) => {
                 if !binding.type_parameters.is_empty() {
                     if let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) {
                         self.store_local_initialization_state(
@@ -1677,7 +1684,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(None)
             }
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 let value = self.compile_expression(environment, &binding.value)?;
                 if environment.did_return {
                     return Ok(None);
@@ -1695,11 +1702,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(None)
             }
-            Statement::Assignment(assignment) => {
+            Item::Assignment(assignment) => {
                 self.compile_assignment(environment, assignment)?;
                 Ok(None)
             }
-            Statement::Return(statement) => {
+            Item::Return(statement) => {
                 let value = self.compile_expression(environment, &statement.value)?;
                 if environment.did_return {
                     return Ok(None);
@@ -1717,7 +1724,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 environment.did_return = true;
                 Ok(None)
             }
-            Statement::Break(statement) => {
+            Item::Break(statement) => {
                 let value = if let Some(expression) = &statement.value {
                     let value = self.compile_expression(environment, expression)?;
                     if environment.did_return {
@@ -1753,7 +1760,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 environment.did_return = true;
                 Ok(None)
             }
-            Statement::Continue(statement) => {
+            Item::Continue(statement) => {
                 let (header, owned_before) = environment
                     .loops
                     .last()
@@ -1768,7 +1775,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 environment.did_return = true;
                 Ok(None)
             }
-            Statement::Expression(expression) => {
+            Item::Expression(expression) => {
                 let value = self.compile_expression(environment, expression)?;
                 if !environment.did_return {
                     let value_type = self
@@ -1786,9 +1793,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(Some(value))
             }
-            Statement::Submodule(_) => Ok(None),
-            Statement::TypeDeclaration(_) => Ok(None),
-            Statement::UseDeclaration(_) => Ok(None),
+            Item::Submodule(_) => Ok(None),
+            Item::TypeDeclaration(_) => Ok(None),
+            Item::UseDeclaration(_) => Ok(None),
+            _ => Ok(None),
         }
     }
 
@@ -2361,9 +2369,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Expression::Block(block) => {
                 let owned_before = environment.owned_order.len();
-                self.predeclare_checked_bindings(environment, &block.statements)?;
+                self.predeclare_checked_bindings(environment, &block.items)?;
                 let mut value = None;
-                for statement in &block.statements {
+                for statement in &block.items {
                     value = self.compile_statement(environment, statement)?;
                     if environment.did_return {
                         break;

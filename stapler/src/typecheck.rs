@@ -4,7 +4,7 @@ use std::fmt;
 use crate::{
     Accessor, Binding, BuiltinType, Diagnostic, Expression, FloatType, FunctionId,
     IntegerType, Item, Module, ModuleId, Pattern, PatternBindingKind, ProductExpression,
-    ProductType, ResolvedFunction, ResolvedModule, Span, Statement, SymbolId, SyntaxId, TraitId,
+    ProductType, ResolvedFunction, ResolvedModule, Span, SymbolId, SyntaxId, TraitId,
     TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId,
     TypeParameterPattern,
 };
@@ -1086,7 +1086,7 @@ impl TypeChecker {
             // initializer (a dedicated function in codegen), so reachability
             // tracking must be live here exactly as it is inside a function
             // body — otherwise a top-level `break`/`continue` never records
-            // itself (see the `return_reachable` guard on `Statement::Break`/
+            // itself (see the `return_reachable` guard on `Item::Break`/
             // `Continue`), and `check_loop_expression` then treats a
             // perfectly ordinary `loop { ...; break }` as never exiting,
             // marking every subsequent top-level item unreachable and
@@ -2005,8 +2005,7 @@ impl TypeChecker {
     fn collect_top_level_bindings(&mut self, module: &ResolvedModule) {
         for source_module in module.program().modules() {
             for item in &source_module.syntax.items {
-                if let Item::Statement(statement) = item
-                    && let Statement::Binding(binding) = statement.as_ref()
+                if let Item::Binding(binding) = item
                     && let Some(symbol) = module.symbol_for(binding.syntax.id)
                 {
                     self.top_level_bindings.insert(symbol, binding.clone());
@@ -2024,11 +2023,7 @@ impl TypeChecker {
                             self.seed_binding_annotation(module, binding);
                         }
                     }
-                    Item::Statement(statement) => {
-                        if let Statement::Binding(binding) = statement.as_ref() {
-                            self.seed_binding_annotation(module, binding);
-                        }
-                    }
+                    Item::Binding(binding) => self.seed_binding_annotation(module, binding),
                     Item::UseDeclaration(_)
                     | Item::Modified(_)
                     | Item::VisibilityMacroInvocation(_)
@@ -2038,7 +2033,13 @@ impl TypeChecker {
                     | Item::TypeDeclaration(_)
                     | Item::MacroDeclaration(_)
                     | Item::TraitDeclaration(_)
-                    | Item::TraitImplementation(_) => {}
+                    | Item::TraitImplementation(_)
+                    | Item::PatternBinding(_)
+                    | Item::Assignment(_)
+                    | Item::Return(_)
+                    | Item::Break(_)
+                    | Item::Continue(_)
+                    | Item::Expression(_) => {}
                 }
             }
         }
@@ -2246,7 +2247,7 @@ impl TypeChecker {
 
     /// The module a function is declared in, used as the calling context for
     /// call-site `mut` checks performed deep inside its body. Unlike
-    /// `Statement::Assignment`, an arbitrary expression's own syntax id is
+    /// `Item::Assignment`, an arbitrary expression's own syntax id is
     /// never in `syntax_modules` (only declarations and assignment
     /// statements are), so `module.module_for_syntax` cannot be applied
     /// directly to a `Call` node — this is resolved once per function
@@ -2675,18 +2676,18 @@ impl TypeChecker {
     ) -> CheckedResourceSet {
         let mut owned: Option<HashMap<SymbolId, usize>> = None;
         let mut resources = CheckedResourceSet::default();
-        for statement in &block.statements {
+        for statement in &block.items {
             let current = owned.as_ref().unwrap_or(target_parameters);
             let contribution = match statement {
-                Statement::Binding(value) => value
+                Item::Binding(value) => value
                     .value
                     .as_ref()
                     .map(|value| self.expression_resources_now(module, value, current))
                     .unwrap_or_default(),
-                Statement::PatternBinding(value) => {
+                Item::PatternBinding(value) => {
                     self.expression_resources_now(module, &value.value, current)
                 }
-                Statement::Assignment(value) => {
+                Item::Assignment(value) => {
                     let combined = self
                         .expression_resources_now(module, &value.target, current)
                         .union(&self.expression_resources_now(module, &value.value, current));
@@ -2698,21 +2699,22 @@ impl TypeChecker {
                         None => combined,
                     }
                 }
-                Statement::Return(value) => {
+                Item::Return(value) => {
                     self.expression_resources_now(module, &value.value, current)
                 }
-                Statement::Break(value) => value
+                Item::Break(value) => value
                     .value
                     .as_ref()
                     .map(|value| self.expression_resources_now(module, value, current))
                     .unwrap_or_default(),
-                Statement::Continue(_) => CheckedResourceSet::default(),
-                Statement::Expression(value) => {
+                Item::Continue(_) => CheckedResourceSet::default(),
+                Item::Expression(value) => {
                     self.expression_resources_now(module, value, current)
                 }
-                Statement::Submodule(_) => CheckedResourceSet::default(),
-                Statement::TypeDeclaration(_) => CheckedResourceSet::default(),
-                Statement::UseDeclaration(_) => CheckedResourceSet::default(),
+                Item::Submodule(_) => CheckedResourceSet::default(),
+                Item::TypeDeclaration(_) => CheckedResourceSet::default(),
+                Item::UseDeclaration(_) => CheckedResourceSet::default(),
+                _ => CheckedResourceSet::default(),
             };
             let alias = self.statement_parameter_ref_alias(module, statement, current);
             resources = resources.union(&contribution);
@@ -2728,7 +2730,7 @@ impl TypeChecker {
     /// If `statement` is a binding whose value crosses a `Ref` rooted at one
     /// of `target_parameters`, returns the newly bound symbol and the
     /// position it aliases. Scoped to the direct forms only: a bare
-    /// `let`/`var` binding (`Statement::Binding`, or a destructuring
+    /// `let`/`var` binding (`Item::Binding`, or a destructuring
     /// `Pattern::Binding`), or one level of nominal unwrap
     /// (`let Name inner = <value>`) — not nested or product patterns, which
     /// would need to decide which of several bound names aliases which part
@@ -2736,15 +2738,15 @@ impl TypeChecker {
     fn statement_parameter_ref_alias(
         &self,
         module: &ResolvedModule,
-        statement: &Statement,
+        statement: &Item,
         target_parameters: &HashMap<SymbolId, usize>,
     ) -> Option<(SymbolId, usize)> {
         let (symbol, value) = match statement {
-            Statement::Binding(binding) => (
+            Item::Binding(binding) => (
                 module.symbol_for(binding.syntax.id)?,
                 binding.value.as_ref()?,
             ),
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 let bound = match &binding.pattern {
                     Pattern::Binding(value) => value,
                     Pattern::Nominal(nominal) => match nominal.argument.as_ref() {
@@ -2887,21 +2889,18 @@ impl TypeChecker {
         for source_module in module.program().modules() {
             let is_entry_module = source_module.id == entry_module;
             for item in &source_module.syntax.items {
-                let Item::Statement(statement) = item else {
-                    continue;
-                };
-                let (syntax, resources) = match statement.as_ref() {
-                    Statement::Binding(binding) => binding.value.as_ref().map(|value| {
+                let (syntax, resources) = match item {
+                    Item::Binding(binding) => binding.value.as_ref().map(|value| {
                         (
                             value.syntax(),
                             self.expression_resources_now(module, value, &no_parameters),
                         )
                     }),
-                    Statement::PatternBinding(binding) => Some((
+                    Item::PatternBinding(binding) => Some((
                         binding.value.syntax(),
                         self.expression_resources_now(module, &binding.value, &no_parameters),
                     )),
-                    Statement::Assignment(value) => Some((
+                    Item::Assignment(value) => Some((
                         &value.syntax,
                         self.expression_resources_now(module, &value.target, &no_parameters)
                             .union(&self.expression_resources_now(
@@ -2910,24 +2909,25 @@ impl TypeChecker {
                                 &no_parameters,
                             )),
                     )),
-                    Statement::Return(value) => Some((
+                    Item::Return(value) => Some((
                         &value.syntax,
                         self.expression_resources_now(module, &value.value, &no_parameters),
                     )),
-                    Statement::Break(value) => value.value.as_ref().map(|expression| {
+                    Item::Break(value) => value.value.as_ref().map(|expression| {
                         (
                             &value.syntax,
                             self.expression_resources_now(module, expression, &no_parameters),
                         )
                     }),
-                    Statement::Continue(_) => None,
-                    Statement::Expression(value) => Some((
+                    Item::Continue(_) => None,
+                    Item::Expression(value) => Some((
                         value.syntax(),
                         self.expression_resources_now(module, value, &no_parameters),
                     )),
-                    Statement::Submodule(_) => None,
-                    Statement::TypeDeclaration(_) => None,
-                    Statement::UseDeclaration(_) => None,
+                    Item::Submodule(_) => None,
+                    Item::TypeDeclaration(_) => None,
+                    Item::UseDeclaration(_) => None,
+                    _ => None,
                 }
                 .unwrap_or((&source_module.syntax.syntax, CheckedResourceSet::default()));
                 let required = if is_entry_module {
@@ -3018,9 +3018,9 @@ impl TypeChecker {
         module: &ResolvedModule,
         block: &crate::BlockExpression,
     ) -> Option<CheckedType> {
-        match block.statements.last()? {
-            Statement::Expression(expression) => self.refreshed_expression_type(module, expression),
-            Statement::Return(value) => self.refreshed_expression_type(module, &value.value),
+        match block.items.last()? {
+            Item::Expression(expression) => self.refreshed_expression_type(module, expression),
+            Item::Return(value) => self.refreshed_expression_type(module, &value.value),
             _ => None,
         }
     }
@@ -3050,8 +3050,17 @@ impl TypeChecker {
 
         for source_module in module.program().modules() {
             for item in &source_module.syntax.items {
-                if let Item::Statement(statement) = item {
-                    changed |= self.refresh_statement_function_types(module, statement);
+                if matches!(
+                    item,
+                    Item::Binding(_)
+                        | Item::PatternBinding(_)
+                        | Item::Assignment(_)
+                        | Item::Return(_)
+                        | Item::Break(_)
+                        | Item::Continue(_)
+                        | Item::Expression(_)
+                ) {
+                    changed |= self.refresh_statement_function_types(module, item);
                 }
             }
         }
@@ -3069,10 +3078,10 @@ impl TypeChecker {
     fn refresh_statement_function_types(
         &mut self,
         module: &ResolvedModule,
-        statement: &Statement,
+        statement: &Item,
     ) -> bool {
         match statement {
-            Statement::Binding(binding) => {
+            Item::Binding(binding) => {
                 let mut changed = false;
                 if let Some(value) = &binding.value {
                     changed |= self.refresh_expression_function_types(module, value);
@@ -3092,25 +3101,26 @@ impl TypeChecker {
                 }
                 changed
             }
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 self.refresh_expression_function_types(module, &binding.value)
             }
-            Statement::Assignment(value) => {
+            Item::Assignment(value) => {
                 self.refresh_expression_function_types(module, &value.target)
                     | self.refresh_expression_function_types(module, &value.value)
             }
-            Statement::Return(value) => {
+            Item::Return(value) => {
                 self.refresh_expression_function_types(module, &value.value)
             }
-            Statement::Break(value) => value
+            Item::Break(value) => value
                 .value
                 .as_ref()
                 .is_some_and(|value| self.refresh_expression_function_types(module, value)),
-            Statement::Continue(_) => false,
-            Statement::Expression(value) => self.refresh_expression_function_types(module, value),
-            Statement::Submodule(_) => false,
-            Statement::TypeDeclaration(_) => false,
-            Statement::UseDeclaration(_) => false,
+            Item::Continue(_) => false,
+            Item::Expression(value) => self.refresh_expression_function_types(module, value),
+            Item::Submodule(_) => false,
+            Item::TypeDeclaration(_) => false,
+            Item::UseDeclaration(_) => false,
+            _ => false,
         }
     }
 
@@ -3136,7 +3146,7 @@ impl TypeChecker {
             Expression::Loop(value) => {
                 value
                     .body
-                    .statements
+                    .items
                     .iter()
                     .fold(false, |changed, statement| {
                         self.refresh_statement_function_types(module, statement) | changed
@@ -3144,13 +3154,13 @@ impl TypeChecker {
             }
             Expression::With(value) => {
                 let mut changed = self.refresh_expression_function_types(module, &value.value);
-                for statement in &value.body.statements {
+                for statement in &value.body.items {
                     changed |= self.refresh_statement_function_types(module, statement);
                 }
                 changed
             }
             Expression::Block(value) => {
-                value.statements.iter().fold(false, |changed, statement| {
+                value.items.iter().fold(false, |changed, statement| {
                     self.refresh_statement_function_types(module, statement) | changed
                 })
             }
@@ -3240,7 +3250,7 @@ impl TypeChecker {
                 }
             }
             Expression::Loop(value) => {
-                for statement in &value.body.statements {
+                for statement in &value.body.items {
                     self.record_statement_resources(
                         module,
                         statement,
@@ -3256,7 +3266,7 @@ impl TypeChecker {
                     target_parameters,
                     current_module,
                 );
-                for statement in &value.body.statements {
+                for statement in &value.body.items {
                     self.record_statement_resources(
                         module,
                         statement,
@@ -3266,7 +3276,7 @@ impl TypeChecker {
                 }
             }
             Expression::Block(value) => {
-                for statement in &value.statements {
+                for statement in &value.items {
                     self.record_statement_resources(
                         module,
                         statement,
@@ -3355,12 +3365,12 @@ impl TypeChecker {
     fn record_statement_resources(
         &mut self,
         module: &ResolvedModule,
-        statement: &Statement,
+        statement: &Item,
         target_parameters: &HashMap<SymbolId, usize>,
         current_module: Option<ModuleId>,
     ) {
         match statement {
-            Statement::Binding(value) => {
+            Item::Binding(value) => {
                 if let Some(value) = &value.value {
                     self.record_expression_resources(
                         module,
@@ -3370,13 +3380,13 @@ impl TypeChecker {
                     );
                 }
             }
-            Statement::PatternBinding(value) => self.record_expression_resources(
+            Item::PatternBinding(value) => self.record_expression_resources(
                 module,
                 &value.value,
                 target_parameters,
                 current_module,
             ),
-            Statement::Assignment(value) => {
+            Item::Assignment(value) => {
                 self.record_expression_resources(
                     module,
                     &value.target,
@@ -3390,13 +3400,13 @@ impl TypeChecker {
                     current_module,
                 );
             }
-            Statement::Return(value) => self.record_expression_resources(
+            Item::Return(value) => self.record_expression_resources(
                 module,
                 &value.value,
                 target_parameters,
                 current_module,
             ),
-            Statement::Break(value) => {
+            Item::Break(value) => {
                 if let Some(value) = &value.value {
                     self.record_expression_resources(
                         module,
@@ -3406,16 +3416,17 @@ impl TypeChecker {
                     );
                 }
             }
-            Statement::Continue(_) => {}
-            Statement::Expression(value) => self.record_expression_resources(
+            Item::Continue(_) => {}
+            Item::Expression(value) => self.record_expression_resources(
                 module,
                 value,
                 target_parameters,
                 current_module,
             ),
-            Statement::Submodule(_) => {}
-            Statement::TypeDeclaration(_) => {}
-            Statement::UseDeclaration(_) => {}
+            Item::Submodule(_) => {}
+            Item::TypeDeclaration(_) => {}
+            Item::UseDeclaration(_) => {}
+            _ => {}
         }
     }
 
@@ -3637,7 +3648,13 @@ impl TypeChecker {
                     self.check_binding(module, binding);
                 }
             }
-            Item::Statement(statement) => {
+            statement @ (Item::Binding(_)
+            | Item::PatternBinding(_)
+            | Item::Assignment(_)
+            | Item::Return(_)
+            | Item::Break(_)
+            | Item::Continue(_)
+            | Item::Expression(_)) => {
                 self.check_statement(module, statement);
             }
             Item::UseDeclaration(_)
@@ -3653,13 +3670,13 @@ impl TypeChecker {
         }
     }
 
-    fn check_statement(&mut self, module: &ResolvedModule, statement: &Statement) -> CheckedType {
+    fn check_statement(&mut self, module: &ResolvedModule, statement: &Item) -> CheckedType {
         match statement {
-            Statement::Binding(binding) => {
+            Item::Binding(binding) => {
                 self.check_binding(module, binding);
                 CheckedType::empty_product()
             }
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 let value_type = self.check_expression(module, &binding.value);
                 if !self.did_return {
                     if binding.kind == PatternBindingKind::Propagating {
@@ -3670,7 +3687,7 @@ impl TypeChecker {
                 }
                 CheckedType::empty_product()
             }
-            Statement::Assignment(assignment) => {
+            Item::Assignment(assignment) => {
                 if let Expression::Index(index) = &assignment.target {
                     let target_type = self.check_expression(module, &index.value);
                     let mut position_type = self.check_expression(module, &index.index);
@@ -3751,7 +3768,7 @@ impl TypeChecker {
                 }
                 CheckedType::empty_product()
             }
-            Statement::Return(statement) => {
+            Item::Return(statement) => {
                 let expected = self.return_contexts.last().cloned();
                 let concrete_expected = expected
                     .as_ref()
@@ -3771,7 +3788,7 @@ impl TypeChecker {
                 }
                 CheckedType::empty_product()
             }
-            Statement::Break(statement) => {
+            Item::Break(statement) => {
                 let expected = self
                     .loop_contexts
                     .last()
@@ -3810,16 +3827,17 @@ impl TypeChecker {
                 }
                 CheckedType::empty_product()
             }
-            Statement::Continue(_) => {
+            Item::Continue(_) => {
                 if !self.did_return && self.return_reachable {
                     self.did_return = true;
                 }
                 CheckedType::empty_product()
             }
-            Statement::Expression(expression) => self.check_expression(module, expression),
-            Statement::Submodule(_) => CheckedType::empty_product(),
-            Statement::TypeDeclaration(_) => CheckedType::empty_product(),
-            Statement::UseDeclaration(_) => CheckedType::empty_product(),
+            Item::Expression(expression) => self.check_expression(module, expression),
+            Item::Submodule(_) => CheckedType::empty_product(),
+            Item::TypeDeclaration(_) => CheckedType::empty_product(),
+            Item::UseDeclaration(_) => CheckedType::empty_product(),
+            _ => CheckedType::empty_product(),
         }
     }
 
@@ -4397,15 +4415,15 @@ impl TypeChecker {
             Expression::Block(block) => {
                 let mut result = CheckedType::empty_product();
                 let mut block_returned = false;
-                for (index, statement) in block.statements.iter().enumerate() {
+                for (index, statement) in block.items.iter().enumerate() {
                     let outer_reachable = self.return_reachable;
                     if block_returned {
                         self.return_reachable = false;
                         self.did_return = false;
                     }
                     if !block_returned
-                        && index + 1 == block.statements.len()
-                        && let Statement::Expression(expression) = statement
+                        && index + 1 == block.items.len()
+                        && let Item::Expression(expression) = statement
                     {
                         result = self.check_expression_expected(module, expression, expected);
                     } else {
@@ -8077,7 +8095,7 @@ fn place_root_symbol(module: &ResolvedModule, expression: &Expression) -> Option
     walk(module, expression, false)
 }
 
-/// The mutation a `Statement::Assignment` performs, if its target is a
+/// The mutation a `Item::Assignment` performs, if its target is a
 /// projected write into one of `target_parameters`. When the root is a
 /// parameter, this also requires the path to cross a `Ref` (mirroring
 /// `writable_place_issue`'s hard-error rule): a by-value parameter write is

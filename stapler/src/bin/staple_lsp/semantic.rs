@@ -168,13 +168,10 @@ impl<'a> Classifier<'a> {
                         self.collect_binding_symbol(binding, resolved);
                     }
                 }
-                Item::Statement(statement) => match statement.as_ref() {
-                    Statement::Binding(binding) => self.collect_binding_symbol(binding, resolved),
-                    Statement::PatternBinding(binding) => {
-                        self.collect_pattern_symbols(&binding.pattern, VARIABLE, resolved)
-                    }
-                    _ => {}
-                },
+                Item::Binding(binding) => self.collect_binding_symbol(binding, resolved),
+                Item::PatternBinding(binding) => {
+                    self.collect_pattern_symbols(&binding.pattern, VARIABLE, resolved)
+                }
                 _ => {}
             }
         }
@@ -366,30 +363,36 @@ impl<'a> Classifier<'a> {
                     self.expression(&member.value, resolved);
                 }
             }
-            Item::Statement(value) => self.statement(value, resolved),
+            value @ (Item::Binding(_)
+            | Item::PatternBinding(_)
+            | Item::Assignment(_)
+            | Item::Return(_)
+            | Item::Break(_)
+            | Item::Continue(_)
+            | Item::Expression(_)) => self.statement(value, resolved),
         }
     }
 
-    fn statement(&mut self, statement: &Statement, resolved: Option<&ResolvedModule>) {
+    fn statement(&mut self, statement: &Item, resolved: Option<&ResolvedModule>) {
         match statement {
-            Statement::Binding(value) => self.binding(value, resolved),
-            Statement::PatternBinding(value) => {
+            Item::Binding(value) => self.binding(value, resolved),
+            Item::PatternBinding(value) => {
                 self.pattern(&value.pattern, VARIABLE, resolved);
                 self.expression(&value.value, resolved);
             }
-            Statement::Assignment(value) => {
+            Item::Assignment(value) => {
                 self.expression_with_mod(&value.target, resolved, MODIFICATION);
                 self.expression(&value.value, resolved);
             }
-            Statement::Return(value) => self.expression(&value.value, resolved),
-            Statement::Break(value) => {
+            Item::Return(value) => self.expression(&value.value, resolved),
+            Item::Break(value) => {
                 if let Some(expression) = &value.value {
                     self.expression(expression, resolved);
                 }
             }
-            Statement::Continue(_) => {}
-            Statement::Expression(value) => self.expression(value, resolved),
-            Statement::Submodule(value) => {
+            Item::Continue(_) => {}
+            Item::Expression(value) => self.expression(value, resolved),
+            Item::Submodule(value) => {
                 self.mark_first(
                     &value.syntax,
                     &value.name,
@@ -399,7 +402,7 @@ impl<'a> Classifier<'a> {
                 );
                 self.module(&value.module, resolved);
             }
-            Statement::TypeDeclaration(value) => {
+            Item::TypeDeclaration(value) => {
                 self.mark_declaration(&value.syntax, &value.name, TYPE, None, resolved);
                 for parameter in &value.type_parameters {
                     self.type_parameter(parameter, resolved);
@@ -411,7 +414,7 @@ impl<'a> Classifier<'a> {
                     self.ty(ty, resolved);
                 }
             }
-            Statement::UseDeclaration(value) => {
+            Item::UseDeclaration(value) => {
                 for part in &value.path {
                     self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
                 }
@@ -430,6 +433,7 @@ impl<'a> Classifier<'a> {
                     _ => {}
                 }
             }
+            _ => {}
         }
     }
 
@@ -567,7 +571,7 @@ impl<'a> Classifier<'a> {
                 }
             }
             Expression::Loop(value) => {
-                for statement in &value.body.statements {
+                for statement in &value.body.items {
                     self.statement(statement, resolved);
                 }
             }
@@ -579,12 +583,12 @@ impl<'a> Classifier<'a> {
                 self.mark_first(&value.syntax, "with", KEYWORD, 0, 1);
                 self.ty(&value.resource, resolved);
                 self.expression(&value.value, resolved);
-                for statement in &value.body.statements {
+                for statement in &value.body.items {
                     self.statement(statement, resolved);
                 }
             }
             Expression::Block(value) => {
-                for statement in &value.statements {
+                for statement in &value.items {
                     self.statement(statement, resolved);
                 }
             }

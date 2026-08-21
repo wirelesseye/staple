@@ -133,40 +133,47 @@ impl DeclarationCollector<'_> {
             Item::MacroDeclaration(value) => {
                 self.declaration(&value.syntax, &value.name);
             }
-            Item::Statement(value) => self.statement(value),
+            value @ (Item::Binding(_)
+            | Item::PatternBinding(_)
+            | Item::Assignment(_)
+            | Item::Return(_)
+            | Item::Break(_)
+            | Item::Continue(_)
+            | Item::Expression(_)) => self.statement(value),
             Item::UseDeclaration(_) | Item::TraitImplementation(_) => {}
         }
     }
 
-    fn statement(&mut self, statement: &Statement) {
+    fn statement(&mut self, statement: &Item) {
         match statement {
-            Statement::Binding(value) => self.binding(value),
-            Statement::PatternBinding(value) => self.pattern(&value.pattern),
-            Statement::Expression(value) => self.expression(value),
-            Statement::Assignment(value) => {
+            Item::Binding(value) => self.binding(value),
+            Item::PatternBinding(value) => self.pattern(&value.pattern),
+            Item::Expression(value) => self.expression(value),
+            Item::Assignment(value) => {
                 self.expression(&value.target);
                 self.expression(&value.value);
             }
-            Statement::Return(value) => self.expression(&value.value),
-            Statement::Break(value) => {
+            Item::Return(value) => self.expression(&value.value),
+            Item::Break(value) => {
                 if let Some(value) = &value.value {
                     self.expression(value);
                 }
             }
-            Statement::Continue(_) => {}
-            Statement::Submodule(value) => {
+            Item::Continue(_) => {}
+            Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
                     self.insert(DefinitionId::Module(id), &value.syntax, &value.name);
                 }
                 self.module(&value.module);
             }
-            Statement::TypeDeclaration(value) => {
+            Item::TypeDeclaration(value) => {
                 self.declaration(&value.syntax, &value.name);
                 for parameter in &value.type_parameters {
                     self.type_parameter(parameter);
                 }
             }
-            Statement::UseDeclaration(_) => {}
+            Item::UseDeclaration(_) => {}
+            _ => {}
         }
     }
 
@@ -195,19 +202,19 @@ impl DeclarationCollector<'_> {
                 }
             }
             Expression::Loop(value) => {
-                for statement in &value.body.statements {
+                for statement in &value.body.items {
                     self.statement(statement);
                 }
             }
             Expression::Resource(_) => {}
             Expression::With(value) => {
                 self.expression(&value.value);
-                for statement in &value.body.statements {
+                for statement in &value.body.items {
                     self.statement(statement);
                 }
             }
             Expression::Block(value) => {
-                for statement in &value.statements {
+                for statement in &value.items {
                     self.statement(statement);
                 }
             }
@@ -408,7 +415,13 @@ impl Collector<'_> {
                     self.expression(&member.value);
                 }
             }
-            Item::Statement(value) => self.statement(value),
+            value @ (Item::Binding(_)
+            | Item::PatternBinding(_)
+            | Item::Assignment(_)
+            | Item::Return(_)
+            | Item::Break(_)
+            | Item::Continue(_)
+            | Item::Expression(_)) => self.statement(value),
         }
     }
 
@@ -443,26 +456,26 @@ impl Collector<'_> {
         }
     }
 
-    fn statement(&mut self, statement: &Statement) {
+    fn statement(&mut self, statement: &Item) {
         match statement {
-            Statement::Binding(value) => self.binding(value),
-            Statement::PatternBinding(value) => {
+            Item::Binding(value) => self.binding(value),
+            Item::PatternBinding(value) => {
                 self.pattern(&value.pattern);
                 self.expression(&value.value);
             }
-            Statement::Assignment(value) => {
+            Item::Assignment(value) => {
                 self.expression(&value.target);
                 self.expression(&value.value);
             }
-            Statement::Return(value) => self.expression(&value.value),
-            Statement::Break(value) => {
+            Item::Return(value) => self.expression(&value.value),
+            Item::Break(value) => {
                 if let Some(value) = &value.value {
                     self.expression(value);
                 }
             }
-            Statement::Continue(_) => {}
-            Statement::Expression(value) => self.expression(value),
-            Statement::Submodule(value) => {
+            Item::Continue(_) => {}
+            Item::Expression(value) => self.expression(value),
+            Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
                     self.add(
                         &value.syntax,
@@ -473,7 +486,7 @@ impl Collector<'_> {
                 }
                 self.module(&value.module);
             }
-            Statement::TypeDeclaration(value) => {
+            Item::TypeDeclaration(value) => {
                 self.add_resolved(&value.syntax, &value.name, false);
                 for parameter in &value.type_parameters {
                     self.type_parameter(parameter);
@@ -485,7 +498,8 @@ impl Collector<'_> {
                     self.ty(underlying);
                 }
             }
-            Statement::UseDeclaration(value) => self.use_declaration(value),
+            Item::UseDeclaration(value) => self.use_declaration(value),
+            _ => {}
         }
     }
 
@@ -550,7 +564,7 @@ impl Collector<'_> {
                 }
             }
             Expression::Loop(value) => {
-                for statement in &value.body.statements {
+                for statement in &value.body.items {
                     self.statement(statement);
                 }
             }
@@ -558,12 +572,12 @@ impl Collector<'_> {
             Expression::With(value) => {
                 self.ty(&value.resource);
                 self.expression(&value.value);
-                for statement in &value.body.statements {
+                for statement in &value.body.items {
                     self.statement(statement);
                 }
             }
             Expression::Block(value) => {
-                for statement in &value.statements {
+                for statement in &value.items {
                     self.statement(statement);
                 }
             }

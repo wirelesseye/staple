@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 
 use crate::parser::parse_with_syntax_ids;
 use crate::{
-    BlockExpression, Expression, Item, Module, SourceLocation, Span, Statement, Submodule,
+    BlockExpression, Expression, Item, Module, SourceLocation, Span, Submodule,
     Syntax, SyntaxId, TokenKind, UseDeclaration, UseKind, Visibility,
 };
 
@@ -771,10 +771,7 @@ impl ProgramLoader {
             .any(|item| {
                 let syntax = match item {
                     Item::VisibilityMacroInvocation(invocation) => &invocation.syntax,
-                    Item::Statement(statement) => match statement.as_ref() {
-                        crate::Statement::Expression(expression) => expression.syntax(),
-                        _ => return false,
-                    },
+                    Item::Expression(expression) => expression.syntax(),
                     _ => return false,
                 };
                 syntax
@@ -1083,35 +1080,42 @@ fn find_block_submodules_in_item(item: &Item, out: &mut Vec<Submodule>) {
                 find_block_submodules_in_expression(&member.value, out);
             }
         }
-        Item::Statement(statement) => find_block_submodules_in_statement(statement, out),
+        item @ (Item::Binding(_)
+        | Item::PatternBinding(_)
+        | Item::Assignment(_)
+        | Item::Return(_)
+        | Item::Break(_)
+        | Item::Continue(_)
+        | Item::Expression(_)) => find_block_submodules_in_statement(item, out),
     }
 }
 
-fn find_block_submodules_in_statement(statement: &Statement, out: &mut Vec<Submodule>) {
+fn find_block_submodules_in_statement(statement: &Item, out: &mut Vec<Submodule>) {
     match statement {
-        Statement::Binding(binding) => {
+        Item::Binding(binding) => {
             if let Some(value) = &binding.value {
                 find_block_submodules_in_expression(value, out);
             }
         }
-        Statement::PatternBinding(binding) => {
+        Item::PatternBinding(binding) => {
             find_block_submodules_in_expression(&binding.value, out)
         }
-        Statement::Assignment(assignment) => {
+        Item::Assignment(assignment) => {
             find_block_submodules_in_expression(&assignment.target, out);
             find_block_submodules_in_expression(&assignment.value, out);
         }
-        Statement::Return(statement) => find_block_submodules_in_expression(&statement.value, out),
-        Statement::Break(statement) => {
+        Item::Return(statement) => find_block_submodules_in_expression(&statement.value, out),
+        Item::Break(statement) => {
             if let Some(value) = &statement.value {
                 find_block_submodules_in_expression(value, out);
             }
         }
-        Statement::Continue(_) => {}
-        Statement::Expression(expression) => find_block_submodules_in_expression(expression, out),
-        Statement::Submodule(submodule) => out.push(submodule.clone()),
-        Statement::TypeDeclaration(_) => {}
-        Statement::UseDeclaration(_) => {}
+        Item::Continue(_) => {}
+        Item::Expression(expression) => find_block_submodules_in_expression(expression, out),
+        Item::Submodule(submodule) => out.push(submodule.clone()),
+        Item::TypeDeclaration(_) => {}
+        Item::UseDeclaration(_) => {}
+        _ => {}
     }
 }
 
@@ -1163,7 +1167,7 @@ fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Su
 }
 
 fn find_block_submodules_in_block(block: &BlockExpression, out: &mut Vec<Submodule>) {
-    for statement in &block.statements {
+    for statement in &block.items {
         find_block_submodules_in_statement(statement, out);
     }
 }
@@ -1213,39 +1217,46 @@ fn find_block_use_declarations_in_item(item: &Item, out: &mut Vec<UseDeclaration
                 find_block_use_declarations_in_expression(&member.value, out);
             }
         }
-        Item::Statement(statement) => find_block_use_declarations_in_statement(statement, out),
+        item @ (Item::Binding(_)
+        | Item::PatternBinding(_)
+        | Item::Assignment(_)
+        | Item::Return(_)
+        | Item::Break(_)
+        | Item::Continue(_)
+        | Item::Expression(_)) => find_block_use_declarations_in_statement(item, out),
     }
 }
 
-fn find_block_use_declarations_in_statement(statement: &Statement, out: &mut Vec<UseDeclaration>) {
+fn find_block_use_declarations_in_statement(statement: &Item, out: &mut Vec<UseDeclaration>) {
     match statement {
-        Statement::Binding(binding) => {
+        Item::Binding(binding) => {
             if let Some(value) = &binding.value {
                 find_block_use_declarations_in_expression(value, out);
             }
         }
-        Statement::PatternBinding(binding) => {
+        Item::PatternBinding(binding) => {
             find_block_use_declarations_in_expression(&binding.value, out)
         }
-        Statement::Assignment(assignment) => {
+        Item::Assignment(assignment) => {
             find_block_use_declarations_in_expression(&assignment.target, out);
             find_block_use_declarations_in_expression(&assignment.value, out);
         }
-        Statement::Return(statement) => {
+        Item::Return(statement) => {
             find_block_use_declarations_in_expression(&statement.value, out)
         }
-        Statement::Break(statement) => {
+        Item::Break(statement) => {
             if let Some(value) = &statement.value {
                 find_block_use_declarations_in_expression(value, out);
             }
         }
-        Statement::Continue(_) => {}
-        Statement::Expression(expression) => {
+        Item::Continue(_) => {}
+        Item::Expression(expression) => {
             find_block_use_declarations_in_expression(expression, out)
         }
-        Statement::Submodule(_) => {}
-        Statement::TypeDeclaration(_) => {}
-        Statement::UseDeclaration(declaration) => out.push(declaration.clone()),
+        Item::Submodule(_) => {}
+        Item::TypeDeclaration(_) => {}
+        Item::UseDeclaration(declaration) => out.push(declaration.clone()),
+        _ => {}
     }
 }
 
@@ -1299,7 +1310,7 @@ fn find_block_use_declarations_in_expression(expression: &Expression, out: &mut 
 }
 
 fn find_block_use_declarations_in_block(block: &BlockExpression, out: &mut Vec<UseDeclaration>) {
-    for statement in &block.statements {
+    for statement in &block.items {
         find_block_use_declarations_in_statement(statement, out);
     }
 }

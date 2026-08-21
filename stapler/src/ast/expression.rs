@@ -1,4 +1,4 @@
-use super::{Item, Pattern, Statement, Syntax, Type, VisibilitySyntax};
+use super::{Item, Pattern, Syntax, Type, VisibilitySyntax};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
@@ -152,7 +152,7 @@ pub struct SatisfiesExpression {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockExpression {
     pub syntax: Syntax,
-    pub statements: Vec<Statement>,
+    pub items: Vec<Item>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

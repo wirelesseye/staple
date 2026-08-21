@@ -3,7 +3,7 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
     MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program,
-    ResolvedMacro, Span, Statement, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
+    ResolvedMacro, Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
     VisibilityKind, VisibilitySyntax,
 };
 
@@ -283,16 +283,16 @@ impl DelimitedSyntaxValue {
                     DelimitedValueContents::Sequence(values) => values,
                     DelimitedValueContents::Separated { .. } => return None,
                 };
-                let statements = values
+                let items = values
                     .into_iter()
                     .map(|value| match value {
-                        Value::Syntax(value) => value.into_expression().map(Statement::Expression),
+                        Value::Syntax(value) => value.into_expression().map(Item::Expression),
                         _ => None,
                     })
                     .collect::<Option<Vec<_>>>()?;
                 Some(Expression::Block(BlockExpression {
                     syntax: self.syntax,
-                    statements,
+                    items,
                 }))
             }
         }
@@ -435,8 +435,7 @@ pub(crate) fn expand_program(
     expander.validate_definitions();
     for module in program.modules() {
         for item in &module.syntax.items {
-            if let Item::Statement(statement) = item
-                && let Statement::Binding(binding) = statement.as_ref()
+            if let Item::Binding(binding) = item
                 && binding.kind == BindingKind::Def
                 && binding_uses_macro_call_visibility(binding)
             {
@@ -464,9 +463,7 @@ pub(crate) fn expand_program(
         }
         items.retain(|item| {
             !matches!(item,
-                Item::Statement(statement)
-                    if matches!(statement.as_ref(), Statement::Binding(binding)
-                        if binding_is_compile_time_helper(binding))
+                Item::Binding(binding) if binding_is_compile_time_helper(binding)
             )
         });
         let declared = items
@@ -477,8 +474,7 @@ pub(crate) fn expand_program(
             })
             .collect::<std::collections::HashSet<_>>();
         for item in &items {
-            if let Item::Statement(statement) = item
-                && let Statement::Binding(binding) = statement.as_ref()
+            if let Item::Binding(binding) = item
                 && binding.kind != BindingKind::Def
                 && binding
                     .annotation
@@ -631,10 +627,8 @@ impl MacroExpander {
                             .or_default()
                             .push(key);
                     }
-                    Item::Statement(statement) => {
-                        if let Statement::Binding(binding) = statement.as_ref()
-                            && binding.value.is_some()
-                        {
+                    Item::Binding(binding) => {
+                        if binding.value.is_some() {
                             scopes[source_module.id.0].helpers.insert(
                                 binding.name.clone(),
                                 HelperDefinition {
@@ -1269,19 +1263,21 @@ impl MacroExpander {
             }
             return;
         }
-        if let Item::Statement(statement) = item
-            && let Statement::Expression(expression) = statement.as_ref()
-        {
+        if let Item::Expression(expression) = item {
             let expression = expression.clone();
             if self.expand_top_level_macro(module, item, expression, depth) {
                 return;
             }
         }
         match item {
-            Item::Statement(statement)
-                if matches!(statement.as_ref(), Statement::Binding(binding)
-                    if binding_is_compile_time_helper(binding)) => {}
-            Item::Statement(statement) => self.expand_statement(module, statement, depth),
+            Item::Binding(binding) if binding_is_compile_time_helper(binding) => {}
+            statement @ (Item::Binding(_)
+            | Item::PatternBinding(_)
+            | Item::Assignment(_)
+            | Item::Return(_)
+            | Item::Break(_)
+            | Item::Continue(_)
+            | Item::Expression(_)) => self.expand_statement(module, statement, depth),
             Item::TraitImplementation(implementation) => {
                 for member in &mut implementation.members {
                     member.value = self.expand_expression(module, member.value.clone(), depth);
@@ -1415,7 +1411,7 @@ impl MacroExpander {
                             argument: Box::new((*argument).clone()),
                         });
                     }
-                    Some(Item::Statement(Box::new(Statement::Expression(expression))))
+                    Some(Item::Expression(expression))
                 }
             }
             syntax => {
@@ -1921,7 +1917,7 @@ impl MacroExpander {
                 if items.len() == 1 {
                     let mut generated = items.remove(0);
                     if !arguments[consumed_count..].is_empty() {
-                        let Item::Statement(statement) = &generated else {
+                        let Item::Expression(result) = &generated else {
                             self.diagnostics.push(Diagnostic::new(
                                 expression.syntax().span.clone(),
                                 format!(
@@ -1932,17 +1928,7 @@ impl MacroExpander {
                             self.expansion_stack.pop();
                             return true;
                         };
-                        let Statement::Expression(mut result) = statement.as_ref().clone() else {
-                            self.diagnostics.push(Diagnostic::new(
-                                expression.syntax().span.clone(),
-                                format!(
-                                    "item-producing macro `{}` cannot have excess arguments",
-                                    key.name
-                                ),
-                            ));
-                            self.expansion_stack.pop();
-                            return true;
-                        };
+                        let mut result = result.clone();
                         for argument in &arguments[consumed_count..] {
                             let mut syntax = result.syntax().clone();
                             syntax.id = self.fresh_id();
@@ -1952,7 +1938,7 @@ impl MacroExpander {
                                 argument: Box::new((*argument).clone()),
                             });
                         }
-                        generated = Item::Statement(Box::new(Statement::Expression(result)));
+                        generated = Item::Expression(result);
                     }
                     *item = generated;
                     self.expand_item(module, item, depth + 1);
@@ -2016,7 +2002,7 @@ impl MacroExpander {
                         });
                     }
                     result = self.expand_expression(module, result, depth + 1);
-                    *item = Item::Statement(Box::new(Statement::Expression(result)));
+                    *item = Item::Expression(result);
                 }
             }
             syntax => self.diagnostics.push(Diagnostic::new(
@@ -2032,64 +2018,65 @@ impl MacroExpander {
         true
     }
 
-    fn expand_statement(&mut self, module: ModuleId, statement: &mut Statement, depth: usize) {
+    fn expand_statement(&mut self, module: ModuleId, statement: &mut Item, depth: usize) {
         match statement {
-            Statement::Binding(binding) => {
+            Item::Binding(binding) => {
                 if let Some(value) = binding.value.take() {
                     binding.value = Some(self.expand_expression(module, value, depth));
                 }
             }
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 binding.value = self.expand_expression(module, binding.value.clone(), depth);
             }
-            Statement::Assignment(assignment) => {
+            Item::Assignment(assignment) => {
                 assignment.target =
                     self.expand_expression(module, assignment.target.clone(), depth);
                 assignment.value = self.expand_expression(module, assignment.value.clone(), depth);
             }
-            Statement::Return(return_) => {
+            Item::Return(return_) => {
                 return_.value = self.expand_expression(module, return_.value.clone(), depth);
             }
-            Statement::Break(break_) => {
+            Item::Break(break_) => {
                 if let Some(value) = break_.value.take() {
                     break_.value = Some(self.expand_expression(module, value, depth));
                 }
             }
-            Statement::Continue(_) => {}
-            Statement::Expression(expression) => {
+            Item::Continue(_) => {}
+            Item::Expression(expression) => {
                 *expression = self.expand_expression(module, expression.clone(), depth);
             }
             // A block-scoped `mod` is its own flat `SourceModule`, expanded
             // independently when the top-level driver reaches it — mirrors
             // the `Item::Submodule(_) => {}` catch-all in `expand_item`.
-            Statement::Submodule(_) => {}
+            Item::Submodule(_) => {}
             // Types carry no runtime macro calls to expand — mirrors the
             // `Item::TypeDeclaration(_) => {}` catch-all in `expand_item`.
-            Statement::TypeDeclaration(_) => {}
+            Item::TypeDeclaration(_) => {}
             // A use declaration's path carries no runtime macro calls either
             // — mirrors `Item::UseDeclaration(_) => {}` in `expand_item`.
-            Statement::UseDeclaration(_) => {}
+            Item::UseDeclaration(_) => {}
+            _ => unreachable!("unsupported item reached statement expansion"),
         }
     }
 
     fn expand_block(&mut self, module: ModuleId, block: &mut BlockExpression, depth: usize) {
         let outer = self.scopes[module.0].clone();
-        for statement in &block.statements {
+        for statement in &block.items {
             match statement {
-                Statement::Submodule(submodule) => {
+                Item::Submodule(submodule) => {
                     if let Some(child) = self.child_modules.get(&submodule.syntax.id).copied() {
                         self.scopes[module.0]
                             .namespaces
                             .insert(submodule.name.clone(), child);
                     }
                 }
-                Statement::UseDeclaration(declaration) => {
+                Item::UseDeclaration(declaration) => {
                     self.install_block_import(module, declaration);
                 }
                 _ => {}
             }
         }
-        for statement in &mut block.statements {
+        for statement in &mut block.items {
             self.expand_statement(module, statement, depth);
         }
         self.scopes[module.0] = outer;
@@ -3174,9 +3161,9 @@ impl MacroExpander {
             Expression::Block(block) => {
                 let mut local = environment.clone();
                 let mut result = Value::Product(Vec::new());
-                for statement in &block.statements {
+                for statement in &block.items {
                     match statement {
-                        Statement::Binding(binding) => {
+                        Item::Binding(binding) => {
                             let Some(value) = &binding.value else {
                                 self.diagnostics.push(Diagnostic::new(
                                     binding.syntax.span.clone(),
@@ -3208,13 +3195,13 @@ impl MacroExpander {
                                 EnvironmentBinding::new(value, binding.mutable, binding.reassignable),
                             );
                         }
-                        Statement::PatternBinding(binding) => {
+                        Item::PatternBinding(binding) => {
                             let value = self.eval_expression(module, &binding.value, &mut local)?;
                             if !match_pattern(&binding.pattern, &value, &mut local) {
                                 return None;
                             }
                         }
-                        Statement::Assignment(assignment) => {
+                        Item::Assignment(assignment) => {
                             let value = if let Expression::Quote(quote) = &assignment.value
                                 && quote.kind == crate::QuoteKind::ParseQuote
                                 && matches!(
@@ -3241,47 +3228,48 @@ impl MacroExpander {
                                 return None;
                             }
                         }
-                        Statement::Expression(value) => {
+                        Item::Expression(value) => {
                             result = self.eval_expression(module, value, &mut local)?
                         }
-                        Statement::Return(return_) => {
+                        Item::Return(return_) => {
                             return self.eval_expression(module, &return_.value, &mut local);
                         }
-                        Statement::Break(break_) => {
+                        Item::Break(break_) => {
                             self.diagnostics.push(Diagnostic::new(
                                 break_.syntax.span.clone(),
                                 "`break` is not supported during compile-time evaluation",
                             ));
                             return None;
                         }
-                        Statement::Continue(continue_) => {
+                        Item::Continue(continue_) => {
                             self.diagnostics.push(Diagnostic::new(
                                 continue_.syntax.span.clone(),
                                 "`continue` is not supported during compile-time evaluation",
                             ));
                             return None;
                         }
-                        Statement::Submodule(submodule) => {
+                        Item::Submodule(submodule) => {
                             self.diagnostics.push(Diagnostic::new(
                                 submodule.syntax.span.clone(),
                                 "`mod` is not supported during compile-time evaluation",
                             ));
                             return None;
                         }
-                        Statement::TypeDeclaration(declaration) => {
+                        Item::TypeDeclaration(declaration) => {
                             self.diagnostics.push(Diagnostic::new(
                                 declaration.syntax.span.clone(),
                                 "type declarations are not supported during compile-time evaluation",
                             ));
                             return None;
                         }
-                        Statement::UseDeclaration(declaration) => {
+                        Item::UseDeclaration(declaration) => {
                             self.diagnostics.push(Diagnostic::new(
                                 declaration.syntax.span.clone(),
                                 "`use` is not supported during compile-time evaluation",
                             ));
                             return None;
                         }
+                        _ => return None,
                     }
                 }
                 Some(result)
@@ -4284,7 +4272,7 @@ impl MacroExpander {
             }
             Expression::Loop(loop_) => {
                 self.freshen_syntax(&mut loop_.body.syntax, module, mark);
-                for statement in &mut loop_.body.statements {
+                for statement in &mut loop_.body.items {
                     freshen_statement(self, statement, module, mark);
                 }
             }
@@ -4295,12 +4283,12 @@ impl MacroExpander {
                 freshen_type(self, &mut with.resource, module, mark);
                 self.freshen_expression(&mut with.value, module, mark);
                 self.freshen_syntax(&mut with.body.syntax, module, mark);
-                for statement in &mut with.body.statements {
+                for statement in &mut with.body.items {
                     freshen_statement(self, statement, module, mark);
                 }
             }
             Expression::Block(block) => {
-                for statement in &mut block.statements {
+                for statement in &mut block.items {
                     freshen_statement(self, statement, module, mark);
                 }
             }
@@ -5419,11 +5407,11 @@ fn inferred_result_meta_type(expression: &Expression) -> MetaType {
             crate::QuoteTemplate::Raw => MetaType::Syntax,
         },
         Expression::Block(block) => block
-            .statements
+            .items
             .last()
             .and_then(|statement| match statement {
-                Statement::Expression(expression) => Some(inferred_result_meta_type(expression)),
-                Statement::Return(return_) => Some(inferred_result_meta_type(&return_.value)),
+                Item::Expression(expression) => Some(inferred_result_meta_type(expression)),
+                Item::Return(return_) => Some(inferred_result_meta_type(&return_.value)),
                 _ => None,
             })
             .unwrap_or(MetaType::SyntaxNode),
@@ -5675,19 +5663,20 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         Expression::Resource(_) | Expression::With(_) => true,
         Expression::Block(block) => {
             block
-                .statements
+                .items
                 .last()
                 .is_none_or(|statement| match statement {
-                    Statement::Expression(expression) => obviously_not_syntax(expression, 0),
-                    Statement::Return(return_) => obviously_not_syntax(&return_.value, 0),
-                    Statement::Binding(_)
-                    | Statement::PatternBinding(_)
-                    | Statement::Assignment(_)
-                    | Statement::Break(_)
-                    | Statement::Continue(_)
-                    | Statement::Submodule(_)
-                    | Statement::TypeDeclaration(_)
-                    | Statement::UseDeclaration(_) => true,
+                    Item::Expression(expression) => obviously_not_syntax(expression, 0),
+                    Item::Return(return_) => obviously_not_syntax(&return_.value, 0),
+                    Item::Binding(_)
+                    | Item::PatternBinding(_)
+                    | Item::Assignment(_)
+                    | Item::Break(_)
+                    | Item::Continue(_)
+                    | Item::Submodule(_)
+                    | Item::TypeDeclaration(_)
+                    | Item::UseDeclaration(_) => true,
+                    _ => true,
                 })
         }
         Expression::Function(_)
@@ -5719,11 +5708,11 @@ fn quote_at_tail(expression: &Expression, arity: usize) -> bool {
             .iter()
             .any(|arm| quote_at_tail(&arm.body, 0)),
         Expression::Block(block) => block
-            .statements
+            .items
             .last()
             .is_some_and(|statement| match statement {
-                Statement::Expression(expression) => quote_at_tail(expression, 0),
-                Statement::Return(return_) => quote_at_tail(&return_.value, 0),
+                Item::Expression(expression) => quote_at_tail(expression, 0),
+                Item::Return(return_) => quote_at_tail(&return_.value, 0),
                 _ => false,
             }),
         _ => false,
@@ -6267,7 +6256,7 @@ fn substitute_splices(
             }
         }
         Expression::Loop(loop_) => {
-            for statement in &mut loop_.body.statements {
+            for statement in &mut loop_.body.items {
                 substitute_statement(statement, environment, diagnostics)?;
             }
         }
@@ -6277,12 +6266,12 @@ fn substitute_splices(
         Expression::With(with) => {
             substitute_type(&mut with.resource, environment, diagnostics)?;
             *with.value = substitute_splices(&with.value, environment, diagnostics)?;
-            for statement in &mut with.body.statements {
+            for statement in &mut with.body.items {
                 substitute_statement(statement, environment, diagnostics)?;
             }
         }
         Expression::Block(block) => {
-            for statement in &mut block.statements {
+            for statement in &mut block.items {
                 substitute_statement(statement, environment, diagnostics)?;
             }
         }
@@ -6315,39 +6304,39 @@ fn substitute_splices(
 }
 
 fn substitute_statement(
-    statement: &mut Statement,
+    statement: &mut Item,
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
     match statement {
-        Statement::Binding(binding) => {
+        Item::Binding(binding) => {
             substitute_binding(binding, environment, diagnostics)?;
         }
-        Statement::PatternBinding(binding) => {
+        Item::PatternBinding(binding) => {
             substitute_pattern(&mut binding.pattern, environment, diagnostics)?;
             binding.value = substitute_splices(&binding.value, environment, diagnostics)?
         }
-        Statement::Assignment(assignment) => {
+        Item::Assignment(assignment) => {
             assignment.target = substitute_splices(&assignment.target, environment, diagnostics)?;
             assignment.value = substitute_splices(&assignment.value, environment, diagnostics)?;
         }
-        Statement::Return(return_) => {
+        Item::Return(return_) => {
             return_.value = substitute_splices(&return_.value, environment, diagnostics)?
         }
-        Statement::Break(break_) => {
+        Item::Break(break_) => {
             if let Some(value) = &mut break_.value {
                 *value = substitute_splices(value, environment, diagnostics)?;
             }
         }
-        Statement::Continue(_) => {}
-        Statement::Expression(expression) => {
+        Item::Continue(_) => {}
+        Item::Expression(expression) => {
             *expression = substitute_splices(expression, environment, diagnostics)?
         }
-        Statement::Submodule(submodule) => {
+        Item::Submodule(submodule) => {
             substitute_identifier(&mut submodule.name, environment, diagnostics)?;
             substitute_item_list(&mut submodule.module.items, environment, diagnostics)?;
         }
-        Statement::TypeDeclaration(declaration) => {
+        Item::TypeDeclaration(declaration) => {
             substitute_identifier(&mut declaration.name, environment, diagnostics)?;
             substitute_type_parameter_list(
                 &mut declaration.type_parameters,
@@ -6367,11 +6356,12 @@ fn substitute_statement(
                 substitute_type(underlying, environment, diagnostics)?;
             }
         }
-        Statement::UseDeclaration(declaration) => {
+        Item::UseDeclaration(declaration) => {
             for component in &mut declaration.path {
                 substitute_identifier(component, environment, diagnostics)?;
             }
         }
+        _ => unreachable!("unsupported item reached statement substitution"),
     }
     Some(())
 }
@@ -6386,7 +6376,13 @@ fn item_output_supported(item: &Item) -> bool {
         | Item::TypeDeclaration(_)
         | Item::TraitDeclaration(_)
         | Item::TraitImplementation(_)
-        | Item::Statement(_) => true,
+        | Item::Binding(_)
+        | Item::PatternBinding(_)
+        | Item::Assignment(_)
+        | Item::Return(_)
+        | Item::Break(_)
+        | Item::Continue(_)
+        | Item::Expression(_) => true,
         Item::Submodule(_) | Item::UseDeclaration(_) => true,
         Item::MacroDeclaration(_) => false,
     }
@@ -6402,10 +6398,12 @@ fn modifier_target_supported(item: &Item) -> bool {
         | Item::TypeDeclaration(_)
         | Item::TraitDeclaration(_)
         | Item::TraitImplementation(_) => true,
-        Item::Statement(statement) => matches!(
-            statement.as_ref(),
-            Statement::Binding(_) | Statement::PatternBinding(_)
-        ),
+        Item::Binding(_) | Item::PatternBinding(_) => true,
+        Item::Assignment(_)
+        | Item::Return(_)
+        | Item::Break(_)
+        | Item::Continue(_)
+        | Item::Expression(_) => false,
         Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => false,
     }
 }
@@ -6423,22 +6421,29 @@ fn item_syntax(item: &Item) -> &Syntax {
         Item::MacroDeclaration(value) => &value.syntax,
         Item::TraitDeclaration(value) => &value.syntax,
         Item::TraitImplementation(value) => &value.syntax,
-        Item::Statement(value) => statement_syntax(value),
+        value @ (Item::Binding(_)
+        | Item::PatternBinding(_)
+        | Item::Assignment(_)
+        | Item::Return(_)
+        | Item::Break(_)
+        | Item::Continue(_)
+        | Item::Expression(_)) => statement_syntax(value),
     }
 }
 
-fn statement_syntax(statement: &Statement) -> &Syntax {
+fn statement_syntax(statement: &Item) -> &Syntax {
     match statement {
-        Statement::Binding(value) => &value.syntax,
-        Statement::PatternBinding(value) => &value.syntax,
-        Statement::Assignment(value) => &value.syntax,
-        Statement::Return(value) => &value.syntax,
-        Statement::Break(value) => &value.syntax,
-        Statement::Continue(value) => &value.syntax,
-        Statement::Expression(value) => value.syntax(),
-        Statement::Submodule(value) => &value.syntax,
-        Statement::TypeDeclaration(value) => &value.syntax,
-        Statement::UseDeclaration(value) => &value.syntax,
+        Item::Binding(value) => &value.syntax,
+        Item::PatternBinding(value) => &value.syntax,
+        Item::Assignment(value) => &value.syntax,
+        Item::Return(value) => &value.syntax,
+        Item::Break(value) => &value.syntax,
+        Item::Continue(value) => &value.syntax,
+        Item::Expression(value) => value.syntax(),
+        Item::Submodule(value) => &value.syntax,
+        Item::TypeDeclaration(value) => &value.syntax,
+        Item::UseDeclaration(value) => &value.syntax,
+        _ => unreachable!("statement-only syntax helper received a declaration item"),
     }
 }
 
@@ -6816,7 +6821,13 @@ fn substitute_item(
                 member.value = substitute_splices(&member.value, environment, diagnostics)?;
             }
         }
-        Item::Statement(statement) => {
+        statement @ (Item::Binding(_)
+        | Item::PatternBinding(_)
+        | Item::Assignment(_)
+        | Item::Return(_)
+        | Item::Break(_)
+        | Item::Continue(_)
+        | Item::Expression(_)) => {
             substitute_statement(statement, environment, diagnostics)?;
         }
         Item::TypeDeclaration(declaration) => {
@@ -6898,14 +6909,7 @@ fn apply_visibility_to_item(
         Item::TraitDeclaration(declaration) if kind != VisibilityKind::PublicRepr => {
             declaration.visibility = public
         }
-        Item::Statement(statement) => {
-            let Statement::Binding(binding) = statement.as_mut() else {
-                diagnostics.push(Diagnostic::new(
-                    span,
-                    "visibility may only be spliced onto a declaration item",
-                ));
-                return None;
-            };
+        Item::Binding(binding) => {
             if kind == VisibilityKind::PublicRepr {
                 diagnostics.push(Diagnostic::new(
                     span,
@@ -7083,38 +7087,45 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
                 alpha_rename_expression(&mut member.value, mark, &mut scopes);
             }
         }
-        Item::Statement(statement) => match statement.as_mut() {
-            Statement::Binding(binding) => {
+        statement @ (Item::Binding(_)
+        | Item::PatternBinding(_)
+        | Item::Assignment(_)
+        | Item::Return(_)
+        | Item::Break(_)
+        | Item::Continue(_)
+        | Item::Expression(_)) => match statement {
+            Item::Binding(binding) => {
                 if let Some(value) = &mut binding.value {
                     alpha_rename_expression(value, mark, &mut scopes);
                 }
             }
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 alpha_rename_expression(&mut binding.value, mark, &mut scopes)
             }
-            Statement::Assignment(assignment) => {
+            Item::Assignment(assignment) => {
                 alpha_rename_expression(&mut assignment.target, mark, &mut scopes);
                 alpha_rename_expression(&mut assignment.value, mark, &mut scopes);
             }
-            Statement::Return(return_) => {
+            Item::Return(return_) => {
                 alpha_rename_expression(&mut return_.value, mark, &mut scopes)
             }
-            Statement::Break(break_) => {
+            Item::Break(break_) => {
                 if let Some(value) = &mut break_.value {
                     alpha_rename_expression(value, mark, &mut scopes);
                 }
             }
-            Statement::Continue(_) => {}
-            Statement::Expression(expression) => {
+            Item::Continue(_) => {}
+            Item::Expression(expression) => {
                 alpha_rename_expression(expression, mark, &mut scopes)
             }
-            Statement::Submodule(submodule) => {
+            Item::Submodule(submodule) => {
                 for item in &mut submodule.module.items {
                     alpha_rename_item(item, mark);
                 }
             }
-            Statement::TypeDeclaration(_) => {}
-            Statement::UseDeclaration(_) => {}
+            Item::TypeDeclaration(_) => {}
+            Item::UseDeclaration(_) => {}
+            _ => unreachable!("unsupported item reached block hygiene"),
         },
         Item::TypeDeclaration(_) => {}
         Item::Submodule(submodule) => {
@@ -7235,9 +7246,9 @@ fn alpha_rename_block(
     scopes: &mut Vec<HashMap<String, String>>,
 ) {
     scopes.push(HashMap::new());
-    for statement in &mut block.statements {
+    for statement in &mut block.items {
         match statement {
-            Statement::Binding(binding) => {
+            Item::Binding(binding) => {
                 if let Some(value) = &mut binding.value {
                     alpha_rename_expression(value, mark, scopes);
                 }
@@ -7248,32 +7259,33 @@ fn alpha_rename_block(
                     .insert(binding.name.clone(), renamed.clone());
                 binding.name = renamed;
             }
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 alpha_rename_expression(&mut binding.value, mark, scopes);
                 alpha_rename_pattern(&mut binding.pattern, mark, scopes.last_mut().unwrap());
             }
-            Statement::Assignment(assignment) => {
+            Item::Assignment(assignment) => {
                 alpha_rename_expression(&mut assignment.target, mark, scopes);
                 alpha_rename_expression(&mut assignment.value, mark, scopes);
             }
-            Statement::Return(return_) => alpha_rename_expression(&mut return_.value, mark, scopes),
-            Statement::Break(break_) => {
+            Item::Return(return_) => alpha_rename_expression(&mut return_.value, mark, scopes),
+            Item::Break(break_) => {
                 if let Some(value) = &mut break_.value {
                     alpha_rename_expression(value, mark, scopes);
                 }
             }
-            Statement::Continue(_) => {}
-            Statement::Expression(expression) => alpha_rename_expression(expression, mark, scopes),
+            Item::Continue(_) => {}
+            Item::Expression(expression) => alpha_rename_expression(expression, mark, scopes),
             // A submodule's body can never reference the enclosing block's
             // local bindings, so there's nothing here for value-identifier
             // hygiene to rename.
-            Statement::Submodule(_) => {}
+            Item::Submodule(_) => {}
             // Likewise, a type declaration's bounds/underlying type reference
             // type parameters and other types, never value identifiers.
-            Statement::TypeDeclaration(_) => {}
+            Item::TypeDeclaration(_) => {}
             // A use declaration's path never references local value
             // bindings this pass tracks either.
-            Statement::UseDeclaration(_) => {}
+            Item::UseDeclaration(_) => {}
+            _ => unreachable!("unsupported item reached block hygiene"),
         }
     }
     scopes.pop();
@@ -7344,44 +7356,44 @@ fn freshen_pattern(
 
 fn freshen_statement(
     expander: &mut MacroExpander,
-    statement: &mut Statement,
+    statement: &mut Item,
     module: ModuleId,
     mark: u64,
 ) {
     match statement {
-        Statement::Binding(binding) => freshen_binding(expander, binding, module, mark),
-        Statement::PatternBinding(binding) => {
+        Item::Binding(binding) => freshen_binding(expander, binding, module, mark),
+        Item::PatternBinding(binding) => {
             expander.freshen_syntax(&mut binding.syntax, module, mark);
             freshen_pattern(expander, &mut binding.pattern, module, mark);
             expander.freshen_expression(&mut binding.value, module, mark);
         }
-        Statement::Assignment(assignment) => {
+        Item::Assignment(assignment) => {
             expander.freshen_syntax(&mut assignment.syntax, module, mark);
             expander.freshen_expression(&mut assignment.target, module, mark);
             expander.freshen_expression(&mut assignment.value, module, mark);
         }
-        Statement::Return(return_) => {
+        Item::Return(return_) => {
             expander.freshen_syntax(&mut return_.syntax, module, mark);
             expander.freshen_expression(&mut return_.value, module, mark);
         }
-        Statement::Break(break_) => {
+        Item::Break(break_) => {
             expander.freshen_syntax(&mut break_.syntax, module, mark);
             if let Some(value) = &mut break_.value {
                 expander.freshen_expression(value, module, mark);
             }
         }
-        Statement::Continue(continue_) => {
+        Item::Continue(continue_) => {
             expander.freshen_syntax(&mut continue_.syntax, module, mark);
         }
-        Statement::Expression(expression) => expander.freshen_expression(expression, module, mark),
-        Statement::Submodule(submodule) => {
+        Item::Expression(expression) => expander.freshen_expression(expression, module, mark),
+        Item::Submodule(submodule) => {
             expander.freshen_syntax(&mut submodule.syntax, module, mark);
             expander.freshen_syntax(&mut submodule.module.syntax, module, mark);
             for item in &mut submodule.module.items {
                 freshen_item(expander, item, module, mark);
             }
         }
-        Statement::TypeDeclaration(declaration) => {
+        Item::TypeDeclaration(declaration) => {
             expander.freshen_syntax(&mut declaration.syntax, module, mark);
             for parameter in &mut declaration.type_parameters {
                 freshen_type_parameter(expander, parameter, module, mark);
@@ -7399,9 +7411,10 @@ fn freshen_statement(
                 freshen_type(expander, underlying, module, mark);
             }
         }
-        Statement::UseDeclaration(declaration) => {
+        Item::UseDeclaration(declaration) => {
             expander.freshen_syntax(&mut declaration.syntax, module, mark);
         }
+        _ => unreachable!("unsupported item reached statement freshening"),
     }
 }
 
@@ -7577,7 +7590,13 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
                 expander.freshen_expression(&mut member.value, module, mark);
             }
         }
-        Item::Statement(statement) => freshen_statement(expander, statement, module, mark),
+        statement @ (Item::Binding(_)
+        | Item::PatternBinding(_)
+        | Item::Assignment(_)
+        | Item::Return(_)
+        | Item::Break(_)
+        | Item::Continue(_)
+        | Item::Expression(_)) => freshen_statement(expander, statement, module, mark),
         Item::Submodule(submodule) => {
             expander.freshen_syntax(&mut submodule.syntax, module, mark);
             expander.freshen_syntax(&mut submodule.module.syntax, module, mark);

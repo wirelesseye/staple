@@ -1653,10 +1653,12 @@ Braces construct a block expression:
 }
 ```
 
-A block may contain bindings, returns, and expressions. Its final statement
-determines the block's value: a final expression supplies its value, while an
-empty block or a block ending in a non-expression supplies `()`. A semicolon
-after the final expression does not discard that value.
+A block may contain bindings, assignments, returns, loop control, expressions,
+private `mod` and `type` declarations, and private `use` declarations. Other
+item forms, including `extern`, `macro`, `trait`, and `impl`, are rejected in a
+block. Its final item determines the block's value: a final expression supplies
+its value, while an empty block or a block ending in a non-expression supplies
+`()`. A semicolon after the final expression does not discard that value.
 
 ## Match expressions
 

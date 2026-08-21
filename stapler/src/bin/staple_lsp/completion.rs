@@ -178,7 +178,9 @@ impl Collector<'_> {
 
     fn sequential_item(&self, item: &Item, candidates: &mut Vec<Candidate>, start: usize) {
         match item {
-            Item::Statement(statement) => self.statement_declarations(statement, candidates, start),
+            statement @ (Item::Binding(_) | Item::PatternBinding(_)) => {
+                self.statement_declarations(statement, candidates, start)
+            }
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
                     if let Some(candidate) = self.binding_candidate(binding, start) {
@@ -192,12 +194,12 @@ impl Collector<'_> {
 
     fn statement_declarations(
         &self,
-        statement: &Statement,
+        statement: &Item,
         candidates: &mut Vec<Candidate>,
         scope_start: usize,
     ) {
         match statement {
-            Statement::Binding(binding) => {
+            Item::Binding(binding) => {
                 let available = if binding.kind == BindingKind::Def {
                     scope_start
                 } else {
@@ -207,7 +209,7 @@ impl Collector<'_> {
                     candidates.push(candidate);
                 }
             }
-            Statement::PatternBinding(binding) => {
+            Item::PatternBinding(binding) => {
                 let available = syntax_range(&binding.syntax).end;
                 self.pattern_candidates(&binding.pattern, available, candidates);
             }
@@ -265,7 +267,13 @@ impl Collector<'_> {
                     self.expression(&member.value, module_index);
                 }
             }
-            Item::Statement(statement) => self.statement(statement, module_index),
+            statement @ (Item::Binding(_)
+            | Item::PatternBinding(_)
+            | Item::Assignment(_)
+            | Item::Return(_)
+            | Item::Break(_)
+            | Item::Continue(_)
+            | Item::Expression(_)) => self.statement(statement, module_index),
             Item::RepeatedItemSplice(_) | Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
         }
     }
@@ -286,23 +294,23 @@ impl Collector<'_> {
         }
     }
 
-    fn statement(&mut self, statement: &Statement, module_index: usize) {
+    fn statement(&mut self, statement: &Item, module_index: usize) {
         match statement {
-            Statement::Binding(value) => self.binding(value, module_index),
-            Statement::PatternBinding(value) => self.expression(&value.value, module_index),
-            Statement::Assignment(value) => {
+            Item::Binding(value) => self.binding(value, module_index),
+            Item::PatternBinding(value) => self.expression(&value.value, module_index),
+            Item::Assignment(value) => {
                 self.expression(&value.target, module_index);
                 self.expression(&value.value, module_index);
             }
-            Statement::Return(value) => self.expression(&value.value, module_index),
-            Statement::Break(value) => {
+            Item::Return(value) => self.expression(&value.value, module_index),
+            Item::Break(value) => {
                 if let Some(expression) = &value.value {
                     self.expression(expression, module_index);
                 }
             }
-            Statement::Expression(value) => self.expression(value, module_index),
-            Statement::Continue(_) => {}
-            Statement::Submodule(value) => {
+            Item::Expression(value) => self.expression(value, module_index),
+            Item::Continue(_) => {}
+            Item::Submodule(value) => {
                 if let Some(id) = self
                     .typed
                     .resolved()
@@ -312,8 +320,9 @@ impl Collector<'_> {
                     self.module(&value.module, id);
                 }
             }
-            Statement::TypeDeclaration(_) => {}
-            Statement::UseDeclaration(_) => {}
+            Item::TypeDeclaration(_) => {}
+            Item::UseDeclaration(_) => {}
+            _ => {}
         }
     }
 
@@ -394,13 +403,13 @@ impl Collector<'_> {
     fn block(&mut self, block: &BlockExpression, module_index: usize) {
         let range = syntax_range(&block.syntax);
         let mut candidates = Vec::new();
-        for statement in &block.statements {
+        for statement in &block.items {
             self.statement_declarations(statement, &mut candidates, range.start);
         }
         self.index.modules[module_index]
             .scopes
             .push(Scope { range, candidates });
-        for statement in &block.statements {
+        for statement in &block.items {
             self.statement(statement, module_index);
         }
     }
