@@ -1507,7 +1507,9 @@ impl NameResolver {
             self.next_symbol_id += 1;
             self.symbol_owners.insert(symbol, None);
             self.type_constructor_symbols.insert(id, symbol);
-            self.module_values[module.0].insert(declaration.name.clone(), symbol);
+            if top_level {
+                self.module_values[module.0].insert(declaration.name.clone(), symbol);
+            }
             if declaration.kind == crate::TypeDeclarationKind::Singleton {
                 self.singleton_values.insert(symbol, id);
             } else {

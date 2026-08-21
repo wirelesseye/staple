@@ -517,6 +517,7 @@ struct MacroExpander {
     definitions: HashMap<MacroKey, MacroDefinition>,
     scopes: Vec<ModuleScope>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
+    child_modules: HashMap<SyntaxId, ModuleId>,
     parent_modules: Vec<Option<ModuleId>>,
     diagnostics: Vec<Diagnostic>,
     next_syntax_id: usize,
@@ -878,6 +879,7 @@ impl MacroExpander {
             definitions,
             scopes,
             imported_modules: program.imported_modules().clone(),
+            child_modules: program.child_modules().clone(),
             parent_modules: program
                 .modules()
                 .iter()
@@ -2073,10 +2075,19 @@ impl MacroExpander {
     fn expand_block(&mut self, module: ModuleId, block: &mut BlockExpression, depth: usize) {
         let outer = self.scopes[module.0].clone();
         for statement in &block.statements {
-            let Statement::UseDeclaration(declaration) = statement else {
-                continue;
-            };
-            self.install_block_import(module, declaration);
+            match statement {
+                Statement::Submodule(submodule) => {
+                    if let Some(child) = self.child_modules.get(&submodule.syntax.id).copied() {
+                        self.scopes[module.0]
+                            .namespaces
+                            .insert(submodule.name.clone(), child);
+                    }
+                }
+                Statement::UseDeclaration(declaration) => {
+                    self.install_block_import(module, declaration);
+                }
+                _ => {}
+            }
         }
         for statement in &mut block.statements {
             self.expand_statement(module, statement, depth);

@@ -381,6 +381,26 @@ fn block_scoped_submodules_are_reachable_within_their_block() {
 }
 
 #[test]
+fn block_scoped_submodule_macros_are_reachable_within_their_block() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "let result: I32 = {\n",
+            "    mod inner {\n",
+            "        pub macro reveal = value => value\n",
+            "    }\n",
+            "    inner.reveal 42\n",
+            "}\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("a macro in a block-scoped submodule should be callable within that block");
+}
+
+#[test]
 fn block_scoped_submodules_see_the_enclosing_modules_top_level_items_via_super() {
     let fixture = Fixture::new();
     fixture.write(
@@ -577,6 +597,24 @@ fn block_scoped_types_shadow_module_level_types_of_the_same_name() {
     fixture
         .compile()
         .expect("a block-scoped type should shadow a module-level type of the same name");
+}
+
+#[test]
+fn block_scoped_type_constructors_do_not_enter_macro_definition_scope() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "type Wrapped = I32\n",
+            "macro make = _: Expr => parse_quote { Wrapped 42 }\n",
+            "{ type Wrapped = Bool; () }\n",
+            "let result: Wrapped = make ()\n",
+        ),
+    );
+
+    fixture.compile().expect(
+        "a block-local constructor should not replace a module constructor in macro definition scope",
+    );
 }
 
 #[test]
