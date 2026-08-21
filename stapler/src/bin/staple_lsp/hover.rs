@@ -165,20 +165,20 @@ impl Collector<'_> {
                 }
             }
             Expression::Loop(loop_) => {
-                for statement in &loop_.body.items {
-                    self.collect_statement_declarations(statement);
+                for item in &loop_.body.items {
+                    self.collect_item_declarations(item);
                 }
             }
             Expression::Resource(_) => {}
             Expression::With(with) => {
                 self.collect_expression_declarations(&with.value);
-                for statement in &with.body.items {
-                    self.collect_statement_declarations(statement);
+                for item in &with.body.items {
+                    self.collect_item_declarations(item);
                 }
             }
             Expression::Block(block) => {
-                for statement in &block.items {
-                    self.collect_statement_declarations(statement);
+                for item in &block.items {
+                    self.collect_item_declarations(item);
                 }
             }
             Expression::Product(product) => {
@@ -659,21 +659,21 @@ impl Collector<'_> {
                 }
             }
             Expression::Loop(loop_) => {
-                for statement in &loop_.body.items {
-                    self.statement(statement);
+                for item in &loop_.body.items {
+                    self.item(item);
                 }
             }
             Expression::Resource(resource) => self.ty(&resource.resource),
             Expression::With(with) => {
                 self.ty(&with.resource);
                 self.expression(&with.value);
-                for statement in &with.body.items {
-                    self.statement(statement);
+                for item in &with.body.items {
+                    self.item(item);
                 }
             }
             Expression::Block(block) => {
-                for statement in &block.items {
-                    self.statement(statement);
+                for item in &block.items {
+                    self.item(item);
                 }
             }
             Expression::Product(product) => {

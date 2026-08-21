@@ -202,20 +202,20 @@ impl DeclarationCollector<'_> {
                 }
             }
             Expression::Loop(value) => {
-                for statement in &value.body.items {
-                    self.statement(statement);
+                for item in &value.body.items {
+                    self.item(item);
                 }
             }
             Expression::Resource(_) => {}
             Expression::With(value) => {
                 self.expression(&value.value);
-                for statement in &value.body.items {
-                    self.statement(statement);
+                for item in &value.body.items {
+                    self.item(item);
                 }
             }
             Expression::Block(value) => {
-                for statement in &value.items {
-                    self.statement(statement);
+                for item in &value.items {
+                    self.item(item);
                 }
             }
             Expression::Product(value) => {
@@ -564,21 +564,21 @@ impl Collector<'_> {
                 }
             }
             Expression::Loop(value) => {
-                for statement in &value.body.items {
-                    self.statement(statement);
+                for item in &value.body.items {
+                    self.item(item);
                 }
             }
             Expression::Resource(value) => self.ty(&value.resource),
             Expression::With(value) => {
                 self.ty(&value.resource);
                 self.expression(&value.value);
-                for statement in &value.body.items {
-                    self.statement(statement);
+                for item in &value.body.items {
+                    self.item(item);
                 }
             }
             Expression::Block(value) => {
-                for statement in &value.items {
-                    self.statement(statement);
+                for item in &value.items {
+                    self.item(item);
                 }
             }
             Expression::Product(value) => {

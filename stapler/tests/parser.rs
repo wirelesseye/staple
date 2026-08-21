@@ -1417,10 +1417,23 @@ fn rejects_unsupported_items_in_blocks() {
         "{ macro generated = () }\n",
         "{ trait Generated {} }\n",
         "{ impl Generated I32 {} }\n",
-        "{ @generated let value = 1 }\n",
     ] {
         assert!(parse(source).is_err(), "unsupported block item parsed: {source}");
     }
+}
+
+#[test]
+fn parses_modifiers_on_block_items() {
+    let source = "{ @outer @inner(42) let value = 1 }\n";
+    let root = parse(source).expect("block item modifiers should parse");
+    let Item::Expression(Expression::Block(block)) = &root.items[0] else {
+        panic!("expected block expression");
+    };
+    let Item::Modified(modified) = &block.items[0] else {
+        panic!("expected modified block item");
+    };
+    assert_eq!(modified.modifiers.len(), 2);
+    assert!(matches!(modified.item.as_ref(), Item::Binding(_)));
 }
 
 #[test]

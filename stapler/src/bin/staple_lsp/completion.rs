@@ -199,6 +199,9 @@ impl Collector<'_> {
         scope_start: usize,
     ) {
         match statement {
+            Item::Modified(value) => {
+                self.statement_declarations(&value.item, candidates, scope_start)
+            }
             Item::Binding(binding) => {
                 let available = if binding.kind == BindingKind::Def {
                     scope_start
@@ -409,8 +412,8 @@ impl Collector<'_> {
         self.index.modules[module_index]
             .scopes
             .push(Scope { range, candidates });
-        for statement in &block.items {
-            self.statement(statement, module_index);
+        for item in &block.items {
+            self.item(item, module_index);
         }
     }
 

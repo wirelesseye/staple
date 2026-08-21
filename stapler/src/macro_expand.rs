@@ -2061,8 +2061,8 @@ impl MacroExpander {
 
     fn expand_block(&mut self, module: ModuleId, block: &mut BlockExpression, depth: usize) {
         let outer = self.scopes[module.0].clone();
-        for statement in &block.items {
-            match statement {
+        for item in &block.items {
+            match item {
                 Item::Submodule(submodule) => {
                     if let Some(child) = self.child_modules.get(&submodule.syntax.id).copied() {
                         self.scopes[module.0]
@@ -2076,10 +2076,49 @@ impl MacroExpander {
                 _ => {}
             }
         }
-        for statement in &mut block.items {
-            self.expand_statement(module, statement, depth);
+        let mut expanded = Vec::new();
+        for item in std::mem::take(&mut block.items) {
+            expanded.extend(self.expand_block_item(module, item, depth));
         }
+        block.items = expanded;
         self.scopes[module.0] = outer;
+    }
+
+    fn expand_block_item(&mut self, module: ModuleId, item: Item, depth: usize) -> Vec<Item> {
+        let generated = if let Item::Modified(modified) = item {
+            match self.apply_modifier_chain(module, modified, depth) {
+                Some(ModifierChainResult::Item(item)) => vec![item],
+                Some(ModifierChainResult::Items(items)) => items,
+                None => return Vec::new(),
+            }
+        } else {
+            vec![item]
+        };
+
+        let mut expanded = Vec::new();
+        for generated_item in generated {
+            if matches!(generated_item, Item::Modified(_)) {
+                expanded.extend(self.expand_block_item(module, generated_item, depth + 1));
+                continue;
+            }
+            if !block_item_supported(&generated_item) {
+                self.diagnostics.push(Diagnostic::new(
+                    item_syntax(&generated_item).span.clone(),
+                    "item is not supported in a block expression",
+                ));
+                continue;
+            }
+            let mut generated_item = generated_item;
+            if let Item::Submodule(submodule) = &mut generated_item
+                && submodule.syntax.definition_module().is_some()
+            {
+                let items = std::mem::take(&mut submodule.module.items);
+                submodule.module.items = self.expand_generated_items(module, items, depth + 1);
+            }
+            self.expand_statement(module, &mut generated_item, depth + 1);
+            expanded.push(generated_item);
+        }
+        expanded
     }
 
     fn install_block_import(&mut self, module: ModuleId, use_: &UseDeclaration) {
@@ -6405,6 +6444,32 @@ fn modifier_target_supported(item: &Item) -> bool {
         | Item::Continue(_)
         | Item::Expression(_) => false,
         Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => false,
+    }
+}
+
+fn block_item_supported(item: &Item) -> bool {
+    match item {
+        Item::Binding(binding) => binding.visibility == Visibility::Private,
+        Item::PatternBinding(_)
+        | Item::Assignment(_)
+        | Item::Return(_)
+        | Item::Break(_)
+        | Item::Continue(_)
+        | Item::Expression(_) => true,
+        Item::Submodule(submodule) => submodule.visibility == Visibility::Private,
+        Item::TypeDeclaration(declaration) => {
+            declaration.visibility == Visibility::Private
+                && declaration.representation_visibility == Visibility::Private
+        }
+        Item::UseDeclaration(declaration) => declaration.visibility == Visibility::Private,
+        Item::Modified(_)
+        | Item::VisibilityMacroInvocation(_)
+        | Item::VisibilitySplice(_)
+        | Item::RepeatedItemSplice(_)
+        | Item::ExternBlock(_)
+        | Item::MacroDeclaration(_)
+        | Item::TraitDeclaration(_)
+        | Item::TraitImplementation(_) => false,
     }
 }
 

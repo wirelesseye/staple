@@ -303,6 +303,11 @@ the surrounding chain continues. Modifiers may target `let`, `def`, `type`,
 occupy separate namespaces, and imports, renames, namespaces, and re-exports
 carry both.
 
+Modifiers may also target eligible private items in block expressions. A block
+modifier may produce zero, one, or many replacement items, which are spliced at
+the modifier's position. Every result must itself be valid in a block, so public
+items and `extern`, `macro`, `trait`, or `impl` declarations are rejected.
+
 A modifier declared `Item -> Item` must return exactly one `Item`, as before.
 A modifier declared `Item -> Sequence Item` or `Item -> Syntax` may instead
 expand to zero, one, or many items, reusing the same reparse and splice
@@ -1654,11 +1659,12 @@ Braces construct a block expression:
 ```
 
 A block may contain bindings, assignments, returns, loop control, expressions,
-private `mod` and `type` declarations, and private `use` declarations. Other
-item forms, including `extern`, `macro`, `trait`, and `impl`, are rejected in a
-block. Its final item determines the block's value: a final expression supplies
-its value, while an empty block or a block ending in a non-expression supplies
-`()`. A semicolon after the final expression does not discard that value.
+private `mod` and `type` declarations, and private `use` declarations. Modifier
+macros may be applied to eligible declarations. Other item forms, including
+`extern`, `macro`, `trait`, and `impl`, are rejected in a block. Its final item
+determines the block's value: a final expression supplies its value, while an
+empty block or a block ending in a non-expression supplies `()`. A semicolon
+after the final expression does not discard that value.
 
 ## Match expressions
 

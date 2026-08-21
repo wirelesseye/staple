@@ -2927,6 +2927,78 @@ fn modifier_macro_deletes_its_target_by_producing_zero_items() {
 }
 
 #[test]
+fn block_modifiers_replace_splice_and_delete_items() {
+    let module = type_check(concat!(
+        "macro @split: Item -> Sequence Item = _ => parse_quote {\n",
+        "    let first: I32 = 20\n",
+        "    let second: I32 = 22\n",
+        "}\n",
+        "macro @delete: Item -> Sequence Item = _ => parse_quote {}\n",
+        "def answer: () -> I32 = () => {\n",
+        "    @split let original = 0\n",
+        "    @delete let removed = 0\n",
+        "    first + second\n",
+        "}\n",
+        "let result: I32 = answer ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("block modifier output should splice and compile");
+}
+
+#[test]
+fn block_modifiers_may_generate_supported_declarations() {
+    let module = type_check(concat!(
+        "mod helpers { pub def value: I32 = 42 }\n",
+        "macro @declarations: Item -> Sequence Item = _ => parse_quote {\n",
+        "    type alias Local = I32\n",
+        "    use helpers value\n",
+        "    mod local { pub def extra: I32 = 1 }\n",
+        "    let generated: Local = value + local.extra\n",
+        "}\n",
+        "def answer: () -> I32 = () => {\n",
+        "    @declarations let original = 0\n",
+        "    generated\n",
+        "}\n",
+        "let result: I32 = answer ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("supported declarations generated in a block should compile");
+}
+
+#[test]
+fn block_modifiers_reject_unsupported_and_public_outputs() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for source in [
+        concat!(
+            "macro @invalid: Item -> Item = _ => parse_quote { trait Invalid = T => { value: T } }\n",
+            "def test = () => { @invalid let original = 0 }\n",
+        ),
+        concat!(
+            "macro @invalid: Item -> Item = _ => parse_quote { pub let invalid = 0 }\n",
+            "def test = () => { @invalid let original = 0 }\n",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&with_syntax_imports(source), root)
+            .expect("source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("invalid block modifier output should be rejected");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic.message == "item is not supported in a block expression"
+            }),
+            "expected unsupported block item diagnostic, found {diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
 fn non_outermost_modifier_applies_the_next_modifier_to_its_first_item() {
     let module = type_check(concat!(
         "macro @outer: Item -> Item = _ => parse_quote { let transformed: I32 = 100 }\n",

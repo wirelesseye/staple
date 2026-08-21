@@ -665,14 +665,26 @@ impl Grammar {
 
     /// Parses one of the item forms supported in a block expression.
     fn parse_block_item(&mut self) -> Result<Item, ParseError> {
+        let item_start = self.position;
+        if self.at(TokenKind::At) {
+            let mut modifiers = Vec::new();
+            while self.at(TokenKind::At) {
+                modifiers.push(self.parse_modifier_invocation()?);
+            }
+            let item = Box::new(self.parse_block_item()?);
+            return Ok(Item::Modified(ModifiedItem {
+                syntax: self.syntax(item_start),
+                modifiers,
+                item,
+            }));
+        }
         if self.at(TokenKind::Pub) {
             return Err(self.error("public items are not supported in block expressions"));
         }
         if matches!(
             self.peek(),
             Some(
-                TokenKind::At
-                    | TokenKind::Extern
+                TokenKind::Extern
                     | TokenKind::Macro
                     | TokenKind::Trait
                     | TokenKind::Impl

@@ -571,8 +571,8 @@ impl<'a> Classifier<'a> {
                 }
             }
             Expression::Loop(value) => {
-                for statement in &value.body.items {
-                    self.statement(statement, resolved);
+                for item in &value.body.items {
+                    self.item(item, resolved);
                 }
             }
             Expression::Resource(value) => {
@@ -583,13 +583,13 @@ impl<'a> Classifier<'a> {
                 self.mark_first(&value.syntax, "with", KEYWORD, 0, 1);
                 self.ty(&value.resource, resolved);
                 self.expression(&value.value, resolved);
-                for statement in &value.body.items {
-                    self.statement(statement, resolved);
+                for item in &value.body.items {
+                    self.item(item, resolved);
                 }
             }
             Expression::Block(value) => {
-                for statement in &value.items {
-                    self.statement(statement, resolved);
+                for item in &value.items {
+                    self.item(item, resolved);
                 }
             }
             Expression::Product(value) => {

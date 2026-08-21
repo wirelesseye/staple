@@ -245,7 +245,7 @@ impl Program {
     pub(crate) fn rebuild_generated_inline_modules(&mut self) {
         let mut parent = 0;
         while parent < self.modules.len() {
-            let declarations = self.modules[parent]
+            let mut declarations = self.modules[parent]
                 .syntax
                 .items
                 .iter()
@@ -253,12 +253,25 @@ impl Program {
                     Item::Submodule(module)
                         if !self.child_modules.contains_key(&module.syntax.id) =>
                     {
-                        Some(module.clone())
+                        Some((module.clone(), true))
                     }
                     _ => None,
                 })
                 .collect::<Vec<_>>();
-            for declaration in declarations {
+            let mut block_declarations = Vec::new();
+            find_block_submodules(
+                &self.modules[parent].syntax.items,
+                &mut block_declarations,
+            );
+            declarations.extend(
+                block_declarations
+                    .into_iter()
+                    .filter(|declaration| {
+                        !self.child_modules.contains_key(&declaration.syntax.id)
+                    })
+                    .map(|declaration| (declaration, false)),
+            );
+            for (declaration, top_level) in declarations {
                 let id = ModuleId(self.modules.len());
                 let qualified_name = format!(
                     "{}.{}",
@@ -274,7 +287,9 @@ impl Program {
                     qualified_name,
                 });
                 self.children.push(HashMap::new());
-                self.children[parent].insert(declaration.name, id);
+                if top_level {
+                    self.children[parent].insert(declaration.name, id);
+                }
                 self.child_modules.insert(declaration.syntax.id, id);
             }
             parent += 1;
