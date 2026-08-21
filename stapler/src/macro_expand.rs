@@ -3988,8 +3988,8 @@ impl MacroExpander {
         environment: &Environment,
         expected: &MetaType,
     ) -> Option<Value> {
-        let quote_is_imported =
-            self.scopes[module.0]
+        let quote_is_imported = quote.qualified
+            || self.scopes[module.0]
                 .macros
                 .get(quote.kind.name())
                 .is_some_and(|definitions| {

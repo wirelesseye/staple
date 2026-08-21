@@ -33,6 +33,16 @@ fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
 }
 
 #[test]
+fn parses_fully_qualified_quote_expressions_losslessly() {
+    let source = concat!(
+        "macro capture = value => std.syntax.quote { $value }\n",
+        "macro parsed = value => std.syntax.parse_quote { $value }\n",
+    );
+    let module = parse(source).expect("qualified quotations should parse");
+    assert_eq!(module.syntax.text(), source);
+}
+
+#[test]
 fn parses_mut_effect_sets_losslessly() {
     use stapler::{MutationTarget, MutationTargetKind};
 

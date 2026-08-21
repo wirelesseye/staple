@@ -640,14 +640,17 @@ impl<'a> Classifier<'a> {
             }
             Expression::SyntaxArgument(_) => {}
             Expression::VisibilityArgument(value) => self.visibility(value),
-            Expression::Quote(value) => match &value.template {
-                QuoteTemplate::Expression(expression) => self.expression(expression, resolved),
-                QuoteTemplate::Item(item) => self.item(item, resolved),
-                QuoteTemplate::Items(items) => {
-                    items.iter().for_each(|item| self.item(item, resolved))
+            Expression::Quote(value) => {
+                self.mark_first(&value.syntax, value.kind.name(), MACRO, READONLY, 1);
+                match &value.template {
+                    QuoteTemplate::Expression(expression) => self.expression(expression, resolved),
+                    QuoteTemplate::Item(item) => self.item(item, resolved),
+                    QuoteTemplate::Items(items) => {
+                        items.iter().for_each(|item| self.item(item, resolved))
+                    }
+                    QuoteTemplate::Raw => {}
                 }
-                QuoteTemplate::Raw => {}
-            },
+            }
             Expression::Splice(value) => self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1),
             Expression::Name(value) => {
                 if resolved
@@ -1108,6 +1111,21 @@ mod tests {
                 "missing {expected:?} in {labels:?}"
             );
         }
+    }
+
+    #[test]
+    fn classifies_quotation_calls_semantically() {
+        let source = concat!(
+            "macro bare = value => quote { $value }\n",
+            "macro qualified = value => std.syntax.parse_quote { $value }\n",
+        );
+        let module = parse(source).unwrap();
+        let labels = labels(source, &tokens(source, Some(&module), None, None));
+        assert!(labels.contains(&("quote", MACRO)), "labels: {labels:?}");
+        assert!(
+            labels.contains(&("parse_quote", MACRO)),
+            "labels: {labels:?}"
+        );
     }
 
     #[test]

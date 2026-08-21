@@ -84,6 +84,7 @@ pub struct WithResourceExpression {
 pub struct QuoteExpression {
     pub syntax: Syntax,
     pub kind: QuoteKind,
+    pub qualified: bool,
     pub contents: Syntax,
     pub template: QuoteTemplate,
 }

@@ -98,10 +98,6 @@
     "quotation": {
       "patterns": [
         {
-          "name": "keyword.other.quote.staple",
-          "match": "\\bquote(?=\\s*\\{)"
-        },
-        {
           "name": "meta.macro.splice.staple",
           "match": "(\\$)((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)(\\.\\.\\.)?",
           "captures": {

@@ -2147,14 +2147,10 @@ impl Grammar {
 
     /// Parses a primary expression without call, access, or binary operators.
     fn parse_atom(&mut self) -> Result<Expression, ParseError> {
-        if self.peek() == Some(TokenKind::Identifier)
-            && self
-                .tokens
-                .get(self.next_non_trivia(self.position))
-                .is_some_and(|token| token.text == "quote" || token.text == "parse_quote")
-            && self.peek_n(1) == Some(TokenKind::LBrace)
-        {
-            return self.parse_quote_expression().map(Expression::Quote);
+        if let Some(qualified) = self.quote_expression_start() {
+            return self
+                .parse_quote_expression(qualified)
+                .map(Expression::Quote);
         }
         if self.peek_text("resource") && self.is_resource_expression_start() {
             return self
@@ -2250,8 +2246,37 @@ impl Grammar {
         }
     }
 
-    fn parse_quote_expression(&mut self) -> Result<QuoteExpression, ParseError> {
+    fn quote_expression_start(&self) -> Option<bool> {
+        let texts = (0..7)
+            .map(|index| {
+                let mut position = self.position;
+                for step in 0..=index {
+                    position = self.next_non_trivia(position);
+                    if step != index {
+                        position += 1;
+                    }
+                }
+                self.tokens.get(position).map(|token| token.text.as_str())
+            })
+            .collect::<Vec<_>>();
+        if matches!(texts.as_slice(), [Some("quote" | "parse_quote"), Some("{"), ..]) {
+            return Some(false);
+        }
+        matches!(
+            texts.as_slice(),
+            [Some("std"), Some("."), Some("syntax"), Some("."), Some("quote" | "parse_quote"), Some("{"), ..]
+        )
+        .then_some(true)
+    }
+
+    fn parse_quote_expression(&mut self, qualified: bool) -> Result<QuoteExpression, ParseError> {
         let start = self.position;
+        if qualified {
+            self.expect(TokenKind::Identifier, "expected `std`")?;
+            self.expect(TokenKind::Dot, "expected `.` after `std`")?;
+            self.expect(TokenKind::Identifier, "expected `syntax`")?;
+            self.expect(TokenKind::Dot, "expected `.` after `syntax`")?;
+        }
         let quote = self.expect(TokenKind::Identifier, "expected `quote` or `parse_quote`")?;
         debug_assert!(quote.text == "quote" || quote.text == "parse_quote");
         let kind = if quote.text == "parse_quote" {
@@ -2319,6 +2344,7 @@ impl Grammar {
         Ok(QuoteExpression {
             syntax: self.syntax(start),
             kind,
+            qualified,
             contents,
             template,
         })
