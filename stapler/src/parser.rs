@@ -855,14 +855,23 @@ impl Grammar {
     ) -> Result<UseDeclaration, ParseError> {
         self.expect(TokenKind::Use, "expected `use`")?;
         let mut path = vec![self.parse_quoted_identifier("expected module path after `use`")?];
-        while self.eat(TokenKind::Dot) {
+        while self.at(TokenKind::Dot) && self.peek_n(1) == Some(TokenKind::Identifier) {
+            self.eat(TokenKind::Dot);
             path.push(self.parse_value_name("expected module path component after `.`")?);
         }
         let kind = if self.has_newline_before_next_token() {
-            UseKind::Namespace
-        } else if self.eat(TokenKind::Star) {
+            if path.len() > 1 && !path.iter().all(|part| part == "super") {
+                UseKind::Dotted
+            } else {
+                UseKind::Namespace
+            }
+        } else if self.at(TokenKind::Dot) && self.peek_n(1) == Some(TokenKind::Star) {
+            self.eat(TokenKind::Dot);
+            self.eat(TokenKind::Star);
             UseKind::Glob
-        } else if self.eat(TokenKind::LParen) {
+        } else if self.at(TokenKind::Dot) && self.peek_n(1) == Some(TokenKind::LParen) {
+            self.eat(TokenKind::Dot);
+            self.eat(TokenKind::LParen);
             let mut names = Vec::new();
             if !self.at(TokenKind::RParen) {
                 loop {
@@ -877,14 +886,21 @@ impl Grammar {
             }
             self.expect(TokenKind::RParen, "expected `)` after imported items")?;
             UseKind::Selected(names)
-        } else if self.at(TokenKind::Identifier) {
-            let item = self.parse_value_name("expected imported item")?;
-            if self.eat(TokenKind::As) {
-                let alias = self.parse_value_name("expected import alias after `as`")?;
-                UseKind::Renamed { item, alias }
-            } else {
-                UseKind::Selected(vec![item])
+        } else if self.eat(TokenKind::As) {
+            let item = path
+                .pop()
+                .ok_or_else(|| self.error("expected imported item before `as`"))?;
+            if path.is_empty() {
+                return Err(self.error("renamed imports require a module path before the item"));
             }
+            let alias = self.parse_value_name("expected import alias after `as`")?;
+            UseKind::Renamed { item, alias }
+        } else if self.at(TokenKind::Identifier) {
+            return Err(self.error("item imports use `.` between the module path and item name"));
+        } else if self.at(TokenKind::Dot) {
+            return Err(self.error("expected `*` or `(` after `.` in `use` declaration"));
+        } else if path.len() > 1 && !path.iter().all(|part| part == "super") {
+            UseKind::Dotted
         } else {
             UseKind::Namespace
         };

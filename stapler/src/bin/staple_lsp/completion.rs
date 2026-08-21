@@ -606,7 +606,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(root.join("dependency.sta"), "pub let imported = 1\n").unwrap();
         let source = concat!(
-            "use dependency *\n",
+            "use dependency.*\n",
             "def outer = parameter: I32 => {\n",
             "    0\n",
             "    let local = 1\n",
@@ -711,7 +711,7 @@ mod tests {
         )
         .unwrap();
         let source = concat!(
-            "use dependency (callable, Number, Printable, identity)\n",
+            "use dependency.(callable, Number, Printable, identity)\n",
             "use dependency\n",
         );
         let path = root.join("main.sta");

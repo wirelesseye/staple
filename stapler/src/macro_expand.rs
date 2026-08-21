@@ -513,6 +513,7 @@ struct MacroExpander {
     definitions: HashMap<MacroKey, MacroDefinition>,
     scopes: Vec<ModuleScope>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
+    use_kinds: HashMap<SyntaxId, UseKind>,
     child_modules: HashMap<SyntaxId, ModuleId>,
     parent_modules: Vec<Option<ModuleId>>,
     diagnostics: Vec<Diagnostic>,
@@ -523,6 +524,28 @@ struct MacroExpander {
     emitted_items: Option<Vec<Item>>,
     invocations: HashMap<SyntaxId, ResolvedMacro>,
     quote_context: Option<MetaType>,
+}
+
+fn provisional_use_kind(program: &Program, declaration: &UseDeclaration) -> UseKind {
+    if declaration.kind != UseKind::Dotted {
+        return declaration.kind.clone();
+    }
+    let Some(candidates) = program.dotted_import(declaration.syntax.id) else {
+        return UseKind::Dotted;
+    };
+    if candidates.namespace.is_some() {
+        UseKind::Namespace
+    } else if candidates.item_module.is_some() {
+        UseKind::Selected(vec![
+            declaration
+                .path
+                .last()
+                .expect("dotted import has a final component")
+                .clone(),
+        ])
+    } else {
+        UseKind::Dotted
+    }
 }
 
 impl MacroExpander {
@@ -684,7 +707,8 @@ impl MacroExpander {
                     let Some(imported) = program.imported_module(use_.syntax.id) else {
                         continue;
                     };
-                    let names = match &use_.kind {
+                    let names = match provisional_use_kind(program, use_) {
+                        UseKind::Dotted => Vec::new(),
                         UseKind::Namespace => Vec::new(),
                         UseKind::Glob => previous_macros
                             .keys()
@@ -807,7 +831,8 @@ impl MacroExpander {
                 } else {
                     (&public_macros, &public_helpers)
                 };
-                match &use_.kind {
+                match provisional_use_kind(program, use_) {
+                    UseKind::Dotted => {}
                     UseKind::Namespace => {
                         if let Some(name) = use_.path.last() {
                             scopes[source_module.id.0]
@@ -843,8 +868,8 @@ impl MacroExpander {
                             Self::install_selected(
                                 &mut scopes[source_module.id.0],
                                 imported,
-                                name,
-                                name,
+                                &name,
+                                &name,
                                 macros,
                                 helpers,
                             );
@@ -853,8 +878,8 @@ impl MacroExpander {
                     UseKind::Renamed { item, alias } => Self::install_selected(
                         &mut scopes[source_module.id.0],
                         imported,
-                        item,
-                        alias,
+                        &item,
+                        &alias,
                         macros,
                         helpers,
                     ),
@@ -873,6 +898,19 @@ impl MacroExpander {
             definitions,
             scopes,
             imported_modules: program.imported_modules().clone(),
+            use_kinds: program
+                .modules()
+                .iter()
+                .flat_map(|module| {
+                    module.syntax.items.iter().filter_map(|item| match item {
+                        Item::UseDeclaration(declaration) => Some((
+                            declaration.syntax.id,
+                            provisional_use_kind(program, declaration),
+                        )),
+                        _ => None,
+                    })
+                })
+                .collect(),
             child_modules: program.child_modules().clone(),
             parent_modules: program
                 .modules()
@@ -2163,8 +2201,10 @@ impl MacroExpander {
                 scope.helpers.entry(alias.to_owned()).or_insert_with(|| helper.clone());
             }
         };
+        let use_kind = self.use_kind(use_);
         let scope = &mut self.scopes[module.0];
-        match &use_.kind {
+        match use_kind {
+            UseKind::Dotted => {}
             UseKind::Namespace => {
                 if let Some(name) = use_.path.last() {
                     scope.namespaces.insert(name.clone(), imported);
@@ -2172,7 +2212,7 @@ impl MacroExpander {
             }
             UseKind::Glob => {
                 for name in imported_scope.macros.keys().chain(imported_scope.modifiers.keys()) {
-                    install(name, name, scope);
+                    install(&name, &name, scope);
                 }
                 for name in imported_scope.helpers.keys() {
                     install(name, name, scope);
@@ -2180,11 +2220,18 @@ impl MacroExpander {
             }
             UseKind::Selected(names) => {
                 for name in names {
-                    install(name, name, scope);
+                    install(&name, &name, scope);
                 }
             }
-            UseKind::Renamed { item, alias } => install(item, alias, scope),
+            UseKind::Renamed { item, alias } => install(&item, &alias, scope),
         }
+    }
+
+    fn use_kind(&self, declaration: &UseDeclaration) -> UseKind {
+        self.use_kinds
+            .get(&declaration.syntax.id)
+            .cloned()
+            .unwrap_or_else(|| declaration.kind.clone())
     }
 
     fn expand_expression(

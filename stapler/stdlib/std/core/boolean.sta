@@ -2,7 +2,7 @@ pub typegroup Bool = {
     True,
     False,
 }
-pub use Bool *
+pub use Bool.*
 
 impl ToString Bool {
     def to_string = value => match value {

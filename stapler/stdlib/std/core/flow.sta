@@ -1,7 +1,7 @@
-use std.core.boolean (True, False)
-use std.core.iterator (IntoIterator, Iterator)
-use std.core.iterator.IterStep (Done, Yield)
-use std.syntax *
+use std.core.boolean.(True, False)
+use std.core.iterator.(IntoIterator, Iterator)
+use std.core.iterator.IterStep.(Done, Yield)
+use std.syntax.*
 
 def if_clauses:
     Sequence (Expr, FatArrow, Expr) ->

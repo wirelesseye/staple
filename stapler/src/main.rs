@@ -607,7 +607,7 @@ mod tests {
         std::fs::create_dir_all(root.join("bin")).unwrap();
         std::fs::write(
             root.join("bin/main.sta"),
-            "use package.values answer\nlet checked: I32 = answer\n",
+            "use package.values.answer\nlet checked: I32 = answer\n",
         )
         .unwrap();
         std::fs::write(root.join("values.sta"), "pub let answer: I32 = 42\n").unwrap();
@@ -826,7 +826,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "use std.io println\n",
+                "use std.io.println\n",
                 "extern \"c\" { let exit: I32 -> () }\n",
                 "var initialized = 0\n",
                 "initialized = 41\n",
@@ -1249,7 +1249,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { let exit: I32 -> () }\n",
-                "use std.cinterop (string_from_c_string, string_to_c_string)\n",
+                "use std.cinterop.(string_from_c_string, string_to_c_string)\n",
                 "type Some = String\n",
                 "def roundtrip: String -> String = value => string_from_c_string (string_to_c_string value)\n",
                 "def return_unicode = () => roundtrip \"hé\"\n",

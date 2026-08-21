@@ -1,5 +1,5 @@
 // Bindings, literals, products, functions, closures, blocks, and operators.
-use std.io println
+use std.io.println
 
 let greeting: String = "Staple language tour"
 let details: (name: String, year: I32) = (name: greeting, year: 2026)

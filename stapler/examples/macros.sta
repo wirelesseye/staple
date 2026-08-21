@@ -2,8 +2,8 @@
 //
 // Macro APIs are compile-time-only and are not part of the standard prelude,
 // so every syntax type used below is imported explicitly.
-use std.io println
-use std.syntax (
+use std.io.println
+use std.syntax.(
     quote,
     parse_quote,
     Expr,

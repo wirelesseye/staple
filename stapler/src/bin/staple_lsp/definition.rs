@@ -433,7 +433,7 @@ impl Collector<'_> {
                 .to_vec();
             self.add(&value.syntax, name, &definitions, false);
         }
-        match &value.kind {
+        match self.resolved.program().use_kind(value) {
             UseKind::Selected(names) => {
                 for name in names {
                     let definitions = self
@@ -452,7 +452,7 @@ impl Collector<'_> {
                     self.add(&value.syntax, name, &definitions, name == alias);
                 }
             }
-            UseKind::Namespace | UseKind::Glob => {}
+            UseKind::Dotted | UseKind::Namespace | UseKind::Glob => {}
         }
     }
 
@@ -830,7 +830,7 @@ mod tests {
     fn indexes_inline_module_names_and_members() {
         let source = concat!(
             "mod inner { pub def answer = () => 42 }\n",
-            "use inner answer as selected\n",
+            "use inner.answer as selected\n",
             "selected ()\n",
             "inner.answer ()\n",
         );
@@ -857,7 +857,7 @@ mod tests {
     #[test]
     fn indexes_function_and_modifier_macro_invocations() {
         let source = concat!(
-            "use std.syntax parse_quote\n",
+            "use std.syntax.parse_quote\n",
             "macro identity: Expr -> Expr = value => parse_quote { $value }\n",
             "macro @keep: Item -> Item = item => item\n",
             "let answer = identity 42\n",
@@ -896,8 +896,8 @@ mod tests {
         let dependency = std::fs::canonicalize(dependency).unwrap();
         let source = concat!(
             "use geometry\n",
-            "use geometry (Point, origin)\n",
-            "use geometry origin as make_origin\n",
+            "use geometry.(Point, origin)\n",
+            "use geometry.origin as make_origin\n",
             "let start: Point = make_origin ()\n",
             "let other = geometry.origin ()\n",
         );
@@ -930,7 +930,7 @@ mod tests {
     #[test]
     fn does_not_project_macro_definition_ranges_onto_call_site_tokens() {
         let source = concat!(
-            "use std.io println\n",
+            "use std.io.println\n",
             "\n",
             "typegroup A = {\n",
             "    Hello\n",

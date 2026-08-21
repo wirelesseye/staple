@@ -23,6 +23,18 @@ pub struct SourceModule {
     pub qualified_name: String,
 }
 
+/// The two module targets a bare dotted `use` declaration may denote.
+///
+/// `namespace` is the complete path, while `item_module` is the path without
+/// its final component. The latter's public interface decides whether the
+/// final component is an imported item.
+#[derive(Debug, Clone)]
+pub(crate) struct DottedImport {
+    pub namespace: Option<ModuleId>,
+    pub item_module: Option<ModuleId>,
+    pub span: Span,
+}
+
 /// A structured failure produced while loading an editor-owned source file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadDiagnostic {
@@ -87,6 +99,9 @@ pub struct Program {
     standard_library_io: Option<ModuleId>,
     modules: Vec<SourceModule>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
+    dotted_imports: HashMap<SyntaxId, DottedImport>,
+    resolved_use_kinds: HashMap<SyntaxId, UseKind>,
+    additional_imported_namespaces: HashMap<SyntaxId, ModuleId>,
     root_qualified_modules: HashMap<(ModuleId, String), ModuleId>,
     child_modules: HashMap<SyntaxId, ModuleId>,
     children: Vec<HashMap<String, ModuleId>>,
@@ -111,6 +126,9 @@ impl Program {
                 qualified_name: "<memory>".to_owned(),
             }],
             imported_modules: HashMap::new(),
+            dotted_imports: HashMap::new(),
+            resolved_use_kinds: HashMap::new(),
+            additional_imported_namespaces: HashMap::new(),
             root_qualified_modules: HashMap::new(),
             child_modules: HashMap::new(),
             children: vec![HashMap::new()],
@@ -121,6 +139,7 @@ impl Program {
         program.initialization_order = initialization_order(
             &program.modules,
             &program.imported_modules,
+            &program.additional_imported_namespaces,
             &program.root_qualified_modules,
         );
         program
@@ -205,40 +224,52 @@ impl Program {
             );
         }
         for (source, declaration) in uses {
-            let mut target = source;
-            let mut index = 0;
-            if declaration.path.first().is_some_and(|part| part == "super") {
-                while declaration
-                    .path
-                    .get(index)
-                    .is_some_and(|part| part == "super")
-                {
-                    let Some(parent) = self.parent_module(target) else {
-                        break;
-                    };
-                    target = parent;
-                    index += 1;
-                }
-            } else if let Some(first) = declaration.path.first()
-                && let Some(child) = self.child_named(source, first)
+            if declaration.kind == UseKind::Dotted
+                && self.dotted_imports.contains_key(&declaration.syntax.id)
             {
-                target = child;
-                index = 1;
-            } else {
                 continue;
             }
-            let mut valid = index > 0;
-            for part in &declaration.path[index..] {
-                let Some(child) = self.child_named(target, part) else {
-                    valid = false;
-                    break;
-                };
-                target = child;
-            }
-            if valid {
-                self.imported_modules.insert(declaration.syntax.id, target);
+            let namespace = self.resolve_single_inline_path(source, &declaration.path);
+            if declaration.kind == UseKind::Dotted {
+                let item_module = self
+                    .resolve_single_inline_path(source, &declaration.path[..declaration.path.len() - 1]);
+                self.dotted_imports.insert(
+                    declaration.syntax.id,
+                    DottedImport {
+                        namespace,
+                        item_module,
+                        span: declaration.syntax.span.clone(),
+                    },
+                );
+                if let Some(imported) = namespace.or(item_module) {
+                    self.imported_modules.insert(declaration.syntax.id, imported);
+                }
+            } else if let Some(imported) = namespace {
+                self.imported_modules.insert(declaration.syntax.id, imported);
             }
         }
+    }
+
+    fn resolve_single_inline_path(&self, source: ModuleId, parts: &[String]) -> Option<ModuleId> {
+        let mut target = source;
+        let mut index = 0;
+        if parts.first().is_some_and(|part| part == "super") {
+            while parts.get(index).is_some_and(|part| part == "super") {
+                target = self.parent_module(target)?;
+                index += 1;
+            }
+        } else if let Some(first) = parts.first()
+            && let Some(child) = self.child_named(source, first)
+        {
+            target = child;
+            index = 1;
+        } else {
+            return None;
+        }
+        for part in &parts[index..] {
+            target = self.child_named(target, part)?;
+        }
+        Some(target)
     }
 
     /// Registers inline modules introduced after parsing, such as macro output.
@@ -298,6 +329,7 @@ impl Program {
         self.initialization_order = initialization_order(
             &self.modules,
             &self.imported_modules,
+            &self.additional_imported_namespaces,
             &self.root_qualified_modules,
         );
     }
@@ -334,8 +366,114 @@ impl Program {
         self.imported_modules.get(&use_syntax).copied()
     }
 
+    /// Returns the resolved import interpretation when one is available.
+    pub fn use_kind<'a>(&'a self, declaration: &'a UseDeclaration) -> &'a UseKind {
+        self.resolved_use_kinds
+            .get(&declaration.syntax.id)
+            .unwrap_or(&declaration.kind)
+    }
+
+    pub(crate) fn dotted_import(&self, use_syntax: SyntaxId) -> Option<DottedImport> {
+        self.dotted_imports.get(&use_syntax).cloned()
+    }
+
+    /// Resolves bare dotted imports once public interfaces are available.
+    /// Returns source syntax IDs for imports that denote both a namespace and
+    /// a public item.
+    pub(crate) fn resolve_dotted_imports(
+        &mut self,
+        item_availability: impl Fn(ModuleId, &str, Option<ModuleId>) -> (bool, bool),
+    ) -> Vec<Span> {
+        let declarations = self
+            .modules
+            .iter()
+            .flat_map(|module| {
+                module
+                    .syntax
+                    .items
+                    .iter()
+                    .filter_map(|item| match item {
+                        Item::UseDeclaration(declaration) => Some(declaration.clone()),
+                        _ => None,
+                    })
+            })
+            .chain(self.modules.iter().flat_map(|module| {
+                let mut declarations = Vec::new();
+                find_block_use_declarations(&module.syntax.items, &mut declarations);
+                declarations
+            }))
+            .filter(|declaration| declaration.kind == UseKind::Dotted)
+            .collect::<Vec<_>>();
+        let mut ambiguous = Vec::new();
+        for declaration in declarations {
+            let Some(candidates) = self.dotted_import(declaration.syntax.id) else {
+                continue;
+            };
+            let item = declaration
+                .path
+                .last()
+                .expect("dotted import has a final component");
+            let (public_item, conflicts_with_namespace) = candidates
+                .item_module
+                .map(|module| item_availability(module, item, candidates.namespace))
+                .unwrap_or((false, false));
+            match (
+                candidates.namespace,
+                candidates.item_module,
+                public_item,
+                conflicts_with_namespace,
+            ) {
+                (Some(_), Some(_), true, true) => ambiguous.push(candidates.span),
+                (Some(namespace), Some(item_module), true, false) => {
+                    self.imported_modules
+                        .insert(declaration.syntax.id, item_module);
+                    self.additional_imported_namespaces
+                        .insert(declaration.syntax.id, namespace);
+                    self.resolved_use_kinds.insert(
+                        declaration.syntax.id,
+                        UseKind::Selected(vec![item.clone()]),
+                    );
+                }
+                (Some(namespace), _, false, _) => {
+                    self.imported_modules.insert(declaration.syntax.id, namespace);
+                    self.resolved_use_kinds
+                        .insert(declaration.syntax.id, UseKind::Namespace);
+                }
+                (None, Some(item_module), _, _) => {
+                    self.imported_modules
+                        .insert(declaration.syntax.id, item_module);
+                    self.resolved_use_kinds.insert(
+                        declaration.syntax.id,
+                        UseKind::Selected(vec![item.clone()]),
+                    );
+                }
+                (Some(namespace), None, _, _) => {
+                    self.imported_modules.insert(declaration.syntax.id, namespace);
+                    self.resolved_use_kinds
+                        .insert(declaration.syntax.id, UseKind::Namespace);
+                }
+                (None, None, _, _) => {}
+            }
+        }
+        self.initialization_order = initialization_order(
+            &self.modules,
+            &self.imported_modules,
+            &self.additional_imported_namespaces,
+            &self.root_qualified_modules,
+        );
+        ambiguous
+    }
+
     pub(crate) fn imported_modules(&self) -> &HashMap<SyntaxId, ModuleId> {
         &self.imported_modules
+    }
+
+    pub(crate) fn resolved_use_kinds(&self) -> &HashMap<SyntaxId, UseKind> {
+        &self.resolved_use_kinds
+    }
+
+    pub(crate) fn additional_imported_namespaces(&self) -> &HashMap<SyntaxId, ModuleId> {
+        &self.additional_imported_namespaces
     }
 
     pub(crate) fn root_qualified_modules(
@@ -379,6 +517,7 @@ pub struct ProgramLoader {
     modules: Vec<SourceModule>,
     paths: HashMap<PathBuf, ModuleId>,
     imported_modules: HashMap<SyntaxId, ModuleId>,
+    dotted_imports: HashMap<SyntaxId, DottedImport>,
     root_qualified_modules: HashMap<(ModuleId, String), ModuleId>,
     child_modules: HashMap<SyntaxId, ModuleId>,
     children: Vec<HashMap<String, ModuleId>>,
@@ -636,10 +775,17 @@ impl ProgramLoader {
             .collect::<Vec<_>>();
         find_block_use_declarations(&self.modules[module.0].syntax.items, &mut uses);
         for declaration in uses {
-            match self.resolve_import(module, &declaration, root) {
+            let resolution = if declaration.kind == UseKind::Dotted {
+                self.resolve_dotted_import(module, &declaration, root)
+            } else {
+                self.resolve_import(module, &declaration, root).map(Some)
+            };
+            match resolution {
                 Ok(imported) => {
-                    self.imported_modules
-                        .insert(declaration.syntax.id, imported);
+                    if let Some(imported) = imported {
+                        self.imported_modules
+                            .insert(declaration.syntax.id, imported);
+                    }
                 }
                 Err(_) if self.can_defer_inline_import(module, &declaration) => {}
                 Err(error) => return Err(error),
@@ -654,6 +800,39 @@ impl ProgramLoader {
             self.load_imports(child, root)?;
         }
         Ok(())
+    }
+
+    fn resolve_dotted_import(
+        &mut self,
+        module: ModuleId,
+        declaration: &UseDeclaration,
+        root: &Path,
+    ) -> Result<Option<ModuleId>, LoadDiagnostic> {
+        let namespace = self.resolve_import(module, declaration, root);
+        let mut item_declaration = declaration.clone();
+        item_declaration
+            .path
+            .pop()
+            .expect("dotted import has a final component");
+        let item_module = self.resolve_import(module, &item_declaration, root);
+        let namespace = namespace.ok();
+        let item_module = item_module.ok();
+        if namespace.is_none() && item_module.is_none() {
+            return Err(self
+                .resolve_import(module, declaration, root)
+                .err()
+                .or_else(|| self.resolve_import(module, &item_declaration, root).err())
+                .expect("failed dotted import has a diagnostic"));
+        }
+        self.dotted_imports.insert(
+            declaration.syntax.id,
+            DottedImport {
+                namespace,
+                item_module,
+                span: declaration.syntax.span.clone(),
+            },
+        );
+        Ok(namespace.or(item_module))
     }
 
     fn load_root_qualified_references(
@@ -964,6 +1143,7 @@ impl ProgramLoader {
         let initialization_order = initialization_order(
             &self.modules,
             &self.imported_modules,
+            &HashMap::new(),
             &self.root_qualified_modules,
         );
         Program {
@@ -974,6 +1154,9 @@ impl ProgramLoader {
             standard_library_io: self.standard_library_io,
             modules: self.modules,
             imported_modules: self.imported_modules,
+            dotted_imports: self.dotted_imports,
+            resolved_use_kinds: HashMap::new(),
+            additional_imported_namespaces: HashMap::new(),
             root_qualified_modules: self.root_qualified_modules,
             child_modules: self.child_modules,
             children: self.children,
@@ -1333,6 +1516,7 @@ fn find_block_use_declarations_in_block(block: &BlockExpression, out: &mut Vec<U
 fn initialization_order(
     modules: &[SourceModule],
     imports: &HashMap<SyntaxId, ModuleId>,
+    additional_imports: &HashMap<SyntaxId, ModuleId>,
     root_qualified_modules: &HashMap<(ModuleId, String), ModuleId>,
 ) -> Vec<ModuleId> {
     let mut edges = vec![Vec::new(); modules.len()];
@@ -1343,11 +1527,19 @@ fn initialization_order(
             {
                 edges[module.id.0].push(*imported);
             }
+            if let Item::UseDeclaration(declaration) = item
+                && let Some(imported) = additional_imports.get(&declaration.syntax.id)
+            {
+                edges[module.id.0].push(*imported);
+            }
         }
         let mut block_declarations = Vec::new();
         find_block_use_declarations(&module.syntax.items, &mut block_declarations);
         for declaration in &block_declarations {
             if let Some(imported) = imports.get(&declaration.syntax.id) {
+                edges[module.id.0].push(*imported);
+            }
+            if let Some(imported) = additional_imports.get(&declaration.syntax.id) {
                 edges[module.id.0].push(*imported);
             }
         }

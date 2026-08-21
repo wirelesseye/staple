@@ -1,4 +1,4 @@
-pub use std.core.number.types *
+pub use std.core.number.types.*
 
 extern "staple-intrinsic" {
     let __i8_to_string: I8 -> String

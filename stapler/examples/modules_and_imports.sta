@@ -1,9 +1,9 @@
 // Namespace, selected, renamed, and glob imports.
 use sample_modules.geometry
-use sample_modules.geometry (Point, origin)
-use sample_modules.geometry translate as move
-use sample_modules.messages *
-use std.io println
+use sample_modules.geometry.(Point, origin)
+use sample_modules.geometry.translate as move
+use sample_modules.messages.*
+use std.io.println
 
 let start: Point = origin ()
 let finish = move (start, 20, 22)

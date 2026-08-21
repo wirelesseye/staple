@@ -1,5 +1,5 @@
-use std.core.iterator (IntoIterator, Iterator)
-use std.core.iterator.IterStep (Done, Yield)
+use std.core.iterator.(IntoIterator, Iterator)
+use std.core.iterator.IterStep.(Done, Yield)
 
 pub(repr) type Range = T => (
     current: T,

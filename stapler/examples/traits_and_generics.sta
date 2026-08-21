@@ -1,5 +1,5 @@
 // Generic aliases/functions, traits, implementations, bounds, and static dispatch.
-use std.io println
+use std.io.println
 
 type alias Pair = (A, B) => (A, B)
 

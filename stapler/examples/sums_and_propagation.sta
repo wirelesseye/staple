@@ -1,5 +1,5 @@
 // Open sums, nominal payloads, propagating bindings, returns, and catch-all arms.
-use std.io println
+use std.io.println
 
 pub(repr) type Found = T => T
 pub(repr) type Missing = String

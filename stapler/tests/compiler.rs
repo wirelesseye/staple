@@ -83,7 +83,7 @@ fn with_syntax_imports(source: &str) -> String {
     if names.is_empty() {
         source.to_owned()
     } else {
-        format!("{source}\nuse std.syntax ({})\n", names.join(", "))
+        format!("{source}\nuse std.syntax.({})\n", names.join(", "))
     }
 }
 
@@ -134,7 +134,7 @@ fn infers_checks_and_lowers_typed_resources() {
 fn rejects_invalid_resource_contracts_and_types() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.cinterop *\n",
+            "use std.cinterop.*\n",
             "type MoveOnly = CString\n",
             "def invalid: () ->{MoveOnly} () = () => ()\n",
         )))
@@ -162,7 +162,7 @@ fn rejects_invalid_resource_contracts_and_types() {
 #[test]
 fn standard_io_is_a_compiler_provided_resource_and_propagates_to_main() {
     let module = type_check(concat!(
-        "use std.io (IO, print, println)\n",
+        "use std.io.(IO, print, println)\n",
         "def identity: T => T -> T = value => value\n",
         "def explicit: String ->{IO} () = value => print value\n",
         "def inferred = value: String => println value\n",
@@ -193,7 +193,7 @@ fn standard_io_is_a_compiler_provided_resource_and_propagates_to_main() {
 fn allows_io_at_entry_module_top_level_but_rejects_non_builtin_opaque_resources() {
     // `IO` is implicitly available to the entry module's top-level
     // statements, so a bare `println` there now compiles.
-    type_check("use std.io println\nprintln \"entry module output\"\n");
+    type_check("use std.io.println\nprintln \"entry module output\"\n");
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
@@ -872,7 +872,7 @@ fn rejects_invalid_assignment_targets_and_uninitialized_mutable_lets() {
 #[test]
 fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
     let module = type_check(concat!(
-        "use std.cinterop *\n",
+        "use std.cinterop.*\n",
         "def local = (first: CString, second: CString) => {\n",
         "  var value = first\n",
         "  value = second\n",
@@ -946,7 +946,7 @@ fn rejects_invalid_product_spreads_and_indices() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.cinterop CString\n",
+            "use std.cinterop.CString\n",
             "def invalid = (pair: (CString, I32), position: USize) => pair[position]\n",
         )))
         .expect_err("a product containing a move-only element cannot derive Index");
@@ -1032,7 +1032,7 @@ fn rejects_by_value_indexed_assignment() {
 #[test]
 fn updates_and_mutates_move_only_homogeneous_products() {
     let source = concat!(
-        "use std.cinterop CString\n",
+        "use std.cinterop.CString\n",
         "def update = (values: CString[2], position: USize, replacement: CString) => ",
         "UpdateIndex.update_index (values, position, replacement)\n",
         "def mutate = (values: Ref CString[2], position: USize, replacement: CString) => { ",
@@ -1108,7 +1108,7 @@ fn derives_structural_iteration_for_products() {
 fn rejects_structural_iteration_for_non_copy_products() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.cinterop CString\n",
+            "use std.cinterop.CString\n",
             "def invalid = pair: (CString, I32) => {\n",
             "  var count = 0\n",
             "  for value in pair { count = count + 1 }\n",
@@ -1923,7 +1923,7 @@ fn does_not_add_state_metadata_to_safe_bindings() {
 
 #[test]
 fn rejects_an_incorrect_function_result_type() {
-    let module = resolve("use std.cinterop *\nlet answer = () => 42 satisfies CString\n");
+    let module = resolve("use std.cinterop.*\nlet answer = () => 42 satisfies CString\n");
     let diagnostics = TypeChecker::new()
         .check(module)
         .expect_err("incorrect return type should fail");
@@ -2063,7 +2063,7 @@ fn at_patterns_require_copy_runtime_values_and_honor_copy_bounds() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.cinterop CString\n",
+            "use std.cinterop.CString\n",
             "def invalid = value: CString => { let whole@_ = value; () }\n",
         )))
         .expect_err("a move-only concrete at-pattern should be rejected");
@@ -2346,7 +2346,7 @@ fn cinterop_types_require_an_explicit_import() {
     );
 
     type_check(concat!(
-        "use std.cinterop *\n",
+        "use std.cinterop.*\n",
         "let character: CChar\n",
         "let pointer: CPointer CChar\n",
         "let text: CString\n",
@@ -2386,7 +2386,7 @@ fn syntax_types_and_quote_require_an_explicit_import() {
     }));
 
     resolve(concat!(
-        "use std.syntax (parse_quote, Expr)\n",
+        "use std.syntax.(parse_quote, Expr)\n",
         "macro identity: Expr -> Expr = value => parse_quote { $value }\n",
         "let result: I32 = identity 42\n",
     ));
@@ -2395,7 +2395,7 @@ fn syntax_types_and_quote_require_an_explicit_import() {
 #[test]
 fn c_pointer_preserves_its_pointee_type() {
     let module = resolve(concat!(
-        "use std.cinterop *\n",
+        "use std.cinterop.*\n",
         "extern \"c\" { let consume: (CPointer I32) -> I32 }\n",
         "consume (c_string \"wrong pointee\")\n",
     ));
@@ -2479,7 +2479,7 @@ fn validates_the_standard_library_string_representation() {
 #[test]
 fn c_string_is_an_imported_primitive_macro() {
     let module = type_check(concat!(
-        "use std.cinterop *\n",
+        "use std.cinterop.*\n",
         "def exercise = () => {\n",
         "  let text: String = \"hello\"\n",
         "  let c_text: CString = c_string \"hello\"\n",
@@ -2509,7 +2509,7 @@ fn c_string_rejects_non_literal_arguments() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "use std.cinterop *\n",
+                "use std.cinterop.*\n",
                 "let text = \"hello\"\n",
                 "c_string text\n",
             ),
@@ -2528,7 +2528,7 @@ fn c_string_rejects_non_literal_arguments() {
 
 #[test]
 fn c_string_rejects_interior_nul_bytes() {
-    let module = type_check("use std.cinterop *\nc_string \"bad\\0value\"\n");
+    let module = type_check("use std.cinterop.*\nc_string \"bad\\0value\"\n");
     let context = Context::create();
     let diagnostics = CodeGenerator::new(&context)
         .compile_module(&module)
@@ -2953,7 +2953,7 @@ fn block_modifiers_may_generate_supported_declarations() {
         "mod helpers { pub def value: I32 = 42 }\n",
         "macro @declarations: Item -> Sequence Item = _ => parse_quote {\n",
         "    type alias Local = I32\n",
-        "    use helpers value\n",
+        "    use helpers.value\n",
         "    mod local { pub def extra: I32 = 1 }\n",
         "    let generated: Local = value + local.extra\n",
         "}\n",
@@ -3120,7 +3120,7 @@ fn expands_standard_typegroup_into_module_variants_and_alias() {
         "    Literal String,\n",
         "    Wildcard,\n",
         "}\n",
-        "pub use Pattern *\n",
+        "pub use Pattern.*\n",
         "let literal: Pattern = Pattern.Literal \"value\"\n",
         "let wildcard: Pattern = Pattern.Wildcard\n",
         "let reexported_literal: Pattern = Literal \"value\"\n",
@@ -3139,7 +3139,7 @@ fn typegroup_supports_generic_groups_and_reexports_their_variants() {
         "    Missing,\n",
         "    Present T,\n",
         "}\n",
-        "pub use Maybe *\n",
+        "pub use Maybe.*\n",
         "let missing: Maybe I32 = Missing\n",
         "let present: Maybe I32 = Present 1\n",
         "let qualified: Maybe String = Maybe.Present \"value\"\n",
@@ -3547,7 +3547,7 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             "`@recursive_constructor` may only modify a type declaration",
         ),
         (
-            "macro @identity: Item -> Item = item => item\n@identity\nuse std.core *\n",
+            "macro @identity: Item -> Item = item => item\n@identity\nuse std.core.*\n",
             "modifier macros may only be applied to `let`, `def`, `type`, `extern`, `trait`, or `impl` items",
         ),
         (
@@ -4820,7 +4820,7 @@ fn applies_excess_arguments_to_a_bare_quote_invoked_as_a_top_level_statement() {
     // `"..."` argument left after `println`, rather than silently dropping
     // it and only ever loading the `println` closure without calling it.
     let module = type_check(concat!(
-        "use std.io println\n",
+        "use std.io.println\n",
         "macro identity = value: Expr => quote { $value }\n",
         "identity println \"excess arguments follow the expansion\"\n",
     ));
@@ -5152,7 +5152,7 @@ fn lowers_transitive_captures_across_curried_layers() {
 #[test]
 fn adapts_non_variadic_externs_used_as_function_values() {
     let module = type_check(concat!(
-        "use std.cinterop *\n",
+        "use std.cinterop.*\n",
         "extern \"c\" { let puts: (CPointer CChar) -> I32 }\n",
         "def apply: ((CPointer CChar) -> I32, CPointer CChar) -> I32 = (f, value) => f value\n",
         "apply (puts, c_string \"hello\")\n",
@@ -5181,7 +5181,7 @@ fn compiles_builtin_arithmetic_via_trait_dispatch() {
 #[test]
 fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
-        "use std.cinterop *\n",
+        "use std.cinterop.*\n",
         "extern \"c\" { let puts: (CPointer CChar) -> I32 }\n",
         "puts (c_string \"hello\\n\")\n",
     );
@@ -6196,7 +6196,7 @@ fn infers_copy_and_enforces_affine_moves() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.cinterop *\n",
+            "use std.cinterop.*\n",
             "def invalid = (value: CString) => { let moved = value; value }\n",
         )))
         .expect_err("CString must be move-only");
@@ -6244,7 +6244,7 @@ fn lowers_custom_drop_and_gc_finalizer_glue() {
 fn rejects_move_only_globals_partial_moves_and_cstring_returns_from_c() {
     let ffi_diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.cinterop *\n",
+            "use std.cinterop.*\n",
             "extern \"c\" { let invalid_return: () -> CString }\n",
         )))
         .expect_err("C must not manufacture owned CStrings");
@@ -6256,7 +6256,7 @@ fn rejects_move_only_globals_partial_moves_and_cstring_returns_from_c() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "use std.cinterop *\n",
+            "use std.cinterop.*\n",
             "let global: CString = c_string \"owned\"\n",
             "def partial = (pair: (CString, I32)) => pair.0\n",
         )))
@@ -6280,7 +6280,7 @@ fn rejects_move_only_globals_partial_moves_and_cstring_returns_from_c() {
 #[test]
 fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
     let module = type_check(concat!(
-        "use std.cinterop *\n",
+        "use std.cinterop.*\n",
         "extern \"c\" { let inspect: CString -> I32 }\n",
         "def make = (value: CString) => { let callback = () => inspect value; callback }\n",
     ));
@@ -6292,12 +6292,12 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
 
     for source in [
         concat!(
-            "use std.cinterop *\n",
+            "use std.cinterop.*\n",
             "extern \"c\" { let inspect: CString -> I32 }\n",
             "def invalid = (value: CString) => { let callback = () => inspect value; value }\n",
         ),
         concat!(
-            "use std.cinterop *\n",
+            "use std.cinterop.*\n",
             "def invalid = (value: Ref CString) => { let Ref inner = value; drop inner }\n",
         ),
     ] {

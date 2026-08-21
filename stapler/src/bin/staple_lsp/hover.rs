@@ -362,17 +362,17 @@ impl Collector<'_> {
     }
 
     fn use_declaration(&mut self, declaration: &UseDeclaration) {
-        match &declaration.kind {
+        match self.typed.resolved().program().use_kind(declaration) {
             UseKind::Selected(names) => {
                 for name in names {
-                    self.imported_name(declaration, name, name, false);
+                    self.imported_name(declaration, &name, &name, false);
                 }
             }
             UseKind::Renamed { item, alias } => {
-                self.imported_name(declaration, item, item, false);
-                self.imported_name(declaration, alias, item, true);
+                self.imported_name(declaration, &item, &item, false);
+                self.imported_name(declaration, &alias, &item, true);
             }
-            UseKind::Namespace | UseKind::Glob => {}
+            UseKind::Dotted | UseKind::Namespace | UseKind::Glob => {}
         }
     }
 
@@ -960,11 +960,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dependency.sta"),
-            "use std.syntax (parse_quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => parse_quote { $value }\n",
+            "use std.syntax.(parse_quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => parse_quote { $value }\n",
         )
         .unwrap();
         let source = concat!(
-            "use std.syntax (parse_quote, Expr, CallExpr, Item)\n",
+            "use std.syntax.(parse_quote, Expr, CallExpr, Item)\n",
             "use dependency\n",
             "macro choose: Expr -> Expr = _: Expr => parse_quote { 1 }\n",
             "macro choose: CallExpr -> Expr = _: CallExpr => parse_quote { 2 }\n",
@@ -1050,7 +1050,7 @@ mod tests {
         )
         .unwrap();
         let source = concat!(
-            "use dependency (imported, imported_value)\n",
+            "use dependency.(imported, imported_value)\n",
             "use dependency\n",
             "imported ()\n",
             "imported_value\n",
@@ -1104,8 +1104,8 @@ mod tests {
         )
         .unwrap();
         let source = concat!(
-            "use dependency (value, Number, Printable, identity)\n",
-            "use dependency callable as invoke\n",
+            "use dependency.(value, Number, Printable, identity)\n",
+            "use dependency.callable as invoke\n",
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
@@ -1155,7 +1155,7 @@ mod tests {
         )
         .unwrap();
         let source = concat!(
-            "use geometry (Point, origin)\n",
+            "use geometry.(Point, origin)\n",
             "let start: Point = origin ()\n",
             "start\n",
         );
@@ -1229,7 +1229,7 @@ mod tests {
         )
         .unwrap();
         let source = concat!(
-            "use dependency (Hidden, HiddenGeneric, Visible, Alias)\n",
+            "use dependency.(Hidden, HiddenGeneric, Visible, Alias)\n",
             "def hidden: Hidden -> Hidden = value => value\n",
             "def hidden_generic: HiddenGeneric I32 -> HiddenGeneric I32 = value => value\n",
             "def visible: Visible -> Visible = value => value\n",

@@ -256,7 +256,10 @@ impl<'a> Classifier<'a> {
                 for part in &value.path {
                     self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
                 }
-                match &value.kind {
+                match resolved
+                    .map(|resolved| resolved.program().use_kind(value))
+                    .unwrap_or(&value.kind)
+                {
                     UseKind::Renamed { item, alias } => {
                         let kind = self.import_kind(value, item, resolved);
                         self.mark_first(&value.syntax, item, kind, 0, 1);
@@ -418,7 +421,10 @@ impl<'a> Classifier<'a> {
                 for part in &value.path {
                     self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
                 }
-                match &value.kind {
+                match resolved
+                    .map(|resolved| resolved.program().use_kind(value))
+                    .unwrap_or(&value.kind)
+                {
                     UseKind::Renamed { item, alias } => {
                         let kind = self.import_kind(value, item, resolved);
                         self.mark_first(&value.syntax, item, kind, 0, 1);
@@ -1131,11 +1137,11 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dependency.sta"),
-            "use std.syntax (parse_quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => parse_quote { $value }\n",
+            "use std.syntax.(parse_quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => parse_quote { $value }\n",
         )
         .unwrap();
         let source = concat!(
-            "use std.syntax (parse_quote, Expr, CallExpr, Item)\n",
+            "use std.syntax.(parse_quote, Expr, CallExpr, Item)\n",
             "use dependency\n",
             "macro choose: Expr -> Expr = _: Expr => parse_quote { 1 }\n",
             "macro choose: CallExpr -> Expr = _: CallExpr => parse_quote { 2 }\n",
@@ -1246,7 +1252,7 @@ mod tests {
         )
         .unwrap();
         let source = concat!(
-            "use dependency (imported_function, imported_value)\n",
+            "use dependency.(imported_function, imported_value)\n",
             "imported_function ()\n",
             "imported_value\n",
         );
@@ -1286,8 +1292,8 @@ mod tests {
         )
         .unwrap();
         let source = concat!(
-            "use dependency (value, Number, Printable, identity)\n",
-            "use dependency callable as invoke\n",
+            "use dependency.(value, Number, Printable, identity)\n",
+            "use dependency.callable as invoke\n",
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()

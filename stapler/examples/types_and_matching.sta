@@ -1,5 +1,5 @@
 // Aliases, distinct and generic types, singletons, sums, and exhaustive match.
-use std.io println
+use std.io.println
 
 pub type alias Number = I32
 pub(repr) type UserId = Number

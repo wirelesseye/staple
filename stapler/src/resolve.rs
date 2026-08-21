@@ -685,6 +685,8 @@ pub struct NameResolver {
     block_types: Vec<HashMap<String, TypeId>>,
     type_ids_by_syntax: HashMap<SyntaxId, TypeId>,
     imported_module_ids: HashMap<SyntaxId, ModuleId>,
+    resolved_use_kinds: HashMap<SyntaxId, UseKind>,
+    additional_imported_namespaces: HashMap<SyntaxId, ModuleId>,
     module_parents: HashMap<ModuleId, ModuleId>,
     imported_types: Vec<HashMap<String, TypeId>>,
     imported_macros: Vec<HashMap<String, Vec<MacroId>>>,
@@ -792,7 +794,7 @@ impl NameResolver {
     }
 
     fn resolve_program_inner(mut self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
-        let (program, macro_analysis) = crate::macro_expand::expand_program(program)?;
+        let (mut program, macro_analysis) = crate::macro_expand::expand_program(program)?;
         self.standard_library_core = program.standard_library_core();
         self.standard_library_syntax = program.standard_library_syntax();
         self.standard_library_cinterop = program.standard_library_cinterop();
@@ -817,8 +819,31 @@ impl NameResolver {
             .unwrap_or(0)
             + 1;
         self.collect_interfaces(&program);
+        for span in program.resolve_dotted_imports(|module, name, namespace| {
+            let interface = &self.interfaces[module.0];
+            let different_namespace = interface
+                .namespaces
+                .get(name)
+                .is_some_and(|item_module| Some(*item_module) != namespace);
+            let any_item = interface.values.contains_key(name)
+                || interface.types.contains_key(name)
+                || interface.macros.contains_key(name)
+                || interface.traits.contains_key(name)
+                || different_namespace;
+            let conflicts = interface.values.contains_key(name)
+                || interface.macros.contains_key(name)
+                || different_namespace;
+            (any_item, conflicts)
+        }) {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                "ambiguous dotted import: the final component is both a module and a public item",
+            ));
+        }
         self.submodule_ids = program.child_modules().clone();
         self.imported_module_ids = program.imported_modules().clone();
+        self.resolved_use_kinds = program.resolved_use_kinds().clone();
+        self.additional_imported_namespaces = program.additional_imported_namespaces().clone();
         self.module_parents = program
             .modules()
             .iter()
@@ -1161,6 +1186,46 @@ impl NameResolver {
                     let imported = &previous[imported.0];
                     let exported = &mut self.interfaces[source_module.id.0];
                     match &declaration.kind {
+                        UseKind::Dotted => {
+                            let Some(candidates) = program.dotted_import(declaration.syntax.id)
+                            else {
+                                continue;
+                            };
+                            let Some(item_module) = candidates.item_module else {
+                                continue;
+                            };
+                            let item = declaration
+                                .path
+                                .last()
+                                .expect("dotted import has a final component");
+                            if let Some(namespace) = candidates.namespace {
+                                let imported = &previous[item_module.0];
+                                let different_namespace = imported
+                                    .namespaces
+                                    .get(item)
+                                    .is_some_and(|module| *module != namespace);
+                                let compatible_item = imported.types.contains_key(item)
+                                    || imported.traits.contains_key(item);
+                                let conflicts = imported.values.contains_key(item)
+                                    || imported.macros.contains_key(item)
+                                    || different_namespace;
+                                if compatible_item && !conflicts {
+                                    changed |=
+                                        export_interface_item(exported, imported, item, item);
+                                    changed |= exported
+                                        .namespaces
+                                        .insert(item.clone(), namespace)
+                                        .is_none();
+                                }
+                            } else {
+                                changed |= export_interface_item(
+                                    exported,
+                                    &previous[item_module.0],
+                                    item,
+                                    item,
+                                );
+                            }
+                        }
                         UseKind::Namespace => {}
                         UseKind::Glob => {
                             changed |= extend_interface(exported, imported);
@@ -1583,7 +1648,8 @@ impl NameResolver {
                 } else {
                     self.interfaces[imported.0].clone()
                 };
-                match &use_.kind {
+                match self.use_kind(use_) {
+                    UseKind::Dotted => {}
                     UseKind::Glob => {
                         self.definition_context_values[module.id.0]
                             .extend(interface.values.clone());
@@ -1593,29 +1659,29 @@ impl NameResolver {
                     }
                     UseKind::Selected(names) => {
                         for name in names {
-                            if let Some(symbol) = interface.values.get(name) {
+                            if let Some(symbol) = interface.values.get(&name) {
                                 self.definition_context_values[module.id.0]
                                     .insert(name.clone(), *symbol);
                             }
-                            if let Some(ty) = interface.types.get(name) {
+                            if let Some(ty) = interface.types.get(&name) {
                                 self.definition_context_types[module.id.0]
                                     .insert(name.clone(), *ty);
                             }
-                            if let Some(namespace) = interface.namespaces.get(name) {
+                            if let Some(namespace) = interface.namespaces.get(&name) {
                                 self.definition_context_namespaces[module.id.0]
                                     .insert(name.clone(), *namespace);
                             }
                         }
                     }
                     UseKind::Renamed { item, alias } => {
-                        if let Some(symbol) = interface.values.get(item) {
+                        if let Some(symbol) = interface.values.get(&item) {
                             self.definition_context_values[module.id.0]
                                 .insert(alias.clone(), *symbol);
                         }
-                        if let Some(ty) = interface.types.get(item) {
+                        if let Some(ty) = interface.types.get(&item) {
                             self.definition_context_types[module.id.0].insert(alias.clone(), *ty);
                         }
-                        if let Some(namespace) = interface.namespaces.get(item) {
+                        if let Some(namespace) = interface.namespaces.get(&item) {
                             self.definition_context_namespaces[module.id.0]
                                 .insert(alias.clone(), *namespace);
                         }
@@ -1740,7 +1806,7 @@ impl NameResolver {
         } else {
             self.interfaces[imported.0].clone()
         };
-        if declaration.kind == UseKind::Glob {
+        if self.use_kind(declaration) == UseKind::Glob {
             self.record_private_glob_items(imported, declaration, &interface);
         }
         if let Some(name) = declaration.path.last() {
@@ -1749,7 +1815,8 @@ impl NameResolver {
                 .or_default()
                 .push(DefinitionId::Module(imported));
         }
-        match &declaration.kind {
+        match self.use_kind(declaration) {
+            UseKind::Dotted => {}
             UseKind::Namespace => {
                 let name = declaration
                     .path
@@ -1790,15 +1857,38 @@ impl NameResolver {
             }
             UseKind::Selected(names) => {
                 for name in names {
-                    self.record_import_definitions(declaration.syntax.id, name, name, &interface);
-                    self.install_selected(&interface, name, name, declaration.syntax.span.clone());
+                    self.record_import_definitions(declaration.syntax.id, &name, &name, &interface);
+                    self.install_selected(&interface, &name, &name, declaration.syntax.span.clone());
+                    if let Some(namespace) = self
+                        .additional_imported_namespaces
+                        .get(&declaration.syntax.id)
+                        .copied()
+                        && interface.namespaces.get(&name) != Some(&namespace)
+                    {
+                        self.insert_imported_namespace(
+                            name.clone(),
+                            namespace,
+                            declaration.syntax.span.clone(),
+                        );
+                        self.import_definitions
+                            .entry((declaration.syntax.id, name))
+                            .or_default()
+                            .push(DefinitionId::Module(namespace));
+                    }
                 }
             }
             UseKind::Renamed { item, alias } => {
-                self.record_import_definitions(declaration.syntax.id, item, alias, &interface);
-                self.install_selected(&interface, item, alias, declaration.syntax.span.clone());
+                self.record_import_definitions(declaration.syntax.id, &item, &alias, &interface);
+                self.install_selected(&interface, &item, &alias, declaration.syntax.span.clone());
             }
         }
+    }
+
+    fn use_kind(&self, declaration: &UseDeclaration) -> UseKind {
+        self.resolved_use_kinds
+            .get(&declaration.syntax.id)
+            .cloned()
+            .unwrap_or_else(|| declaration.kind.clone())
     }
 
     fn record_import_definitions(

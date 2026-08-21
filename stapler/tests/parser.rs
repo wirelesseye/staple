@@ -387,11 +387,11 @@ fn parses_default_trait_members_losslessly() {
 fn parses_use_declarations_and_public_items_losslessly() {
     let source = concat!(
         "use path.to.another_module\n",
-        "use path.to.another_module *\n",
-        "use path.to.another_module (func, MyType)\n",
-        "use path.to.another_module func\n",
-        "use path.to.another_module func as my_func\n",
-        "pub use path.to.another_module PublicType\n",
+        "use path.to.another_module.*\n",
+        "use path.to.another_module.(func, MyType)\n",
+        "use path.to.another_module.func\n",
+        "use path.to.another_module.func as my_func\n",
+        "pub use path.to.another_module.PublicType\n",
         "pub type alias PublicType = I32\n",
         "pub def public_value = 1\n",
     );
@@ -399,14 +399,14 @@ fn parses_use_declarations_and_public_items_losslessly() {
 
     assert_eq!(root.text(), source);
     assert!(
-        matches!(root.items[0], Item::UseDeclaration(ref use_) if use_.kind == UseKind::Namespace)
+        matches!(root.items[0], Item::UseDeclaration(ref use_) if use_.kind == UseKind::Dotted)
     );
     assert!(matches!(root.items[1], Item::UseDeclaration(ref use_) if use_.kind == UseKind::Glob));
     assert!(
         matches!(root.items[2], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Selected(names) if names == &["func", "MyType"]))
     );
     assert!(
-        matches!(root.items[3], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Selected(names) if names == &["func"]))
+        matches!(root.items[3], Item::UseDeclaration(ref use_) if use_.kind == UseKind::Dotted)
     );
     assert!(
         matches!(root.items[4], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Renamed { item, alias } if item == "func" && alias == "my_func"))
@@ -434,10 +434,17 @@ fn parses_use_declarations_and_public_items_losslessly() {
 }
 
 #[test]
+fn rejects_space_separated_single_item_imports() {
+    let error = parse("use path.to.module item\n")
+        .expect_err("space-separated item imports should be rejected");
+    assert!(error.message.contains("item imports use `.`"));
+}
+
+#[test]
 fn parses_recursive_inline_submodules_losslessly() {
     let source = concat!(
         "pub mod outer {\n",
-        "    use super parent\n",
+        "    use super.parent\n",
         "    mod inner { pub def value = 42 }\n",
         "}\n",
     );
@@ -505,9 +512,9 @@ fn parses_block_scoped_use_declarations_losslessly() {
     let source = concat!(
         "let x = {\n",
         "    use path.to.another_module\n",
-        "    use path.to.another_module *\n",
-        "    use path.to.another_module (func, MyType)\n",
-        "    use path.to.another_module func as my_func\n",
+        "    use path.to.another_module.*\n",
+        "    use path.to.another_module.(func, MyType)\n",
+        "    use path.to.another_module.func as my_func\n",
         "    0\n",
         "}\n",
     );
@@ -521,7 +528,7 @@ fn parses_block_scoped_use_declarations_losslessly() {
     };
     assert!(matches!(
         &block.items[0],
-        Item::UseDeclaration(use_) if use_.kind == UseKind::Namespace
+        Item::UseDeclaration(use_) if use_.kind == UseKind::Dotted
     ));
     assert!(matches!(
         &block.items[1],
@@ -1454,7 +1461,7 @@ fn parses_multiple_top_level_statements() {
 #[test]
 fn parses_returns_and_semicolon_separated_items_losslessly() {
     let source = concat!(
-        "use std.core *;",
+        "use std.core.*;",
         "type alias Number = I32;",
         "extern \"c\" { let exit: I32 -> (); };",
         "def answer = () => { let value = 42; return value; };",

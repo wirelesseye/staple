@@ -310,7 +310,7 @@ fn create_project(parent: &Path, name: &str) -> Result<PathBuf, String> {
         write_project_file(&destination.join(".gitignore"), "/build\n")?;
         write_project_file(
             &source_directory.join("main.sta"),
-            "use std.io println\n\nprintln \"Hello, world!\"\n",
+            "use std.io.println\n\nprintln \"Hello, world!\"\n",
         )?;
         Ok(())
     })();
@@ -936,7 +936,7 @@ mod tests {
         );
         assert_eq!(
             std::fs::read_to_string(destination.join("src/main.sta")).unwrap(),
-            "use std.io println\n\nprintln \"Hello, world!\"\n"
+            "use std.io.println\n\nprintln \"Hello, world!\"\n"
         );
 
         let package =

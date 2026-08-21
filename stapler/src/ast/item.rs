@@ -118,6 +118,10 @@ pub struct UseDeclaration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UseKind {
+    /// A bare dotted path whose final component can be either a module name or
+    /// an item imported from its parent module. Program loading records both
+    /// candidates; name resolution selects the only valid interpretation.
+    Dotted,
     Namespace,
     Glob,
     Selected(Vec<String>),
