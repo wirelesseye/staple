@@ -3165,6 +3165,24 @@ fn resolves_and_merges_type_companion_items() {
 }
 
 #[test]
+fn type_checks_companion_method_call_syntax() {
+    let module = type_check(concat!(
+        "type alias Animal = I32\n",
+        "companion Animal { pub def move_to: Animal -> (F32, F32) -> Animal = animal => _ => animal }\n",
+        "let animal: Animal = 1\n",
+        "let moved: Animal = animal^move_to (1.0, 1.0)\n",
+        "let partially_applied: (F32, F32) -> Animal = animal^move_to\n",
+        "def move: Animal -> Animal = value => value^move_to (1.0, 1.0)\n",
+        "def make: () -> Animal = () => animal\n",
+        "let moved_from_call: Animal = (make ())^move_to (1.0, 1.0)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("companion method calls should lower as ordinary calls");
+}
+
+#[test]
 fn typegroup_supports_generic_groups_and_reexports_their_variants() {
     let module = type_check(concat!(
         "pub(repr) typegroup Maybe T {\n",

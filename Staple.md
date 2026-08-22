@@ -628,6 +628,20 @@ companion Animal {
 let moved = Animal.move_to 1
 ```
 
+Companion functions can also be called with postfix method syntax. The
+receiver is supplied as the function's first curried argument:
+
+```staple
+let moved = animal^move_to (1.0, 1.0)
+// Equivalent to Animal.move_to animal (1.0, 1.0)
+```
+
+A bare `animal^move_to` is the receiver-applied value, so it may be a
+partially-applied function when the companion function accepts more arguments.
+Method lookup uses the receiver's static named type; aliases retain companion
+identity when introduced by an annotation or an explicitly typed function
+parameter or result.
+
 More than one companion block may contribute to the same type. Companion
 blocks have no visibility of their own; visibility is declared on their items.
 Their bodies can refer directly to declarations in the containing module.

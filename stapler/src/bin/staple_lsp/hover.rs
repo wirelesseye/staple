@@ -815,7 +815,15 @@ impl Collector<'_> {
                 self.expression(&call.callee);
                 self.expression(&call.argument);
             }
-            Expression::Access(access) => self.expression(&access.value),
+            Expression::Access(access) => {
+                if let Accessor::Method(name) = &access.accessor
+                    && let Some(value_type) = self.typed.type_of_expression(access.syntax.id)
+                {
+                    self.named_last(&access.syntax, name, self.display_type(value_type));
+                } else {
+                    self.expression(&access.value);
+                }
+            }
             Expression::Index(index) => {
                 self.expression(&index.value);
                 self.expression(&index.index);

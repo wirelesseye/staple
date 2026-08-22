@@ -643,9 +643,13 @@ impl<'a> Classifier<'a> {
                     }
                     return;
                 }
-                self.expression_with_mod(&value.value, resolved, modifiers);
-                if let Accessor::Name(name) = &value.accessor {
-                    self.mark_last(&value.syntax, name, PROPERTY, modifiers, 1);
+                if let Accessor::Method(name) = &value.accessor {
+                    self.mark_last(&value.syntax, name, FUNCTION, READONLY, 1);
+                } else {
+                    self.expression_with_mod(&value.value, resolved, modifiers);
+                    if let Accessor::Name(name) = &value.accessor {
+                        self.mark_last(&value.syntax, name, PROPERTY, modifiers, 1);
+                    }
                 }
             }
             Expression::Index(value) => {

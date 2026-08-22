@@ -3192,6 +3192,7 @@ impl MacroExpander {
                             ));
                             None
                         }
+                        Accessor::Method(_) => None,
                     };
                 }
                 let Value::Product(elements) = value else {
@@ -3210,6 +3211,7 @@ impl MacroExpander {
                         .into_iter()
                         .find(|(field, _)| field.as_deref() == Some(name))
                         .map(|(_, value)| value),
+                    Accessor::Method(_) => None,
                 }
             }
             Expression::Index(index) => {

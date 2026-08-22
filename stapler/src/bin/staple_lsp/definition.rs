@@ -628,10 +628,11 @@ impl Collector<'_> {
                 self.expression(&value.argument);
             }
             Expression::Access(value) => {
-                if let Accessor::Name(name) = &value.accessor {
+                if let Accessor::Name(name) | Accessor::Method(name) = &value.accessor {
                     let definitions = self.definitions_for(value.syntax.id);
                     self.add(&value.syntax, name, &definitions, true);
-                    if let Expression::Name(namespace) = value.value.as_ref()
+                    if matches!(value.accessor, Accessor::Name(_))
+                        && let Expression::Name(namespace) = value.value.as_ref()
                         && let Some(module) = definitions
                             .iter()
                             .find_map(|definition| self.resolved.definition_module(*definition))
@@ -769,6 +770,9 @@ impl Collector<'_> {
 
     fn definitions_for(&self, syntax: SyntaxId) -> Vec<DefinitionId> {
         let mut definitions = self.resolved.definitions_for(syntax);
+        if let Some(symbol) = self.typed.and_then(|typed| typed.symbol_for(syntax)) {
+            definitions.push(DefinitionId::Symbol(symbol));
+        }
         if let Some(dispatch) = self
             .typed
             .and_then(|typed| typed.trait_dispatch_for(syntax))

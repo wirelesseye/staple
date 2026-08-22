@@ -927,6 +927,24 @@ fn parses_type_companion_blocks_losslessly() {
 }
 
 #[test]
+fn parses_companion_method_calls_at_postfix_precedence() {
+    let source = "animal^move_to (1.0, 1.0)\n";
+    let root = parse(source).expect("companion method call should parse");
+    assert_eq!(root.text(), source);
+    let Item::Expression(Expression::Call(call)) = &root.items[0] else {
+        panic!("expected explicit argument call");
+    };
+    let Expression::Call(method) = call.callee.as_ref() else {
+        panic!("expected receiver application");
+    };
+    assert!(matches!(
+        method.callee.as_ref(),
+        Expression::Access(access) if access.accessor == Accessor::Method("move_to".into())
+    ));
+    assert!(parse("animal^ 1\n").is_err());
+}
+
+#[test]
 fn parses_grouped_type_and_pattern_macro_arguments_losslessly() {
     let source = concat!(
         "inspect_type (I32 -> I32)\n",

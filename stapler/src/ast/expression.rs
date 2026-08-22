@@ -207,6 +207,7 @@ pub struct IndexExpression {
 pub enum Accessor {
     Name(String),
     Index(String),
+    Method(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

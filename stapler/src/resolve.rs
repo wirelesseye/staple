@@ -338,6 +338,14 @@ pub struct ResolvedModule {
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
     compile_time_bindings: HashMap<SyntaxId, CompileTimeBindingInfo>,
+    companion_members: HashMap<TypeId, HashMap<String, ResolvedCompanionMember>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ResolvedCompanionMember {
+    symbol: SymbolId,
+    declaring_module: ModuleId,
+    public: bool,
 }
 
 impl ResolvedModule {
@@ -370,6 +378,17 @@ impl ResolvedModule {
         syntax_id: SyntaxId,
     ) -> Option<&CompileTimeBindingInfo> {
         self.compile_time_bindings.get(&syntax_id)
+    }
+
+    pub fn companion_member(
+        &self,
+        ty: TypeId,
+        name: &str,
+        accessing_module: Option<ModuleId>,
+    ) -> Option<SymbolId> {
+        let member = self.companion_members.get(&ty)?.get(name)?;
+        (member.public || accessing_module == Some(member.declaring_module))
+            .then_some(member.symbol)
     }
 
     pub fn macro_for(&self, id: MacroId) -> Option<&ResolvedMacro> {
@@ -995,6 +1014,30 @@ impl NameResolver {
                     .map(DefinitionId::Type);
             }
         }
+        let companion_members = self
+            .type_modules
+            .iter()
+            .filter_map(|(ty, owner)| {
+                let name = &self.type_declarations[ty].name;
+                let child = program.child_named(*owner, name)?;
+                program.module(child).companion.then(|| {
+                    let members = self.module_values[child.0]
+                        .iter()
+                        .map(|(name, symbol)| {
+                            (
+                                name.clone(),
+                                ResolvedCompanionMember {
+                                    symbol: *symbol,
+                                    declaring_module: *owner,
+                                    public: self.interfaces[child.0].values.contains_key(name),
+                                },
+                            )
+                        })
+                        .collect();
+                    (*ty, members)
+                })
+            })
+            .collect();
         let mut resolved = ResolvedModule {
             program,
             functions: self.functions,
@@ -1039,6 +1082,7 @@ impl NameResolver {
             import_definitions: self.import_definitions,
             visible_module_definitions: self.visible_module_definitions,
             compile_time_bindings,
+            companion_members,
         };
         let analysis = InitializationAnalyzer::new(&resolved).analyze();
         if !analysis.diagnostics.is_empty() {

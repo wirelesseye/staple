@@ -33,8 +33,26 @@ fn place_expression_name(expression: &Expression) -> String {
         Expression::Access(access) => match &access.accessor {
             Accessor::Name(name) => name.clone(),
             Accessor::Index(index) => index.clone(),
+            Accessor::Method(name) => name.clone(),
         },
         _ => "value".to_string(),
+    }
+}
+
+fn source_type_id(module: &ResolvedModule, ty: &Type) -> Option<TypeId> {
+    match ty {
+        Type::Named(named) => module.type_for(named.syntax.id),
+        Type::Application(application) => source_type_id(module, &application.callee),
+        _ => None,
+    }
+}
+
+fn checked_type_id(ty: &CheckedType) -> Option<TypeId> {
+    match ty {
+        CheckedType::TypeConstructor { id, .. }
+        | CheckedType::Opaque { id, .. }
+        | CheckedType::Distinct { id, .. } => Some(*id),
+        _ => None,
     }
 }
 
@@ -660,6 +678,7 @@ pub struct TypedModule {
     iterator_trait: Option<TraitId>,
     io_type: Option<TypeId>,
     mutated_parameter_symbols: HashSet<SymbolId>,
+    method_symbols: HashMap<SyntaxId, SymbolId>,
 }
 
 impl TypedModule {
@@ -692,7 +711,10 @@ impl TypedModule {
     }
 
     pub fn symbol_for(&self, syntax_id: SyntaxId) -> Option<SymbolId> {
-        self.resolved.symbol_for(syntax_id)
+        self.method_symbols
+            .get(&syntax_id)
+            .copied()
+            .or_else(|| self.resolved.symbol_for(syntax_id))
     }
 
     pub fn function_for(&self, syntax_id: SyntaxId) -> Option<FunctionId> {
@@ -982,6 +1004,9 @@ pub struct TypeChecker {
     matches: HashMap<SyntaxId, CheckedMatch>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
+    method_symbols: HashMap<SyntaxId, SymbolId>,
+    symbol_companion_types: HashMap<SymbolId, TypeId>,
+    function_result_companion_types: HashMap<FunctionId, TypeId>,
     string_representation: Option<CheckedType>,
     copy_trait: Option<TraitId>,
     sized_trait: Option<TraitId>,
@@ -1006,6 +1031,7 @@ pub struct TypeChecker {
     checking_bindings: HashSet<SymbolId>,
     checked_bindings: HashSet<SymbolId>,
     checking_functions: HashSet<FunctionId>,
+    checking_modules: Vec<ModuleId>,
     checked_functions: HashSet<FunctionId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     resolved_named_types: HashMap<TypeId, CheckedType>,
@@ -1111,9 +1137,11 @@ impl TypeChecker {
             let outer_return_reachable = self.return_reachable;
             self.did_return = false;
             self.return_reachable = true;
+            self.checking_modules.push(module_id);
             for item in &module.program().module(module_id).syntax.items {
                 self.check_item(&module, item);
             }
+            self.checking_modules.pop();
             self.did_return = outer_did_return;
             self.return_reachable = outer_return_reachable;
         }
@@ -1161,6 +1189,7 @@ impl TypeChecker {
             iterator_trait: self.iterator_trait,
             io_type: self.io_type,
             mutated_parameter_symbols: self.mutated_parameter_symbols,
+            method_symbols: self.method_symbols,
         };
         let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
         if ownership_diagnostics.is_empty() {
@@ -2084,6 +2113,9 @@ impl TypeChecker {
         let value_type = self.resolve_source_type(module, annotation);
         if let Some(symbol) = module.symbol_for(binding.syntax.id) {
             self.symbol_types.insert(symbol, value_type);
+            if let Some(id) = source_type_id(module, annotation) {
+                self.symbol_companion_types.insert(symbol, id);
+            }
         }
     }
 
@@ -2303,6 +2335,17 @@ impl TypeChecker {
     fn seed_function_types(&mut self, module: &ResolvedModule) {
         for function in module.functions() {
             let parameter_symbols = function_parameter_symbols(module, &function.pattern);
+            if let Some(Type::Function(annotation)) = function.binding_annotation.as_ref() {
+                let symbols = parameter_symbols.iter().flatten().copied().collect::<Vec<_>>();
+                if let [symbol] = symbols.as_slice()
+                    && let Some(id) = source_type_id(module, &annotation.parameter)
+                {
+                    self.symbol_companion_types.insert(*symbol, id);
+                }
+                if let Some(id) = source_type_id(module, &annotation.result) {
+                    self.function_result_companion_types.insert(function.id, id);
+                }
+            }
             for symbol in parameter_symbols.iter().flatten() {
                 self.mutable_parameter_symbols.insert(*symbol);
             }
@@ -2469,6 +2512,9 @@ impl TypeChecker {
             .cloned()
             .expect("resolved function ID must be valid");
         let function_type = self.function_types[&function.id].clone();
+        if let Some(module_id) = self.function_module(module, &function) {
+            self.checking_modules.push(module_id);
+        }
         self.active_function_bounds.push(
             self.function_bounds
                 .get(&function.id)
@@ -2561,6 +2607,9 @@ impl TypeChecker {
         self.checked_functions.insert(function_id);
         self.active_function_bounds.pop();
         self.active_subtype_bounds.pop();
+        if self.function_module(module, &function).is_some() {
+            self.checking_modules.pop();
+        }
     }
 
     fn join_return_contributions(
@@ -4576,6 +4625,76 @@ impl TypeChecker {
                 normalize_product_type(elements, false)
             }
             Expression::Call(call) => {
+                if let Expression::Access(selector) = call.callee.as_ref()
+                    && let Accessor::Method(method) = &selector.accessor
+                {
+                    let receiver_type = self.check_expression(module, &call.argument);
+                    if self.did_return {
+                        return CheckedType::empty_product();
+                    }
+                    let receiver_id = self
+                        .companion_type_for_expression(module, &call.argument)
+                        .or_else(|| checked_type_id(&receiver_type));
+                    let Some(receiver_id) = receiver_id else {
+                        self.diagnostics.push(Diagnostic::new(
+                            selector.syntax.span.clone(),
+                            format!("cannot use companion method `{method}` on a value without a named static type"),
+                        ));
+                        return CheckedType::Error;
+                    };
+                    let Some(symbol) = module.companion_member(
+                        receiver_id,
+                        method,
+                        self.checking_modules.last().copied(),
+                    ) else {
+                        self.diagnostics.push(Diagnostic::new(
+                            selector.syntax.span.clone(),
+                            format!("type has no accessible companion method named `{method}`"),
+                        ));
+                        return CheckedType::Error;
+                    };
+                    self.method_symbols.insert(selector.syntax.id, symbol);
+                    self.ensure_binding_checked(module, symbol);
+                    if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
+                        self.ensure_function_checked(module, function_id);
+                    }
+                    let raw_type = self.symbol_types.get(&symbol).cloned().unwrap_or(CheckedType::Error);
+                    let callee_type = self.instantiate_function_use(
+                        raw_type.clone(),
+                        Some(&receiver_type),
+                        expected,
+                        selector.syntax.span.clone(),
+                    );
+                    if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
+                        self.check_function_bounds(
+                            function_id,
+                            &raw_type,
+                            &callee_type,
+                            selector.syntax.span.clone(),
+                        );
+                    }
+                    self.expression_types.insert(selector.syntax.id, callee_type.clone());
+                    let result = match callee_type {
+                        CheckedType::Function(function) => {
+                            self.check_call_argument(
+                                call.argument.syntax().id,
+                                receiver_type,
+                                &function.parameter,
+                                call.argument.syntax().span.clone(),
+                            );
+                            *function.result
+                        }
+                        CheckedType::Error => CheckedType::Error,
+                        other => {
+                            self.diagnostics.push(Diagnostic::new(
+                                selector.syntax.span.clone(),
+                                format!("companion item `{method}` is not callable: `{other}`"),
+                            ));
+                            CheckedType::Error
+                        }
+                    };
+                    return self.finish_expression_type(expression, result, expected);
+                }
                 if module.primitive_macro_for(call.syntax.id).is_some() {
                     self.check_expression(module, &call.argument);
                     if self.did_return {
@@ -4807,6 +4926,7 @@ impl TypeChecker {
                                 .elements
                                 .iter()
                                 .position(|element| element.name.as_deref() == Some(name)),
+                            Accessor::Method(_) => None,
                         };
                         let Some(index) = index else {
                             self.diagnostics.push(Diagnostic::new(
@@ -4817,6 +4937,9 @@ impl TypeChecker {
                                     }
                                     Accessor::Name(name) => {
                                         format!("product has no element named `{name}`")
+                                    }
+                                    Accessor::Method(name) => {
+                                        format!("unknown companion method `{name}`")
                                     }
                                 },
                             ));
@@ -4864,6 +4987,13 @@ impl TypeChecker {
                             self.diagnostics.push(Diagnostic::new(
                                 access.syntax.span.clone(),
                                 format!("erased product has no named element `{name}`"),
+                            ));
+                            CheckedType::Error
+                        }
+                        Accessor::Method(name) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                format!("unknown companion method `{name}`"),
                             ));
                             CheckedType::Error
                         }
@@ -6312,6 +6442,27 @@ impl TypeChecker {
                 .symbol_for(access.syntax.id)
                 .and_then(|symbol| self.function_symbols.get(&symbol).copied()),
             Expression::Call(call) => self.function_origin(module, &call.callee),
+            _ => None,
+        }
+    }
+
+    fn companion_type_for_expression(
+        &self,
+        module: &ResolvedModule,
+        expression: &Expression,
+    ) -> Option<TypeId> {
+        match expression {
+            Expression::Name(name) => module
+                .symbol_for(name.syntax.id)
+                .and_then(|symbol| self.symbol_companion_types.get(&symbol).copied()),
+            Expression::Call(call) => self
+                .function_origin(module, &call.callee)
+                .and_then(|function| self.function_result_companion_types.get(&function).copied()),
+            Expression::Product(product)
+                if product.elements.len() == 1 && !product.elements[0].spread =>
+            {
+                self.companion_type_for_expression(module, &product.elements[0].value)
+            }
             _ => None,
         }
     }

@@ -430,6 +430,7 @@ impl Grammar {
             type_parameters: Vec::new(),
             trait_bounds: Vec::new(),
             subtype_bounds: Vec::new(),
+            companion_target: None,
         })
     }
 
@@ -473,6 +474,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            companion_target: Some(target),
         })
     }
 
@@ -2142,6 +2144,21 @@ impl Grammar {
                     syntax: self.syntax(start),
                     value: Box::new(expression),
                     accessor,
+                });
+            } else if self.eat_operator("^") {
+                let method = self
+                    .expect(TokenKind::Identifier, "expected companion method name after `^`")?
+                    .text;
+                let receiver = expression;
+                let selector = Expression::Access(AccessExpression {
+                    syntax: self.syntax(self.position.saturating_sub(2)),
+                    value: Box::new(receiver.clone()),
+                    accessor: Accessor::Method(method),
+                });
+                expression = Expression::Call(CallExpression {
+                    syntax: self.syntax(start),
+                    callee: Box::new(selector),
+                    argument: Box::new(receiver),
                 });
             } else if !self.has_trivia_before_next_token() && self.eat(TokenKind::LBracket) {
                 let index = self.parse_expression()?;

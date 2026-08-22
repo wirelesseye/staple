@@ -106,6 +106,7 @@ pub struct Submodule {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    pub companion_target: Option<Type>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
