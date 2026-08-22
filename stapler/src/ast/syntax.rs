@@ -37,6 +37,7 @@ pub enum TokenKind {
     Match,
     Alias,
     Opaque,
+    Where,
     Underscore,
     Identifier,
     String,

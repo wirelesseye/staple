@@ -840,10 +840,10 @@ mod tests {
     #[test]
     fn indexes_local_values_types_and_trait_members() {
         let source = concat!(
-            "type Wrapper = T => (value: T)\n",
-            "trait Identity = T => { identity: T -> T }\n",
+            "type Wrapper T = (value: T)\n",
+            "trait Identity T { identity: T -> T }\n",
             "impl Identity I32 { def identity = value => value }\n",
-            "def wrap: T => T -> Wrapper T = value => Wrapper (value: value)\n",
+            "def wrap: <T> T -> Wrapper T = value => Wrapper (value: value)\n",
             "def apply = () => identity 1\n",
             "let (first, second) = (1, 2)\n",
             "first\n",
@@ -870,10 +870,10 @@ mod tests {
     #[test]
     fn indexes_generic_trait_implementation_type_parameters() {
         let source = concat!(
-            "trait Bound = T => { check: T -> Bool }\n",
-            "trait Target = T => { act: T -> T }\n",
+            "trait Bound T { check: T -> Bool }\n",
+            "trait Target T { act: T -> T }\n",
             "impl Bound I32 { def check = value => True }\n",
-            "impl T => Bound T => Target T { def act = value => value }\n",
+            "impl <T where Bound T> Target T { def act = value => value }\n",
         );
         let path = std::env::temp_dir().join("staple-definition-generic-impl-test.sta");
         let program = ProgramLoader::new()

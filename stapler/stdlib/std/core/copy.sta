@@ -1,1 +1,1 @@
-pub trait Copy = T => {}
+pub trait Copy T {}

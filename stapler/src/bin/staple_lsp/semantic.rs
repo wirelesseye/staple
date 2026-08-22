@@ -127,6 +127,7 @@ impl<'a> Classifier<'a> {
                 | TokenKind::Match
                 | TokenKind::Alias
                 | TokenKind::Opaque
+                | TokenKind::Where
                 | TokenKind::Underscore => Some(KEYWORD),
                 TokenKind::Satisfies
                 | TokenKind::Operator
@@ -1118,9 +1119,9 @@ mod tests {
         let source = concat!(
             "use tools\n",
             "type alias Item = I32\n",
-            "trait Show = T => { show: T -> String }\n",
+            "trait Show T { show: T -> String }\n",
             "macro identity = value => parse_quote { $value }\n",
-            "def project: T => T -> T = value => (field: value).field\n",
+            "def project: <T> T -> T = value => (field: value).field\n",
             "mod child { def nested = () => 1 }\n",
             "type Clock = I32\n",
             "def read: () ->{Clock} Clock = () => resource Clock\n",
@@ -1246,10 +1247,10 @@ mod tests {
     #[test]
     fn classifies_generic_trait_implementation_generics() {
         let source = concat!(
-            "trait Bound = T => { check: T -> Bool }\n",
-            "trait Target = T => { act: T -> T }\n",
+            "trait Bound T { check: T -> Bool }\n",
+            "trait Target T { act: T -> T }\n",
             "impl Bound I32 { def check = value => True }\n",
-            "impl T => Bound T => Target T { def act = value => value }\n",
+            "impl <T where Bound T> Target T { def act = value => value }\n",
         );
         let path = std::env::temp_dir().join("staple-semantic-generic-impl.sta");
         let program = ProgramLoader::new()
@@ -1421,7 +1422,7 @@ mod tests {
                 "pub let value = 1\n",
                 "pub def callable = () => 1\n",
                 "pub type alias Number = I32\n",
-                "pub trait Printable = T => {}\n",
+                "pub trait Printable T {}\n",
                 "pub macro identity = value => parse_quote { $value }\n",
             ),
         )

@@ -1,1 +1,1 @@
-pub trait Sized = T => {}
+pub trait Sized T {}

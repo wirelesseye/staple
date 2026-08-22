@@ -234,13 +234,13 @@ fn parses_string_literal_types_and_patterns_losslessly() {
 #[test]
 fn parses_traits_implementations_and_bounds_losslessly() {
     let source = concat!(
-        "pub trait ToString = T => {\n",
+        "pub trait ToString T {\n",
         "  to_string: T -> String\n",
         "}\n",
         "impl ToString I32 {\n",
         "  def to_string = number => \"number\"\n",
         "}\n",
-        "def print: T => ToString T => T -> () = value => ()\n",
+        "def print: <T where ToString T> T -> () = value => ()\n",
     );
     let root = parse(source).expect("trait syntax should parse");
     assert_eq!(root.text(), source);
@@ -270,16 +270,16 @@ fn parses_traits_implementations_and_bounds_losslessly() {
 #[test]
 fn parses_generic_conditional_trait_implementations_losslessly() {
     let source = concat!(
-        "trait Bound = T => { check: T -> Bool }\n",
-        "trait Other = T => { verify: T -> Bool }\n",
-        "trait Target = T => { act: T -> T }\n",
+        "trait Bound T { check: T -> Bool }\n",
+        "trait Other T { verify: T -> Bool }\n",
+        "trait Target T { act: T -> T }\n",
         "impl Target I32 {\n",
         "  def act = value => value\n",
         "}\n",
-        "impl T => Bound T => Target T {\n",
+        "impl <T where Bound T> Target T {\n",
         "  def act = value => value\n",
         "}\n",
-        "impl T => Bound T => Other T => Target T {\n",
+        "impl <T where Bound T, Other T> Target T {\n",
         "  def act = value => value\n",
         "}\n",
     );
@@ -315,11 +315,11 @@ fn parses_generic_conditional_trait_implementations_losslessly() {
 #[test]
 fn parses_curried_and_product_trait_parameters_and_arguments() {
     let source = concat!(
-        "trait Add = Left => Right => Output => { add: (Left, Right) -> Output }\n",
-        "trait Convert = (From, To) => { convert: From -> To }\n",
+        "trait Add Left Right Output { add: (Left, Right) -> Output }\n",
+        "trait Convert (From, To) { convert: From -> To }\n",
         "impl Add I32 I32 I32 { def add = (left, right) => left + right }\n",
         "impl Convert (I32, String) { def convert = value => \"converted\" }\n",
-        "def combine: (L, R, O) => Add L R O => (L, R) -> O = pair => Add.add pair\n",
+        "def combine: <L, R, O where Add L R O> (L, R) -> O = pair => Add.add pair\n",
     );
     let root = parse(source).expect("multi-parameter trait syntax should parse");
     assert_eq!(root.text(), source);
@@ -356,8 +356,8 @@ fn parses_curried_and_product_trait_parameters_and_arguments() {
 #[test]
 fn parses_trait_prerequisites_losslessly() {
     let source = concat!(
-        "trait Ord = T => Eq T => { compare: T -> T -> I32 }\n",
-        "trait Relation = (Left, Right) => Eq Left => Eq Right => { related: (Left, Right) -> Bool }\n",
+        "trait Ord T where Eq T { compare: T -> T -> I32 }\n",
+        "trait Relation (Left, Right) where Eq Left, Eq Right { related: (Left, Right) -> Bool }\n",
     );
     let root = parse(source).expect("trait prerequisites should parse");
     assert_eq!(root.text(), source);
@@ -384,10 +384,10 @@ fn parses_trait_prerequisites_losslessly() {
 #[test]
 fn parses_trait_functional_dependencies_losslessly() {
     let source = concat!(
-        "trait Iterator = Iter => Item => Iter ~> Item => { next: Iter -> Item }\n",
-        "trait Add = Left => Right => Output => {Left, Right} ~> Output => Eq Output => { add: Left -> Right -> Output }\n",
-        "def iterate: Iter => Iterator Iter => Iter -> () = value => ()\n",
-        "def add: T => Add T T _ => T -> T = value => value\n",
+        "trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
+        "trait Add Left Right Output where {Left, Right} ~> Output, Eq Output { add: Left -> Right -> Output }\n",
+        "def iterate: <Iter where Iterator Iter> Iter -> () = value => ()\n",
+        "def add: <T where Add T T _> T -> T = value => value\n",
     );
     let root = parse(source).expect("functional dependency syntax should parse");
     assert_eq!(root.text(), source);
@@ -422,7 +422,7 @@ fn parses_trait_functional_dependencies_losslessly() {
 #[test]
 fn parses_default_trait_members_losslessly() {
     let source = concat!(
-        "trait Increment = T => {\n",
+        "trait Increment T {\n",
         "  increment: T -> T\n",
         "  twice: T -> T = value => increment (increment value)\n",
         "  identity: T -> T = value => { value }\n",
@@ -646,7 +646,7 @@ fn parses_bodyless_types_as_singletons() {
 #[test]
 fn parses_generic_opaque_type_declarations() {
     let root =
-        parse("pub type CPointer = Pointee => opaque\n").expect("generic opaque type should parse");
+        parse("pub type CPointer Pointee = opaque\n").expect("generic opaque type should parse");
     assert!(matches!(
         root.items[0],
         Item::TypeDeclaration(ref declaration)
@@ -677,7 +677,7 @@ fn parses_opaque_macro_declarations() {
 
 #[test]
 fn parses_the_generic_contextual_quote_signature() {
-    let source = "pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T\n";
+    let source = "pub macro parse_quote: <T where ParseQuoteResult T> Braced Syntax -> T\n";
     let root = parse(source).expect("generic primitive macro signature should parse");
     assert_eq!(root.text(), source);
     assert!(matches!(
@@ -1274,9 +1274,9 @@ fn type_declaration_underlying_type_stops_at_newline() {
 #[test]
 fn parses_compile_time_parameters_and_type_application() {
     let source = concat!(
-        "type alias Pair = (A, B) => (A, B)\n",
-        "type Box = T => (value: T)\n",
-        "def identity: T => T -> T = x => x\n",
+        "type alias Pair (A, B) = (A, B)\n",
+        "type Box T = (value: T)\n",
+        "def identity: <T> T -> T = x => x\n",
         "let pair: Pair (String, I32)\n",
     );
     let root = parse(source).expect("generic syntax should parse");
@@ -1298,9 +1298,9 @@ fn parses_compile_time_parameters_and_type_application() {
 #[test]
 fn parses_default_type_bounds_losslessly() {
     let source = concat!(
-        "type Box = T => T ?= String => (value: T)\n",
-        "type alias Pair = A => B => B ?= A => (A, B)\n",
-        "trait Increment = T => T ?= I32 => { increment: T -> T }\n",
+        "type Box (T = String) = (value: T)\n",
+        "type alias Pair A (B = A) = (A, B)\n",
+        "trait Increment (T = I32) { increment: T -> T }\n",
     );
     let root = parse(source).expect("default type bounds should parse");
     assert_eq!(root.text(), source);
@@ -1328,9 +1328,9 @@ fn parses_default_type_bounds_losslessly() {
 #[test]
 fn parses_inline_default_type_bounds_losslessly() {
     let source = concat!(
-        "pub(repr) type Ident = Spelling ?= String => Spelling <: String => Spelling\n",
-        "type alias Pair = A => B ?= A => (A, B)\n",
-        "trait Converts = From => To ?= String => { convert: From -> To }\n",
+        "pub(repr) type Ident (Spelling = String) where Spelling <: String = Spelling\n",
+        "type alias Pair A (B = A) = (A, B)\n",
+        "trait Converts From (To = String) { convert: From -> To }\n",
     );
     let root = parse(source).expect("inline default type bounds should parse");
     assert_eq!(root.text(), source);
@@ -1367,8 +1367,8 @@ fn rejects_inline_default_on_a_product_type_parameter() {
 #[test]
 fn combines_inline_and_trailing_default_type_bounds() {
     let source = concat!(
-        "type alias Triple = A ?= I32 => B => C ?= B => (A, B, C)\n",
-        "type alias Triple = A ?= I32 => B => B ?= I32 => (A, B)\n",
+        "type alias Triple (A = I32) B (C = B) = (A, B, C)\n",
+        "type alias Triple (A = I32) (B = A) = (A, B)\n",
     );
     let root = parse(source).expect("mixed inline and trailing defaults should parse");
     assert_eq!(root.text(), source);
@@ -1385,9 +1385,9 @@ fn combines_inline_and_trailing_default_type_bounds() {
 #[test]
 fn parses_sized_relaxations_losslessly() {
     let source = concat!(
-        "pub(repr) type RefLike = T => ?Sized T => T\n",
-        "def preserve: T => ?Sized T => Ref T -> Ref T = value => value\n",
-        "def ordinary: T => T -> T = value => value\n",
+        "pub(repr) type RefLike T where ?Sized T = T\n",
+        "def preserve: <T where ?Sized T> Ref T -> Ref T = value => value\n",
+        "def ordinary: <T> T -> T = value => value\n",
     );
     let root = parse(source).expect("`?Sized` clauses should parse");
     assert_eq!(root.text(), source);
@@ -1416,15 +1416,15 @@ fn parses_sized_relaxations_losslessly() {
         [stapler::TypeParameterPattern::Binding(binding)] if binding.sized
     ));
 
-    assert!(parse("type alias Bad = T => ?Other T => T\n").is_err());
-    assert!(parse("type alias Bad = T => ?Sized U => T\n").is_err());
-    assert!(parse("type alias Bad = T => ?Sized T => ?Sized T => T\n").is_err());
+    assert!(parse("type alias Bad T where ?Other T = T\n").is_err());
+    assert!(parse("type alias Bad T where ?Sized U = T\n").is_err());
+    assert!(parse("type alias Bad T where ?Sized T, ?Sized T = T\n").is_err());
 }
 
 #[test]
 fn parses_public_representations_and_nominal_patterns() {
     let source = concat!(
-        "pub(repr) type Box = T => (value: T)\n",
+        "pub(repr) type Box T = (value: T)\n",
         "let Box (value) = Box (value: 42)\n",
         "def unbox: Box I32 -> I32 = Box value => value\n",
     );

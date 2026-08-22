@@ -49,7 +49,7 @@ visibility => parameters => entries => match entries {
             rest: typegroup_generic_items visibility parameters rest,
         ),
         (variant: Ident String, Some underlying) => Sequence (
-            first: parse_quote { $visibility type $variant = $parameters... => $underlying },
+            first: parse_quote { $visibility type $variant $parameters... = $underlying },
             rest: typegroup_generic_items visibility parameters rest,
         ),
     },
@@ -172,7 +172,7 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match (
             $public_visibility mod $group {
                 $items...
             }
-            $public_visibility type alias $group = $parameters... => $sum
+            $public_visibility type alias $group $parameters... = $sum
         }
     },
 }
@@ -207,7 +207,7 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match (
             $public_visibility mod $group {
                 $items...
             }
-            $public_visibility type alias $group = $parameters... => $sum
+            $public_visibility type alias $group $parameters... = $sum
         }
     },
 }

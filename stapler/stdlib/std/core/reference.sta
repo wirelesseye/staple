@@ -1,7 +1,7 @@
 @recursive_constructor
-pub(repr) type Ref = T => ?Sized T => T
+pub(repr) type Ref T where ?Sized T = T
 
 // TODO: move this to the `product` module
-pub def length: T => Ref T[] -> USize = value => 0
+pub def length: <T> Ref T[] -> USize = value => 0
 
-pub def replace: T => (Ref T, T) ->{mut 0} T = (reference, value) => value
+pub def replace: <T> (Ref T, T) ->{mut 0} T = (reference, value) => value

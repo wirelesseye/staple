@@ -3,12 +3,12 @@ use std.io.println
 
 pub type alias Number = I32
 pub(repr) type UserId = Number
-pub(repr) type Box = T => (value: T)
+pub(repr) type Box T = (value: T)
 type Enabled
 type Disabled
 type alias Switch = Enabled | Disabled
 
-def unbox: T => Box T -> T = Box value => value
+def unbox: <T> Box T -> T = Box value => value
 
 def switch_number = switch: Switch => match switch {
     Enabled() => 1,

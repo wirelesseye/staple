@@ -40,6 +40,12 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
             .or(tag("=>").map(|_| TokenKind::FatArrow))
             .or(tag("->").map(|_| TokenKind::Arrow))
             .or(tag("...").map(|_| TokenKind::Ellipsis))
+            .or(tag("<:").map(|_| TokenKind::Operator))
+            .or(tag("<=").map(|_| TokenKind::Operator))
+            .or(tag(">=").map(|_| TokenKind::Operator))
+            .or(tag("~>").map(|_| TokenKind::Operator))
+            .or(tag("<").map(|_| TokenKind::Operator))
+            .or(tag(">").map(|_| TokenKind::Operator))
             .or(float)
             .or(identifier)
             .or(integer)
@@ -81,6 +87,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
                 "match" => TokenKind::Match,
                 "alias" => TokenKind::Alias,
                 "opaque" => TokenKind::Opaque,
+                "where" => TokenKind::Where,
                 "_" => TokenKind::Underscore,
                 _ => TokenKind::Identifier,
             };
@@ -228,7 +235,7 @@ fn lex_operator(source: &str, offset: usize) -> Option<usize> {
     }
     let mut end = offset;
     for (relative, character) in tail.char_indices() {
-        if !"!#$%&*+./<=>?@\\^|-~:".contains(character) {
+        if !"!#$%&*+./=?@\\^|-~:".contains(character) {
             break;
         }
         end = offset + relative + character.len_utf8();

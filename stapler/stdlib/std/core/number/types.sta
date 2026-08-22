@@ -22,23 +22,23 @@ pub type Equal
 pub type Greater
 pub type alias Ordering = Less | Equal | Greater
 
-pub trait Add = T => Copy T => {
+pub trait Add T where Copy T {
     add: T -> T -> T
 }
 
-pub trait Subtract = T => Copy T => {
+pub trait Subtract T where Copy T {
     subtract: T -> T -> T
 }
 
-pub trait Multiply = T => Copy T => {
+pub trait Multiply T where Copy T {
     multiply: T -> T -> T
 }
 
-pub trait Divide = T => Copy T => {
+pub trait Divide T where Copy T {
     divide: T -> T -> T
 }
 
-pub trait PartialOrd = T => Copy T => {
+pub trait PartialOrd T where Copy T {
     partial_cmp: T -> T -> Option Ordering
     lt: T -> T -> Bool = left => right => match (partial_cmp left right) {
         Some Less() => True,
@@ -60,6 +60,6 @@ pub trait PartialOrd = T => Copy T => {
     }
 }
 
-pub trait Ord = T => Eq T => PartialOrd T => {
+pub trait Ord T where Eq T, PartialOrd T {
     cmp: T -> T -> Ordering
 }

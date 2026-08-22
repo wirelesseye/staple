@@ -426,7 +426,7 @@ fn unknown_names_report_private_glob_candidates() {
         "main.sta",
         concat!(
             "mod submodule {\n",
-            "    def id: T => T -> T = x => x\n",
+            "    def id: <T> T -> T = x => x\n",
             "}\n",
             "use submodule.*\n",
             "id 42\n",
@@ -746,7 +746,7 @@ fn block_scoped_types_in_generic_functions_monomorphize_per_call_site() {
     fixture.write(
         "main.sta",
         concat!(
-            "def wrap: T => T -> T = value => {\n",
+            "def wrap: <T> T -> T = value => {\n",
             "    type Boxed = T\n",
             "    match Boxed value { Boxed inner => inner }\n",
             "}\n",
@@ -1028,7 +1028,7 @@ fn inline_glob_reexports_types_traits_and_macros() {
             "mod child {\n",
             "    use std.syntax.(parse_quote)\n",
             "    pub type alias Number = I32\n",
-            "    pub trait Identity = T => { identity: T -> T }\n",
+            "    pub trait Identity T { identity: T -> T }\n",
             "    pub macro reveal = item => parse_quote { $item }\n",
             "    pub mod Variant { pub type Ready }\n",
             "}\n",
@@ -1100,7 +1100,7 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
     let fixture = Fixture::new();
     fixture.write(
         "traits.sta",
-        "pub trait Increment = T => { increment: T -> T }\n",
+        "pub trait Increment T { increment: T -> T }\n",
     );
     fixture.write(
         "implementations.sta",
@@ -1114,7 +1114,7 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
         concat!(
             "use traits.(Increment)\n",
             "use implementations\n",
-            "def twice: T => Increment T => T -> T = value => increment (increment value)\n",
+            "def twice: <T where Increment T> T -> T = value => increment (increment value)\n",
             "let answer: I32 = twice 40\n",
             "let qualified: I32 = Increment.increment answer\n",
         ),
@@ -1128,19 +1128,19 @@ fn imports_public_traits_and_discovers_loaded_global_implementations() {
         concat!(
             "use traits\n",
             "use implementations\n",
-            "def apply: T => traits.Increment T => T -> T = value => traits.Increment.increment value\n",
+            "def apply: <T where traits.Increment T> T -> T = value => traits.Increment.increment value\n",
             "let answer: I32 = apply 41\n",
         ),
         concat!(
             "use traits.Increment as Inc\n",
             "use implementations\n",
-            "def apply: T => Inc T => T -> T = value => Inc.increment value\n",
+            "def apply: <T where Inc T> T -> T = value => Inc.increment value\n",
             "let answer: I32 = apply 41\n",
         ),
         concat!(
             "use traits.*\n",
             "use implementations\n",
-            "def apply: T => Increment T => T -> T = value => increment value\n",
+            "def apply: <T where Increment T> T -> T = value => increment value\n",
             "let answer: I32 = apply 41\n",
         ),
     ] {
@@ -1169,8 +1169,8 @@ fn preserves_trait_prerequisites_across_modules() {
     fixture.write(
         "traits.sta",
         concat!(
-            "pub trait Base = T => { base: T -> T }\n",
-            "pub trait Derived = T => Base T => { derived: T -> T }\n",
+            "pub trait Base T { base: T -> T }\n",
+            "pub trait Derived T where Base T { derived: T -> T }\n",
         ),
     );
     fixture.write(
@@ -1186,7 +1186,7 @@ fn preserves_trait_prerequisites_across_modules() {
         concat!(
             "use traits.(Base, Derived)\n",
             "use implementations\n",
-            "def apply: T => Derived T => T -> T = value => Base.base (Derived.derived value)\n",
+            "def apply: <T where Derived T> T -> T = value => Base.base (Derived.derived value)\n",
             "let answer: I32 = apply 42\n",
         ),
     );
@@ -1201,7 +1201,7 @@ fn preserves_trait_functional_dependencies_across_modules() {
     let fixture = Fixture::new();
     fixture.write(
         "traits.sta",
-        "pub trait Iterator = Iter => Item => Iter ~> Item => { next: Iter -> Item }\n",
+        "pub trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
     );
     fixture.write(
         "implementations.sta",
@@ -1230,7 +1230,7 @@ fn imports_and_specializes_default_trait_members() {
     fixture.write(
         "traits.sta",
         concat!(
-            "pub trait Increment = T => {\n",
+            "pub trait Increment T {\n",
             "  increment: T -> T\n",
             "  twice: T -> T = value => increment (increment value)\n",
             "}\n",
@@ -1264,7 +1264,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
         "values.sta",
         concat!(
             "pub type UserId = I32\n",
-            "pub def identity: T => T -> T = x => x\n",
+            "pub def identity: <T> T -> T = x => x\n",
         ),
     );
     fixture.write(
@@ -1293,7 +1293,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
 #[test]
 fn exports_constructors_and_destructors_for_public_representations() {
     let fixture = Fixture::new();
-    fixture.write("boxes.sta", "pub(repr) type Box = T => (value: T)\n");
+    fixture.write("boxes.sta", "pub(repr) type Box T = (value: T)\n");
     fixture.write(
         "main.sta",
         concat!(

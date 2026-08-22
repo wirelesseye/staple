@@ -1,4 +1,4 @@
-pub trait Default = T => {
+pub trait Default T {
     default: () -> T
 }
 

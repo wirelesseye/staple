@@ -4,7 +4,7 @@ extern "staple-intrinsic" {
     let __string_add: (String, String) -> String
 }
 
-pub trait ToString = T => {
+pub trait ToString T {
     to_string: T -> String
 }
 

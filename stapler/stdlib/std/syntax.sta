@@ -2,27 +2,27 @@
 // their data in the first structured-syntax slice; the remaining expression
 // forms round-trip through UnstructuredExpr without exposing their fields yet.
 @recursive_constructor
-pub(repr) type Ident = Spelling ?= String => Spelling <: String => Spelling
+pub(repr) type Ident (Spelling = String) where Spelling <: String = Spelling
 @recursive_constructor
 pub(repr) type CallExpr = (
     callee: Expr,
     argument: Expr,
 )
 @recursive_constructor
-pub(repr) type Sequence = Element => Element
+pub(repr) type Sequence Element = Element
 @recursive_constructor
-pub(repr) type Optional = Element => Element
+pub(repr) type Optional Element = Element
 @recursive_constructor
-pub(repr) type Separated = Element => Separator => Element
+pub(repr) type Separated Element Separator = Element
 pub type Comma
 pub type Equals
 pub type FatArrow
 @recursive_constructor
-pub(repr) type Parenthesized = Contents => Contents
+pub(repr) type Parenthesized Contents = Contents
 @recursive_constructor
-pub(repr) type Bracketed = Contents => Contents
+pub(repr) type Bracketed Contents = Contents
 @recursive_constructor
-pub(repr) type Braced = Contents => Contents
+pub(repr) type Braced Contents = Contents
 pub type UnstructuredExpr = opaque
 pub type alias Expr = Ident String | CallExpr | UnstructuredExpr
 
@@ -44,7 +44,7 @@ pub type Syntax = opaque
 pub type alias SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
 
 // A sealed compiler-defined marker for the contextual result of `parse_quote`.
-pub trait ParseQuoteResult = T => {}
+pub trait ParseQuoteResult T {}
 
 pub macro quote: Braced Syntax -> Syntax
-pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T
+pub macro parse_quote: <T where ParseQuoteResult T> Braced Syntax -> T

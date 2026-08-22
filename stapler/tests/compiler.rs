@@ -163,7 +163,7 @@ fn rejects_invalid_resource_contracts_and_types() {
 fn standard_io_is_a_compiler_provided_resource_and_propagates_to_main() {
     let module = type_check(concat!(
         "use std.io.(IO, print, println)\n",
-        "def identity: T => T -> T = value => value\n",
+        "def identity: <T> T -> T = value => value\n",
         "def explicit: String ->{IO} () = value => print value\n",
         "def inferred = value: String => println value\n",
         "def main = () => { explicit \"one\"; inferred (identity \"two\") }\n",
@@ -213,8 +213,8 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
         "type Clock = I32\n",
         "type alias CurrentClock = Clock\n",
         "type Logger = I32\n",
-        "type Box = T => (value: T)\n",
-        "trait Observe = T => { observe: T ->{Clock} Clock }\n",
+        "type Box T = (value: T)\n",
+        "trait Observe T { observe: T ->{Clock} Clock }\n",
         "impl Observe I32 { def observe = value => resource CurrentClock }\n",
         "macro request = _: Ident \"clock\" => parse_quote { resource CurrentClock }\n",
         "def generated = () => request clock\n",
@@ -365,7 +365,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
     std::fs::write(
         temporary.join("std/core/string.sta"),
         format!(
-            "{declaration}\nextern \"staple-intrinsic\" {{ let __string_add: (String, String) -> String }}\npub trait ToString = T => {{ to_string: T -> String }}\nimpl ToString String {{ def to_string = value => value }}\nimpl Add String {{ def add = left => right => __string_add (left, right) }}\n"
+            "{declaration}\nextern \"staple-intrinsic\" {{ let __string_add: (String, String) -> String }}\npub trait ToString T {{ to_string: T -> String }}\nimpl ToString String {{ def to_string = value => value }}\nimpl Add String {{ def add = left => right => __string_add (left, right) }}\n"
         ),
     )
         .expect("test String declaration should be written");
@@ -749,7 +749,7 @@ fn a_closure_mutating_a_captured_parameter_attributes_to_the_enclosing_function(
 fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Reset = T => { reset: T -> () }\n",
+            "trait Reset T { reset: T -> () }\n",
             "impl Reset (Ref (I32, I32)) { def reset = p => { p.0 = 0 } }\n",
         )))
         .expect_err("the impl mutates a parameter its trait does not declare");
@@ -960,7 +960,7 @@ fn rejects_invalid_product_spreads_and_indices() {
 #[test]
 fn derives_trait_delegated_product_indexing() {
     let source = concat!(
-        "def select: (A, B) => Copy A => Copy B => ((A, B), USize) -> A | B = (pair, position) => pair[position]\n",
+        "def select: <A, B where Copy A, Copy B> ((A, B), USize) -> A | B = (pair, position) => pair[position]\n",
         "let pair = (1, \"two\")\n",
         "let position: USize = 1\n",
         "let generic_selected: I32 | String = select (pair, position)\n",
@@ -1225,9 +1225,9 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
 #[test]
 fn enforces_implicit_sized_and_supports_question_sized_parameters() {
     type_check(concat!(
-        "type alias Slice = E => E[]\n",
-        "def preserve: T => ?Sized T => Ref T -> Ref T = value => value\n",
-        "def explicitly_sized: T => ?Sized T => Sized T => Ref T -> Ref T = value => value\n",
+        "type alias Slice E = E[]\n",
+        "def preserve: <T where ?Sized T> Ref T -> Ref T = value => value\n",
+        "def explicitly_sized: <T where ?Sized T, Sized T> Ref T -> Ref T = value => value\n",
         "let fixed: Ref I32[2] = Ref (1, 2)\n",
         "let erased: Ref (Slice I32) = fixed\n",
         "let same: Ref (Slice I32) = preserve erased\n",
@@ -1236,7 +1236,7 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def sized_only: T => Ref T -> Ref T = value => value\n",
+            "def sized_only: <T> Ref T -> Ref T = value => value\n",
             "let fixed: Ref I32[2] = Ref (1, 2)\n",
             "let erased: Ref I32[] = fixed\n",
             "let invalid = sized_only erased\n",
@@ -1250,7 +1250,7 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "def invalid: T => ?Sized T => T -> () = value => ()\n",
+            "def invalid: <T where ?Sized T> T -> () = value => ()\n",
         ))
         .expect_err("a relaxed parameter cannot be passed by value");
     assert!(
@@ -1370,7 +1370,7 @@ fn checks_general_satisfies_expressions_and_contextually_types_functions() {
 #[test]
 fn infers_and_lowers_nominal_sums_with_propagation() {
     let module = type_check(concat!(
-        "pub(repr) type Ok = T => T\n",
+        "pub(repr) type Ok T = T\n",
         "pub(repr) type IOError = String\n",
         "def read: String -> Ok String | IOError = path => Ok(path)\n",
         "def parse = (path: String) => { let Ok(file)? = read(path); Ok(file) }\n",
@@ -1496,7 +1496,7 @@ fn matches_values_of_any_runtime_type() {
         "def identity = value: I32 => value\n",
         "def function = value: (I32 -> I32) => match value { callable => callable 4 }\n",
         "def nominal = value: Wrapped => match value { Wrapped number => number }\n",
-        "def generic: T => T -> T = value => match value { same: T => same }\n",
+        "def generic: <T> T -> T = value => match value { same: T => same }\n",
         "integer 1\n",
         "float 1.5\n",
         "function identity\n",
@@ -1648,7 +1648,7 @@ fn injects_and_widens_sum_values() {
     let module = type_check(concat!(
         "pub(repr) type IOError = String\n",
         "pub(repr) type ParseError = String\n",
-        "type alias Result = T => Ok T | IOError\n",
+        "type alias Result T = Ok T | IOError\n",
         "def small: () -> Ok I32 | IOError = () => Ok(1)\n",
         "let reordered: IOError | Ok I32 = small()\n",
         "let aliased: Result I32 = reordered\n",
@@ -1719,7 +1719,7 @@ fn supports_arbitrary_sized_sum_alternatives_and_typed_matches() {
         "let applied: Ok I32 | Ok String = Ok(3)\n",
         "def small: () -> I32 | String = () => 7\n",
         "let widened: I32 | String | F64 = small()\n",
-        "def generic: T => T -> T | String = value => value\n",
+        "def generic: <T> T -> T | String = value => value\n",
         "generic 9\n",
         "select(integer)\n",
         "select(text)\n",
@@ -1898,7 +1898,7 @@ fn captures_potentially_unsafe_local_defs_by_binding_cell() {
 fn applies_initialization_state_to_recursive_local_generics() {
     let module = type_check(concat!(
         "def outer: () -> I32 = () => {\n",
-        "  def recur: T => T -> T = value => recur value\n",
+        "  def recur: <T> T -> T = value => recur value\n",
         "  recur 1\n",
         "}\n",
     ));
@@ -2050,10 +2050,10 @@ fn at_patterns_are_structural_in_matches_and_propagation() {
 
 #[test]
 fn at_patterns_require_copy_runtime_values_and_honor_copy_bounds() {
-    type_check("def retain: T => Copy T => T -> T = value@_ => value\n");
+    type_check("def retain: <T where Copy T> T -> T = value@_ => value\n");
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("def invalid: T => T -> T = value@_ => value\n"))
+        .check(resolve("def invalid: <T> T -> T = value@_ => value\n"))
         .expect_err("an unconstrained generic at-pattern should not be Copy");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
@@ -2120,8 +2120,8 @@ fn compares_all_standard_library_integer_types() {
         "let less_equal: Bool = 1 <= 2\n",
         "let greater: Bool = 2 > 1\n",
         "let greater_equal: Bool = 2 >= 1\n",
-        "def same: T => Copy T => Eq T => T -> T -> Bool = left => right => left == right\n",
-        "def before: T => PartialOrd T => T -> T -> Bool = left => right => left < right\n",
+        "def same: <T where Copy T, Eq T> T -> T -> Bool = left => right => left == right\n",
+        "def before: <T where PartialOrd T> T -> T -> Bool = left => right => left < right\n",
         "let generic_equal: Bool = same 1 1\n",
         "let generic_order: Bool = before 1 2\n",
         "def i8 = (x: I8, y: I8) => x < y\n",
@@ -2222,7 +2222,7 @@ fn rejects_invalid_float_contexts_and_float_ord() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("def compare: T => Ord T => T -> T -> Ordering = left => right => Ord.cmp left right\nlet invalid = compare 1.0 2.0\n"))
+        .check(resolve("def compare: <T where Ord T> T -> T -> Ordering = left => right => Ord.cmp left right\nlet invalid = compare 1.0 2.0\n"))
         .expect_err("floats should not implement Ord");
     assert!(!diagnostics.is_empty());
 }
@@ -2419,7 +2419,7 @@ fn c_pointer_preserves_its_pointee_type() {
 #[test]
 fn generic_opaque_arguments_are_part_of_type_identity() {
     let module = resolve(concat!(
-        "type Handle = T => opaque\n",
+        "type Handle T = opaque\n",
         "def invalid: Handle I32 -> Handle String = value => value\n",
     ));
     let diagnostics = TypeChecker::new()
@@ -2467,7 +2467,7 @@ fn validates_the_standard_library_string_representation() {
             "standard library type `String` must keep its representation private",
         ),
         (
-            "pub type String = T => Ref U8[]\n",
+            "pub type String T = Ref U8[]\n",
             "standard library type `String` must not accept compile-time arguments",
         ),
         (
@@ -2981,7 +2981,7 @@ fn block_modifiers_reject_unsupported_and_public_outputs() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for source in [
         concat!(
-            "macro @invalid: Item -> Item = _ => parse_quote { trait Invalid = T => { value: T } }\n",
+            "macro @invalid: Item -> Item = _ => parse_quote { trait Invalid T { value: T } }\n",
             "def test = () => { @invalid let original = 0 }\n",
         ),
         concat!(
@@ -3861,7 +3861,7 @@ fn quote_result_is_sealed_and_generic_user_macros_are_rejected() {
 
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("macro generic: T => Expr -> T = value => value\n", root)
+        .load_source("macro generic: <T> Expr -> T = value => value\n", root)
         .expect("generic macro syntax should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
@@ -4017,7 +4017,7 @@ fn generates_extern_trait_and_implementation_items() {
         "    extern \"c\" { let generated_external: I32 -> I32 }\n",
         "}\n",
         "macro define_trait = _: Expr => parse_quote {\n",
-        "    trait GeneratedTrait = T => { transform: T -> T }\n",
+        "    trait GeneratedTrait T { transform: T -> T }\n",
         "}\n",
         "macro define_impl = replacement: Expr => parse_quote {\n",
         "    impl GeneratedTrait I32 { def transform = value => $replacement }\n",
@@ -4036,11 +4036,11 @@ fn generates_extern_trait_and_implementation_items() {
 #[test]
 fn generates_generic_conditional_trait_implementation_items() {
     let module = type_check(concat!(
-        "trait Bound = T => { check: T -> Bool }\n",
-        "trait Target = T => { act: T -> T }\n",
+        "trait Bound T { check: T -> Bool }\n",
+        "trait Target T { act: T -> T }\n",
         "impl Bound I32 { def check = value => True }\n",
         "macro define_impl = _: Expr => parse_quote {\n",
-        "    impl T => Bound T => Target T { def act = value => value }\n",
+        "    impl <T where Bound T> Target T { def act = value => value }\n",
         "}\n",
         "define_impl ()\n",
         "let answer: I32 = Target.act 41\n",
@@ -4055,7 +4055,7 @@ fn generates_generic_conditional_trait_implementation_items() {
 fn generates_traits_with_functional_dependencies() {
     let module = type_check(concat!(
         "macro define_trait = _: Expr => parse_quote {\n",
-        "    trait Generated = Input => Output => Input ~> Output => { generate: Input -> Output }\n",
+        "    trait Generated Input Output where Input ~> Output { generate: Input -> Output }\n",
         "}\n",
         "define_trait ()\n",
         "impl Generated I32 String { def generate = value => \"generated\" }\n",
@@ -4590,7 +4590,7 @@ fn rejects_bare_literal_identifier_macro_parameters() {
 #[test]
 fn subtype_bound_call_preserves_string_literal_type() {
     let module = type_check(concat!(
-        "def string_identity: T => T <: String => T -> T = x => x\n",
+        "def string_identity: <T where T <: String> T -> T = x => x\n",
         "string_identity \"foo\"\n",
     ));
     let statement = &module.syntax().items[1];
@@ -4606,7 +4606,7 @@ fn subtype_bound_call_preserves_string_literal_type() {
 #[test]
 fn subtype_bound_rejects_non_string_arguments() {
     let module = resolve(concat!(
-        "def string_identity: T => T <: String => T -> T = x => x\n",
+        "def string_identity: <T where T <: String> T -> T = x => x\n",
         "string_identity 1\n",
     ));
     let diagnostics = TypeChecker::new()
@@ -4620,7 +4620,7 @@ fn subtype_bound_rejects_non_string_arguments() {
 #[test]
 fn subtype_bound_reflexivity() {
     type_check(concat!(
-        "def echo: T => T <: T => T -> T = x => x\n",
+        "def echo: <T where T <: T> T -> T = x => x\n",
         "echo \"hello\"\n",
         "echo 1\n",
     ));
@@ -4629,7 +4629,7 @@ fn subtype_bound_reflexivity() {
 #[test]
 fn subtype_bound_union_introduction() {
     type_check(concat!(
-        "def widen: T => T <: I32 | String => T -> () = x => ()\n",
+        "def widen: <T where T <: I32 | String> T -> () = x => ()\n",
         "widen 1\n",
         "widen \"text\"\n",
     ));
@@ -4638,7 +4638,7 @@ fn subtype_bound_union_introduction() {
 #[test]
 fn subtype_bound_union_elimination() {
     type_check(concat!(
-        "def accept: T => T <: I32 | String | F64 => T -> () = x => ()\n",
+        "def accept: <T where T <: I32 | String | F64> T -> () = x => ()\n",
         "let value: I32 | String = 1\n",
         "accept value\n",
     ));
@@ -4661,7 +4661,7 @@ fn ident_rejects_non_string_spelling_types() {
 #[test]
 fn default_type_bound_fills_omitted_type_argument() {
     let module = type_check(concat!(
-        "type alias Box = T => T ?= String => (value: T)\n",
+        "type alias Box (T = String) = (value: T)\n",
         "let boxed: Box = (value: \"hi\")\n",
         "let explicit: Box I32 = (value: 42)\n",
     ));
@@ -4674,7 +4674,7 @@ fn default_type_bound_fills_omitted_type_argument() {
 #[test]
 fn default_type_bound_rejects_mismatched_default_value() {
     let module = resolve(concat!(
-        "type alias Box = T => T ?= String => (value: T)\n",
+        "type alias Box (T = String) = (value: T)\n",
         "let boxed: Box = (value: 42)\n",
     ));
     TypeChecker::new()
@@ -4685,7 +4685,7 @@ fn default_type_bound_rejects_mismatched_default_value() {
 #[test]
 fn default_type_bound_may_reference_an_earlier_parameter() {
     let module = type_check(concat!(
-        "type alias Pair = A => B => B ?= A => (A, B)\n",
+        "type alias Pair A (B = A) = (A, B)\n",
         "let same: Pair I32 = (1, 2)\n",
     ));
     let context = Context::create();
@@ -4697,7 +4697,7 @@ fn default_type_bound_may_reference_an_earlier_parameter() {
 #[test]
 fn default_type_bound_referencing_an_earlier_parameter_rejects_mismatch() {
     let module = resolve(concat!(
-        "type alias Pair = A => B => B ?= A => (A, B)\n",
+        "type alias Pair A (B = A) = (A, B)\n",
         "let bad: Pair I32 = (1, \"x\")\n",
     ));
     TypeChecker::new()
@@ -4708,7 +4708,7 @@ fn default_type_bound_referencing_an_earlier_parameter_rejects_mismatch() {
 #[test]
 fn default_type_bound_is_checked_against_subtype_bound() {
     let module = resolve(concat!(
-        "type alias Constrained = T => T <: String => T ?= I32 => T\n",
+        "type alias Constrained (T = I32) where T <: String = T\n",
         "let bad: Constrained\n",
     ));
     let diagnostics = TypeChecker::new()
@@ -4722,7 +4722,7 @@ fn default_type_bound_is_checked_against_subtype_bound() {
 #[test]
 fn default_type_bound_does_not_fire_when_a_later_parameter_lacks_one() {
     let module = resolve(concat!(
-        "type alias Weird = A => B => A ?= I32 => (A, B)\n",
+        "type alias Weird (A = I32) B = (A, B)\n",
         "let bad: Weird = (1, 2)\n",
     ));
     let diagnostics = TypeChecker::new().check(module).expect_err(concat!(
@@ -4739,9 +4739,9 @@ fn default_type_bound_does_not_fire_when_a_later_parameter_lacks_one() {
 #[test]
 fn trait_default_type_bound_fills_missing_implementation_and_bound_arguments() {
     let module = type_check(concat!(
-        "trait Converts = From => To => To ?= String => { convert: From -> To }\n",
+        "trait Converts From (To = String) { convert: From -> To }\n",
         "impl Converts I32 { def convert = value => to_string value }\n",
-        "def show: T => Converts T => T -> String = value => convert value\n",
+        "def show: <T where Converts T> T -> String = value => convert value\n",
         "let text: String = show 42\n",
     ));
     let context = Context::create();
@@ -4754,7 +4754,7 @@ fn trait_default_type_bound_fills_missing_implementation_and_bound_arguments() {
 #[test]
 fn inline_default_type_bound_introduces_and_defaults_in_one_clause() {
     let module = type_check(concat!(
-        "type alias Pair = A => B ?= A => (A, B)\n",
+        "type alias Pair A (B = A) = (A, B)\n",
         "let same: Pair I32 = (1, 2)\n",
         "let overridden: Pair I32 String = (1, \"x\")\n",
     ));
@@ -4767,7 +4767,7 @@ fn inline_default_type_bound_introduces_and_defaults_in_one_clause() {
 #[test]
 fn inline_default_type_bound_combines_with_a_trailing_subtype_bound() {
     let module = type_check(concat!(
-        "type alias Ident2 = Spelling ?= String => Spelling <: String => Spelling\n",
+        "type alias Ident2 (Spelling = String) where Spelling <: String = Spelling\n",
         "let literal: Ident2 = \"answer\"\n",
         "let widened: Ident2 String = \"answer\"\n",
     ));
@@ -4780,9 +4780,9 @@ fn inline_default_type_bound_combines_with_a_trailing_subtype_bound() {
 #[test]
 fn inline_default_type_bound_for_trait_parameter_fills_missing_argument() {
     let module = type_check(concat!(
-        "trait Converts = From => To ?= String => { convert: From -> To }\n",
+        "trait Converts From (To = String) { convert: From -> To }\n",
         "impl Converts I32 { def convert = value => to_string value }\n",
-        "def show: T => Converts T => T -> String = value => convert value\n",
+        "def show: <T where Converts T> T -> String = value => convert value\n",
         "let text: String = show 42\n",
     ));
     let context = Context::create();
@@ -4797,7 +4797,7 @@ fn rejects_duplicate_default_type_bound_for_the_same_parameter() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("type alias Bad = T ?= I32 => T ?= String => T\n", root)
+        .load_source("type alias Bad (T = I32) (T = String) = T\n", root)
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
@@ -5223,8 +5223,8 @@ fn decodes_source_string_literals_before_llvm_generation() {
 #[test]
 fn type_checks_generic_aliases_and_functions() {
     let module = type_check(concat!(
-        "type alias Pair = (A, B) => (A, B)\n",
-        "def identity: T => T -> T = x => x\n",
+        "type alias Pair (A, B) = (A, B)\n",
+        "def identity: <T> T -> T = x => x\n",
         "let pair: Pair (String, I32) = (\"answer\", 42)\n",
         "let answer: I32 = identity 42\n",
         "let text: String = identity \"hello\"\n",
@@ -5245,14 +5245,14 @@ fn type_checks_generic_aliases_and_functions() {
 #[test]
 fn type_checks_static_traits_and_bounded_generic_functions() {
     let module = type_check(concat!(
-        "trait Increment = T => { increment: T -> T }\n",
-        "trait Echo = T => { echo: T -> T }\n",
-        "trait Swap = T => { swap: T -> T }\n",
+        "trait Increment T { increment: T -> T }\n",
+        "trait Echo T { echo: T -> T }\n",
+        "trait Swap T { swap: T -> T }\n",
         "impl Increment I32 { def increment = value => value + 1 }\n",
         "impl Echo I32 { def echo = value => value }\n",
         "impl Swap (I32, I32) { def swap = (left, right) => (right, left) }\n",
-        "def increment_twice: T => Increment T => T -> T = value => increment (increment value)\n",
-        "def increment_echo: T => Increment T => Echo T => T -> T = value => echo (increment value)\n",
+        "def increment_twice: <T where Increment T> T -> T = value => increment (increment value)\n",
+        "def increment_echo: <T where Increment T, Echo T> T -> T = value => echo (increment value)\n",
         "let direct: I32 = Increment.increment 40\n",
         "let answer: I32 = increment_twice direct\n",
         "let bounded: I32 = increment_echo answer\n",
@@ -5270,7 +5270,7 @@ fn type_checks_static_traits_and_bounded_generic_functions() {
 #[test]
 fn provides_to_string_for_prelude_scalar_types() {
     let module = type_check(concat!(
-        "def render: T => ToString T => T -> String = value => to_string value\n",
+        "def render: <T where ToString T> T -> String = value => to_string value\n",
         "let a = render (1 satisfies I8)\nlet b = render (1 satisfies I16)\n",
         "let c = render (1 satisfies I32)\nlet d = render (1 satisfies I64)\n",
         "let e = render (1 satisfies U8)\nlet f = render (1 satisfies U16)\n",
@@ -5289,7 +5289,7 @@ fn provides_to_string_for_prelude_scalar_types() {
 #[test]
 fn uses_generic_default_trait_members_and_concrete_overrides() {
     let module = type_check(concat!(
-        "trait Increment = T => {\n",
+        "trait Increment T {\n",
         "  increment: T -> T\n",
         "  twice: T -> T = value => increment (increment value)\n",
         "}\n",
@@ -5308,9 +5308,9 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
 #[test]
 fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
     let module = type_check(concat!(
-        "trait Same = T => Eq T => { same: (T, T) -> Bool = (left, right) => Eq.equal left right }\n",
-        "trait Select = Value => { select: (Bool, Value, Value) -> Value = (condition, left, right) => if { condition => left, else => right } }\n",
-        "trait First = (Left, Right) => { first: (Left, Right) -> Left = (left, right) => left }\n",
+        "trait Same T where Eq T { same: (T, T) -> Bool = (left, right) => Eq.equal left right }\n",
+        "trait Select Value { select: (Bool, Value, Value) -> Value = (condition, left, right) => if { condition => left, else => right } }\n",
+        "trait First (Left, Right) { first: (Left, Right) -> Left = (left, right) => left }\n",
         "impl Same I32 {}\n",
         "impl Select I32 {}\n",
         "impl First (I32, String) {}\n",
@@ -5327,7 +5327,7 @@ fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
 #[test]
 fn explicit_trait_members_override_defaults() {
     let module = type_check(concat!(
-        "trait Identity = T => { identity: T -> T = value => value }\n",
+        "trait Identity T { identity: T -> T = value => value }\n",
         "impl Identity I32 { def identity = value => value + 1 }\n",
         "let answer: I32 = Identity.identity 41\n",
     ));
@@ -5340,7 +5340,7 @@ fn explicit_trait_members_override_defaults() {
 #[test]
 fn specializes_recursive_default_trait_members() {
     let module = type_check(concat!(
-        "trait Recursive = T => { recurse: T -> T = value => Recursive.recurse value }\n",
+        "trait Recursive T { recurse: T -> T = value => Recursive.recurse value }\n",
         "impl Recursive I32 {}\n",
         "let result: I32 = Recursive.recurse 1\n",
     ));
@@ -5354,7 +5354,7 @@ fn specializes_recursive_default_trait_members() {
 fn rejects_invalid_default_trait_member_bodies() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "trait Invalid = T => { identity: T -> T = value => \"wrong\" }\n",
+            "trait Invalid T { identity: T -> T = value => \"wrong\" }\n",
         ))
         .expect_err("default bodies must match their member type");
     assert!(
@@ -5366,7 +5366,7 @@ fn rejects_invalid_default_trait_member_bodies() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("trait Invalid = T => { identity: T -> T = 42 }\n", root)
+        .load_source("trait Invalid T { identity: T -> T = 42 }\n", root)
         .expect("invalid default source should load");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
@@ -5381,11 +5381,11 @@ fn rejects_invalid_default_trait_member_bodies() {
 #[test]
 fn type_checks_product_and_curried_multi_parameter_traits() {
     let module = type_check(concat!(
-        "trait Merge = Left => Right => Output => { merge: (Left, Right) -> Output }\n",
-        "trait Convert = (From, To) => { convert: From -> To }\n",
+        "trait Merge Left Right Output { merge: (Left, Right) -> Output }\n",
+        "trait Convert (From, To) { convert: From -> To }\n",
         "impl Merge I32 I32 I32 { def merge = (left, right) => left + right }\n",
         "impl Convert (I32, String) { def convert = value => \"converted\" }\n",
-        "def combine: (L, R, O) => Merge L R O => (L, R) -> O = pair => Merge.merge pair\n",
+        "def combine: <L, R, O where Merge L R O> (L, R) -> O = pair => Merge.merge pair\n",
         "let total: I32 = combine (20, 22)\n",
         "let converted: String = Convert.convert total\n",
     ));
@@ -5399,19 +5399,19 @@ fn type_checks_product_and_curried_multi_parameter_traits() {
 #[test]
 fn infers_trait_functional_dependency_arguments() {
     let module = type_check(concat!(
-        "trait Iterator = Iter => Item => Iter ~> Item => { next: Iter -> Item }\n",
+        "trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
         "impl Iterator I32 String { def next = value => \"next\" }\n",
-        "trait AddTo = Left => Right => Output => {Left, Right} ~> Output => { add_to: Left -> Right -> Output }\n",
+        "trait AddTo Left Right Output where {Left, Right} ~> Output { add_to: Left -> Right -> Output }\n",
         "impl AddTo I32 I32 I32 { def add_to = left => right => left + right }\n",
-        "trait Chain = A => B => C => A ~> B => B ~> C => { chained: A -> (B, C) }\n",
+        "trait Chain A B C where A ~> B, B ~> C { chained: A -> (B, C) }\n",
         "impl Chain I32 String U8 { def chained = value => (\"chain\", 7) }\n",
-        "trait ConvertPair = (From, To) => From ~> To => { convert_pair: From -> To }\n",
+        "trait ConvertPair (From, To) where From ~> To { convert_pair: From -> To }\n",
         "impl ConvertPair (I32, String) { def convert_pair = value => \"pair\" }\n",
-        "def requires_iterator: T => Iterator T => T -> () = value => ()\n",
-        "def requires_iterator_explicit: T => Iterator T _ => T -> () = value => ()\n",
-        "def requires_add: T => AddTo T T => T -> T = value => value\n",
-        "def requires_pair: T => ConvertPair (T, _) => T -> () = value => ()\n",
-        "trait UsesIterator = Iter => Iterator Iter => { use_iterator: Iter -> Iter }\n",
+        "def requires_iterator: <T where Iterator T> T -> () = value => ()\n",
+        "def requires_iterator_explicit: <T where Iterator T _> T -> () = value => ()\n",
+        "def requires_add: <T where AddTo T T> T -> T = value => value\n",
+        "def requires_pair: <T where ConvertPair (T, _)> T -> () = value => ()\n",
+        "trait UsesIterator Iter where Iterator Iter { use_iterator: Iter -> Iter }\n",
         "impl UsesIterator I32 { def use_iterator = value => value }\n",
         "let next_value = Iterator.next 1\n",
         "let next_string: String = next_value\n",
@@ -5432,7 +5432,7 @@ fn infers_trait_functional_dependency_arguments() {
 fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Convert = From => To => From ~> To => { convert: From -> To }\n",
+            "trait Convert From To where From ~> To { convert: From -> To }\n",
             "impl Convert I32 String { def convert = value => \"one\" }\n",
             "impl Convert I32 I32 { def convert = value => value }\n",
         )))
@@ -5445,8 +5445,8 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait AddTo = Left => Right => Output => {Left, Right} ~> Output => { add_to: Left -> Right -> Output }\n",
-            "def invalid: T => AddTo T _ T => T -> T = value => value\n",
+            "trait AddTo Left Right Output where {Left, Right} ~> Output { add_to: Left -> Right -> Output }\n",
+            "def invalid: <T where AddTo T _ T> T -> T = value => value\n",
         )))
         .expect_err("non-dependent arguments cannot be inferred");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -5457,7 +5457,7 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Convert = From => To => From ~> To => { convert: From -> To }\n",
+            "trait Convert From To where From ~> To { convert: From -> To }\n",
             "impl Convert I32 { def convert = value => value }\n",
         )))
         .expect_err("implementation headers remain exact-arity");
@@ -5469,8 +5469,8 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Iterator = Iter => Item => Iter ~> Item => { next: Iter -> Item }\n",
-            "def invalid: (Iter, Item) => Iterator Iter Item => Iterator Iter String => Iter -> Iter = value => value\n",
+            "trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
+            "def invalid: <Iter, Item where Iterator Iter Item, Iterator Iter String> Iter -> Iter = value => value\n",
         )))
         .expect_err("active bounds must respect functional dependencies");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -5485,15 +5485,15 @@ fn rejects_invalid_functional_dependency_declarations() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for (source, expected) in [
         (
-            "trait Invalid = A => B => Missing ~> B => { convert: A -> B }\n",
+            "trait Invalid A B where Missing ~> B { convert: A -> B }\n",
             "unknown trait type parameter `Missing` in functional dependency",
         ),
         (
-            "trait Invalid = A => B => {A, A} ~> B => { convert: A -> B }\n",
+            "trait Invalid A B where {A, A} ~> B { convert: A -> B }\n",
             "duplicate functional dependency determinant `A`",
         ),
         (
-            "trait Invalid = A => A ~> A => { convert: A -> A }\n",
+            "trait Invalid A where A ~> A { convert: A -> A }\n",
             "functional dependency cannot determine one of its determinants",
         ),
     ] {
@@ -5515,10 +5515,10 @@ fn rejects_invalid_functional_dependency_declarations() {
 #[test]
 fn preserves_applied_types_as_unary_trait_arguments() {
     let module = type_check(concat!(
-        "type Box = T => (value: T)\n",
-        "trait Echo = T => { echo: T -> T }\n",
+        "type Box T = (value: T)\n",
+        "trait Echo T { echo: T -> T }\n",
         "impl Echo Box I32 { def echo = value => value }\n",
-        "def echo_box: T => Echo Box T => (Box T) -> Box T = value => Echo.echo value\n",
+        "def echo_box: <T where Echo Box T> (Box T) -> Box T = value => Echo.echo value\n",
         "let boxed: Box I32 = Box 42\n",
         "let echoed: Box I32 = echo_box boxed\n",
     ));
@@ -5531,13 +5531,13 @@ fn preserves_applied_types_as_unary_trait_arguments() {
 #[test]
 fn enforces_and_propagates_transitive_trait_prerequisites() {
     let module = type_check(concat!(
-        "trait Base = T => { base: T -> T }\n",
-        "trait Middle = T => Base T => { middle: T -> T }\n",
-        "trait Derived = T => Middle T => { derived: T -> T }\n",
+        "trait Base T { base: T -> T }\n",
+        "trait Middle T where Base T { middle: T -> T }\n",
+        "trait Derived T where Middle T { derived: T -> T }\n",
         "impl Derived I32 { def derived = value => value }\n",
         "impl Middle I32 { def middle = value => value }\n",
         "impl Base I32 { def base = value => value }\n",
-        "def apply: T => Derived T => T -> T = value => Base.base (Middle.middle (Derived.derived value))\n",
+        "def apply: <T where Derived T> T -> T = value => Base.base (Middle.middle (Derived.derived value))\n",
         "let answer: I32 = apply 42\n",
     ));
     let context = Context::create();
@@ -5548,8 +5548,8 @@ fn enforces_and_propagates_transitive_trait_prerequisites() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Base = T => { base: T -> T }\n",
-            "trait Derived = T => Base T => { derived: T -> T }\n",
+            "trait Base T { base: T -> T }\n",
+            "trait Derived T where Base T { derived: T -> T }\n",
             "impl Derived I32 { def derived = value => value }\n",
         )))
         .expect_err("implementations must satisfy trait prerequisites");
@@ -5563,9 +5563,9 @@ fn enforces_and_propagates_transitive_trait_prerequisites() {
 #[test]
 fn prerequisite_copy_bounds_are_visible_to_ownership_checking() {
     type_check(concat!(
-        "trait Duplicate = T => Copy T => { duplicate: T -> T }\n",
+        "trait Duplicate T where Copy T { duplicate: T -> T }\n",
         "impl Duplicate I32 { def duplicate = value => value }\n",
-        "def pair: T => Duplicate T => T -> (T, T) = value => (value, value)\n",
+        "def pair: <T where Duplicate T> T -> (T, T) = value => (value, value)\n",
         "let values: (I32, I32) = pair 42\n",
     ));
 }
@@ -5573,9 +5573,9 @@ fn prerequisite_copy_bounds_are_visible_to_ownership_checking() {
 #[test]
 fn substitutes_product_parameters_into_multiple_prerequisites() {
     type_check(concat!(
-        "trait BothEqual = (Left, Right) => Eq Left => Eq Right => { equal: (Left, Left, Right, Right) -> (Bool, Bool) }\n",
+        "trait BothEqual (Left, Right) where Eq Left, Eq Right { equal: (Left, Left, Right, Right) -> (Bool, Bool) }\n",
         "impl BothEqual (I32, I32) { def equal = (left_a, left_b, right_a, right_b) => (Eq.equal left_a left_b, Eq.equal right_a right_b) }\n",
-        "def compare_both: (Left, Right) => BothEqual (Left, Right) => (Left, Left, Right, Right) -> (Bool, Bool) = (left_a, left_b, right_a, right_b) => (Eq.equal left_a left_b, Eq.equal right_a right_b)\n",
+        "def compare_both: <Left, Right where BothEqual (Left, Right)> (Left, Left, Right, Right) -> (Bool, Bool) = (left_a, left_b, right_a, right_b) => (Eq.equal left_a left_b, Eq.equal right_a right_b)\n",
         "let result: (Bool, Bool) = compare_both (1, 1, 2, 2)\n",
     ));
 }
@@ -5587,8 +5587,8 @@ fn rejects_cyclic_trait_prerequisites() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "trait First = T => Second T => { first: T -> T }\n",
-                "trait Second = T => First T => { second: T -> T }\n",
+                "trait First T where Second T { first: T -> T }\n",
+                "trait Second T where First T { second: T -> T }\n",
             ),
             root,
         )
@@ -5607,7 +5607,7 @@ fn rejects_cyclic_trait_prerequisites() {
 fn rejects_invalid_multi_parameter_trait_uses_and_members() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Add = Left => Right => Output => { add: (Left, Right) -> Output }\n",
+            "trait Add Left Right Output { add: (Left, Right) -> Output }\n",
             "impl Add I32 I32 { def add = pair => 0 }\n",
         )))
         .expect_err("trait implementation arity must match the declaration");
@@ -5619,7 +5619,7 @@ fn rejects_invalid_multi_parameter_trait_uses_and_members() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "trait Invalid = Left => Right => { keep_left: Left -> Left }\n",
+            "trait Invalid Left Right { keep_left: Left -> Left }\n",
         ))
         .expect_err("every member must mention every trait parameter");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -5630,7 +5630,7 @@ fn rejects_invalid_multi_parameter_trait_uses_and_members() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Convert = (From, To) => { convert: From -> To }\n",
+            "trait Convert (From, To) { convert: From -> To }\n",
             "impl Convert I32 { def convert = value => value }\n",
         )))
         .expect_err("product binders require product arguments");
@@ -5645,7 +5645,7 @@ fn rejects_invalid_multi_parameter_trait_uses_and_members() {
 fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Increment = T => { increment: T -> T }\n",
+            "trait Increment T { increment: T -> T }\n",
             "impl Increment I32 { }\n",
         )))
         .expect_err("implementations must be complete");
@@ -5657,7 +5657,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Increment = T => { increment: T -> T }\n",
+            "trait Increment T { increment: T -> T }\n",
             "type alias Number = I32\n",
             "impl Increment I32 { def increment = value => value }\n",
             "impl Increment Number { def increment = value => value }\n",
@@ -5671,7 +5671,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Increment = T => { increment: T -> T }\n",
+            "trait Increment T { increment: T -> T }\n",
             "impl Increment I32 { def increment = value => \"wrong\" }\n",
         )))
         .expect_err("implementation bodies must match their trait member types");
@@ -5684,9 +5684,9 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Increment = T => { increment: T -> T }\n",
+            "trait Increment T { increment: T -> T }\n",
             "impl Increment I32 { def increment = value => value }\n",
-            "def invalid: T => T -> T = value => increment value\n",
+            "def invalid: <T> T -> T = value => increment value\n",
         )))
         .expect_err("generic callers must propagate trait bounds");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -5699,7 +5699,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
 #[test]
 fn rejects_invalid_trait_member_signatures_and_non_concrete_targets() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("trait Invalid = T => { value: I32 }\n"))
+        .check(resolve("trait Invalid T { value: I32 }\n"))
         .expect_err("trait members must be functions that mention the parameter");
     assert!(
         diagnostics
@@ -5714,7 +5714,7 @@ fn rejects_invalid_trait_member_signatures_and_non_concrete_targets() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Increment = T => { increment: T -> T }\n",
+            "trait Increment T { increment: T -> T }\n",
             "impl Increment _ { def increment = value => value }\n",
         )))
         .expect_err("implementation targets must be concrete");
@@ -5728,10 +5728,10 @@ fn rejects_invalid_trait_member_signatures_and_non_concrete_targets() {
 #[test]
 fn generic_conditional_trait_implementation_dispatches_and_compiles() {
     let module = type_check(concat!(
-        "trait Bound = T => { check: T -> Bool }\n",
-        "trait Target = T => { act: T -> Bool }\n",
+        "trait Bound T { check: T -> Bool }\n",
+        "trait Target T { act: T -> Bool }\n",
         "impl Bound I32 { def check = value => True }\n",
-        "impl T => Bound T => Target T { def act = value => Bound.check value }\n",
+        "impl <T where Bound T> Target T { def act = value => Bound.check value }\n",
         "let answer: Bool = Target.act 41\n",
     ));
     let context = Context::create();
@@ -5745,9 +5745,9 @@ fn generic_conditional_trait_implementation_dispatches_and_compiles() {
 fn rejects_generic_trait_implementation_dispatch_when_bound_is_unmet() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Bound = T => { check: T -> Bool }\n",
-            "trait Target = T => { act: T -> T }\n",
-            "impl T => Bound T => Target T { def act = value => value }\n",
+            "trait Bound T { check: T -> Bool }\n",
+            "trait Target T { act: T -> T }\n",
+            "impl <T where Bound T> Target T { def act = value => value }\n",
             "let answer: I32 = Target.act 41\n",
         )))
         .expect_err("I32 does not implement Bound, so the conditional impl must not apply");
@@ -5762,10 +5762,10 @@ fn rejects_generic_trait_implementation_dispatch_when_bound_is_unmet() {
 fn rejects_alpha_equivalent_duplicate_generic_trait_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Bound = T => { check: T -> Bool }\n",
-            "trait Target = T => { act: T -> T }\n",
-            "impl T => Bound T => Target T { def act = value => value }\n",
-            "impl U => Bound U => Target U { def act = value => value }\n",
+            "trait Bound T { check: T -> Bool }\n",
+            "trait Target T { act: T -> T }\n",
+            "impl <T where Bound T> Target T { def act = value => value }\n",
+            "impl <U where Bound U> Target U { def act = value => value }\n",
         )))
         .expect_err("alpha-equivalent generic implementations must be rejected as duplicates");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -5779,11 +5779,11 @@ fn rejects_alpha_equivalent_duplicate_generic_trait_implementations() {
 fn rejects_ambiguous_dispatch_between_blanket_and_concrete_trait_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Bound = T => { check: T -> Bool }\n",
-            "trait Target = T => { act: T -> T }\n",
+            "trait Bound T { check: T -> Bool }\n",
+            "trait Target T { act: T -> T }\n",
             "impl Bound I32 { def check = value => True }\n",
             "impl Target I32 { def act = value => value }\n",
-            "impl T => Bound T => Target T { def act = value => value }\n",
+            "impl <T where Bound T> Target T { def act = value => value }\n",
             "let answer: I32 = Target.act 41\n",
         )))
         .expect_err("a concrete impl and an applicable blanket impl must be ambiguous");
@@ -5798,8 +5798,8 @@ fn rejects_ambiguous_dispatch_between_blanket_and_concrete_trait_implementations
 fn cyclic_trait_implementation_bound_fails_without_hanging() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "trait Cyclic = T => { check: T -> Bool }\n",
-            "impl T => Cyclic T => Cyclic T { def check = value => True }\n",
+            "trait Cyclic T { check: T -> Bool }\n",
+            "impl <T where Cyclic T> Cyclic T { def check = value => True }\n",
             "let answer: Bool = Cyclic.check 41\n",
         )))
         .expect_err("a self-referential bound must fail rather than being accepted coinductively");
@@ -5813,8 +5813,8 @@ fn cyclic_trait_implementation_bound_fails_without_hanging() {
 #[test]
 fn requires_qualification_for_ambiguous_trait_methods() {
     let source = concat!(
-        "trait Left = T => { convert: T -> T }\n",
-        "trait Right = T => { convert: T -> T }\n",
+        "trait Left T { convert: T -> T }\n",
+        "trait Right T { convert: T -> T }\n",
         "impl Left I32 { def convert = value => value }\n",
         "impl Right I32 { def convert = value => value }\n",
         "let left: I32 = Left.convert 1\n",
@@ -5835,7 +5835,7 @@ fn requires_qualification_for_ambiguous_trait_methods() {
 fn constructs_distinct_and_generic_distinct_values() {
     let module = type_check(concat!(
         "type UserId = I32\n",
-        "type Box = T => (value: T)\n",
+        "type Box T = (value: T)\n",
         "let user: UserId = UserId 42\n",
         "let boxed: Box I32 = Box (value: 42)\n",
     ));
@@ -5889,7 +5889,7 @@ fn opaque_types_do_not_introduce_values_and_singletons_are_not_callable() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("pub type Foo\nFoo()\n"))
+        .check(resolve("pub type Foo;\nFoo()\n"))
         .expect_err("singleton value should not be callable");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
@@ -5901,7 +5901,7 @@ fn opaque_types_do_not_introduce_values_and_singletons_are_not_callable() {
 #[test]
 fn contextually_specializes_first_class_generic_functions() {
     let module = type_check(concat!(
-        "def identity: T => T -> T = x => x\n",
+        "def identity: <T> T -> T = x => x\n",
         "def apply: (I32 -> I32) -> I32 = f => f 42\n",
         "let int_identity: I32 -> I32 = identity\n",
         "let answer: I32 = apply identity\n",
@@ -5919,7 +5919,7 @@ fn contextually_specializes_first_class_generic_functions() {
 fn contextually_specializes_first_class_constructors() {
     let module = type_check(concat!(
         "type UserId = I32\n",
-        "type Box = T => (value: T)\n",
+        "type Box T = (value: T)\n",
         "let make_user: I32 -> UserId = UserId\n",
         "let make_box: (value: I32) -> Box I32 = Box\n",
         "let user: UserId = make_user 42\n",
@@ -5953,8 +5953,8 @@ fn destructures_nominal_values_in_lets_and_functions() {
 #[test]
 fn destructures_contextually_typed_generic_nominal_patterns() {
     let module = type_check(concat!(
-        "type Box = T => (value: T)\n",
-        "def unbox: T => Box T -> T = Box (value) => value\n",
+        "type Box T = (value: T)\n",
+        "def unbox: <T> Box T -> T = Box (value) => value\n",
         "let answer: I32 = unbox (Box (value: 42))\n",
         "let text: String = unbox (Box (value: \"hello\"))\n",
     ));
@@ -6015,9 +6015,9 @@ fn rejects_non_nominal_and_mismatched_nominal_patterns() {
 #[test]
 fn monomorphizes_nested_and_recursive_generic_calls() {
     let module = type_check(concat!(
-        "def identity: T => T -> T = x => x\n",
-        "def copy: U => U -> U = x => identity x\n",
-        "def recur: V => V -> V = x => recur x\n",
+        "def identity: <T> T -> T = x => x\n",
+        "def copy: <U> U -> U = x => identity x\n",
+        "def recur: <V> V -> V = x => recur x\n",
         "let answer: I32 = copy 42\n",
         "let recurse: I32 = recur 1\n",
     ));
@@ -6031,7 +6031,7 @@ fn monomorphizes_nested_and_recursive_generic_calls() {
 fn monomorphizes_generic_closures_with_captures() {
     let module = type_check(concat!(
         "def outer: I32 -> I32 = y => {\n",
-        "  def inner: T => T -> I32 = x => y\n",
+        "  def inner: <T> T -> I32 = x => y\n",
         "  inner \"ignored\"\n",
         "}\n",
         "let answer: I32 = outer 42\n",
@@ -6045,9 +6045,9 @@ fn monomorphizes_generic_closures_with_captures() {
 #[test]
 fn infers_product_and_result_only_compile_time_parameters() {
     let module = type_check(concat!(
-        "def first: (A, B) => (A, B) -> A = (a, b) => a\n",
-        "type Phantom = T => I32\n",
-        "def make: T => I32 -> Phantom T = x => Phantom x\n",
+        "def first: <A, B> (A, B) -> A = (a, b) => a\n",
+        "type Phantom T = I32\n",
+        "def make: <T> I32 -> Phantom T = x => Phantom x\n",
         "let answer: I32 = first (42, \"ignored\")\n",
         "let contextual: Phantom String = make 7\n",
     ));
@@ -6060,7 +6060,7 @@ fn infers_product_and_result_only_compile_time_parameters() {
 #[test]
 fn monomorphizes_curried_generic_function_layers() {
     let module = type_check(concat!(
-        "def keep_first: (A, B) => Copy A => A -> B -> A = a => b => a\n",
+        "def keep_first: <A, B where Copy A> A -> B -> A = a => b => a\n",
         "let answer: I32 = keep_first 42 \"ignored\"\n",
     ));
     let context = Context::create();
@@ -6073,9 +6073,9 @@ fn monomorphizes_curried_generic_function_layers() {
 fn rejects_unconstrained_generic_values_and_non_function_schemes() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def identity: T => T -> T = x => x\n",
+            "def identity: <T> T -> T = x => x\n",
             "def copied = identity\n",
-            "def invalid: U => U = 42\n",
+            "def invalid: <U> U = 42\n",
         )))
         .expect_err("generic values require a concrete use or function scheme");
     let messages = diagnostics
@@ -6097,7 +6097,7 @@ fn rejects_unconstrained_generic_values_and_non_function_schemes() {
 #[test]
 fn rejects_polymorphic_recursion() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("def grow: T => T -> T = x => grow (x, x)\n"))
+        .check(resolve("def grow: <T> T -> T = x => grow (x, x)\n"))
         .expect_err("recursive calls may not change their specialization");
     assert!(
         diagnostics
@@ -6727,7 +6727,7 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
 #[test]
 fn pub_repr_type_constructor_satisfies_its_own_subtype_bound() {
     let module = type_check(concat!(
-        "pub(repr) type Ident2 = Spelling => Spelling <: String => Spelling\n",
+        "pub(repr) type Ident2 Spelling where Spelling <: String = Spelling\n",
         "let literal: Ident2 String = Ident2 \"answer\"\n",
     ));
     let context = Context::create();

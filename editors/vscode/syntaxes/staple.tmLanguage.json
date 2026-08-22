@@ -78,7 +78,7 @@
         },
         {
           "name": "meta.implementation.staple",
-          "match": "\\b(impl)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)(?!\\s*=>)",
+          "match": "\\b(impl)\\s+(?!<)((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
           "captures": {
             "1": { "name": "storage.type.impl.staple" },
             "2": { "name": "entity.name.type.interface.staple" }
@@ -112,7 +112,7 @@
       "patterns": [
         {
           "name": "keyword.control.staple",
-          "match": "\\b(?:break|continue|loop|match|return|with)\\b"
+          "match": "\\b(?:break|continue|loop|match|return|where|with)\\b"
         },
         {
           "name": "keyword.control.import.staple",

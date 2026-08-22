@@ -1115,7 +1115,7 @@ mod tests {
     #[test]
     fn formats_def_and_trait_member_declarations() {
         let source = concat!(
-            "trait Identity = T => { identity: T -> T }\n",
+            "trait Identity T { identity: T -> T }\n",
             "impl Identity I32 { def identity = value => value }\n",
             "def apply = () => identity 1\n",
             "apply\n",
@@ -1149,10 +1149,10 @@ mod tests {
     #[test]
     fn indexes_generic_trait_implementation_generics() {
         let source = concat!(
-            "trait Bound = T => { check: T -> Bool }\n",
-            "trait Target = T => { act: T -> T }\n",
+            "trait Bound T { check: T -> Bool }\n",
+            "trait Target T { act: T -> T }\n",
             "impl Bound I32 { def check = value => True }\n",
-            "impl T => Bound T => Target T { def act = value => value }\n",
+            "impl <T where Bound T> Target T { def act = value => value }\n",
         );
         let path = std::env::temp_dir().join("staple-hover-generic-impl-test.sta");
         let program = ProgramLoader::new()
@@ -1237,7 +1237,7 @@ mod tests {
                 "pub let value = 1\n",
                 "pub def callable = () => 1\n",
                 "pub type alias Number = I32\n",
-                "pub trait Printable = T => {}\n",
+                "pub trait Printable T {}\n",
                 "pub macro identity = value => parse_quote { $value }\n",
             ),
         )
@@ -1326,8 +1326,8 @@ mod tests {
     #[test]
     fn formats_local_type_declarations_and_references() {
         let source = concat!(
-            "type Box = T => (value: T)\n",
-            "type alias Pair = (A, B) => (A, B)\n",
+            "type Box T = (value: T)\n",
+            "type alias Pair (A, B) = (A, B)\n",
             "def keep: Box I32 -> Box I32 = value => value\n",
             "def pair: Pair (I32, I32) -> Pair (I32, I32) = value => value\n",
         );
@@ -1361,7 +1361,7 @@ mod tests {
             root.join("dependency.sta"),
             concat!(
                 "pub type Hidden = I32\n",
-                "pub type HiddenGeneric = T => T\n",
+                "pub type HiddenGeneric T = T\n",
                 "pub(repr) type Visible = I32\n",
                 "pub type alias Alias = I32\n",
             ),

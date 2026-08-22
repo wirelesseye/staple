@@ -88,7 +88,7 @@ macro choose = condition => then => else => parse_quote {
 
 Typed parameters constrain the grammar accepted at an invocation. `Ident` is a
 generic syntax type whose argument constrains its spelling, declared as
-`pub(repr) type Ident = Spelling ?= String => Spelling <: String => Spelling`.
+`pub(repr) type Ident (Spelling = String) where Spelling <: String = Spelling`.
 `Ident` and `Ident String` both accept any identifier — `Spelling` defaults to
 `String` (see [Default type parameters](#default-type-parameters)) — and
 `Ident "else"` accepts exactly the identifier `else`, because every string
@@ -190,7 +190,7 @@ contracts are:
 
 ```staple
 pub macro quote: Braced Syntax -> Syntax
-pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T
+pub macro parse_quote: <T where ParseQuoteResult T> Braced Syntax -> T
 ```
 
 `ParseQuoteResult` is a sealed compiler capability implemented only for
@@ -434,7 +434,7 @@ expression forms remain future work.
 
 Compiler-provided macros use typed bodyless contracts. `std.syntax` declares
 `pub macro quote: Braced Syntax -> Syntax` and
-`pub macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T`, and
+`pub macro parse_quote: <T where ParseQuoteResult T> Braced Syntax -> T`, and
 `std.cinterop` declares `pub macro c_string: Expr -> Expr`. Neither module is
 re-exported by `std.core`; their APIs require explicit imports.
 
@@ -1171,16 +1171,20 @@ let add: (x: I32, y: I32) -> I32
 
 ### Generic functions
 
-A function-valued `def` may introduce compile-time type parameters before its
-ordinary function type:
+A function-valued `def` may introduce compile-time type parameters in angle
+brackets before its ordinary function type:
 
 ```staple
-def identity: T => T -> T = value => value
-def first: (A, B) => (A, B) -> A = (a, b) => a
-def choose: T => (Bool, T, T) -> T = (condition, a, b) => {
+def identity: <T> T -> T = value => value
+def first: <A, B> (A, B) -> A = (a, b) => a
+def choose: <T> (Bool, T, T) -> T = (condition, a, b) => {
     // ...
 }
 ```
+
+Product-pattern parameters are not permitted inside the angle brackets
+themselves — `first`'s two type parameters are declared as `<A, B>`, flattened,
+even though its value parameter is the product `(A, B)`.
 
 The compiler infers concrete type arguments from call arguments and the
 expected result or function type. A generic function can therefore be used as
@@ -1204,14 +1208,15 @@ which accepts unsized arguments can relax that default after introducing the
 parameter:
 
 ```staple
-def preserve_ref: T => ?Sized T => Ref T -> Ref T = value => value
+def preserve_ref: <T where ?Sized T> Ref T -> Ref T = value => value
 ```
 
-The `?Sized T =>` clause must name an already introduced parameter and may
-appear only once for that parameter. It is a relaxation, not a trait bound:
-`Sized T =>` remains the ordinary bounded-generic spelling. A relaxed parameter
-cannot itself be passed or returned by value. `Sized` is compiler-derived, so
-explicit `impl Sized` declarations are rejected.
+The `?Sized T` relaxation must name an already introduced parameter and may
+appear only once for that parameter within the `where` clause. It is a
+relaxation, not a trait bound: `where Sized T` remains the ordinary
+bounded-generic spelling. A relaxed parameter cannot itself be passed or
+returned by value. `Sized` is compiler-derived, so explicit `impl Sized`
+declarations are rejected.
 
 ### Typed resources
 
@@ -1337,24 +1342,25 @@ point the closure is created.
 
 ### Traits and bounded generic functions
 
-A trait declares a set of functions for one or more compile-time parameters.
-Like functions and type definitions, its parameters may be curried or grouped
-in a product binder:
+A trait declares a set of functions for one or more compile-time parameters,
+written directly after the trait name with no surrounding brackets and no `=`.
+Its parameters may be given as bare juxtaposed names or grouped in a product
+binder:
 
 ```staple
-trait ToString = T => {
+trait ToString T {
     to_string: T -> String
 }
 
-trait Add = Left => Right => Output => {
+trait Add Left Right Output {
     add: (Left, Right) -> Output
 }
 
-trait Convert = (From, To) => {
+trait Convert (From, To) {
     convert: From -> To
 }
 
-trait PartialOrd = T => Copy T => {
+trait PartialOrd T where Copy T {
     partial_cmp: T -> T -> Option Ordering
     lt: T -> T -> Bool = left => right => match (partial_cmp left right) {
         Some Less() => True,
@@ -1362,34 +1368,35 @@ trait PartialOrd = T => Copy T => {
     }
 }
 
-trait Ord = T => Eq T => PartialOrd T => {
+trait Ord T where Eq T, PartialOrd T {
     cmp: T -> T -> Ordering
 }
 
-trait Increment = T => {
+trait Increment T {
     increment: T -> T
     increment_twice: T -> T = value => increment (increment value)
 }
 ```
 
-A trait may declare functional dependencies after its compile-time parameter
-binders. A dependency states that the parameters on the left uniquely determine
-the parameter on the right:
+A trait may declare functional dependencies in its `where` clause, alongside
+any prerequisite trait bounds. A dependency states that the parameters on the
+left uniquely determine the parameter on the right:
 
 ```staple
-trait Iterator = Iter => Item => Iter ~> Item => {
+trait Iterator Iter Item where Iter ~> Item {
     next: Iter -> IterStep (Iter, Item)
 }
 
-trait Add = Left => Right => Output => {Left, Right} ~> Output => {
+trait Add Left Right Output where {Left, Right} ~> Output {
     add: Left -> Right -> Output
 }
 ```
 
 The left side is either one parameter or a non-empty comma-separated set in
 braces. The right side is one parameter. A trait may declare multiple
-dependencies, including chains such as `A ~> B => B ~> C =>`. Dependencies
-precede any prerequisite trait bounds in the declaration header.
+dependencies, including chains such as `where A ~> B, B ~> C`. Dependencies and
+prerequisite trait bounds are comma-separated entries of the same `where`
+clause and may be mixed freely, as in `where Source ~> Iter, Iterator Iter`.
 
 A dependent argument may be written as `_` when all of its determinants are
 known. If every remaining argument is inferable, the trailing arguments may be
@@ -1451,13 +1458,13 @@ loaded program is available globally. Defining the same trait/argument
 combination twice, including through aliases of the same types or through
 alpha-equivalent generic headers, is an error.
 
-A trait may place one or more prerequisite bounds between its parameter binders
-and member block. Every implementation must satisfy the instantiated
-prerequisites, and a generic bound makes its prerequisites available
-transitively:
+A trait may place one or more prerequisite bounds in a `where` clause between
+its parameters and member block. Every implementation must satisfy the
+instantiated prerequisites, and a generic bound makes its prerequisites
+available transitively:
 
 ```staple
-def equal_ordered: T => Ord T => T -> T -> Bool = left => right => {
+def equal_ordered: <T where Ord T> T -> T -> Bool = left => right => {
     left == right
 }
 ```
@@ -1471,15 +1478,16 @@ Calls from a default body use normal trait dispatch, so an explicit member on
 the concrete implementation overrides a sibling default. Default bodies are
 generic over the trait parameters and are monomorphized only when used.
 
-A generic `def` adds one or more trait bounds between its compile-time parameter
-binder and its ordinary function type:
+A generic `def` adds one or more trait bounds in a `where` clause inside its
+angle-bracketed compile-time parameter list, before its ordinary function
+type:
 
 ```staple
-def print: T => ToString T => T ->{IO} () = value => {
+def print: <T where ToString T> T ->{IO} () = value => {
     print_string (to_string value)
 }
 
-def combine: (L, R, O) => Add L R O => (L, R) -> O = pair => {
+def combine: <L, R, O where Add L R O> (L, R) -> O = pair => {
     Add.add pair
 }
 ```
@@ -1501,18 +1509,19 @@ currently supported.
 
 ### Generic trait implementations
 
-An implementation may itself be generic, using the same `Name =>` binder and
-bound-clause syntax as a generic `def`, `type`, or `trait`. A generic
-implementation applies conditionally: it is available for any instantiation of
-its own compile-time parameters that satisfies its bounds.
+An implementation may itself be generic, using the same angle-bracketed
+`<...>` parameter list and `where`-clause syntax as a generic `def` or
+`macro`. A generic implementation applies conditionally: it is available for
+any instantiation of its own compile-time parameters that satisfies its
+bounds.
 
 ```staple
-trait Bound = T => { check: T -> Bool }
-trait Target = T => { act: T -> T }
+trait Bound T { check: T -> Bool }
+trait Target T { act: T -> T }
 
 impl Bound I32 { def check = value => True }
 
-impl T => Bound T => Target T {
+impl <T where Bound T> Target T {
     def act = value => value
 }
 ```
@@ -1522,8 +1531,8 @@ Here `Target` is implemented for every `T` that implements `Bound`, so
 implementation above. A generic implementation's own bounds are available
 inside its members' bodies, exactly as they are inside a bounded generic
 `def`. `?Sized` relaxations and `<:` subtype bounds may also appear in an
-implementation's header, in the same positions and order as in a generic
-`def`.
+implementation's `where` clause, alongside trait bounds, exactly as in a
+generic `def`.
 
 Two implementations that are alpha-equivalent — the same header shape up to
 renaming the compile-time parameters — are rejected as duplicates, the same as
@@ -1537,11 +1546,10 @@ that both would apply to.
 ### Subtype bounds
 
 A generic `def` or `type` may also bound a compile-time parameter with `<:`,
-placed alongside trait bounds between the parameter binder and the ordinary
-type:
+placed alongside trait bounds in the same `where` clause:
 
 ```staple
-def string_identity: T => T <: String => T -> T = x => x
+def string_identity: <T where T <: String> T -> T = x => x
 ```
 
 `T <: SuperType` is not backed by an `impl`; it is checked against a fixed
@@ -1561,30 +1569,31 @@ calling `string_identity "foo"` infers `T` as the literal type `"foo"`, not
 enforced — `string_identity 1` is rejected, since `I32` is not a subtype of
 `String`. `Ident`'s spelling parameter (see [Metaprogramming](#metaprogramming))
 is bounded this way, combined with a default (see [Default type
-parameters](#default-type-parameters)): `pub(repr) type Ident = Spelling ?=
-String => Spelling <: String => Spelling`.
+parameters](#default-type-parameters)): `pub(repr) type Ident (Spelling =
+String) where Spelling <: String = Spelling`.
 
 ### Default type parameters
 
 A `type` or `trait` may give one or more of its trailing compile-time
-parameters a default with `?=`, introducing the parameter and its default in
-one clause in place of the ordinary `Name =>` binder:
+parameters a default with `=`, written inline with the parameter. Because a
+juxtaposed parameter list has no other delimiter, a defaulted parameter must
+be parenthesized to disambiguate the `=` from the trailing `=` that precedes
+a type's body or the `{` that opens a trait's member block:
 
 ```staple
-type Box = T ?= String => (value: T)
-type alias Pair = A => B ?= A => (A, B)
-trait Increment = T ?= I32 => { increment: T -> T }
+type Box (T = String) = (value: T)
+type alias Pair A (B = A) = (A, B)
+trait Increment (T = I32) { increment: T -> T }
 ```
 
-`Name ?= Default =>` is sugar for introducing `Name` plainly and then adding
-a separate trailing `Name ?= Default =>` clause afterward, alongside subtype
-and trait bounds — the two forms produce the same result and may be freely
-mixed. The trailing form is useful when a parameter needs other clauses too;
-`Ident`'s spelling parameter (see [Metaprogramming](#metaprogramming)) is
-declared this way, combining a default with a subtype bound:
-`pub(repr) type Ident = Spelling ?= String => Spelling <: String => Spelling`.
-Only a plain named parameter can carry a default — a product or splice
-pattern in the binder position is a parse error if followed by `?=`.
+The default is part of that one parameter's own parentheses; it is not a
+separate clause. It may be combined with a subtype or trait bound in the
+`where` clause, as in `Ident`'s spelling parameter (see
+[Metaprogramming](#metaprogramming)), which declares a default together with a
+subtype bound: `pub(repr) type Ident (Spelling = String) where Spelling <:
+String = Spelling`. Only a plain named parameter can carry a default — a
+product or splice pattern in the parameter position is a parse error if
+followed by `=`.
 
 At a use site, trailing arguments may be omitted as long as every parameter
 from that point on has a default; the omitted arguments are filled in from
@@ -1606,8 +1615,8 @@ argument would be.
 Trait defaults apply the same way to under-supplied trait arguments, in both
 an `impl` header and a bound clause — complementing the functional-dependency
 based inference described above ([Traits and bounded generic
-functions](#traits-and-bounded-generic-functions)). Given `trait Converts =
-From => To ?= String => { convert: From -> To }`, `impl Converts I32 { ... }`
+functions](#traits-and-bounded-generic-functions)). Given `trait Converts
+From (To = String) { convert: From -> To }`, `impl Converts I32 { ... }`
 supplies only `From` and fills `To` with `String`.
 
 ## Function application
@@ -1805,20 +1814,19 @@ with every step. `Iter` functionally determines `Item`:
 
 ```staple
 pub mod IterStep {
-    pub(repr) type Done = Iter => Iter
-    pub(repr) type Yield = (Item, Iter) => (Item, Iter)
+    pub(repr) type Done Iter = Iter
+    pub(repr) type Yield (Item, Iter) = (Item, Iter)
 }
 
-pub type alias IterStep = (Iter, Item) =>
+pub type alias IterStep (Iter, Item) =
     IterStep.Done Iter |
     IterStep.Yield (Item, Iter)
 
-pub trait Iterator = Iter => Item => Iter ~> Item => {
+pub trait Iterator Iter Item where Iter ~> Item {
     next: Iter -> IterStep (Iter, Item)
 }
 
-pub trait IntoIterator =
-    Source => Iter => Source ~> Iter => Iterator Iter => {
+pub trait IntoIterator Source Iter where Source ~> Iter, Iterator Iter {
     into_iterator: Source -> Iter
 }
 ```
@@ -1915,7 +1923,7 @@ Two strings can be concatenated with `+`; this dispatches through the standard
 `Add String` implementation and returns a newly allocated `String`.
 
 `Ref T` is a garbage-collected reference to a value of type `T`. Its standard
-declaration is `pub(repr) type Ref = T => ?Sized T => T`, so its payload may be
+declaration is `pub(repr) type Ref T where ?Sized T = T`, so its payload may be
 sized or unsized while the reference value itself always has a known
 representation.
 Constructing `Ref value` copies or moves `value` into a managed allocation;
@@ -1932,7 +1940,7 @@ point.x = 30
 let Ref (captured_x, captured_y) = point
 ```
 
-The prelude function `replace: T => (Ref T, T) -> T` replaces a whole fixed
+The prelude function `replace: <T> (Ref T, T) -> T` replaces a whole fixed
 payload and returns the previous value:
 
 ```staple
@@ -1994,9 +2002,9 @@ explicit `impl Copy` is rejected. A custom `Drop` implementation makes its
 distinct target move-only regardless of its representation.
 
 ```staple
-trait Copy = T => {}
+trait Copy T {}
 
-trait Drop = T => {
+trait Drop T {
     drop: T -> ()
 }
 
@@ -2088,7 +2096,7 @@ An opaque type may also accept compile-time arguments when its body is the
 `opaque` marker:
 
 ```staple
-pub type CPointer = Pointee => opaque
+pub type CPointer Pointee = opaque
 ```
 
 Arguments are part of nominal identity, so two applications with different
@@ -2174,7 +2182,7 @@ module. Opaque declarations have no constructor.
 module interface:
 
 ```staple
-pub(repr) type Box = T => (value: T)
+pub(repr) type Box T = (value: T)
 ```
 
 Importers may construct `Box` values and use `Box pattern` to destructure them,
@@ -2183,12 +2191,13 @@ type directly referenced by a public representation must also be public.
 `pub(repr)` is rejected on aliases and opaque declarations.
 
 Represented types, aliases, and explicitly opaque declarations may introduce
-compile-time parameters using the same binder syntax as generic functions:
+compile-time parameters directly after the type name, juxtaposed rather than
+bracketed as with generic functions:
 
 ```staple
-type Box = T => (value: T)
-type HashMap = (K, V) => (key: K, value: V)
-type alias Pair = (A, B) => (A, B)
+type Box T = (value: T)
+type HashMap (K, V) = (key: K, value: V)
+type alias Pair (A, B) = (A, B)
 ```
 
 Type application uses left-associative juxtaposition. A product binder consumes
@@ -2197,7 +2206,7 @@ one product type argument, while curried binders consume successive arguments:
 ```staple
 HashMap (String, I32)
 
-// Given: type CurriedMap = K => V => (key: K, value: V)
+// Given: type CurriedMap K V = (key: K, value: V)
 CurriedMap String I32
 ```
 
@@ -2240,7 +2249,7 @@ types independently and combine them wherever a type is accepted. `Ok` is a
 public represented type from `std.core`:
 
 ```staple
-pub(repr) type Ok = T => T
+pub(repr) type Ok T = T
 ```
 
 Every alternative must be a sized value type. Primitive, product,
