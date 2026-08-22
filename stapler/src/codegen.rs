@@ -1593,7 +1593,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let generic = self
             .typed_module
             .type_of_symbol(symbol)
-            .is_some_and(contains_type_parameter);
+            .cloned()
+            .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
+            .is_some_and(|value_type| contains_type_parameter(&value_type));
         let state_slot = if generic {
             cell
         } else {
@@ -4991,7 +4993,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let generic = self
                 .typed_module
                 .type_of_symbol(symbol)
-                .is_some_and(contains_type_parameter);
+                .cloned()
+                .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
+                .is_some_and(|value_type| contains_type_parameter(&value_type));
             let state = if generic {
                 cell
             } else {
@@ -5350,6 +5354,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             IntrinsicFunction::StringAdd => {
                 return self.compile_string_add(environment, call);
             }
+            IntrinsicFunction::BufferWithCapacity => {
+                return self.compile_buffer_with_capacity(environment, call);
+            }
+            IntrinsicFunction::BufferLength => {
+                return self.compile_buffer_metadata(environment, call, 0, "buffer.length");
+            }
+            IntrinsicFunction::BufferCapacity => {
+                return self.compile_buffer_metadata(environment, call, 1, "buffer.capacity");
+            }
+            IntrinsicFunction::BufferPush => {
+                return self.compile_buffer_push(environment, call);
+            }
+            IntrinsicFunction::BufferPop => {
+                return self.compile_buffer_pop(environment, call);
+            }
+            IntrinsicFunction::BufferGet => {
+                return self.compile_buffer_get(environment, call);
+            }
+            IntrinsicFunction::BufferFreeze => {
+                return self.compile_buffer_freeze(environment, call);
+            }
             IntrinsicFunction::Drop => {
                 let value_type = self
                     .concrete_expression_type(&call.argument)
@@ -5585,6 +5610,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             | IntrinsicFunction::FloatCompare { .. }
             | IntrinsicFunction::SliceLength
             | IntrinsicFunction::SliceFromRef
+            | IntrinsicFunction::BufferWithCapacity
+            | IntrinsicFunction::BufferLength
+            | IntrinsicFunction::BufferCapacity
+            | IntrinsicFunction::BufferPush
+            | IntrinsicFunction::BufferPop
+            | IntrinsicFunction::BufferGet
+            | IntrinsicFunction::BufferFreeze
             | IntrinsicFunction::RefReplace
             | IntrinsicFunction::Drop => {
                 unreachable!()
@@ -6944,6 +6976,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Ok(self.erased_ref_type().into())
             }
             CheckedType::Ref(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
+            CheckedType::Buffer(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::ErasedProduct(_) => Err(Diagnostic::new(
                 Span::Compiler,
                 "an erased product cannot be represented by value",
@@ -7067,7 +7100,7 @@ fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {
 
 fn checked_type_contains_ref(value_type: &CheckedType) -> bool {
     match value_type {
-        CheckedType::Ref(_) => true,
+        CheckedType::Ref(_) | CheckedType::Buffer(_) => true,
         CheckedType::Product(product) => product
             .elements
             .iter()
@@ -7098,8 +7131,415 @@ fn strip_place_wrappers(mut value_type: CheckedType) -> CheckedType {
         match value_type {
             CheckedType::Distinct { representation, .. } => value_type = *representation,
             other => return other,
+            }
         }
     }
+
+impl<'module, 'context> ModuleEmitter<'module, 'context> {
+
+    fn buffer_header_type(
+        &self,
+        element: BasicTypeEnum<'context>,
+    ) -> inkwell::types::StructType<'context> {
+        self.context.struct_type(
+            &[
+                self.size_type.into(),
+                self.size_type.into(),
+                self.context.i8_type().into(),
+                element,
+            ],
+            false,
+        )
+    }
+
+    fn buffer_data_pointer(
+        &self,
+        buffer: inkwell::values::PointerValue<'context>,
+        element: BasicTypeEnum<'context>,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        self.builder
+            .build_struct_gep(self.buffer_header_type(element), buffer, 3, "buffer.data")
+            .map_err(compiler_diagnostic)
+    }
+
+    fn compile_buffer_with_capacity(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let capacity = self.compile_expression(environment, &call.argument)?;
+        let Some(BasicValueEnum::IntValue(capacity)) = value_as_basic(capacity) else {
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "Buffer.with_capacity requires a USize capacity",
+            ));
+        };
+        let CheckedType::Buffer(element) = self
+            .concrete_expression_type(&Expression::Call(call.clone()))
+            .ok_or_else(|| Diagnostic::new(call.syntax.span.clone(), "unchecked Buffer result"))?
+        else {
+            return Err(Diagnostic::new(call.syntax.span.clone(), "invalid Buffer result type"));
+        };
+        let llvm_element = self.compile_type(&element)?;
+        let header = self.buffer_header_type(llvm_element);
+        let offset = self
+            .target_data
+            .offset_of_element(&header, 3)
+            .expect("Buffer data field has an offset");
+        let stride = self.target_data.get_abi_size(&llvm_element);
+        let maximum = if self.size_type.get_bit_width() == 64 {
+            u64::MAX
+        } else {
+            u32::MAX as u64
+        };
+        if stride != 0 {
+            let maximum_capacity = (maximum - offset) / stride;
+            let too_large = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::UGT,
+                    capacity,
+                    self.size_type.const_int(maximum_capacity, false),
+                    "buffer.capacity.overflow",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.build_trap_if(too_large, call.syntax.span.clone())?;
+        }
+        let bytes = self
+            .builder
+            .build_int_mul(
+                capacity,
+                self.size_type.const_int(stride, false),
+                "buffer.element.bytes",
+            )
+            .map_err(compiler_diagnostic)?;
+        let no_element_bytes = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                bytes,
+                self.size_type.const_zero(),
+                "buffer.no.element.bytes",
+            )
+            .map_err(compiler_diagnostic)?;
+        let bytes = self
+            .builder
+            .build_select(
+                no_element_bytes,
+                self.size_type.const_int(1, false),
+                bytes,
+                "buffer.physical.element.bytes",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let bytes = self
+            .builder
+            .build_int_add(
+                bytes,
+                self.size_type.const_int(offset, false),
+                "buffer.allocation.bytes",
+            )
+            .map_err(compiler_diagnostic)?;
+        let buffer = self.build_gc_allocation(bytes, "buffer.allocate", call.syntax.span.clone())?;
+        self.builder
+            .build_memset(buffer, self.target_data.get_abi_alignment(&header), self.context.i8_type().const_zero(), bytes)
+            .map_err(compiler_diagnostic)?;
+        let capacity_slot = self
+            .builder
+            .build_struct_gep(header, buffer, 1, "buffer.capacity.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(capacity_slot, capacity)
+            .map_err(compiler_diagnostic)?;
+        if self.typed_module.type_needs_drop(&element) {
+            let finalizer = self.ensure_buffer_finalizer(&element)?;
+            self.set_gc_finalizer(buffer, finalizer)?;
+        }
+        Ok(buffer.as_any_value_enum())
+    }
+
+    fn compile_buffer_metadata(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+        field: u32,
+        name: &str,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let value = self.compile_expression(environment, &call.argument)?;
+        let Some(BasicValueEnum::PointerValue(buffer)) = value_as_basic(value) else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer handle"));
+        };
+        let CheckedType::Buffer(element) = self
+            .concrete_expression_type(&call.argument)
+            .unwrap_or(CheckedType::Error)
+        else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer type"));
+        };
+        let header = self.buffer_header_type(self.compile_type(&element)?);
+        let slot = self.builder.build_struct_gep(header, buffer, field, name).map_err(compiler_diagnostic)?;
+        self.builder
+            .build_load(self.size_type, slot, name)
+            .map(|value| value.as_any_value_enum())
+            .map_err(compiler_diagnostic)
+    }
+
+    fn compile_buffer_push(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
+        let [inkwell::values::BasicMetadataValueEnum::PointerValue(buffer), replacement] = arguments.as_slice() else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "Buffer.push requires a buffer and value"));
+        };
+        let CheckedType::Product(product) = self
+            .concrete_expression_type(&call.argument)
+            .unwrap_or(CheckedType::Error)
+        else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer.push arguments"));
+        };
+        let CheckedType::Buffer(element) = &product.elements[0].value_type else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer.push target"));
+        };
+        let llvm_element = self.compile_type(element)?;
+        let header = self.buffer_header_type(llvm_element);
+        self.trap_if_buffer_frozen(*buffer, header, call.syntax.span.clone())?;
+        let length_slot = self.builder.build_struct_gep(header, *buffer, 0, "buffer.length.slot").map_err(compiler_diagnostic)?;
+        let capacity_slot = self.builder.build_struct_gep(header, *buffer, 1, "buffer.capacity.slot").map_err(compiler_diagnostic)?;
+        let length = self.builder.build_load(self.size_type, length_slot, "buffer.length").map_err(compiler_diagnostic)?.into_int_value();
+        let capacity = self.builder.build_load(self.size_type, capacity_slot, "buffer.capacity").map_err(compiler_diagnostic)?.into_int_value();
+        let full = self.builder.build_int_compare(inkwell::IntPredicate::UGE, length, capacity, "buffer.full").map_err(compiler_diagnostic)?;
+        self.build_trap_if(full, call.syntax.span.clone())?;
+        let data = self.buffer_data_pointer(*buffer, llvm_element)?;
+        let slot = unsafe { self.builder.build_gep(llvm_element, data, &[length], "buffer.push.slot") }.map_err(compiler_diagnostic)?;
+        let replacement = BasicValueEnum::try_from(*replacement).map_err(|_| Diagnostic::new(call.syntax.span.clone(), "Buffer element is not storable"))?;
+        self.builder.build_store(slot, replacement).map_err(compiler_diagnostic)?;
+        let next = self.builder.build_int_add(length, self.size_type.const_int(1, false), "buffer.next.length").map_err(compiler_diagnostic)?;
+        self.builder.build_store(length_slot, next).map_err(compiler_diagnostic)?;
+        Ok(self.unit_value())
+    }
+
+    fn compile_buffer_get(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
+        let [inkwell::values::BasicMetadataValueEnum::PointerValue(buffer), inkwell::values::BasicMetadataValueEnum::IntValue(position)] = arguments.as_slice() else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "Buffer.get requires a buffer and USize index"));
+        };
+        let CheckedType::Ref(element) = self
+            .concrete_expression_type(&Expression::Call(call.clone()))
+            .unwrap_or(CheckedType::Error)
+        else {
+            return Err(Diagnostic::new(call.syntax.span.clone(), "invalid Buffer.get result"));
+        };
+        let llvm_element = self.compile_type(&element)?;
+        let header = self.buffer_header_type(llvm_element);
+        let length_slot = self.builder.build_struct_gep(header, *buffer, 0, "buffer.length.slot").map_err(compiler_diagnostic)?;
+        let length = self.builder.build_load(self.size_type, length_slot, "buffer.length").map_err(compiler_diagnostic)?.into_int_value();
+        let out = self.builder.build_int_compare(inkwell::IntPredicate::UGE, *position, length, "buffer.get.out_of_bounds").map_err(compiler_diagnostic)?;
+        self.build_trap_if(out, call.syntax.span.clone())?;
+        let data = self.buffer_data_pointer(*buffer, llvm_element)?;
+        let reference = unsafe { self.builder.build_gep(llvm_element, data, &[*position], "buffer.get.reference") }
+            .map_err(compiler_diagnostic)?;
+        self.register_gc_interior(reference, *buffer)?;
+        Ok(reference.as_any_value_enum())
+    }
+
+    fn compile_buffer_pop(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let value = self.compile_expression(environment, &call.argument)?;
+        let Some(BasicValueEnum::PointerValue(buffer)) = value_as_basic(value) else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer handle"));
+        };
+        let CheckedType::Buffer(element) = self.concrete_expression_type(&call.argument).unwrap_or(CheckedType::Error) else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer.pop target"));
+        };
+        let CheckedType::Sum(option) = self
+            .concrete_expression_type(&Expression::Call(call.clone()))
+            .unwrap_or(CheckedType::Error)
+        else {
+            return Err(Diagnostic::new(call.syntax.span.clone(), "Buffer.pop must return Option T"));
+        };
+        let none_index = option.alternatives.iter().position(|alternative| {
+            matches!(alternative, CheckedType::Distinct { name, .. } if name.ends_with("None"))
+        }).ok_or_else(|| Diagnostic::new(call.syntax.span.clone(), "Option is missing None"))?;
+        let some_index = option.alternatives.iter().position(|alternative| {
+            matches!(alternative, CheckedType::Distinct { name, .. } if name.ends_with("Some"))
+        }).ok_or_else(|| Diagnostic::new(call.syntax.span.clone(), "Option is missing Some"))?;
+        let llvm_element = self.compile_type(&element)?;
+        let header = self.buffer_header_type(llvm_element);
+        self.trap_if_buffer_frozen(buffer, header, call.syntax.span.clone())?;
+        let length_slot = self.builder.build_struct_gep(header, buffer, 0, "buffer.length.slot").map_err(compiler_diagnostic)?;
+        let length = self.builder.build_load(self.size_type, length_slot, "buffer.length").map_err(compiler_diagnostic)?.into_int_value();
+        let empty = self.builder.build_int_compare(inkwell::IntPredicate::EQ, length, self.size_type.const_zero(), "buffer.empty").map_err(compiler_diagnostic)?;
+        let function = self.builder.get_insert_block().and_then(|block| block.get_parent()).expect("Buffer.pop is in a function");
+        let none_block = self.context.append_basic_block(function, "buffer.pop.none");
+        let some_block = self.context.append_basic_block(function, "buffer.pop.some");
+        let merge = self.context.append_basic_block(function, "buffer.pop.done");
+        let option_type = self.compile_sum_type(&option)?;
+        let result_slot = self.builder.build_alloca(option_type, "buffer.pop.result").map_err(compiler_diagnostic)?;
+        self.builder.build_store(result_slot, option_type.const_zero()).map_err(compiler_diagnostic)?;
+        let tag_slot = self.builder.build_struct_gep(option_type, result_slot, 0, "buffer.pop.tag").map_err(compiler_diagnostic)?;
+        let payload_slot = self.builder.build_struct_gep(option_type, result_slot, 1, "buffer.pop.payload").map_err(compiler_diagnostic)?;
+        let payload_type = option_type.get_field_type_at_index(1).expect("Option payload");
+        let storage = SumStorage {
+            tag: tag_slot,
+            payload: payload_slot,
+            alignment: self.target_data.get_abi_alignment(&payload_type),
+        };
+        self.builder.build_conditional_branch(empty, none_block, some_block).map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(none_block);
+        self.builder.build_store(tag_slot, self.context.i32_type().const_int(none_index as u64, false)).map_err(compiler_diagnostic)?;
+        self.builder.build_unconditional_branch(merge).map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(some_block);
+        let next = self.builder.build_int_sub(length, self.size_type.const_int(1, false), "buffer.pop.index").map_err(compiler_diagnostic)?;
+        self.builder.build_store(length_slot, next).map_err(compiler_diagnostic)?;
+        let data = self.buffer_data_pointer(buffer, llvm_element)?;
+        let slot = unsafe { self.builder.build_gep(llvm_element, data, &[next], "buffer.pop.slot") }.map_err(compiler_diagnostic)?;
+        let popped = self.builder.build_load(llvm_element, slot, "buffer.pop.value").map_err(compiler_diagnostic)?;
+        self.store_sum_payload(
+            popped.as_any_value_enum(),
+            &option.alternatives[some_index],
+            some_index,
+            &storage,
+            call.syntax.span.clone(),
+        )?;
+        self.builder.build_memset(
+            slot,
+            self.target_data.get_abi_alignment(&llvm_element),
+            self.context.i8_type().const_zero(),
+            self.size_type.const_int(self.target_data.get_store_size(&llvm_element), false),
+        ).map_err(compiler_diagnostic)?;
+        self.builder.build_unconditional_branch(merge).map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(merge);
+        self.builder.build_load(option_type, result_slot, "buffer.pop.option").map(|value| value.as_any_value_enum()).map_err(compiler_diagnostic)
+    }
+
+    fn compile_buffer_freeze(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let value = self.compile_expression(environment, &call.argument)?;
+        let Some(BasicValueEnum::PointerValue(buffer)) = value_as_basic(value) else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer handle"));
+        };
+        let CheckedType::Buffer(element) = self.concrete_expression_type(&call.argument).unwrap_or(CheckedType::Error) else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer type"));
+        };
+        let llvm_element = self.compile_type(&element)?;
+        let header = self.buffer_header_type(llvm_element);
+        let frozen_slot = self.builder.build_struct_gep(header, buffer, 2, "buffer.frozen.slot").map_err(compiler_diagnostic)?;
+        self.builder.build_store(frozen_slot, self.context.i8_type().const_int(1, false)).map_err(compiler_diagnostic)?;
+        let length_slot = self.builder.build_struct_gep(header, buffer, 0, "buffer.length.slot").map_err(compiler_diagnostic)?;
+        let length = self.builder.build_load(self.size_type, length_slot, "buffer.length").map_err(compiler_diagnostic)?.into_int_value();
+        let data = self.buffer_data_pointer(buffer, llvm_element)?;
+        self.register_gc_interior(data, buffer)?;
+        let mut result = self.erased_ref_type().const_zero();
+        result = self.builder.build_insert_value(result, data, 0, "buffer.slice.pointer").map_err(compiler_diagnostic)?.into_struct_value();
+        result = self.builder.build_insert_value(result, length, 1, "buffer.slice.length").map_err(compiler_diagnostic)?.into_struct_value();
+        Ok(result.as_any_value_enum())
+    }
+
+    fn trap_if_buffer_frozen(
+        &mut self,
+        buffer: inkwell::values::PointerValue<'context>,
+        header: inkwell::types::StructType<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let slot = self.builder.build_struct_gep(header, buffer, 2, "buffer.frozen.slot").map_err(compiler_diagnostic)?;
+        let frozen = self.builder.build_load(self.context.i8_type(), slot, "buffer.frozen").map_err(compiler_diagnostic)?.into_int_value();
+        let frozen = self.builder.build_int_compare(inkwell::IntPredicate::NE, frozen, self.context.i8_type().const_zero(), "buffer.is_frozen").map_err(compiler_diagnostic)?;
+        self.build_trap_if(frozen, span)
+    }
+
+    fn register_gc_interior(
+        &mut self,
+        interior: inkwell::values::PointerValue<'context>,
+        payload: inkwell::values::PointerValue<'context>,
+    ) -> CodeGenerationResult<()> {
+        let function_type = self.context.void_type().fn_type(
+            &[
+                self.context.ptr_type(AddressSpace::default()).into(),
+                self.context.ptr_type(AddressSpace::default()).into(),
+            ],
+            false,
+        );
+        let register = self
+            .llvm_module
+            .get_function("__staple_gc_register_interior")
+            .unwrap_or_else(|| {
+                self.llvm_module.add_function(
+                    "__staple_gc_register_interior",
+                    function_type,
+                    None,
+                )
+            });
+        self.builder
+            .build_direct_call(register, &[interior.into(), payload.into()], "")
+            .map(|_| ())
+            .map_err(compiler_diagnostic)
+    }
+
+    fn ensure_buffer_finalizer(
+        &mut self,
+        element: &CheckedType,
+    ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
+        let key = format!("buffer:{element:?}");
+        if let Some(function) = self.gc_finalizers.get(&key).copied() {
+            return Ok(function);
+        }
+        let mut hasher = DefaultHasher::new();
+        key.hash(&mut hasher);
+        let name = format!("__staple_gc_finalize_buffer_{:016x}", hasher.finish());
+        let function_type = self.context.void_type().fn_type(
+            &[self.context.ptr_type(AddressSpace::default()).into()],
+            false,
+        );
+        let function = self.llvm_module.add_function(&name, function_type, None);
+        self.gc_finalizers.insert(key, function);
+        let previous_block = self.builder.get_insert_block();
+        let entry = self.context.append_basic_block(function, "entry");
+        let check = self.context.append_basic_block(function, "buffer.finalize.check");
+        let body = self.context.append_basic_block(function, "buffer.finalize.element");
+        let done = self.context.append_basic_block(function, "buffer.finalize.done");
+        self.builder.position_at_end(entry);
+        let buffer = function.get_first_param().expect("Buffer finalizer payload").into_pointer_value();
+        let llvm_element = self.compile_type(element)?;
+        let header = self.buffer_header_type(llvm_element);
+        let length_slot = self.builder.build_struct_gep(header, buffer, 0, "buffer.length.slot").map_err(compiler_diagnostic)?;
+        let length = self.builder.build_load(self.size_type, length_slot, "buffer.length").map_err(compiler_diagnostic)?.into_int_value();
+        let index_slot = self.builder.build_alloca(self.size_type, "buffer.finalize.index").map_err(compiler_diagnostic)?;
+        self.builder.build_store(index_slot, self.size_type.const_zero()).map_err(compiler_diagnostic)?;
+        self.builder.build_unconditional_branch(check).map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(check);
+        let index = self.builder.build_load(self.size_type, index_slot, "buffer.finalize.index").map_err(compiler_diagnostic)?.into_int_value();
+        let remaining = self.builder.build_int_compare(inkwell::IntPredicate::ULT, index, length, "buffer.finalize.remaining").map_err(compiler_diagnostic)?;
+        self.builder.build_conditional_branch(remaining, body, done).map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(body);
+        let data = self.buffer_data_pointer(buffer, llvm_element)?;
+        let slot = unsafe { self.builder.build_gep(llvm_element, data, &[index], "buffer.finalize.slot") }.map_err(compiler_diagnostic)?;
+        let value = self.builder.build_load(llvm_element, slot, "buffer.finalize.value").map_err(compiler_diagnostic)?;
+        self.compile_drop_value(value, element, Span::Compiler)?;
+        let next = self.builder.build_int_add(index, self.size_type.const_int(1, false), "buffer.finalize.next").map_err(compiler_diagnostic)?;
+        self.builder.build_store(index_slot, next).map_err(compiler_diagnostic)?;
+        self.builder.build_unconditional_branch(check).map_err(compiler_diagnostic)?;
+        self.builder.position_at_end(done);
+        self.builder.build_return(None).map_err(compiler_diagnostic)?;
+        if let Some(block) = previous_block {
+            self.builder.position_at_end(block);
+        }
+        Ok(function)
+    }
+
 }
 
 fn compiler_diagnostic(error: inkwell::builder::BuilderError) -> Diagnostic {

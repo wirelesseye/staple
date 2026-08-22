@@ -177,6 +177,7 @@ pub enum CheckedType {
     String,
     StringLiteralSet(Vec<String>),
     Ref(Box<CheckedType>),
+    Buffer(Box<CheckedType>),
     ErasedProduct(Box<CheckedType>),
     CString,
     CChar,
@@ -454,6 +455,7 @@ impl CheckedType {
                 matches!(value.as_ref(), Self::ErasedProduct(element) if element.is_fully_known())
                     || value.is_fully_known()
             }
+            Self::Buffer(value) => value.is_fully_known(),
             Self::ErasedProduct(_) => false,
             Self::Product(product) => product
                 .elements
@@ -507,6 +509,7 @@ impl CheckedType {
             Self::Distinct { representation, .. } => representation.is_sized(),
             // These values all have a statically known handle or scalar representation.
             Self::Ref(_)
+            | Self::Buffer(_)
             | Self::CPointer { .. }
             | Self::Function(_)
             | Self::I32
@@ -561,6 +564,7 @@ impl fmt::Display for CheckedType {
                 Self::ErasedProduct(element) => format_type_application(formatter, "Slice", element),
                 _ => format_type_application(formatter, "Ref", value),
             },
+            Self::Buffer(value) => format_type_application(formatter, "Buffer", value),
             Self::ErasedProduct(value) => write!(formatter, "{value}[]"),
             Self::CString => formatter.write_str("CString"),
             Self::CChar => formatter.write_str("CChar"),
@@ -2303,6 +2307,18 @@ impl TypeChecker {
                                     CheckedType::Ref(payload)
                                         if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)))
                     ))
+                    .unwrap_or(CheckedType::Error),
+                crate::IntrinsicFunction::BufferWithCapacity
+                | crate::IntrinsicFunction::BufferLength
+                | crate::IntrinsicFunction::BufferCapacity
+                | crate::IntrinsicFunction::BufferPush
+                | crate::IntrinsicFunction::BufferPop
+                | crate::IntrinsicFunction::BufferGet
+                | crate::IntrinsicFunction::BufferFreeze => self
+                    .symbol_types
+                    .get(symbol)
+                    .cloned()
+                    .filter(|value_type| valid_buffer_intrinsic_type(value_type, *intrinsic))
                     .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::RefReplace => self
                     .symbol_types
@@ -7354,6 +7370,9 @@ impl TypeChecker {
                 pointee: Box::new(arguments[0].clone()),
             };
         }
+        if module.builtin_type(id) == Some(BuiltinType::Buffer) {
+            return CheckedType::Buffer(Box::new(arguments[0].clone()));
+        }
         match module.recursive_construction(id) {
             Some(crate::RecursiveConstruction::ManagedReference) => {
                 return CheckedType::Ref(Box::new(arguments[0].clone()));
@@ -7624,6 +7643,11 @@ impl TypeChecker {
                     name: "Slice".to_owned(),
                     arguments: Vec::new(),
                 },
+                BuiltinType::Buffer => CheckedType::TypeConstructor {
+                    id,
+                    name: "Buffer".to_owned(),
+                    arguments: Vec::new(),
+                },
                 BuiltinType::CChar => CheckedType::CChar,
                 BuiltinType::CString => CheckedType::CString,
                 BuiltinType::CPointer => CheckedType::TypeConstructor {
@@ -7819,6 +7843,9 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         }),
         (CheckedType::Ref(actual), CheckedType::Ref(expected)) => {
             merge_types(*actual, *expected).map(|value| CheckedType::Ref(Box::new(value)))
+        }
+        (CheckedType::Buffer(actual), CheckedType::Buffer(expected)) => {
+            merge_types(*actual, *expected).map(|value| CheckedType::Buffer(Box::new(value)))
         }
         (CheckedType::ErasedProduct(actual), CheckedType::ErasedProduct(expected)) => {
             merge_types(*actual, *expected).map(|value| CheckedType::ErasedProduct(Box::new(value)))
@@ -8017,6 +8044,9 @@ pub(crate) fn substitute_type(
         CheckedType::Ref(value) => {
             CheckedType::Ref(Box::new(substitute_type(*value, substitutions)))
         }
+        CheckedType::Buffer(value) => {
+            CheckedType::Buffer(Box::new(substitute_type(*value, substitutions)))
+        }
         CheckedType::ErasedProduct(value) => {
             CheckedType::ErasedProduct(Box::new(substitute_type(*value, substitutions)))
         }
@@ -8130,7 +8160,7 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Parameter { .. } => true,
         CheckedType::CPointer { pointee } => contains_type_parameter(pointee),
-        CheckedType::Ref(value) => contains_type_parameter(value),
+        CheckedType::Ref(value) | CheckedType::Buffer(value) => contains_type_parameter(value),
         CheckedType::ErasedProduct(value) => contains_type_parameter(value),
         CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_type_parameter),
         CheckedType::Product(product) => product
@@ -8169,7 +8199,7 @@ fn contains_inferred_type(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::TypeConstructor { .. } => true,
         CheckedType::CPointer { pointee } => contains_inferred_type(pointee),
-        CheckedType::Ref(value) => contains_inferred_type(value),
+        CheckedType::Ref(value) | CheckedType::Buffer(value) => contains_inferred_type(value),
         CheckedType::ErasedProduct(value) => contains_inferred_type(value),
         CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_inferred_type),
         CheckedType::Product(product) => product
@@ -8202,7 +8232,7 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
                 ids.insert(*id);
             }
             CheckedType::CPointer { pointee } => collect(pointee, ids),
-            CheckedType::Ref(value) => collect(value, ids),
+            CheckedType::Ref(value) | CheckedType::Buffer(value) => collect(value, ids),
             CheckedType::ErasedProduct(value) => collect(value, ids),
             CheckedType::Opaque { arguments, .. } => {
                 for argument in arguments {
@@ -8357,7 +8387,7 @@ fn sized_type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId
             }
             CheckedType::Parameter { .. } => {}
             CheckedType::CPointer { pointee } => collect(pointee, ids),
-            CheckedType::Ref(value) | CheckedType::ErasedProduct(value) => collect(value, ids),
+            CheckedType::Ref(value) | CheckedType::Buffer(value) | CheckedType::ErasedProduct(value) => collect(value, ids),
             CheckedType::Opaque { arguments, .. }
             | CheckedType::TypeConstructor { arguments, .. } => {
                 for argument in arguments {
@@ -8444,6 +8474,10 @@ pub(crate) fn infer_type_parameters(
                 };
             }
             infer_type_parameters(value, actual_value, substitutions)
+        }
+        CheckedType::Buffer(value) => {
+            matches!(actual, CheckedType::Buffer(actual_value)
+                if infer_type_parameters(value, actual_value, substitutions))
         }
         CheckedType::ErasedProduct(value) => {
             matches!(actual, CheckedType::ErasedProduct(actual_value)
@@ -8565,6 +8599,7 @@ fn clear_function_resources(value_type: &mut CheckedType) {
     match value_type {
         CheckedType::CPointer { pointee }
         | CheckedType::Ref(pointee)
+        | CheckedType::Buffer(pointee)
         | CheckedType::ErasedProduct(pointee) => clear_function_resources(pointee),
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             for argument in arguments {
@@ -8989,7 +9024,7 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
                 || checked_type_contains_sum(&function.result)
         }
         CheckedType::CPointer { pointee } => checked_type_contains_sum(pointee),
-        CheckedType::Ref(value) => checked_type_contains_sum(value),
+        CheckedType::Ref(value) | CheckedType::Buffer(value) => checked_type_contains_sum(value),
         CheckedType::Distinct {
             arguments,
             representation,
@@ -9008,7 +9043,7 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
 fn checked_type_contains_erased_product(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::ErasedProduct(_) => true,
-        CheckedType::Ref(value) | CheckedType::CPointer { pointee: value } => {
+        CheckedType::Ref(value) | CheckedType::Buffer(value) | CheckedType::CPointer { pointee: value } => {
             checked_type_contains_erased_product(value)
         }
         CheckedType::Product(product) => product
@@ -9065,6 +9100,82 @@ fn has_drop_implementation(
                 && &implementation.arguments[0] == value_type
         })
     })
+}
+
+fn valid_buffer_intrinsic_type(
+    value_type: &CheckedType,
+    intrinsic: crate::IntrinsicFunction,
+) -> bool {
+    let CheckedType::Function(function) = value_type else {
+        return false;
+    };
+    let no_effects = CheckedResourceSet::default();
+    match intrinsic {
+        crate::IntrinsicFunction::BufferWithCapacity => {
+            function.parameter.as_ref() == &CheckedType::USize
+                && matches!(function.result.as_ref(), CheckedType::Buffer(_))
+                && function.resources == no_effects
+        }
+        crate::IntrinsicFunction::BufferLength | crate::IntrinsicFunction::BufferCapacity => {
+            matches!(function.parameter.as_ref(), CheckedType::Buffer(_))
+                && function.result.as_ref() == &CheckedType::USize
+                && function.resources == no_effects
+        }
+        crate::IntrinsicFunction::BufferPush => {
+            let CheckedType::Product(product) = function.parameter.as_ref() else {
+                return false;
+            };
+            let [buffer, element] = product.elements.as_slice() else {
+                return false;
+            };
+            matches!(&buffer.value_type, CheckedType::Buffer(payload) if payload.as_ref() == &element.value_type)
+                && function.result.as_ref() == &CheckedType::empty_product()
+                && function.resources.mutations == [CheckedMutation::Element(0)]
+                && function.resources.resources.is_empty()
+        }
+        crate::IntrinsicFunction::BufferPop => {
+            let CheckedType::Buffer(element) = function.parameter.as_ref() else {
+                return false;
+            };
+            let CheckedType::Sum(option) = function.result.as_ref() else {
+                return false;
+            };
+            let has_none = option.alternatives.iter().any(|alternative| matches!(
+                alternative,
+                CheckedType::Distinct { name, representation, .. }
+                    if name.ends_with("None") && representation.as_ref() == &CheckedType::empty_product()
+            ));
+            let has_some = option.alternatives.iter().any(|alternative| matches!(
+                alternative,
+                CheckedType::Distinct { name, representation, .. }
+                    if name.ends_with("Some") && representation.as_ref() == element.as_ref()
+            ));
+            has_none
+                && has_some
+                && option.alternatives.len() == 2
+                && function.resources.mutations == [CheckedMutation::Whole]
+                && function.resources.resources.is_empty()
+        }
+        crate::IntrinsicFunction::BufferGet => {
+            let CheckedType::Product(product) = function.parameter.as_ref() else {
+                return false;
+            };
+            let [buffer, position] = product.elements.as_slice() else {
+                return false;
+            };
+            matches!(
+                (&buffer.value_type, function.result.as_ref()),
+                (CheckedType::Buffer(element), CheckedType::Ref(result)) if element == result
+            ) && position.value_type == CheckedType::USize
+                && function.resources == no_effects
+        }
+        crate::IntrinsicFunction::BufferFreeze => matches!(
+            (function.parameter.as_ref(), function.result.as_ref()),
+            (CheckedType::Buffer(element), CheckedType::Ref(result))
+                if matches!(result.as_ref(), CheckedType::ErasedProduct(result) if result == element)
+        ) && function.resources == no_effects,
+        _ => false,
+    }
 }
 
 fn trait_bound_failure(arguments: &[CheckedType]) -> String {
@@ -9129,6 +9240,7 @@ fn is_copy_type(
         | CheckedType::CChar
         | CheckedType::CPointer { .. }
         | CheckedType::Ref(_)
+        | CheckedType::Buffer(_)
         | CheckedType::Function(_) => true,
         CheckedType::CString => false,
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
@@ -9182,6 +9294,7 @@ fn type_needs_drop(
     }
     match value_type {
         CheckedType::CString => true,
+        CheckedType::Buffer(_) => false,
         CheckedType::Product(product) => product
             .elements
             .iter()

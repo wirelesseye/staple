@@ -1986,6 +1986,7 @@ Bool
 String
 Ref T
 Slice T
+Buffer T
 CString
 CChar
 CPointer CChar
@@ -2080,6 +2081,24 @@ spelled out (`Ref T[]`) or reached through such an alias, is rejected; use
 like `preserve: <T where ?Sized T> Ref T -> Ref T` work uniformly whether
 `T` ends up sized or erased, but constructing that erasure in the first
 place always goes through `Slice`.
+
+`Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
+prefix. `Buffer.with_capacity` allocates space without constructing any `T`
+values, so it does not require `Default T`. Buffer handles are Copy aliases of
+the same managed allocation; `Buffer.length` and `Buffer.capacity` report its
+current initialized length and fixed capacity.
+
+`Buffer.push` appends while spare capacity remains, and `Buffer.pop` moves the
+last initialized element into an `Option T`. Both require a mutable buffer
+argument. Pushing to a full buffer traps; growth belongs in higher-level
+containers such as `List`. `Buffer.get` returns a managed reference to an
+initialized element and traps for an out-of-bounds index. Pushing does not
+relocate storage, but popping invalidates references to the removed slot.
+
+`Buffer.freeze` seals the shared allocation against every subsequent push and
+pop and returns a zero-copy `Slice T` over its initialized prefix. Repeated
+freezes are harmless. The allocation drops exactly its initialized elements
+when unreachable; an element reference or frozen slice keeps it alive.
 
 Managed references use a non-moving, single-threaded, stop-the-world
 mark-and-sweep collector. Collection occurs automatically as the live heap

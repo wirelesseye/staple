@@ -2469,6 +2469,40 @@ fn string_literals_have_the_canonical_string_type() {
 }
 
 #[test]
+fn buffer_intrinsics_type_check_and_compile() {
+    let module = type_check(concat!(
+        "let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+        "let empty_length: USize = Buffer.length values\n",
+        "let capacity: USize = Buffer.capacity values\n",
+        "Buffer.push values 10\n",
+        "Buffer.push values 20\n",
+        "let first: Ref I32 = Buffer.get values (0 satisfies USize)\n",
+        "let popped: Option I32 = Buffer.pop values\n",
+        "let frozen: Slice I32 = Buffer.freeze values\n",
+        "let frozen_length: USize = Slice.length frozen\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("Buffer operations should compile");
+    assert!(llvm.contains("buffer.allocate"));
+    assert!(llvm.contains("buffer.push.slot"));
+    assert!(llvm.contains("buffer.pop.option"));
+    assert!(llvm.contains("buffer.slice.pointer"));
+
+    let module = type_check(concat!(
+        "use std.cinterop.*\n",
+        "let mut owned: Buffer CString = Buffer.with_capacity (1 satisfies USize)\n",
+        "Buffer.push owned (c_string \"owned\")\n",
+    ));
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("Buffer should own non-Default, non-Copy elements");
+    assert!(llvm.contains("__staple_gc_finalize_buffer_"));
+
+}
+
+#[test]
 fn validates_the_standard_library_string_representation() {
     assert!(
         string_contract_diagnostics(concat!(

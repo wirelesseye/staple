@@ -73,6 +73,7 @@ pub enum BuiltinType {
     String,
     Ref,
     Slice,
+    Buffer,
     CChar,
     CString,
     CPointer,
@@ -271,6 +272,13 @@ pub enum IntrinsicFunction {
     StringAdd,
     SliceLength,
     SliceFromRef,
+    BufferWithCapacity,
+    BufferLength,
+    BufferCapacity,
+    BufferPush,
+    BufferPop,
+    BufferGet,
+    BufferFreeze,
     RefReplace,
     Drop,
 }
@@ -1114,6 +1122,7 @@ impl NameResolver {
         self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
         self.register_builtin_type(core, "std.core", "Slice", BuiltinType::Slice);
+        self.register_builtin_type(core, "std.core", "Buffer", BuiltinType::Buffer);
         let Some(syntax) = program.standard_library_syntax() else {
             return;
         };
@@ -1294,6 +1303,29 @@ impl NameResolver {
         }
         for (name, _) in expected {
             if !found.contains_key(&name) {
+                self.diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!("standard library `std.core` does not declare intrinsic `{name}`"),
+                ));
+            }
+        }
+        for (name, intrinsic) in [
+            ("__buffer_with_capacity", IntrinsicFunction::BufferWithCapacity),
+            ("__buffer_length", IntrinsicFunction::BufferLength),
+            ("__buffer_capacity", IntrinsicFunction::BufferCapacity),
+            ("__buffer_push", IntrinsicFunction::BufferPush),
+            ("__buffer_pop", IntrinsicFunction::BufferPop),
+            ("__buffer_get", IntrinsicFunction::BufferGet),
+            ("__buffer_freeze", IntrinsicFunction::BufferFreeze),
+        ] {
+            let symbol = program
+                .modules()
+                .iter()
+                .filter(|module| module.path.starts_with(standard_library_directory))
+                .find_map(|module| self.interfaces[module.id.0].values.get(name).copied());
+            if let Some(symbol) = symbol {
+                self.intrinsic_functions.insert(symbol, intrinsic);
+            } else {
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
                     format!("standard library `std.core` does not declare intrinsic `{name}`"),
@@ -1481,7 +1513,7 @@ impl NameResolver {
         }
         if matches!(
             builtin,
-            BuiltinType::CPointer | BuiltinType::Ref | BuiltinType::Slice
+            BuiltinType::CPointer | BuiltinType::Ref | BuiltinType::Slice | BuiltinType::Buffer
         ) && declaration.type_parameters.len() != 1
         {
             self.diagnostics.push(Diagnostic::new(

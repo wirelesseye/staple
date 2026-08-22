@@ -956,6 +956,68 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_buffers_and_keeps_interior_views_alive() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-buffer-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-buffer-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "def churn: I32 -> () = n => match n == 0 {\n",
+                "  True() => (),\n",
+                "  False() => { Ref n; churn (n - 1) },\n",
+                "}\n",
+                "def make_ref = () => {\n",
+                "  let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+                "  Buffer.push values 41\n",
+                "  Buffer.push values 42\n",
+                "  Buffer.get values (1 satisfies USize)\n",
+                "}\n",
+                "def make_slice = () => {\n",
+                "  let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+                "  Buffer.push values 7\n",
+                "  Buffer.push values 8\n",
+                "  let popped = Buffer.pop values\n",
+                "  Buffer.freeze values\n",
+                "}\n",
+                "let kept_ref = make_ref ()\n",
+                "let kept_slice = make_slice ()\n",
+                "churn 40000\n",
+                "churn 40000\n",
+                "let Ref answer = kept_ref\n",
+                "let result = answer - 42\n",
+                "match Slice.length kept_slice == (1 satisfies USize) {\n",
+                "  True() => exit result,\n",
+                "  False() => exit 1,\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary Buffer source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("Buffer executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("Buffer executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "Buffer executable exited with {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_erased_product_length_and_indexing() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

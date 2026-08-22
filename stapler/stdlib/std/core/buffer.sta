@@ -1,0 +1,32 @@
+pub type Buffer T = opaque
+
+pub def __buffer_with_capacity: <T> USize -> Buffer T = capacity => __buffer_with_capacity capacity
+pub def __buffer_length: <T> Buffer T -> USize = buffer => __buffer_length buffer
+pub def __buffer_capacity: <T> Buffer T -> USize = buffer => __buffer_capacity buffer
+pub def __buffer_push: <T> (Buffer T, T) ->{mut 0} () = (buffer, value) => __buffer_push (buffer, value)
+pub def __buffer_pop: <T> Buffer T ->{mut} Option T = buffer => __buffer_pop buffer
+pub def __buffer_get: <T> (Buffer T, USize) -> Ref T = (buffer, position) => __buffer_get (buffer, position)
+pub def __buffer_freeze: <T> Buffer T -> Slice T = buffer => __buffer_freeze buffer
+
+companion<T> Buffer T {
+    // Allocates storage for exactly capacity elements without initialising any T values.
+    pub def with_capacity: USize -> Buffer T = capacity => __buffer_with_capacity capacity
+
+    // Returns the number of initialised elements in the buffer's prefix.
+    pub def length: Buffer T -> USize = buffer => __buffer_length buffer
+
+    // Returns the fixed number of elements for which the buffer has storage.
+    pub def capacity: Buffer T -> USize = buffer => __buffer_capacity buffer
+
+    // Appends an element to the initialised prefix, trapping if full or frozen.
+    pub def push: Buffer T ->{mut} T -> () = buffer => value => __buffer_push (buffer, value)
+
+    // Removes and returns the last element, or None if empty; traps if frozen.
+    pub def pop: Buffer T ->{mut} Option T = buffer => __buffer_pop buffer
+
+    // Borrows an initialised element by position, trapping if out of bounds.
+    pub def get: Buffer T -> USize -> Ref T = buffer => position => __buffer_get (buffer, position)
+
+    // Seals the buffer against mutation and returns a zero-copy slice of its contents.
+    pub def freeze: Buffer T -> Slice T = buffer => __buffer_freeze buffer
+}

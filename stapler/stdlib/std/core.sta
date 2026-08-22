@@ -1,4 +1,5 @@
 pub use std.core.boolean.*
+pub use std.core.buffer.(Buffer)
 pub use std.core.copy.*
 pub use std.core.default.*
 pub use std.core.drop.*

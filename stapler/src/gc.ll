@@ -3,11 +3,14 @@
 %GcHeader = type { ptr, {{SIZE}}, {{SIZE}}, ptr, {{SIZE}} }
 ; Explicit roots form a linked list of byte ranges: start, size, next root.
 %GcRoot = type { ptr, {{SIZE}}, ptr }
+; Registered interior views map an interior pointer back to its allocation.
+%GcInterior = type { ptr, ptr, ptr }
 
 ; Global collector state. The hash table contains payload pointers and uses
 ; address 1 as a tombstone, allowing expected-O(1) pointer validation.
 @__staple_gc_head = internal global ptr null
 @__staple_gc_roots = internal global ptr null
+@__staple_gc_interiors = internal global ptr null
 @__staple_gc_bytes = internal global {{SIZE}} 0
 @__staple_gc_threshold = internal global {{SIZE}} 1048576
 @__staple_gc_stack_bottom = internal global ptr null
@@ -127,7 +130,6 @@ insert:
 }
 
 ; Return the allocation whose payload begins exactly at candidate, if any.
-; Interior pointers are deliberately not treated as references.
 define internal ptr @__staple_gc_hash_lookup({{SIZE}} %candidate) {
 entry:
   %table = load ptr, ptr @__staple_gc_table
@@ -171,6 +173,92 @@ not.found:
   ret ptr null
 }
 
+; Return the allocation registered for an interior view, if any.
+define internal ptr @__staple_gc_containing_payload({{SIZE}} %candidate) {
+entry:
+  %head = load ptr, ptr @__staple_gc_interiors
+  br label %loop
+
+loop:
+  %node = phi ptr [ %head, %entry ], [ %next, %continue ]
+  %done = icmp eq ptr %node, null
+  br i1 %done, label %not.found, label %check
+
+check:
+  %interior.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 0
+  %interior = load ptr, ptr %interior.slot
+  %integer = ptrtoint ptr %interior to {{SIZE}}
+  %matches = icmp eq {{SIZE}} %integer, %candidate
+  br i1 %matches, label %found, label %continue
+
+continue:
+  %next.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 2
+  %next = load ptr, ptr %next.slot
+  br label %loop
+
+found:
+  %payload.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 1
+  %payload = load ptr, ptr %payload.slot
+  ret ptr %payload
+
+not.found:
+  ret ptr null
+}
+
+; Register an interior Buffer Ref/Slice pointer. Duplicate registrations are harmless.
+define void @__staple_gc_register_interior(ptr %interior, ptr %payload) {
+entry:
+  %node = call ptr @malloc({{SIZE}} {{ROOT_BYTES}})
+  %failed = icmp eq ptr %node, null
+  br i1 %failed, label %trap, label %initialize
+
+initialize:
+  %interior.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 0
+  store ptr %interior, ptr %interior.slot
+  %payload.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 1
+  store ptr %payload, ptr %payload.slot
+  %head = load ptr, ptr @__staple_gc_interiors
+  %next.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 2
+  store ptr %head, ptr %next.slot
+  store ptr %node, ptr @__staple_gc_interiors
+  ret void
+
+trap:
+  call void @llvm.trap()
+  unreachable
+}
+
+define internal void @__staple_gc_remove_interiors(ptr %payload) {
+entry:
+  br label %loop
+
+loop:
+  %link = phi ptr [ @__staple_gc_interiors, %entry ], [ %next.link, %keep ], [ %link, %remove ]
+  %node = load ptr, ptr %link
+  %done = icmp eq ptr %node, null
+  br i1 %done, label %return, label %check
+
+check:
+  %payload.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 1
+  %registered = load ptr, ptr %payload.slot
+  %matches = icmp eq ptr %registered, %payload
+  br i1 %matches, label %remove, label %keep
+
+remove:
+  %next.slot = getelementptr %GcInterior, ptr %node, i32 0, i32 2
+  %next = load ptr, ptr %next.slot
+  store ptr %next, ptr %link
+  call void @free(ptr %node)
+  br label %loop
+
+keep:
+  %next.link = getelementptr %GcInterior, ptr %node, i32 0, i32 2
+  br label %loop
+
+return:
+  ret void
+}
+
 ; Replace a removed payload with a tombstone so later probe chains stay valid.
 define internal void @__staple_gc_hash_remove(ptr %payload) {
 entry:
@@ -208,10 +296,19 @@ return:
   ret void
 }
 
-; Mark an exact payload pointer and recursively scan the newly reached object.
+; Mark an exact or interior payload pointer and recursively scan the object.
 define internal void @__staple_gc_mark_candidate({{SIZE}} %candidate) {
 entry:
-  %payload = call ptr @__staple_gc_hash_lookup({{SIZE}} %candidate)
+  %exact = call ptr @__staple_gc_hash_lookup({{SIZE}} %candidate)
+  %found.exact = icmp ne ptr %exact, null
+  br i1 %found.exact, label %lookup.done, label %lookup.interior
+
+lookup.interior:
+  %interior = call ptr @__staple_gc_containing_payload({{SIZE}} %candidate)
+  br label %lookup.done
+
+lookup.done:
+  %payload = phi ptr [ %exact, %entry ], [ %interior, %lookup.interior ]
   %found = icmp ne ptr %payload, null
   br i1 %found, label %mark.check, label %return
 
@@ -377,6 +474,7 @@ discard:
   %dead.size.slot = getelementptr %GcHeader, ptr %header, i32 0, i32 1
   %dead.size = load {{SIZE}}, ptr %dead.size.slot
   %dead.payload = getelementptr i8, ptr %header, {{SIZE}} {{HEADER_BYTES}}
+  call void @__staple_gc_remove_interiors(ptr %dead.payload)
   call void @__staple_gc_hash_remove(ptr %dead.payload)
   %dead.has.payload = icmp ne {{SIZE}} %dead.size, 0
   %dead.payload.size = select i1 %dead.has.payload, {{SIZE}} %dead.size, {{SIZE}} 1
