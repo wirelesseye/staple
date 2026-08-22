@@ -1113,6 +1113,34 @@ mod tests {
     }
 
     #[test]
+    fn displays_declared_types_for_macro_helper_parameters() {
+        let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let path = stdlib_root.join("std").join("core").join("typegroup.sta");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let program = ProgramLoader::new()
+            .with_standard_library_root(stdlib_root)
+            .load_source_at(&path, &source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(&source).unwrap();
+        let entries = entries(&module, &typed);
+
+        for expected in [
+            ("visibility", "visibility: Visibility"),
+            ("entries", "entries: Sequence (Ident String, Optional Type)"),
+        ] {
+            assert!(
+                entries.iter().any(|entry| {
+                    &source[entry.range.clone()] == expected.0 && entry.signature == expected.1
+                }),
+                "missing {:?} in {entries:?}",
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn formats_def_and_trait_member_declarations() {
         let source = concat!(
             "trait Identity T { identity: T -> T }\n",

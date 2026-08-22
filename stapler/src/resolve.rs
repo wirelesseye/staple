@@ -4075,7 +4075,7 @@ fn analyze_compile_time_bindings(program: &Program, helpers: &[(ModuleId, Bindin
         let mut scope = CompileTimeScope::new(*module, globals.clone());
         scope.reference(helper.syntax.id, &helper.name);
         if let Some(value) = &helper.value {
-            analyze_compile_expression(value, &mut scope, CompileTimeBindingKind::HelperParameter, false);
+            analyze_compile_helper_expression(value, helper.annotation.as_ref(), &mut scope);
         }
         result.extend(scope.occurrences);
     }
@@ -4094,9 +4094,53 @@ fn analyze_compile_time_bindings(program: &Program, helpers: &[(ModuleId, Bindin
 }
 
 fn compile_pattern_type(pattern: &Pattern, fallback: Option<String>) -> Option<String> {
-    crate::macro_expand::pattern_meta_type(pattern)
-        .map(|ty| crate::macro_expand::format_meta_type(&ty))
-        .or(fallback)
+    match pattern {
+        Pattern::At(at) if matches!(at.binding.ty, Type::Inferred(_)) => fallback.or_else(|| {
+            crate::macro_expand::pattern_meta_type(pattern)
+                .map(|ty| crate::macro_expand::format_meta_type(&ty))
+        }),
+        Pattern::Binding(binding) if matches!(binding.ty, Type::Inferred(_)) => {
+            fallback.or_else(|| {
+                crate::macro_expand::pattern_meta_type(pattern)
+                    .map(|ty| crate::macro_expand::format_meta_type(&ty))
+            })
+        }
+        Pattern::Wildcard(wildcard) if matches!(wildcard.ty, Type::Inferred(_)) => fallback
+            .or_else(|| {
+                crate::macro_expand::pattern_meta_type(pattern)
+                    .map(|ty| crate::macro_expand::format_meta_type(&ty))
+            }),
+        _ => crate::macro_expand::pattern_meta_type(pattern)
+            .map(|ty| crate::macro_expand::format_meta_type(&ty))
+            .or(fallback),
+    }
+}
+
+fn analyze_compile_helper_expression(
+    expression: &Expression,
+    annotation: Option<&Type>,
+    scope: &mut CompileTimeScope,
+) {
+    if let (Expression::Function(function), Some(Type::Function(function_type))) =
+        (expression, annotation)
+    {
+        scope.frames.push(HashMap::new());
+        declare_compile_pattern(
+            &function.pattern,
+            scope,
+            CompileTimeBindingKind::HelperParameter,
+            Some(function_type.parameter.to_string()),
+        );
+        analyze_compile_helper_expression(&function.body, Some(&function_type.result), scope);
+        scope.frames.pop();
+    } else {
+        analyze_compile_expression(
+            expression,
+            scope,
+            CompileTimeBindingKind::HelperParameter,
+            false,
+        );
+    }
 }
 
 fn compile_time_builtin_signature(name: &str) -> Option<&str> {
