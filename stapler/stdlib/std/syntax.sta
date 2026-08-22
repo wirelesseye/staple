@@ -9,11 +9,17 @@ pub(repr) type CallExpr = (
     argument: Expr,
 )
 @recursive_constructor
-pub(repr) type Sequence Element = Element
+pub(repr) type Sequence Element =
+    () |
+    (first: Element, rest: Sequence Element)
 @recursive_constructor
-pub(repr) type Optional Element = Element
+pub(repr) type Optional Element = None | Some Element
 @recursive_constructor
-pub(repr) type Separated Element Separator = Element
+pub(repr) type Separated Element Separator = (
+    separator: Separator,
+    elements: Sequence Element,
+    trailing: Bool,
+)
 pub type Comma
 pub type Equals
 pub type FatArrow
