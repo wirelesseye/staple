@@ -575,6 +575,12 @@ impl ProgramLoader {
 
     fn load_path_diagnostic(&mut self, entry: &Path) -> Result<Program, LoadDiagnostic> {
         let entry = canonical_file(entry).map_err(LoadDiagnostic::compiler)?;
+        // A configured module root is an explicit package boundary. For the
+        // legacy implicit-root mode, `main.sta` likewise denotes a package;
+        // arbitrary standalone files must not cause their entire containing
+        // directory (notably the system temp directory) to be indexed.
+        let discover_companions = self.module_root.is_some()
+            || entry.file_name().is_some_and(|name| name == "main.sta");
         let root = match &self.module_root {
             Some(root) => {
                 canonical_directory(root, "module root").map_err(LoadDiagnostic::compiler)?
@@ -600,7 +606,9 @@ impl ProgramLoader {
         self.package_entry = Some(entry_id);
         self.load_imports(entry_id, &root)?;
         self.load_standard_library()?;
-        self.discover_companions()?;
+        if discover_companions {
+            self.discover_companions()?;
+        }
         Ok(self.finish_ref(entry_id))
     }
 
@@ -669,7 +677,6 @@ impl ProgramLoader {
         self.package_entry = Some(entry);
         self.load_imports(entry, &module_root)?;
         self.load_standard_library()?;
-        self.discover_companions()?;
         Ok(self.finish_ref(entry))
     }
 
