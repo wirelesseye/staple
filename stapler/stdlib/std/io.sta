@@ -7,11 +7,11 @@ extern "c" {
 }
 
 pub def print: String ->{IO} () = value => {
-    let _ = printf (c_string "%s", string_to_c_string value)
+    let _ = printf (c_string "%s", CString.from_string value)
     ()
 }
 
 pub def println: String ->{IO} () = value => {
-    let _ = printf (c_string "%s\n", string_to_c_string value)
+    let _ = printf (c_string "%s\n", CString.from_string value)
     ()
 }

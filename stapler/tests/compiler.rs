@@ -529,7 +529,7 @@ fn type_checks_and_lowers_mutable_places_and_ref_replace() {
         "let index: USize = 1\n",
         "fixed[index] = 7\n",
         "let mut scalar = Ref 8\n",
-        "let old = replace (scalar, 9)\n",
+        "let old = Ref.replace (scalar, 9)\n",
         "def local = () => { var inside = 10; inside = old; inside }\n",
     );
     let module = type_check(source);
@@ -764,7 +764,7 @@ fn infers_a_mut_effect_through_a_ref_crossing_local_alias() {
         "type MyInt = Ref I32\n",
         "def mutate_my_int: (MyInt, I32) ->{mut 0} () = (my_int, value) => {\n",
         "  let MyInt mut inner = my_int\n",
-        "  replace (inner, value)\n",
+        "  Ref.replace (inner, value)\n",
         "  ()\n",
         "}\n",
         "def foo = (my_int: MyInt) => { mutate_my_int (my_int, 42) }\n",
@@ -779,7 +779,7 @@ fn infers_a_mut_effect_through_a_ref_crossing_local_alias() {
             "type MyInt = Ref I32\n",
             "def mutate_my_int: (MyInt, I32) ->{mut 0} () = (my_int, value) => {\n",
             "  let MyInt mut inner = my_int\n",
-            "  replace (inner, value)\n",
+            "  Ref.replace (inner, value)\n",
             "  ()\n",
             "}\n",
             "def bad = () => {\n",
@@ -887,7 +887,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "}\n",
         "def managed = (initial: CString, next: CString) => {\n",
         "  let mut reference = Ref initial\n",
-        "  let old = replace (reference, next)\n",
+        "  let old = Ref.replace (reference, next)\n",
         "  drop old\n",
         "}\n",
     ));
@@ -2498,8 +2498,8 @@ fn c_string_is_an_imported_primitive_macro() {
         "def exercise = () => {\n",
         "  let text: String = \"hello\"\n",
         "  let c_text: CString = c_string \"hello\"\n",
-        "  let copied: String = string_from_c_string c_text\n",
-        "  let converted: CString = string_to_c_string text\n",
+        "  let copied: String = CString.to_string c_text\n",
+        "  let converted: CString = CString.from_string text\n",
         "}\n",
     ));
     let context = Context::create();

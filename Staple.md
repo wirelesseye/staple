@@ -1690,7 +1690,7 @@ Because each function accepts one value, passing several logical arguments
 means passing a product:
 
 ```staple
-printf (c_string "%s\n", string_to_c_string s)
+printf (c_string "%s\n", CString.from_string s)
 ```
 
 Here, `printf` receives one two-element product.
@@ -1998,15 +1998,15 @@ point.x = 30
 let Ref (captured_x, captured_y) = point
 ```
 
-The prelude function `replace: <T> (Ref T, T) -> T` replaces a whole fixed
+The companion function `Ref.replace: <T> (Ref T, T) -> T` replaces a whole fixed
 payload and returns the previous value:
 
 ```staple
 let value = Ref 10
-let previous = replace (value, 20)
+let previous = Ref.replace (value, 20)
 ```
 
-`replace` is not available for erased product payloads because an erased product
+`Ref.replace` is not available for erased product payloads because an erased product
 cannot be passed by value. Individual elements of `Ref T[]` remain writable by
 index.
 
@@ -2097,9 +2097,9 @@ pointers.
 `free`. It is compatible with `CPointer CChar`, but an arbitrary
 `CPointer CChar` is not assumed to be NUL terminated. Passing a `CString` to a
 C function creates a call-scoped view rather than transferring ownership, and
-C declarations may not return `CString`. `string_from_c_string` consumes its
+C declarations may not return `CString`. `CString.to_string` consumes its
 argument, validates and copies UTF-8 into a `String`, then frees it;
-`string_to_c_string` allocates an owned copy, appends a terminator, and traps on
+`CString.from_string` allocates an owned copy, appends a terminator, and traps on
 an interior NUL byte. Invalid UTF-8 also traps.
 
 An underscore asks the compiler to infer a type:

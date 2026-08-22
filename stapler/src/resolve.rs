@@ -1265,7 +1265,12 @@ impl NameResolver {
             self.intrinsic_functions
                 .insert(symbol, IntrinsicFunction::ErasedProductLength);
         }
-        if let Some(symbol) = self.interfaces[core.0].values.get("replace").copied() {
+        if let Some(symbol) = self.interfaces[core.0]
+            .namespaces
+            .get("Ref")
+            .and_then(|companion| self.interfaces[companion.0].values.get("replace"))
+            .copied()
+        {
             self.intrinsic_functions
                 .insert(symbol, IntrinsicFunction::RefReplace);
         }
@@ -2001,11 +2006,23 @@ impl NameResolver {
                     self.insert_imported_trait(name, trait_id, declaration.syntax.span.clone());
                 }
                 for (name, namespace) in interface.namespaces.clone() {
-                    self.insert_imported_namespace(
-                        name,
-                        namespace,
-                        declaration.syntax.span.clone(),
-                    );
+                    if interface.types.contains_key(&name) {
+                        if self
+                            .namespaces
+                            .last_mut()
+                            .expect("resolver namespace scope")
+                            .insert(name.clone(), namespace)
+                            .is_some()
+                        {
+                            self.duplicate_import(&name, declaration.syntax.span.clone());
+                        }
+                    } else {
+                        self.insert_imported_namespace(
+                            name,
+                            namespace,
+                            declaration.syntax.span.clone(),
+                        );
+                    }
                 }
             }
             UseKind::Selected(names) => {
@@ -2191,7 +2208,19 @@ impl NameResolver {
         }
         if let Some(namespace) = interface.namespaces.get(item).copied() {
             found = true;
-            self.insert_imported_namespace(local.to_owned(), namespace, span.clone());
+            if interface.types.contains_key(item) {
+                if self
+                    .namespaces
+                    .last_mut()
+                    .expect("resolver namespace scope")
+                    .insert(local.to_owned(), namespace)
+                    .is_some()
+                {
+                    self.duplicate_import(local, span.clone());
+                }
+            } else {
+                self.insert_imported_namespace(local.to_owned(), namespace, span.clone());
+            }
         }
         if !found {
             self.diagnostics.push(Diagnostic::new(

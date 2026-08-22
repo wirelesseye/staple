@@ -11,5 +11,7 @@ extern "staple-intrinsic" {
     let __string_to_c_string: String -> CString
 }
 
-pub def string_from_c_string: CString -> String = value => __string_from_c_string value
-pub def string_to_c_string: String -> CString = value => __string_to_c_string value
+companion CString {
+    pub def to_string: CString -> String = value => __string_from_c_string value
+    pub def from_string: String -> CString = value => __string_to_c_string value
+}

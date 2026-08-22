@@ -8,7 +8,7 @@ pub use std.core.index.*
 pub use std.core.iterator.*
 pub use std.core.number.*
 pub use std.core.range.*
-pub use std.core.reference.*
+pub use std.core.reference.(Ref, length)
 pub use std.core.result.*
 pub use std.core.sized.*
 pub use std.core.string.*

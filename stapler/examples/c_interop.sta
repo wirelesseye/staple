@@ -5,6 +5,6 @@ extern "c" {
 }
 
 printf (c_string "hello, world!\n")
-printf (string_to_c_string "owned Staple String\n")
-let round_trip = string_from_c_string (c_string "CString round trip\n")
-printf (string_to_c_string round_trip)
+printf (CString.from_string "owned Staple String\n")
+let round_trip = CString.to_string (c_string "CString round trip\n")
+printf (CString.from_string round_trip)
