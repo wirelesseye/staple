@@ -143,7 +143,12 @@ impl DeclarationCollector<'_> {
             | Item::Break(_)
             | Item::Continue(_)
             | Item::Expression(_)) => self.statement(value),
-            Item::UseDeclaration(_) | Item::TraitImplementation(_) => {}
+            Item::TraitImplementation(value) => {
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter);
+                }
+            }
+            Item::UseDeclaration(_) => {}
         }
     }
 
@@ -432,6 +437,12 @@ impl Collector<'_> {
                 }
             }
             Item::TraitImplementation(value) => {
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter);
+                }
+                for bound in &value.trait_bounds {
+                    self.trait_bound(bound);
+                }
                 self.named_type(&value.trait_name);
                 for argument in &value.arguments {
                     self.ty(argument);
@@ -854,6 +865,28 @@ mod tests {
         assert_target(source, &entries, "identity", "identity");
         assert_target(source, &entries, "value", "value");
         assert_target(source, &entries, "first", "first");
+    }
+
+    #[test]
+    fn indexes_generic_trait_implementation_type_parameters() {
+        let source = concat!(
+            "trait Bound = T => { check: T -> Bool }\n",
+            "trait Target = T => { act: T -> T }\n",
+            "impl Bound I32 { def check = value => True }\n",
+            "impl T => Bound T => Target T { def act = value => value }\n",
+        );
+        let path = std::env::temp_dir().join("staple-definition-generic-impl-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, typed.resolved(), Some(&typed));
+
+        assert_target(source, &entries, "T", "T");
+        assert_target(source, &entries, "Bound", "Bound");
     }
 
     #[test]

@@ -307,6 +307,12 @@ impl Collector<'_> {
                 }
             }
             Item::TraitImplementation(implementation) => {
+                for parameter in &implementation.type_parameters {
+                    self.type_parameter(parameter);
+                }
+                for bound in &implementation.trait_bounds {
+                    self.trait_bound(bound);
+                }
                 for argument in &implementation.arguments {
                     self.ty(argument);
                 }
@@ -1135,6 +1141,38 @@ mod tests {
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "identity"
                     && entry.signature == "def identity: I32 -> I32"
+            }),
+            "entries: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn indexes_generic_trait_implementation_generics() {
+        let source = concat!(
+            "trait Bound = T => { check: T -> Bool }\n",
+            "trait Target = T => { act: T -> T }\n",
+            "impl Bound I32 { def check = value => True }\n",
+            "impl T => Bound T => Target T { def act = value => value }\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-generic-impl-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "T" && entry.signature == "<type parameter> T"
+            }),
+            "entries: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "act" && entry.signature.starts_with("def act: ")
             }),
             "entries: {entries:?}"
         );

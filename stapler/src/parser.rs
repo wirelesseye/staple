@@ -613,6 +613,15 @@ impl Grammar {
         start: usize,
     ) -> Result<TraitImplementation, ParseError> {
         self.expect(TokenKind::Impl, "expected `impl`")?;
+        let mut type_parameters = self.parse_type_parameters()?;
+        let (subtype_bounds, trait_bounds) = if !type_parameters.is_empty() {
+            self.parse_sized_relaxations(&mut type_parameters)?;
+            let subtype_bounds = self.parse_subtype_bounds()?;
+            let trait_bounds = self.parse_trait_bounds()?;
+            (subtype_bounds, trait_bounds)
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let trait_start = self.position;
         let first = self
             .expect(TokenKind::Identifier, "expected trait name")?
@@ -657,6 +666,9 @@ impl Grammar {
         )?;
         Ok(TraitImplementation {
             syntax: self.syntax(start),
+            type_parameters,
+            trait_bounds,
+            subtype_bounds,
             trait_name,
             arguments,
             members,

@@ -1407,8 +1407,10 @@ Add I32 I32
 
 An underscore in a non-dependent position is an error. Product binders may
 infer individual elements, as in `Convert (From, _)`, when the corresponding
-parameter is functionally dependent. Trait implementation headers remain
-fully explicit and concrete.
+parameter is functionally dependent. Trait implementation headers do not
+support this inference and must name every argument explicitly; see
+[Generic trait implementations](#generic-trait-implementations) below for how
+an implementation may still be generic over its own compile-time parameters.
 
 Functional dependencies are global coherence promises. Two implementations
 cannot agree on every determinant while choosing different dependent types;
@@ -1441,10 +1443,13 @@ impl Convert (I32, String) {
 Curried binders consume successive arguments, while a product binder consumes
 one product argument. Parentheses group an applied or otherwise complex type as
 one argument. Implementation arguments may be built-in, nominal, product,
-pointer, or function types and must all be fully concrete. Implementations have
-no visibility modifier: every implementation in the loaded program is available
-globally. Defining the same trait/argument combination twice, including through
-aliases of the same types, is an error.
+pointer, or function types, and must be fully concrete except where they
+mention the implementation's own compile-time parameters (see
+[Generic trait implementations](#generic-trait-implementations) below).
+Implementations have no visibility modifier: every implementation in the
+loaded program is available globally. Defining the same trait/argument
+combination twice, including through aliases of the same types or through
+alpha-equivalent generic headers, is an error.
 
 A trait may place one or more prerequisite bounds between its parameter binders
 and member block. Every implementation must satisfy the instantiated
@@ -1488,9 +1493,46 @@ function values and may be called unqualified when unambiguous or qualified as
 Traits use static dispatch. Bounds and implementations add no runtime values or
 function parameters. During monomorphization, the compiler substitutes the
 concrete trait arguments and emits a direct reference to the selected
-implementation member. Trait objects, runtime dictionaries, associated items,
-generic implementations, and independently generic trait
-members are not currently supported.
+implementation member. An entire implementation may be generic over its own
+compile-time parameters (see below); an individual trait member may not
+independently introduce parameters beyond the ones its implementation
+declares. Trait objects, runtime dictionaries, and associated items are not
+currently supported.
+
+### Generic trait implementations
+
+An implementation may itself be generic, using the same `Name =>` binder and
+bound-clause syntax as a generic `def`, `type`, or `trait`. A generic
+implementation applies conditionally: it is available for any instantiation of
+its own compile-time parameters that satisfies its bounds.
+
+```staple
+trait Bound = T => { check: T -> Bool }
+trait Target = T => { act: T -> T }
+
+impl Bound I32 { def check = value => True }
+
+impl T => Bound T => Target T {
+    def act = value => value
+}
+```
+
+Here `Target` is implemented for every `T` that implements `Bound`, so
+`Target.act` is available for `I32` because of the concrete `Bound I32`
+implementation above. A generic implementation's own bounds are available
+inside its members' bodies, exactly as they are inside a bounded generic
+`def`. `?Sized` relaxations and `<:` subtype bounds may also appear in an
+implementation's header, in the same positions and order as in a generic
+`def`.
+
+Two implementations that are alpha-equivalent — the same header shape up to
+renaming the compile-time parameters — are rejected as duplicates, the same as
+two concrete implementations for the same arguments. The compiler does not
+perform full overlap checking between implementations, so a concrete
+implementation and a generic implementation whose bound happens to be
+satisfied by the same concrete type may both be declared; dispatch reports an
+ambiguous-implementation error only where a call site is actually reachable
+that both would apply to.
 
 ### Subtype bounds
 

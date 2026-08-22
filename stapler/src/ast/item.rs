@@ -242,6 +242,9 @@ pub struct TraitMember {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitImplementation {
     pub syntax: Syntax,
+    pub type_parameters: Vec<TypeParameterPattern>,
+    pub trait_bounds: Vec<TraitBound>,
+    pub subtype_bounds: Vec<SubtypeBound>,
     pub trait_name: NamedType,
     pub arguments: Vec<Type>,
     pub members: Vec<ImplementationMember>,

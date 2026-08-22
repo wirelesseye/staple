@@ -78,7 +78,7 @@
         },
         {
           "name": "meta.implementation.staple",
-          "match": "\\b(impl)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
+          "match": "\\b(impl)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)(?!\\s*=>)",
           "captures": {
             "1": { "name": "storage.type.impl.staple" },
             "2": { "name": "entity.name.type.interface.staple" }

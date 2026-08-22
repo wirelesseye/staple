@@ -6964,6 +6964,17 @@ fn substitute_item(
             }
         }
         Item::TraitImplementation(implementation) => {
+            substitute_type_parameter_list(
+                &mut implementation.type_parameters,
+                environment,
+                diagnostics,
+            )?;
+            for bound in &mut implementation.trait_bounds {
+                substitute_trait_bound(bound, environment, diagnostics)?;
+            }
+            for bound in &mut implementation.subtype_bounds {
+                substitute_subtype_bound(bound, environment, diagnostics)?;
+            }
             for argument in &mut implementation.arguments {
                 substitute_type(argument, environment, diagnostics)?;
             }
@@ -7748,6 +7759,15 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
         }
         Item::TraitImplementation(implementation) => {
             expander.freshen_syntax(&mut implementation.syntax, module, mark);
+            for parameter in &mut implementation.type_parameters {
+                freshen_type_parameter(expander, parameter, module, mark);
+            }
+            for bound in &mut implementation.trait_bounds {
+                freshen_trait_bound(expander, bound, module, mark);
+            }
+            for bound in &mut implementation.subtype_bounds {
+                freshen_subtype_bound(expander, bound, module, mark);
+            }
             expander.freshen_syntax(&mut implementation.trait_name.syntax, module, mark);
             for argument in &mut implementation.arguments {
                 freshen_type(expander, argument, module, mark);

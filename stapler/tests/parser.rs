@@ -268,6 +268,51 @@ fn parses_traits_implementations_and_bounds_losslessly() {
 }
 
 #[test]
+fn parses_generic_conditional_trait_implementations_losslessly() {
+    let source = concat!(
+        "trait Bound = T => { check: T -> Bool }\n",
+        "trait Other = T => { verify: T -> Bool }\n",
+        "trait Target = T => { act: T -> T }\n",
+        "impl Target I32 {\n",
+        "  def act = value => value\n",
+        "}\n",
+        "impl T => Bound T => Target T {\n",
+        "  def act = value => value\n",
+        "}\n",
+        "impl T => Bound T => Other T => Target T {\n",
+        "  def act = value => value\n",
+        "}\n",
+    );
+    let root = parse(source).expect("generic trait implementation syntax should parse");
+    assert_eq!(root.text(), source);
+
+    let Item::TraitImplementation(concrete) = &root.items[3] else {
+        panic!("expected concrete trait implementation");
+    };
+    assert!(concrete.type_parameters.is_empty());
+    assert!(concrete.trait_bounds.is_empty());
+    assert_eq!(concrete.trait_name.name, "Target");
+
+    let Item::TraitImplementation(single_bound) = &root.items[4] else {
+        panic!("expected generic trait implementation with one bound");
+    };
+    assert_eq!(single_bound.type_parameters.len(), 1);
+    assert_eq!(single_bound.type_parameters[0].names(), ["T"]);
+    assert_eq!(single_bound.trait_bounds.len(), 1);
+    assert_eq!(single_bound.trait_bounds[0].trait_name.name, "Bound");
+    assert_eq!(single_bound.trait_name.name, "Target");
+
+    let Item::TraitImplementation(multi_bound) = &root.items[5] else {
+        panic!("expected generic trait implementation with multiple bounds");
+    };
+    assert_eq!(multi_bound.type_parameters.len(), 1);
+    assert_eq!(multi_bound.trait_bounds.len(), 2);
+    assert_eq!(multi_bound.trait_bounds[0].trait_name.name, "Bound");
+    assert_eq!(multi_bound.trait_bounds[1].trait_name.name, "Other");
+    assert_eq!(multi_bound.trait_name.name, "Target");
+}
+
+#[test]
 fn parses_curried_and_product_trait_parameters_and_arguments() {
     let source = concat!(
         "trait Add = Left => Right => Output => { add: (Left, Right) -> Output }\n",

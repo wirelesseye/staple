@@ -4034,6 +4034,24 @@ fn generates_extern_trait_and_implementation_items() {
 }
 
 #[test]
+fn generates_generic_conditional_trait_implementation_items() {
+    let module = type_check(concat!(
+        "trait Bound = T => { check: T -> Bool }\n",
+        "trait Target = T => { act: T -> T }\n",
+        "impl Bound I32 { def check = value => True }\n",
+        "macro define_impl = _: Expr => parse_quote {\n",
+        "    impl T => Bound T => Target T { def act = value => value }\n",
+        "}\n",
+        "define_impl ()\n",
+        "let answer: I32 = Target.act 41\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a macro-generated conditional trait implementation should generate code");
+}
+
+#[test]
 fn generates_traits_with_functional_dependencies() {
     let module = type_check(concat!(
         "macro define_trait = _: Expr => parse_quote {\n",
@@ -5705,6 +5723,91 @@ fn rejects_invalid_trait_member_signatures_and_non_concrete_targets() {
             .iter()
             .any(|diagnostic| { diagnostic.message.contains("target must be fully concrete") })
     );
+}
+
+#[test]
+fn generic_conditional_trait_implementation_dispatches_and_compiles() {
+    let module = type_check(concat!(
+        "trait Bound = T => { check: T -> Bool }\n",
+        "trait Target = T => { act: T -> Bool }\n",
+        "impl Bound I32 { def check = value => True }\n",
+        "impl T => Bound T => Target T { def act = value => Bound.check value }\n",
+        "let answer: Bool = Target.act 41\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a conditional trait implementation should monomorphize and compile");
+    assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn rejects_generic_trait_implementation_dispatch_when_bound_is_unmet() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Bound = T => { check: T -> Bool }\n",
+            "trait Target = T => { act: T -> T }\n",
+            "impl T => Bound T => Target T { def act = value => value }\n",
+            "let answer: I32 = Target.act 41\n",
+        )))
+        .expect_err("I32 does not implement Bound, so the conditional impl must not apply");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("no trait implementation or matching bound")
+    }));
+}
+
+#[test]
+fn rejects_alpha_equivalent_duplicate_generic_trait_implementations() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Bound = T => { check: T -> Bool }\n",
+            "trait Target = T => { act: T -> T }\n",
+            "impl T => Bound T => Target T { def act = value => value }\n",
+            "impl U => Bound U => Target U { def act = value => value }\n",
+        )))
+        .expect_err("alpha-equivalent generic implementations must be rejected as duplicates");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate trait implementation")
+    }));
+}
+
+#[test]
+fn rejects_ambiguous_dispatch_between_blanket_and_concrete_trait_implementations() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Bound = T => { check: T -> Bool }\n",
+            "trait Target = T => { act: T -> T }\n",
+            "impl Bound I32 { def check = value => True }\n",
+            "impl Target I32 { def act = value => value }\n",
+            "impl T => Bound T => Target T { def act = value => value }\n",
+            "let answer: I32 = Target.act 41\n",
+        )))
+        .expect_err("a concrete impl and an applicable blanket impl must be ambiguous");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("ambiguous trait implementation")
+    }));
+}
+
+#[test]
+fn cyclic_trait_implementation_bound_fails_without_hanging() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Cyclic = T => { check: T -> Bool }\n",
+            "impl T => Cyclic T => Cyclic T { def check = value => True }\n",
+            "let answer: Bool = Cyclic.check 41\n",
+        )))
+        .expect_err("a self-referential bound must fail rather than being accepted coinductively");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("no trait implementation or matching bound")
+    }));
 }
 
 #[test]

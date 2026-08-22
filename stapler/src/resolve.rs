@@ -59,7 +59,10 @@ pub struct ResolvedFunctionalDependency {
 pub struct ResolvedTraitImplementation {
     pub syntax: SyntaxId,
     pub trait_id: TraitId,
+    pub parameters: Vec<TypeParameterId>,
     pub arguments: Vec<Type>,
+    pub trait_bounds: Vec<crate::TraitBound>,
+    pub subtype_bounds: Vec<crate::SubtypeBound>,
     pub methods: HashMap<TraitMethodId, FunctionId>,
 }
 
@@ -2541,9 +2544,37 @@ impl NameResolver {
                 self.pop_type_parameter_scope();
             }
             Item::TraitImplementation(implementation) => {
+                self.push_type_parameter_scope();
+                let mut parameters = Vec::new();
+                for parameter in &implementation.type_parameters {
+                    self.declare_type_parameter_pattern(parameter);
+                    self.collect_declared_type_parameter_pattern(parameter, &mut parameters);
+                }
                 let trait_id = self.resolve_trait_name(&implementation.trait_name);
                 for argument in &implementation.arguments {
                     self.resolve_type(argument);
+                }
+                for bound in &implementation.trait_bounds {
+                    if let Some(bound_trait_id) = self.resolve_trait_name(&bound.trait_name) {
+                        self.trait_references.insert(bound.syntax.id, bound_trait_id);
+                    }
+                    for argument in &bound.arguments {
+                        self.resolve_type(argument);
+                    }
+                }
+                for bound in &implementation.subtype_bounds {
+                    if let Some(id) = self.lookup_type_parameter(&bound.parameter.name) {
+                        self.type_parameters.insert(bound.syntax.id, id);
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            bound.parameter.syntax.span.clone(),
+                            format!(
+                                "unknown compile-time parameter `{}` in subtype bound",
+                                bound.parameter.name
+                            ),
+                        ));
+                    }
+                    self.resolve_type(&bound.supertype);
                 }
                 let mut methods = HashMap::new();
                 for member in &implementation.members {
@@ -2570,6 +2601,12 @@ impl NameResolver {
                             )
                         })
                         .unwrap_or_else(|| format!("impl.unknown.{}", member.name));
+                    self.binding_type_parameters
+                        .insert(member.syntax.id, implementation.type_parameters.clone());
+                    self.binding_trait_bounds
+                        .insert(member.syntax.id, implementation.trait_bounds.clone());
+                    self.binding_subtype_bounds
+                        .insert(member.syntax.id, implementation.subtype_bounds.clone());
                     self.resolve_expression(
                         &member.value,
                         None,
@@ -2600,10 +2637,14 @@ impl NameResolver {
                         .push(ResolvedTraitImplementation {
                             syntax: implementation.syntax.id,
                             trait_id,
+                            parameters,
                             arguments: implementation.arguments.clone(),
+                            trait_bounds: implementation.trait_bounds.clone(),
+                            subtype_bounds: implementation.subtype_bounds.clone(),
                             methods,
                         });
                 }
+                self.pop_type_parameter_scope();
             }
             statement @ (Item::Binding(_)
             | Item::PatternBinding(_)
@@ -3014,6 +3055,26 @@ impl NameResolver {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).copied())
+    }
+
+    fn collect_declared_type_parameter_pattern(
+        &self,
+        pattern: &TypeParameterPattern,
+        parameters: &mut Vec<TypeParameterId>,
+    ) {
+        match pattern {
+            TypeParameterPattern::Binding(binding) => {
+                parameters.push(self.type_parameters[&binding.syntax.id]);
+            }
+            TypeParameterPattern::Product(product) => {
+                for element in &product.elements {
+                    self.collect_declared_type_parameter_pattern(element, parameters);
+                }
+            }
+            TypeParameterPattern::Splice(_) => {
+                unreachable!("type-parameter splices must be expanded before resolution")
+            }
+        }
     }
 
     fn declare_type_parameter_pattern(&mut self, pattern: &TypeParameterPattern) {

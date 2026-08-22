@@ -351,6 +351,12 @@ impl<'a> Classifier<'a> {
                 }
             }
             Item::TraitImplementation(value) => {
+                for parameter in &value.type_parameters {
+                    self.type_parameter(parameter, resolved);
+                }
+                for bound in &value.trait_bounds {
+                    self.trait_bound(bound, resolved);
+                }
                 self.mark_last(
                     &value.trait_name.syntax,
                     &value.trait_name.name,
@@ -1235,6 +1241,44 @@ mod tests {
         assert!(labels.contains(&("imported", MACRO)), "labels: {labels:?}");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn classifies_generic_trait_implementation_generics() {
+        let source = concat!(
+            "trait Bound = T => { check: T -> Bool }\n",
+            "trait Target = T => { act: T -> T }\n",
+            "impl Bound I32 { def check = value => True }\n",
+            "impl T => Bound T => Target T { def act = value => value }\n",
+        );
+        let path = std::env::temp_dir().join("staple-semantic-generic-impl.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let labels = labels(
+            source,
+            &tokens(source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
+        assert!(
+            labels
+                .iter()
+                .filter(|token| **token == ("T", TYPE_PARAMETER))
+                .count()
+                >= 2,
+            "labels: {labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .filter(|token| **token == ("Bound", INTERFACE))
+                .count()
+                >= 2,
+            "labels: {labels:?}"
+        );
     }
 
     #[test]

@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -125,7 +126,9 @@ struct LoopCheckContext {
 struct CheckedTraitImplementation {
     span: Span,
     trait_id: TraitId,
+    parameters: HashSet<TypeParameterId>,
     arguments: Vec<CheckedType>,
+    bounds: Vec<CheckedTraitBound>,
     methods: HashMap<TraitMethodId, FunctionId>,
 }
 
@@ -865,12 +868,19 @@ impl TypedModule {
         arguments: &[CheckedType],
         method: TraitMethodId,
     ) -> Option<FunctionId> {
-        self.trait_implementations
-            .iter()
-            .find(|implementation| {
-                implementation.trait_id == trait_id && implementation.arguments == arguments
-            })
-            .and_then(|implementation| implementation.methods.get(&method).copied())
+        let mut seen = Vec::new();
+        let (index, _) = dispatch_matching_implementations(
+            &self.trait_implementations,
+            trait_id,
+            arguments,
+            &mut seen,
+        )
+        .into_iter()
+        .next()?;
+        self.trait_implementations[index]
+            .methods
+            .get(&method)
+            .copied()
     }
 
     pub(crate) fn complete_trait_arguments(
@@ -985,6 +995,12 @@ pub struct TypeChecker {
     iterator_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
     active_subtype_bounds: Vec<Vec<CheckedSubtypeBound>>,
+    /// Guards recursive dispatch through conditional trait implementations:
+    /// verifying a conditional impl's own bounds can re-enter obligation
+    /// resolution, which can in turn re-examine the same implementation. A
+    /// query already on this stack is treated as unsatisfied (fail closed)
+    /// rather than accepted coinductively.
+    checking_trait_obligations: RefCell<Vec<(TraitId, Vec<CheckedType>)>>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     top_level_bindings: HashMap<SymbolId, Binding>,
     checking_bindings: HashSet<SymbolId>,
@@ -1458,10 +1474,14 @@ impl TypeChecker {
                 ));
                 continue;
             }
+            let declared_parameters: HashSet<TypeParameterId> =
+                implementation.parameters.iter().copied().collect();
             if arguments.iter().any(|argument| {
-                contains_type_parameter(argument)
-                    || contains_inferred_type(argument)
+                contains_inferred_type(argument)
                     || !argument.is_fully_known()
+                    || type_parameter_ids(argument)
+                        .iter()
+                        .any(|id| !declared_parameters.contains(id))
             }) {
                 self.diagnostics.push(Diagnostic::new(
                     span,
@@ -1482,8 +1502,11 @@ impl TypeChecker {
                 ));
                 continue;
             }
+            let canonical_arguments = canonicalize_impl_header(&declared_parameters, &arguments);
             if self.trait_implementations.iter().any(|existing| {
-                existing.trait_id == implementation.trait_id && existing.arguments == arguments
+                existing.trait_id == implementation.trait_id
+                    && canonicalize_impl_header(&existing.parameters, &existing.arguments)
+                        == canonical_arguments
             }) {
                 self.diagnostics.push(Diagnostic::new(
                     span,
@@ -1497,12 +1520,14 @@ impl TypeChecker {
                 .cloned()
                 .unwrap_or_default();
             let parameters = &self.trait_parameter_arguments[&implementation.trait_id];
-            let new_values = trait_parameter_values(parameters, &arguments);
+            let new_values = trait_parameter_values(parameters, &canonical_arguments);
             let conflict = self.trait_implementations.iter().any(|existing| {
                 if existing.trait_id != implementation.trait_id {
                     return false;
                 }
-                let existing_values = trait_parameter_values(parameters, &existing.arguments);
+                let existing_canonical =
+                    canonicalize_impl_header(&existing.parameters, &existing.arguments);
+                let existing_values = trait_parameter_values(parameters, &existing_canonical);
                 dependencies.iter().any(|dependency| {
                     dependency.determinants.iter().all(|determinant| {
                         new_values.get(determinant) == existing_values.get(determinant)
@@ -1538,10 +1563,17 @@ impl TypeChecker {
                     self.impl_function_types.insert(function_id, function_type);
                 }
             }
+            let bounds = implementation
+                .trait_bounds
+                .iter()
+                .filter_map(|bound| self.resolve_trait_bound(module, bound))
+                .collect();
             self.trait_implementations.push(CheckedTraitImplementation {
                 span,
                 trait_id: implementation.trait_id,
+                parameters: declared_parameters,
                 arguments,
+                bounds,
                 methods,
             });
         }
@@ -2284,6 +2316,39 @@ impl TypeChecker {
                         arguments: self.trait_parameter_arguments[&trait_id].clone(),
                     }]);
                     self.function_bounds.insert(function.id, bounds);
+                }
+                // A conditional trait implementation's own declared bounds
+                // (e.g. `SomeBound T =>` in `impl T => SomeBound T => ...`)
+                // are not covered by `default_function_traits` above — that
+                // only handles a trait's *default* method bodies, which
+                // rely on the trait's own prerequisites, not an
+                // implementation's. Wire them the same way plain `def`s are
+                // below, so an implementation member's body can rely on its
+                // own header's bounds while being checked.
+                let mut bounds = Vec::new();
+                for bound in &function.trait_bounds {
+                    if let Some(bound) = self.resolve_trait_bound(module, bound) {
+                        bounds.push(bound);
+                    }
+                }
+                if !bounds.is_empty() {
+                    let bounds = self.expand_trait_bounds(bounds);
+                    self.function_bounds
+                        .entry(function.id)
+                        .or_default()
+                        .extend(bounds);
+                }
+                let mut subtype_bounds = Vec::new();
+                for bound in &function.subtype_bounds {
+                    if let Some(bound) = self.resolve_subtype_bound(module, bound) {
+                        subtype_bounds.push(bound);
+                    }
+                }
+                if !subtype_bounds.is_empty() {
+                    self.function_subtype_bounds
+                        .entry(function.id)
+                        .or_default()
+                        .extend(subtype_bounds);
                 }
                 continue;
             }
@@ -5927,6 +5992,20 @@ impl TypeChecker {
                 unavailable = true;
                 continue;
             };
+            if arguments
+                .iter()
+                .all(|argument| !contains_type_parameter(argument))
+                && self
+                    .matching_trait_implementations(trait_id, &arguments)
+                    .len()
+                    > 1
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    ambiguous_trait_implementation_failure(&arguments),
+                ));
+                return CheckedType::Error;
+            }
             let completed =
                 trait_parameter_values(&self.trait_parameter_arguments[&trait_id], &arguments);
             matches.push((*method, arguments, substitute_type(template, &completed)));
@@ -6062,9 +6141,9 @@ impl TypeChecker {
             }) || arguments
                 .iter()
                 .all(|argument| !contains_type_parameter(argument))
-                && self.trait_implementations.iter().any(|implementation| {
-                    implementation.trait_id == trait_id && implementation.arguments == arguments
-                });
+                && !self
+                    .matching_trait_implementations(trait_id, arguments)
+                    .is_empty();
         };
         if Some(trait_id) == self.sized_trait {
             return target.is_sized()
@@ -6095,21 +6174,82 @@ impl TypeChecker {
                 .flatten()
                 .cloned()
                 .collect::<Vec<_>>();
-            return is_default_type(target, trait_id, &self.trait_implementations, &bounds);
+            // `is_default_type` only recognizes concrete `Default` impls by
+            // exact match; a conditional/blanket `Default` impl is not
+            // recognized here. Narrow, disclosed limitation — see the
+            // coherence design notes.
+            if is_default_type(target, trait_id, &self.trait_implementations, &bounds) {
+                return true;
+            }
+            return !self
+                .matching_trait_implementations(trait_id, arguments)
+                .is_empty();
         }
         if arguments
             .iter()
             .all(|argument| !contains_type_parameter(argument))
         {
-            return self.trait_implementations.iter().any(|implementation| {
-                implementation.trait_id == trait_id && implementation.arguments == arguments
-            });
+            return !self
+                .matching_trait_implementations(trait_id, arguments)
+                .is_empty();
         }
         self.active_function_bounds.iter().rev().any(|bounds| {
             bounds
                 .iter()
                 .any(|bound| bound.trait_id == trait_id && bound.arguments == arguments)
         })
+    }
+
+    /// Finds every trait implementation whose (possibly parameterized)
+    /// header unifies with `arguments` and whose own bounds hold under that
+    /// unification. For a concrete impl this degenerates to structural
+    /// equality (unifying a header with no free variables against a
+    /// concrete query is equivalent to `==`), so existing concrete impls are
+    /// matched exactly as before with no special-casing.
+    fn matching_trait_implementations(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Vec<(usize, HashMap<TypeParameterId, CheckedType>)> {
+        let key = (trait_id, arguments.to_vec());
+        {
+            let stack = self.checking_trait_obligations.borrow();
+            if stack.len() > 64 || stack.contains(&key) {
+                return Vec::new();
+            }
+        }
+        self.checking_trait_obligations.borrow_mut().push(key);
+        let matches = self
+            .trait_implementations
+            .iter()
+            .enumerate()
+            .filter_map(|(index, implementation)| {
+                if implementation.trait_id != trait_id
+                    || implementation.arguments.len() != arguments.len()
+                {
+                    return None;
+                }
+                let mut substitutions = HashMap::new();
+                let unifies = implementation.arguments.iter().zip(arguments).all(
+                    |(template, actual)| infer_type_parameters(template, actual, &mut substitutions),
+                );
+                if !unifies {
+                    return None;
+                }
+                let bounds_hold = implementation.bounds.iter().all(|bound| {
+                    let bound_arguments = bound
+                        .arguments
+                        .iter()
+                        .cloned()
+                        .map(|argument| substitute_type(argument, &substitutions))
+                        .collect::<Vec<_>>();
+                    self.trait_obligation_available_exact(bound.trait_id, &bound_arguments)
+                });
+                bounds_hold.then_some((index, substitutions))
+            })
+            .collect();
+        self.checking_trait_obligations.borrow_mut().pop();
+        matches
     }
 
     fn is_subtype(&self, sub: &CheckedType, sup: &CheckedType) -> bool {
@@ -7745,6 +7885,104 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
     ids
 }
 
+/// Rewrites a trait implementation's own declared type-parameter ids into a
+/// stable canonical form, so alpha-equivalent generic impl headers compare
+/// equal regardless of the parameter names/ids their authors happened to
+/// pick (`impl T => Foo T {..}` and `impl U => Foo U {..}` canonicalize to
+/// the same header). This is a syntactic check, not a semantic overlap
+/// solver: it does not account for differing bound clauses, so two impls
+/// with the same target shape but mutually exclusive bounds are still
+/// (conservatively) flagged as duplicates — see the coherence design notes.
+fn canonicalize_impl_header(
+    parameters: &HashSet<TypeParameterId>,
+    arguments: &[CheckedType],
+) -> Vec<CheckedType> {
+    let mut used = arguments
+        .iter()
+        .flat_map(type_parameter_ids)
+        .filter(|id| parameters.contains(id))
+        .collect::<Vec<_>>();
+    used.sort_by_key(|id| id.0);
+    used.dedup();
+    let substitutions = used
+        .into_iter()
+        .enumerate()
+        .map(|(index, id)| {
+            (
+                id,
+                CheckedType::Parameter {
+                    id: TypeParameterId(usize::MAX - index),
+                    name: format!("#{index}"),
+                    sized: true,
+                },
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    arguments
+        .iter()
+        .cloned()
+        .map(|argument| substitute_type(argument, &substitutions))
+        .collect()
+}
+
+/// Finds every trait implementation in `implementations` whose (possibly
+/// parameterized) header unifies with `arguments`, and whose own bounds hold
+/// — checked purely by recursing back into `implementations`, so this does
+/// not consider structural traits (`Copy`/`Sized`/`Index`/...) or any
+/// generic-body bound context. Used at codegen time (`TypedModule`), after
+/// type-checking has already verified every obligation actually reachable
+/// from the program's concrete entry points; `TypeChecker` uses its own
+/// richer `matching_trait_implementations`, which also consults structural
+/// derivation and any active generic-function bounds.
+fn dispatch_matching_implementations<'a>(
+    implementations: &'a [CheckedTraitImplementation],
+    trait_id: TraitId,
+    arguments: &[CheckedType],
+    seen: &mut Vec<(TraitId, Vec<CheckedType>)>,
+) -> Vec<(usize, HashMap<TypeParameterId, CheckedType>)> {
+    let key = (trait_id, arguments.to_vec());
+    if seen.len() > 64 || seen.contains(&key) {
+        return Vec::new();
+    }
+    seen.push(key);
+    let matches = implementations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, implementation)| {
+            if implementation.trait_id != trait_id
+                || implementation.arguments.len() != arguments.len()
+            {
+                return None;
+            }
+            let mut substitutions = HashMap::new();
+            let unifies = implementation.arguments.iter().zip(arguments).all(
+                |(template, actual)| infer_type_parameters(template, actual, &mut substitutions),
+            );
+            if !unifies {
+                return None;
+            }
+            let bounds_hold = implementation.bounds.iter().all(|bound| {
+                let bound_arguments = bound
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(|argument| substitute_type(argument, &substitutions))
+                    .collect::<Vec<_>>();
+                !dispatch_matching_implementations(
+                    implementations,
+                    bound.trait_id,
+                    &bound_arguments,
+                    seen,
+                )
+                .is_empty()
+            });
+            bounds_hold.then_some((index, substitutions))
+        })
+        .collect();
+    seen.pop();
+    matches
+}
+
 fn sized_type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
     fn collect(value_type: &CheckedType, ids: &mut HashSet<TypeParameterId>) {
         match value_type {
@@ -8480,6 +8718,21 @@ fn trait_bound_failure(arguments: &[CheckedType]) -> String {
 
 fn subtype_bound_failure(sub: &CheckedType, sup: &CheckedType) -> String {
     format!("subtype bound is not satisfied: `{sub}` is not a subtype of `{sup}`")
+}
+
+fn ambiguous_trait_implementation_failure(arguments: &[CheckedType]) -> String {
+    if let [argument] = arguments {
+        format!("ambiguous trait implementation for `{argument}`; multiple implementations apply")
+    } else {
+        let arguments = arguments
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "ambiguous trait implementation for `({arguments})`; multiple implementations apply"
+        )
+    }
 }
 
 fn is_copy_type(
