@@ -1275,8 +1275,19 @@ Generic functions are rank-1: an ordinary parameter or result type cannot
 itself contain an uninstantiated generic scheme. Compile-time parameters must
 be declared explicitly; unannotated definitions are not generalized. Each
 reachable concrete use is monomorphized, unused instantiations produce no code,
-and recursive calls must retain the current specialization. Generic `let` and
-`extern` declarations are not supported.
+and recursive calls must retain the current specialization. A top-level
+generic `let` and `extern` declarations are not supported, since nothing ever
+supplies concrete type arguments for them the way a call site does for a
+`def`. A local `let` inside a generic `def`'s body may mention that def's own
+compile-time parameters, since it is specialized along with the rest of the
+body at each concrete use:
+
+```staple
+def make_list: <T where Default T> () -> T[32] = () => {
+    let list: T[32] = default ()
+    list
+}
+```
 
 Every compile-time type parameter has an implicit `Sized` bound. It may
 therefore appear in by-value parameters, results, products, and represented

@@ -1034,6 +1034,11 @@ pub struct TypeChecker {
     iterator_trait: Option<TraitId>,
     active_function_bounds: Vec<Vec<CheckedTraitBound>>,
     active_subtype_bounds: Vec<Vec<CheckedSubtypeBound>>,
+    /// Type parameters declared by each generic `def` currently being
+    /// checked, innermost last. A local `let` inside the body may mention
+    /// any parameter in this stack without being "unconstrained" — it is
+    /// bound by an enclosing generic scheme, not free.
+    active_generic_parameters: Vec<HashSet<TypeParameterId>>,
     /// Guards recursive dispatch through conditional trait implementations:
     /// verifying a conditional impl's own bounds can re-enter obligation
     /// resolution, which can in turn re-examine the same implementation. A
@@ -2045,6 +2050,19 @@ impl TypeChecker {
         }
     }
 
+    fn declared_type_parameters(
+        &self,
+        module: &ResolvedModule,
+        type_parameters: &[TypeParameterPattern],
+    ) -> HashSet<TypeParameterId> {
+        type_parameters
+            .iter()
+            .flat_map(|pattern| {
+                type_parameter_ids(&self.checked_type_parameter_pattern(module, pattern))
+            })
+            .collect()
+    }
+
     fn checked_type_parameter_pattern(
         &self,
         module: &ResolvedModule,
@@ -2542,6 +2560,8 @@ impl TypeChecker {
                 .cloned()
                 .unwrap_or_default(),
         );
+        self.active_generic_parameters
+            .push(self.declared_type_parameters(module, &function.type_parameters));
         self.bind_pattern_types(module, &function.pattern, &function_type.parameter);
         let outer_did_return = self.did_return;
         let outer_return_reachable = self.return_reachable;
@@ -2622,6 +2642,7 @@ impl TypeChecker {
         self.checked_functions.insert(function_id);
         self.active_function_bounds.pop();
         self.active_subtype_bounds.pop();
+        self.active_generic_parameters.pop();
         if self.function_module(module, &function).is_some() {
             self.checking_modules.pop();
         }
@@ -4266,8 +4287,19 @@ impl TypeChecker {
                 format!("could not fully infer the type of `{}`", binding.name),
             ));
         }
+        let has_free_type_parameter = contains_type_parameter(&checked_type) && {
+            let bound_parameters: HashSet<TypeParameterId> = self
+                .active_generic_parameters
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
+            type_parameter_ids(&checked_type)
+                .iter()
+                .any(|id| !bound_parameters.contains(id))
+        };
         if binding.type_parameters.is_empty()
-            && contains_type_parameter(&checked_type)
+            && has_free_type_parameter
             && checked_type != CheckedType::Error
         {
             self.diagnostics.push(Diagnostic::new(

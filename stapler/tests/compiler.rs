@@ -6231,6 +6231,39 @@ fn monomorphizes_curried_generic_function_layers() {
 }
 
 #[test]
+fn allows_generic_locals_bound_by_the_enclosing_def() {
+    let module = type_check(concat!(
+        "def make_list: <T where Default T> () -> T[32] = () => {\n",
+        "  let list: T[32] = default ()\n",
+        "  list\n",
+        "}\n",
+        "let ints: I32[32] = make_list ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a local bound by the enclosing generic def should specialize");
+}
+
+#[test]
+fn allows_generic_locals_inside_a_nested_closure() {
+    let module = type_check(concat!(
+        "def make_pair: <T where Default T> () -> (T, T) = () => {\n",
+        "  let build: () -> T = () => {\n",
+        "    let value: T = default ()\n",
+        "    value\n",
+        "  }\n",
+        "  (build (), build ())\n",
+        "}\n",
+        "let pair: (I32, I32) = make_pair ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a nested closure should inherit the enclosing generic scope");
+}
+
+#[test]
 fn rejects_unconstrained_generic_values_and_non_function_schemes() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
