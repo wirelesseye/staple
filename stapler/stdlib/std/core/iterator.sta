@@ -1,4 +1,4 @@
-pub mod IterStep {
+companion IterStep {
     pub(repr) type Done Iter = Iter
     pub(repr) type Yield (Item, Iter) = (Item, Iter)
 }

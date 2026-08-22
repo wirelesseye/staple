@@ -21,6 +21,7 @@ pub struct SourceModule {
     pub name: Option<String>,
     pub visibility: Visibility,
     pub qualified_name: String,
+    pub companion: bool,
 }
 
 /// The two module targets a bare dotted `use` declaration may denote.
@@ -124,6 +125,7 @@ impl Program {
                 name: None,
                 visibility: Visibility::Private,
                 qualified_name: "<memory>".to_owned(),
+                companion: false,
             }],
             imported_modules: HashMap::new(),
             dotted_imports: HashMap::new(),
@@ -156,6 +158,18 @@ impl Program {
             })
             .collect::<Vec<_>>();
         for declaration in declarations {
+            if declaration.companion
+                && let Some(existing) = self.children[parent.0].get(&declaration.name).copied()
+                && self.modules[existing.0].companion
+            {
+                self.modules[existing.0]
+                    .syntax
+                    .items
+                    .extend(declaration.module.items);
+                self.child_modules.insert(declaration.syntax.id, existing);
+                self.collect_single_submodules(existing);
+                continue;
+            }
             let id = ModuleId(self.modules.len());
             let qualified_name = format!(
                 "{}.{}",
@@ -169,6 +183,7 @@ impl Program {
                 name: Some(declaration.name.clone()),
                 visibility: declaration.visibility,
                 qualified_name,
+                companion: declaration.companion,
             });
             self.children.push(HashMap::new());
             self.children[parent.0].insert(declaration.name, id);
@@ -192,6 +207,7 @@ impl Program {
                 name: Some(declaration.name.clone()),
                 visibility: declaration.visibility,
                 qualified_name,
+                companion: false,
             });
             self.children.push(HashMap::new());
             self.child_modules.insert(declaration.syntax.id, id);
@@ -316,6 +332,7 @@ impl Program {
                     name: Some(declaration.name.clone()),
                     visibility: declaration.visibility,
                     qualified_name,
+                    companion: declaration.companion,
                 });
                 self.children.push(HashMap::new());
                 if top_level {
@@ -583,6 +600,7 @@ impl ProgramLoader {
         self.package_entry = Some(entry_id);
         self.load_imports(entry_id, &root)?;
         self.load_standard_library()?;
+        self.discover_companions()?;
         Ok(self.finish_ref(entry_id))
     }
 
@@ -651,7 +669,97 @@ impl ProgramLoader {
         self.package_entry = Some(entry);
         self.load_imports(entry, &module_root)?;
         self.load_standard_library()?;
+        self.discover_companions()?;
         Ok(self.finish_ref(entry))
+    }
+
+    fn discover_companions(&mut self) -> Result<(), LoadDiagnostic> {
+        let mut roots = Vec::new();
+        let mut seen_files = HashSet::new();
+        if let Some(root) = &self.module_root {
+            roots.push(root.clone());
+        }
+        if let Some(root) = &self.standard_library_root {
+            roots.push(root.clone());
+        }
+        for root in roots {
+            let mut files = Vec::new();
+            collect_staple_files(&root, &mut files);
+            files.sort();
+            for path in files {
+                let canonical = std::fs::canonicalize(&path).unwrap_or(path.clone());
+                if self.paths.contains_key(&canonical) || !seen_files.insert(canonical.clone()) {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&canonical).map_err(|error| {
+                    LoadDiagnostic::source(&canonical, None, format!("could not read `{}`: {error}", canonical.display()))
+                })?;
+                let syntax = parse_with_syntax_ids(
+                    &source,
+                    &mut self.next_syntax_id,
+                    &canonical.display().to_string(),
+                )
+                .map_err(|error| LoadDiagnostic {
+                    source: Some(canonical.clone()),
+                    range: Some(error.offset..error.offset),
+                    location: Some(error.location),
+                    message: error.message,
+                })?;
+                let companions = syntax.items.into_iter().filter_map(|item| match item {
+                    Item::Submodule(module) if module.companion => Some(module),
+                    _ => None,
+                }).collect::<Vec<_>>();
+                for companion in companions {
+                    let owner = self.modules.iter().find(|module| {
+                        !module.companion
+                            && module.path.starts_with(&root)
+                            && module.syntax.items.iter().any(|item| matches!(
+                                item,
+                                Item::TypeDeclaration(declaration) if declaration.name == companion.name
+                            ))
+                    }).map(|module| module.id);
+                    let Some(owner) = owner else { continue };
+                    self.modules[owner.0].syntax.items.push(Item::Submodule(companion.clone()));
+                    self.insert_discovered_companion(owner, canonical.clone(), companion)?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn insert_discovered_companion(
+        &mut self,
+        parent: ModuleId,
+        path: PathBuf,
+        declaration: Submodule,
+    ) -> Result<(), LoadDiagnostic> {
+        if let Some(existing) = self.children[parent.0].get(&declaration.name).copied() {
+            if !self.modules[existing.0].companion {
+                return Err(load_diagnostic_at(
+                    &declaration.syntax.span,
+                    format!("companion `{}` conflicts with an ordinary module", declaration.name),
+                ));
+            }
+            self.modules[existing.0].syntax.items.extend(declaration.module.items);
+            self.child_modules.insert(declaration.syntax.id, existing);
+            return Ok(());
+        }
+        let id = ModuleId(self.modules.len());
+        let qualified_name = format!("{}.{}", self.modules[parent.0].qualified_name, declaration.name);
+        self.modules.push(SourceModule {
+            id,
+            path: path.clone(),
+            syntax: declaration.module,
+            parent: Some(parent),
+            name: Some(declaration.name.clone()),
+            visibility: Visibility::Public,
+            qualified_name: qualified_name.clone(),
+            companion: true,
+        });
+        self.children.push(HashMap::new());
+        self.children[parent.0].insert(declaration.name, id);
+        self.child_modules.insert(declaration.syntax.id, id);
+        self.insert_submodules(id, path, qualified_name)
     }
 
     fn load_file(&mut self, path: &Path) -> Result<ModuleId, LoadDiagnostic> {
@@ -694,6 +802,7 @@ impl ProgramLoader {
             name: None,
             visibility: Visibility::Private,
             qualified_name: qualified_name.clone(),
+            companion: false,
         });
         self.children.push(HashMap::new());
         self.insert_submodules(id, path, qualified_name)?;
@@ -716,6 +825,18 @@ impl ProgramLoader {
             })
             .collect::<Vec<_>>();
         for declaration in declarations {
+            if declaration.companion
+                && let Some(existing) = self.children[parent.0].get(&declaration.name).copied()
+                && self.modules[existing.0].companion
+            {
+                self.modules[existing.0]
+                    .syntax
+                    .items
+                    .extend(declaration.module.items);
+                self.child_modules.insert(declaration.syntax.id, existing);
+                self.insert_submodules(existing, path.clone(), format!("{parent_name}.{}", declaration.name))?;
+                continue;
+            }
             if self.children[parent.0].contains_key(&declaration.name) {
                 return Err(load_diagnostic_at(
                     &declaration.syntax.span,
@@ -732,6 +853,7 @@ impl ProgramLoader {
                 name: Some(declaration.name.clone()),
                 visibility: declaration.visibility,
                 qualified_name: qualified_name.clone(),
+                companion: declaration.companion,
             });
             self.children.push(HashMap::new());
             self.children[parent.0].insert(declaration.name, id);
@@ -752,6 +874,7 @@ impl ProgramLoader {
                 name: Some(declaration.name.clone()),
                 visibility: declaration.visibility,
                 qualified_name: qualified_name.clone(),
+                companion: false,
             });
             self.children.push(HashMap::new());
             self.child_modules.insert(declaration.syntax.id, id);
@@ -1185,6 +1308,20 @@ fn canonical_directory(path: &Path, description: &str) -> Result<PathBuf, String
             path.display()
         )
     })
+}
+
+fn collect_staple_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_staple_files(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "sta") {
+            files.push(path);
+        }
+    }
 }
 
 fn canonical_file(path: &Path) -> Result<PathBuf, String> {

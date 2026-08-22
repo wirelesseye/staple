@@ -100,6 +100,12 @@ pub struct Submodule {
     pub visibility: Visibility,
     pub name: String,
     pub module: Module,
+    /// True for a type-keyed `companion` namespace rather than an ordinary
+    /// inline `mod` declaration.
+    pub companion: bool,
+    pub type_parameters: Vec<TypeParameterPattern>,
+    pub trait_bounds: Vec<TraitBound>,
+    pub subtype_bounds: Vec<SubtypeBound>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

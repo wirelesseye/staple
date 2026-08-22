@@ -17,6 +17,7 @@ const KEYWORDS: &[&str] = &[
     "macro",
     "match",
     "mod",
+    "companion",
     "mut",
     "opaque",
     "parse_quote",

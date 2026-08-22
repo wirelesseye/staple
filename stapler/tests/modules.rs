@@ -343,11 +343,11 @@ fn rejects_a_dotted_import_that_names_both_an_item_and_a_module() {
 }
 
 #[test]
-fn dotted_import_combines_a_type_with_a_same_named_inline_module() {
+fn dotted_import_combines_a_type_with_its_companion() {
     let fixture = Fixture::new();
     fixture.write(
         "library.sta",
-        "pub type alias User = I32\npub mod User { pub let id: I32 = 42 }\n",
+        "pub type alias User = I32\ncompanion User { pub let id: I32 = 42 }\n",
     );
     fixture.write(
         "main.sta",
@@ -356,7 +356,25 @@ fn dotted_import_combines_a_type_with_a_same_named_inline_module() {
 
     fixture
         .compile()
-        .expect("a type and same-named inline module should import together");
+        .expect("a type and its companion should import together");
+}
+
+#[test]
+fn discovers_companions_in_otherwise_unreachable_files() {
+    let fixture = Fixture::new();
+    fixture.write("animals.sta", "pub type alias Animal = I32\n");
+    fixture.write(
+        "animal_extensions.sta",
+        "companion Animal { pub def move_to: Animal -> Animal = animal => animal }\n",
+    );
+    fixture.write(
+        "main.sta",
+        "use animals.Animal\nlet moved: Animal = Animal.move_to 1\n",
+    );
+
+    fixture
+        .compile()
+        .expect("an unreachable file's companion should be discovered");
 }
 
 #[test]
@@ -375,11 +393,11 @@ fn dotted_import_combines_a_type_with_a_same_named_file_module() {
 }
 
 #[test]
-fn dotted_import_preserves_a_reexported_type_and_module_pair() {
+fn dotted_import_preserves_a_reexported_type_and_companion_pair() {
     let fixture = Fixture::new();
     fixture.write(
         "library.sta",
-        "pub type alias User = I32\npub mod User { pub let id: I32 = 42 }\n",
+        "pub type alias User = I32\ncompanion User { pub let id: I32 = 42 }\n",
     );
     fixture.write("facade.sta", "pub use library.User\n");
     fixture.write(
@@ -389,7 +407,7 @@ fn dotted_import_preserves_a_reexported_type_and_module_pair() {
 
     fixture
         .compile()
-        .expect("reexports should preserve a same-named type and module");
+        .expect("reexports should preserve a type and companion pair");
 }
 
 #[test]

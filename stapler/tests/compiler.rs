@@ -3148,6 +3148,23 @@ fn expands_standard_typegroup_into_module_variants_and_alias() {
 }
 
 #[test]
+fn resolves_and_merges_type_companion_items() {
+    type_check(concat!(
+        "type alias Animal = I32\n",
+        "let offset: I32 = 1\n",
+        "companion Animal { pub def move_to = animal: Animal => animal + offset }\n",
+        "companion Animal { pub def stop = animal: Animal => animal }\n",
+        "let moved: Animal = Animal.move_to 1\n",
+        "let stopped: Animal = Animal.stop moved\n",
+    ));
+    type_check(concat!(
+        "type alias Box T = (value: T)\n",
+        "companion<T> Box T { pub def box_identity: Box T -> Box T = box => box }\n",
+        "let identity: Box I32 -> Box I32 = Box.box_identity\n",
+    ));
+}
+
+#[test]
 fn typegroup_supports_generic_groups_and_reexports_their_variants() {
     let module = type_check(concat!(
         "pub(repr) typegroup Maybe T {\n",

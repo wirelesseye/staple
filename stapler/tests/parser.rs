@@ -913,6 +913,20 @@ fn parses_declaration_style_item_macro_punctuation_losslessly() {
 }
 
 #[test]
+fn parses_type_companion_blocks_losslessly() {
+    let source = concat!(
+        "companion Animal { pub def move_to = animal => animal }\n",
+        "companion<T where Bound T> Box T { def value = () => 1 }\n",
+    );
+    let root = parse(source).expect("companion blocks should parse");
+    assert_eq!(root.text(), source);
+    assert!(matches!(&root.items[0], Item::Submodule(module) if module.companion && module.name == "Animal"));
+    assert!(matches!(&root.items[1], Item::Submodule(module) if module.companion && module.name == "Box"));
+    assert!(parse("pub companion Animal {}\n").is_err());
+    assert!(parse("companion (I32, I32) {}\n").is_err());
+}
+
+#[test]
 fn parses_grouped_type_and_pattern_macro_arguments_losslessly() {
     let source = concat!(
         "inspect_type (I32 -> I32)\n",

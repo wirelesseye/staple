@@ -613,6 +613,29 @@ pub mod api {
 }
 ```
 
+### Type companions
+
+Named types and type aliases may have companion items. A companion behaves as
+the type's namespace, so its public members are selected through the type name:
+
+```staple
+type Animal = I32
+
+companion Animal {
+    pub def move_to = animal: Animal => animal
+}
+
+let moved = Animal.move_to 1
+```
+
+More than one companion block may contribute to the same type. Companion
+blocks have no visibility of their own; visibility is declared on their items.
+Their bodies can refer directly to declarations in the containing module.
+Generic and constrained targets use the same bracketed parameter syntax as
+trait implementations, for example `companion<T where Bound T> Box T`.
+Ordinary `mod` declarations may not share a name with a type; use `companion`
+when defining a type-qualified namespace.
+
 An external import resolves the longest existing `.sta` file prefix and then
 traverses public inline submodules. Thus `use library.api.answer` first prefers
 `library/api.sta`; if that file does not exist, it loads `library.sta` and looks

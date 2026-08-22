@@ -136,7 +136,7 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match body {
                 let items = typegroup_items item_visibility elements
                 let sum: Type = typegroup_sum group elements
                 parse_quote {
-                    $public_visibility mod $group {
+                    companion $group {
                         $items...
                     }
                     $public_visibility type alias $group = $sum
@@ -149,7 +149,7 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match body {
                 let items = typegroup_generic_items generic_item_visibility parameter_syntax elements
                 let sum = typegroup_generic_sum_syntax group parameter_syntax elements
                 parse_quote {
-                    $generic_public_visibility mod $group {
+                    companion $group {
                         $items
                     }
                     $generic_public_visibility type alias $group $parameter_syntax = $sum

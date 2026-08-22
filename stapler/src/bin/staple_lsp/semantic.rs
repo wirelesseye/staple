@@ -121,6 +121,7 @@ impl<'a> Classifier<'a> {
                 | TokenKind::Extern
                 | TokenKind::Type
                 | TokenKind::Mod
+                | TokenKind::Companion
                 | TokenKind::Macro
                 | TokenKind::Trait
                 | TokenKind::Impl

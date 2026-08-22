@@ -4,15 +4,18 @@ use std.io.println
 pub type alias Number = I32
 pub(repr) type UserId = Number
 pub(repr) type Box T = (value: T)
-type Enabled
-type Disabled
-type alias Switch = Enabled | Disabled
+
+typegroup Switch {
+    Enabled,
+    Disabled
+}
+use Switch.*
 
 def unbox: <T> Box T -> T = Box value => value
 
 def switch_number = switch: Switch => match switch {
-    Enabled() => 1,
-    Disabled() => 0,
+    Enabled => 1,
+    Disabled => 0,
 }
 
 // A wildcard arm can make a product match exhaustive.

@@ -325,6 +325,10 @@ impl Grammar {
             Some(TokenKind::Mod) => self
                 .parse_submodule(visibility, item_start)
                 .map(Item::Submodule),
+            Some(TokenKind::Companion) if visibility == Visibility::Private => self
+                .parse_companion(item_start)
+                .map(Item::Submodule),
+            Some(TokenKind::Companion) => Err(self.error("companion blocks cannot be public")),
             Some(TokenKind::Extern) => self
                 .parse_extern_block(visibility, item_start)
                 .map(Item::ExternBlock),
@@ -422,6 +426,53 @@ impl Grammar {
             visibility,
             name,
             module,
+            companion: false,
+            type_parameters: Vec::new(),
+            trait_bounds: Vec::new(),
+            subtype_bounds: Vec::new(),
+        })
+    }
+
+    fn parse_companion(&mut self, start: usize) -> Result<Submodule, ParseError> {
+        self.expect(TokenKind::Companion, "expected `companion`")?;
+        let (type_parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
+        let target = self.parse_type()?;
+        let name = companion_target_name(&target)
+            .ok_or_else(|| self.error("companion target must be a named type or type alias"))?;
+        self.expect(TokenKind::LBrace, "expected `{` after companion target")?;
+        let module_start = self.position;
+        let mut items = Vec::new();
+        while self.peek().is_some() && !self.at(TokenKind::RBrace) {
+            items.push(self.parse_item()?);
+            self.eat(TokenKind::Semicolon);
+        }
+        if self.peek().is_none() {
+            return Err(self.error("expected `}` after companion items"));
+        }
+        for item in &mut items {
+            if let Item::Binding(binding) = item {
+                let mut parameters = type_parameters.clone();
+                parameters.extend(binding.type_parameters.clone());
+                binding.type_parameters = parameters;
+                let mut bounds = trait_bounds.clone();
+                bounds.extend(binding.trait_bounds.clone());
+                binding.trait_bounds = bounds;
+                let mut bounds = subtype_bounds.clone();
+                bounds.extend(binding.subtype_bounds.clone());
+                binding.subtype_bounds = bounds;
+            }
+        }
+        let module = Module { syntax: self.syntax(module_start), items };
+        self.expect(TokenKind::RBrace, "expected `}` after companion items")?;
+        Ok(Submodule {
+            syntax: self.syntax(start),
+            visibility: Visibility::Public,
+            name,
+            module,
+            companion: true,
+            type_parameters,
+            trait_bounds,
+            subtype_bounds,
         })
     }
 
@@ -817,6 +868,9 @@ impl Grammar {
                 .map(Item::Binding),
             Some(TokenKind::Mod) => self
                 .parse_submodule(visibility, start.unwrap_or(self.position))
+                .map(Item::Submodule),
+            Some(TokenKind::Companion) if visibility == Visibility::Private => self
+                .parse_companion(start.unwrap_or(self.position))
                 .map(Item::Submodule),
             Some(TokenKind::Type) => self
                 .parse_type_declaration(visibility, Visibility::Private, start.unwrap_or(self.position))
@@ -2770,6 +2824,15 @@ fn split_trait_arguments(mut ty: Type) -> Vec<Type> {
     arguments.push(ty);
     arguments.reverse();
     arguments
+}
+
+fn companion_target_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Named(named) => Some(named.name.clone()),
+        Type::Application(application) => companion_target_name(&application.callee),
+        Type::Splice(splice) => Some(format!("${}", splice.name)),
+        _ => None,
+    }
 }
 
 /// Marks every binding pattern reachable from `pattern` as reassignable, used

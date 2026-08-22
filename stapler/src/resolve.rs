@@ -928,6 +928,18 @@ impl NameResolver {
             self.install_prelude(&program, source_module.id);
             self.install_imports(&program, source_module.id);
             self.install_local_traits(source_module.id);
+            if source_module.companion
+                && let Some(parent) = source_module.parent
+            {
+                self.scopes
+                    .last_mut()
+                    .expect("resolver value scope")
+                    .extend(self.module_values[parent.0].clone());
+                self.imported_types
+                    .last_mut()
+                    .expect("resolver type scope")
+                    .extend(self.declared_types[parent.0].clone());
+            }
             self.predeclare_items(&source_module.syntax.items);
             self.record_visible_module_definitions(source_module.id);
             for item in &source_module.syntax.items {
@@ -1600,6 +1612,20 @@ impl NameResolver {
             for declaration in block_type_declarations {
                 self.register_type_declaration(source_module.id, declaration, false);
             }
+            for item in &source_module.syntax.items {
+                if let Item::Submodule(submodule) = item
+                    && !submodule.companion
+                    && self.declared_types[source_module.id.0].contains_key(&submodule.name)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        submodule.syntax.span.clone(),
+                        format!(
+                            "module `{}` conflicts with a type of the same name; use `companion` to add type items",
+                            submodule.name
+                        ),
+                    ));
+                }
+            }
         }
         self.collect_reexports(program);
     }
@@ -1677,6 +1703,19 @@ impl NameResolver {
         self.definition_context_namespaces = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
+        // Unlike an ordinary inline module, a companion is an extension of
+        // its declaring module's type namespace. Its body therefore sees the
+        // parent's declarations without spelling `use super.*`.
+        for module in program.modules() {
+            if module.companion
+                && let Some(parent) = module.parent
+            {
+                self.definition_context_values[module.id.0]
+                    .extend(self.module_values[parent.0].clone());
+                self.definition_context_types[module.id.0]
+                    .extend(self.declared_types[parent.0].clone());
+            }
+        }
         for module in program.modules() {
             for (namespace, target) in program.root_qualified_modules(module.id) {
                 self.definition_context_namespaces[module.id.0]
@@ -2011,13 +2050,12 @@ impl NameResolver {
             let Some(child) = program.child_module(submodule.syntax.id) else {
                 continue;
             };
-            if self
+            let previous = self
                 .namespaces
                 .last_mut()
                 .expect("resolver namespace scope")
-                .insert(submodule.name.clone(), child)
-                .is_some()
-            {
+                .insert(submodule.name.clone(), child);
+            if previous.is_some_and(|previous| previous != child) {
                 self.duplicate_import(&submodule.name, submodule.syntax.span.clone());
             }
         }
