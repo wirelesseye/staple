@@ -619,13 +619,14 @@ Named types and type aliases may have companion items. A companion behaves as
 the type's namespace, so its public members are selected through the type name:
 
 ```staple
-type Animal = I32
+type Animal = ...
 
 companion Animal {
-    pub def move_to = animal: Animal => animal
+    pub def move_to = animal: Animal => position: (F32, F32) => animal
 }
 
-let moved = Animal.move_to 1
+let animal: Animal = ...
+let moved = Animal.move_to animal (1.0, 1.0)
 ```
 
 Companion functions can also be called with postfix method syntax. The
