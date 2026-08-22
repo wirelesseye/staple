@@ -2,8 +2,8 @@ use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
-    MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program,
-    ResolvedMacro, Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
+    LogicalOperator, MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern,
+    Program, ResolvedMacro, Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
     VisibilityKind, VisibilitySyntax,
 };
 
@@ -3252,6 +3252,32 @@ impl MacroExpander {
                 ));
                 None
             }
+            Expression::Logical(logical) => {
+                let left = self.eval_expression(module, &logical.left, environment)?;
+                let Value::Nominal(name, _) = &left else {
+                    self.diagnostics.push(Diagnostic::new(
+                        logical.left.syntax().span.clone(),
+                        "compile-time `&&`/`||` requires a `Bool` value",
+                    ));
+                    return None;
+                };
+                let short_circuits = match (logical.operator, name.as_str()) {
+                    (LogicalOperator::And, "False") | (LogicalOperator::Or, "True") => true,
+                    (LogicalOperator::And, "True") | (LogicalOperator::Or, "False") => false,
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            logical.left.syntax().span.clone(),
+                            "compile-time `&&`/`||` requires a `Bool` value",
+                        ));
+                        return None;
+                    }
+                };
+                if short_circuits {
+                    Some(left)
+                } else {
+                    self.eval_expression(module, &logical.right, environment)
+                }
+            }
             Expression::Loop(loop_) => {
                 self.diagnostics.push(Diagnostic::new(
                     loop_.syntax.span.clone(),
@@ -4416,6 +4442,11 @@ impl MacroExpander {
             Expression::Index(index) => {
                 self.freshen_expression(&mut index.value, module, mark);
                 self.freshen_expression(&mut index.index, module, mark);
+            }
+            Expression::Logical(logical) => {
+                self.freshen_expression(&mut logical.left, module, mark);
+                self.freshen_expression(&mut logical.right, module, mark);
+                freshen_type(self, &mut logical.bool_type, module, mark);
             }
             Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
@@ -5955,6 +5986,9 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
             .arms
             .iter()
             .any(|arm| obviously_not_syntax(&arm.body, 0)),
+        Expression::Logical(logical) => {
+            obviously_not_syntax(&logical.left, 0) || obviously_not_syntax(&logical.right, 0)
+        }
         Expression::Loop(_) => true,
         Expression::Resource(_) | Expression::With(_) => true,
         Expression::Block(block) => {
@@ -6536,6 +6570,11 @@ fn substitute_splices(
         Expression::Index(index) => {
             *index.value = substitute_splices(&index.value, environment, diagnostics)?;
             *index.index = substitute_splices(&index.index, environment, diagnostics)?;
+        }
+        Expression::Logical(logical) => {
+            *logical.left = substitute_splices(&logical.left, environment, diagnostics)?;
+            *logical.right = substitute_splices(&logical.right, environment, diagnostics)?;
+            substitute_type(&mut logical.bool_type, environment, diagnostics)?;
         }
         Expression::Quote(_) => {}
         Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
@@ -7559,6 +7598,10 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut index.value, mark, scopes);
             alpha_rename_expression(&mut index.index, mark, scopes);
         }
+        Expression::Logical(logical) => {
+            alpha_rename_expression(&mut logical.left, mark, scopes);
+            alpha_rename_expression(&mut logical.right, mark, scopes);
+        }
         Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)
         | Expression::Quote(_)
@@ -7634,6 +7677,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Call(value) => &mut value.syntax,
         Expression::Access(value) => &mut value.syntax,
         Expression::Index(value) => &mut value.syntax,
+        Expression::Logical(value) => &mut value.syntax,
         Expression::SyntaxArgument(value) => &mut value.syntax,
         Expression::VisibilityArgument(value) => &mut value.syntax,
         Expression::Quote(value) => &mut value.syntax,

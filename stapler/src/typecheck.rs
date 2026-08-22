@@ -113,6 +113,14 @@ pub struct CheckedMatch {
     pub source: CheckedType,
 }
 
+/// The resolved `Bool` type for one `&&`/`||` expression, recorded so
+/// codegen can extract the sum tag without re-resolving the operator's
+/// synthesized `bool_type` annotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedLogical {
+    pub bool_type: CheckedType,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedAccess {
     pub index: usize,
@@ -664,6 +672,7 @@ pub struct TypedModule {
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
     propagations: HashMap<SyntaxId, CheckedPropagation>,
     matches: HashMap<SyntaxId, CheckedMatch>,
+    logicals: HashMap<SyntaxId, CheckedLogical>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
     string_representation: Option<CheckedType>,
@@ -743,6 +752,10 @@ impl TypedModule {
 
     pub fn match_for(&self, syntax_id: SyntaxId) -> Option<&CheckedMatch> {
         self.matches.get(&syntax_id)
+    }
+
+    pub fn logical_for(&self, syntax_id: SyntaxId) -> Option<&CheckedLogical> {
+        self.logicals.get(&syntax_id)
     }
 
     pub fn access_for(&self, syntax_id: SyntaxId) -> Option<&CheckedAccess> {
@@ -1002,6 +1015,7 @@ pub struct TypeChecker {
     expression_coercions: HashMap<SyntaxId, CheckedCoercion>,
     propagations: HashMap<SyntaxId, CheckedPropagation>,
     matches: HashMap<SyntaxId, CheckedMatch>,
+    logicals: HashMap<SyntaxId, CheckedLogical>,
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
     method_symbols: HashMap<SyntaxId, SymbolId>,
@@ -1175,6 +1189,7 @@ impl TypeChecker {
             expression_coercions: self.expression_coercions,
             propagations: self.propagations,
             matches: self.matches,
+            logicals: self.logicals,
             accesses: self.accesses,
             pattern_types: self.pattern_types,
             string_representation: self.string_representation,
@@ -2760,6 +2775,13 @@ impl TypeChecker {
                     &value.index,
                     target_parameters,
                 )),
+            Expression::Logical(value) => self
+                .expression_resources_now(module, &value.left, target_parameters)
+                .union(&self.expression_resources_now(
+                    module,
+                    &value.right,
+                    target_parameters,
+                )),
             Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
             | Expression::Quote(_)
@@ -3292,6 +3314,10 @@ impl TypeChecker {
                 self.refresh_expression_function_types(module, &value.value)
                     | self.refresh_expression_function_types(module, &value.index)
             }
+            Expression::Logical(value) => {
+                self.refresh_expression_function_types(module, &value.left)
+                    | self.refresh_expression_function_types(module, &value.right)
+            }
             Expression::Resource(_)
             | Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
@@ -3460,6 +3486,20 @@ impl TypeChecker {
                 self.record_expression_resources(
                     module,
                     &value.index,
+                    target_parameters,
+                    current_module,
+                );
+            }
+            Expression::Logical(value) => {
+                self.record_expression_resources(
+                    module,
+                    &value.left,
+                    target_parameters,
+                    current_module,
+                );
+                self.record_expression_resources(
+                    module,
+                    &value.right,
                     target_parameters,
                     current_module,
                 );
@@ -4482,6 +4522,7 @@ impl TypeChecker {
                 self.check_expression_expected(module, &satisfies.value, Some(&annotation))
             }
             Expression::Match(match_) => self.check_match_expression(module, match_, expected),
+            Expression::Logical(logical) => self.check_logical_expression(module, logical),
             Expression::Loop(loop_) => self.check_loop_expression(module, loop_, expected),
             Expression::Resource(resource) => {
                 let resources = self.resolve_resource_set(
@@ -5184,6 +5225,34 @@ impl TypeChecker {
             }
         };
         self.finish_expression_type(expression, natural_type, expected)
+    }
+
+    /// `&&`/`||` are not trait-based: both operands and the result are
+    /// always `Bool`, resolved from the operator's own synthesized
+    /// annotation rather than from user-overloadable trait dispatch. `right`
+    /// is checked as its own branch, isolated from `left`'s control flow, so
+    /// a `return`/`break` inside `right` never makes the whole expression
+    /// look like it unconditionally diverges: the short-circuit path never
+    /// evaluates `right` at all.
+    fn check_logical_expression(
+        &mut self,
+        module: &ResolvedModule,
+        logical: &crate::LogicalExpression,
+    ) -> CheckedType {
+        let bool_type = self.resolve_source_type(module, &logical.bool_type);
+        self.check_expression_expected(module, &logical.left, Some(&bool_type));
+        if self.did_return {
+            return CheckedType::empty_product();
+        }
+        self.check_expression_expected(module, &logical.right, Some(&bool_type));
+        self.did_return = false;
+        self.logicals.insert(
+            logical.syntax.id,
+            CheckedLogical {
+                bool_type: bool_type.clone(),
+            },
+        );
+        bool_type
     }
 
     fn check_match_expression(

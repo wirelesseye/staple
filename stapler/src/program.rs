@@ -1496,6 +1496,10 @@ fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Su
             find_block_submodules_in_expression(&index.value, out);
             find_block_submodules_in_expression(&index.index, out);
         }
+        Expression::Logical(logical) => {
+            find_block_submodules_in_expression(&logical.left, out);
+            find_block_submodules_in_expression(&logical.right, out);
+        }
         Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)
         | Expression::Quote(_)
@@ -1638,6 +1642,10 @@ fn find_block_use_declarations_in_expression(expression: &Expression, out: &mut 
         Expression::Index(index) => {
             find_block_use_declarations_in_expression(&index.value, out);
             find_block_use_declarations_in_expression(&index.index, out);
+        }
+        Expression::Logical(logical) => {
+            find_block_use_declarations_in_expression(&logical.left, out);
+            find_block_use_declarations_in_expression(&logical.right, out);
         }
         Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)

@@ -13,6 +13,7 @@ pub enum Expression {
     Call(CallExpression),
     Access(AccessExpression),
     Index(IndexExpression),
+    Logical(LogicalExpression),
     SyntaxArgument(SyntaxArgumentExpression),
     VisibilityArgument(VisibilitySyntax),
     Quote(QuoteExpression),
@@ -38,6 +39,7 @@ impl Expression {
             Self::Call(expression) => &expression.syntax,
             Self::Access(expression) => &expression.syntax,
             Self::Index(expression) => &expression.syntax,
+            Self::Logical(expression) => &expression.syntax,
             Self::SyntaxArgument(expression) => &expression.syntax,
             Self::VisibilityArgument(expression) => &expression.syntax,
             Self::Quote(expression) => &expression.syntax,
@@ -201,6 +203,26 @@ pub struct IndexExpression {
     pub syntax: Syntax,
     pub value: Box<Expression>,
     pub index: Box<Expression>,
+}
+
+/// `&&`/`||`. Not backed by a trait: the operands and result are always
+/// `Bool`, and `right` is evaluated only when needed to determine the
+/// result. `bool_type` is a compiler-synthesized reference to the prelude
+/// `Bool` type, tied to the operator's own span, so name resolution and type
+/// checking can resolve it exactly like a hand-written annotation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalExpression {
+    pub syntax: Syntax,
+    pub operator: LogicalOperator,
+    pub left: Box<Expression>,
+    pub right: Box<Expression>,
+    pub bool_type: Type,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogicalOperator {
+    And,
+    Or,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

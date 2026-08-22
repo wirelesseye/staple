@@ -6896,3 +6896,36 @@ fn pub_repr_type_constructor_satisfies_its_own_subtype_bound() {
         .compile_module(&module)
         .expect("distinct type whose representation is a bare bounded parameter should compile");
 }
+
+#[test]
+fn checks_and_generates_short_circuiting_logical_operators() {
+    let module = type_check(concat!(
+        "def positive_and_small: I32 -> Bool = n => n > 0 && n < 10\n",
+        "def zero_or_one: I32 -> Bool = n => n == 0 || n == 1\n",
+        // `&&` binds tighter than `||`, and both are left-associative chains
+        // rather than the non-associative comparison/range operators.
+        "def chained: I32 -> Bool = n => n > 0 && n < 10 || n == 20 || n == 21\n",
+        // Bare `True`/`False` literals must not hit the singleton-narrowing
+        // that a hand-written `match True { ... }` would.
+        "def literals: () -> Bool = () => True && False || True\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("`&&`/`||` should compile to short-circuiting branches");
+    assert!(llvm.contains("logical.short_circuit"));
+    assert!(llvm.contains("logical.right"));
+    assert!(llvm.contains("logical.merge"));
+}
+
+#[test]
+fn rejects_non_bool_logical_operands() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def bad: (I32, I32) -> I32 = (a, b) => a && b\n"))
+        .expect_err("`&&` requires `Bool` operands, and is not overloadable for `I32`");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("True | False"))
+    );
+}

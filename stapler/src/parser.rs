@@ -1392,7 +1392,7 @@ impl Grammar {
             Err(error) => error,
         };
         self.position = checkpoint;
-        let mut expression = self.parse_range_expression()?;
+        let mut expression = self.parse_or_expression()?;
         while self.eat(TokenKind::Satisfies) {
             let previous = self.newline_terminates_type;
             let previous_any = self.any_newline_terminates_type;
@@ -1836,6 +1836,74 @@ impl Grammar {
         ("<", "PartialOrd", "lt"),
         (">", "PartialOrd", "gt"),
     ];
+
+    /// Parses `||` (precedence 1, left-associative), producing a
+    /// `LogicalExpression` rather than desugaring to a call: `||` is not
+    /// backed by a trait and cannot be overloaded, and the right operand must
+    /// be evaluated lazily.
+    fn parse_or_expression(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        let mut expression = self.parse_and_expression()?;
+        loop {
+            if self.newline_terminates_expression && self.has_newline_before_next_token() {
+                break;
+            }
+            let operator_start = self.position;
+            if !self.eat_operator("||") {
+                break;
+            }
+            let bool_type = self.bool_type(operator_start);
+            let right = self.parse_and_expression()?;
+            expression = Expression::Logical(LogicalExpression {
+                syntax: self.syntax(start),
+                operator: LogicalOperator::Or,
+                left: Box::new(expression),
+                right: Box::new(right),
+                bool_type,
+            });
+        }
+        Ok(expression)
+    }
+
+    /// Parses `&&` (precedence 2, left-associative), producing a
+    /// `LogicalExpression` rather than desugaring to a call: `&&` is not
+    /// backed by a trait and cannot be overloaded, and the right operand must
+    /// be evaluated lazily.
+    fn parse_and_expression(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        let mut expression = self.parse_range_expression()?;
+        loop {
+            if self.newline_terminates_expression && self.has_newline_before_next_token() {
+                break;
+            }
+            let operator_start = self.position;
+            if !self.eat_operator("&&") {
+                break;
+            }
+            let bool_type = self.bool_type(operator_start);
+            let right = self.parse_range_expression()?;
+            expression = Expression::Logical(LogicalExpression {
+                syntax: self.syntax(start),
+                operator: LogicalOperator::And,
+                left: Box::new(expression),
+                right: Box::new(right),
+                bool_type,
+            });
+        }
+        Ok(expression)
+    }
+
+    /// Builds a reference to the prelude `Bool` type, tied to the operator's
+    /// own span. Must be called immediately after consuming the operator
+    /// token and before parsing the right operand; see
+    /// `apply_trait_operator`.
+    fn bool_type(&mut self, start: usize) -> Type {
+        Type::Named(NamedType {
+            syntax: self.syntax(start),
+            namespace: None,
+            name: "Bool".to_owned(),
+        })
+    }
 
     /// Parses a `..`/`..=` range expression (precedence 3, non-associative),
     /// desugaring directly to a call to the prelude's `range`/`range_inclusive`

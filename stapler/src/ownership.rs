@@ -265,6 +265,18 @@ impl<'a> OwnershipChecker<'a> {
                 self.check_expression(&value.index, true);
                 true
             }
+            Expression::Logical(value) => {
+                self.check_expression(&value.left, true);
+                let outer = self.states.clone();
+                let short_circuit_states = outer.clone();
+                let right_continues = self.check_expression(&value.right, consume);
+                let mut continuing = vec![short_circuit_states];
+                if right_continues {
+                    continuing.push(self.states.clone());
+                }
+                self.states = merge_states(&outer, &continuing);
+                true
+            }
             Expression::Name(value) => {
                 if let Some(symbol) = self.module.symbol_for(value.syntax.id) {
                     self.use_symbol(symbol, &value.syntax, consume);

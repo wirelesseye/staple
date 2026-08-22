@@ -3078,6 +3078,7 @@ impl NameResolver {
                 }
             }
             Expression::Index(value) => { self.resolve_quoted_expression(&value.value, scopes); self.resolve_quoted_expression(&value.index, scopes); }
+            Expression::Logical(value) => { self.resolve_quoted_expression(&value.left, scopes); self.resolve_quoted_expression(&value.right, scopes); }
             Expression::Quote(_) | Expression::Splice(_) | Expression::Resource(_) | Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) | Expression::String(_) | Expression::CString(_) | Expression::Integer(_) | Expression::Float(_) => {}
         }
     }
@@ -3443,6 +3444,11 @@ impl NameResolver {
             Expression::Index(index) => {
                 self.resolve_expression(&index.value, None, None);
                 self.resolve_expression(&index.index, None, None);
+            }
+            Expression::Logical(logical) => {
+                self.resolve_type(&logical.bool_type);
+                self.resolve_expression(&logical.left, None, None);
+                self.resolve_expression(&logical.right, None, None);
             }
             Expression::Name(name) => match (
                 name.syntax
@@ -4623,6 +4629,10 @@ impl<'a> InitializationAnalyzer<'a> {
                 self.expression(&index.value, local, outer);
                 self.expression(&index.index, local, outer);
             }
+            Expression::Logical(logical) => {
+                self.expression(&logical.left, local, outer);
+                self.expression(&logical.right, local, outer);
+            }
             Expression::Name(name) => {
                 if let Some(symbol) = self.module.symbol_for(name.syntax.id) {
                     self.read(
@@ -4828,6 +4838,10 @@ fn find_block_type_declarations_in_expression<'a>(
         Expression::Index(index) => {
             find_block_type_declarations_in_expression(&index.value, out);
             find_block_type_declarations_in_expression(&index.index, out);
+        }
+        Expression::Logical(logical) => {
+            find_block_type_declarations_in_expression(&logical.left, out);
+            find_block_type_declarations_in_expression(&logical.right, out);
         }
         Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)

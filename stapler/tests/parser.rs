@@ -1,6 +1,6 @@
 use stapler::{
-    Accessor, Expression, Item, Pattern, TokenKind, Type, TypeDeclarationKind, UseKind,
-    Visibility, parse,
+    Accessor, Expression, Item, LogicalOperator, Pattern, TokenKind, Type, TypeDeclarationKind,
+    UseKind, Visibility, parse,
 };
 
 #[test]
@@ -1079,6 +1079,58 @@ fn parses_mixed_precedence_builtin_operator_expression() {
     );
     assert!(matches!(&multiply_access.accessor, Accessor::Name(name) if name == "multiply"));
     assert_eq!(root.text(), source);
+}
+
+#[test]
+fn parses_logical_and_or_as_dedicated_nodes_not_calls() {
+    let source = "a && b || c\n";
+    let root = parse(source).expect("logical operator expression should parse");
+    let Item::Expression(Expression::Logical(or)) = statement(&root.items[0]) else {
+        panic!("expected top-level `||` as a `Logical` node, not a desugared call");
+    };
+    assert_eq!(or.operator, LogicalOperator::Or);
+    let Expression::Logical(and) = or.left.as_ref() else {
+        panic!("expected `&&` to bind tighter than `||`");
+    };
+    assert_eq!(and.operator, LogicalOperator::And);
+    assert!(matches!(and.left.as_ref(), Expression::Name(name) if name.name == "a"));
+    assert!(matches!(and.right.as_ref(), Expression::Name(name) if name.name == "b"));
+    assert!(matches!(or.right.as_ref(), Expression::Name(name) if name.name == "c"));
+    assert_eq!(root.text(), source);
+}
+
+#[test]
+fn parses_left_associative_logical_and_chains() {
+    let source = "a && b && c\n";
+    let root = parse(source).expect("chained `&&` should parse");
+    let Item::Expression(Expression::Logical(outer)) = statement(&root.items[0]) else {
+        panic!("expected `&&` chain to parse as `Logical` nodes");
+    };
+    assert_eq!(outer.operator, LogicalOperator::And);
+    assert!(matches!(outer.right.as_ref(), Expression::Name(name) if name.name == "c"));
+    let Expression::Logical(inner) = outer.left.as_ref() else {
+        panic!("expected `a && b` nested under the outer `&&`, confirming left-associativity");
+    };
+    assert_eq!(inner.operator, LogicalOperator::And);
+    assert!(matches!(inner.left.as_ref(), Expression::Name(name) if name.name == "a"));
+    assert!(matches!(inner.right.as_ref(), Expression::Name(name) if name.name == "b"));
+}
+
+#[test]
+fn logical_operators_bind_looser_than_comparisons() {
+    let source = "1 == 1 && 2 == 2\n";
+    let root = parse(source).expect("`&&` mixed with comparisons should parse");
+    let Item::Expression(Expression::Logical(and)) = statement(&root.items[0]) else {
+        panic!("expected `&&` at the top, binding looser than `==`");
+    };
+    assert_eq!(and.operator, LogicalOperator::And);
+    assert!(matches!(and.left.as_ref(), Expression::Call(_)));
+    assert!(matches!(and.right.as_ref(), Expression::Call(_)));
+}
+
+#[test]
+fn allows_chaining_logical_operators_unlike_comparisons() {
+    parse("a && b && c || d\n").expect("`&&`/`||` are associative and may be chained freely");
 }
 
 #[test]

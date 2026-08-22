@@ -382,6 +382,10 @@ impl Collector<'_> {
                 self.expression(&value.value, module_index);
                 self.expression(&value.index, module_index);
             }
+            Expression::Logical(value) => {
+                self.expression(&value.left, module_index);
+                self.expression(&value.right, module_index);
+            }
             Expression::Quote(value) => match &value.template {
                 QuoteTemplate::Expression(value) => self.expression(value, module_index),
                 QuoteTemplate::Item(value) => self.item(value, module_index),

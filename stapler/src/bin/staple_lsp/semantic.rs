@@ -656,6 +656,10 @@ impl<'a> Classifier<'a> {
                 self.expression_with_mod(&value.value, resolved, modifiers);
                 self.expression(&value.index, resolved);
             }
+            Expression::Logical(value) => {
+                self.expression(&value.left, resolved);
+                self.expression(&value.right, resolved);
+            }
             Expression::SyntaxArgument(_) => {}
             Expression::VisibilityArgument(value) => self.visibility(value),
             Expression::Quote(value) => {

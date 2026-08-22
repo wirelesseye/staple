@@ -195,6 +195,10 @@ impl Collector<'_> {
                 self.collect_expression_declarations(&index.value);
                 self.collect_expression_declarations(&index.index);
             }
+            Expression::Logical(logical) => {
+                self.collect_expression_declarations(&logical.left);
+                self.collect_expression_declarations(&logical.right);
+            }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(quote) => match &quote.template {
                 QuoteTemplate::Expression(expression) => {
@@ -827,6 +831,11 @@ impl Collector<'_> {
             Expression::Index(index) => {
                 self.expression(&index.value);
                 self.expression(&index.index);
+            }
+            Expression::Logical(logical) => {
+                self.expression(&logical.left);
+                self.expression(&logical.right);
+                self.ty(&logical.bool_type);
             }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(quote) => {

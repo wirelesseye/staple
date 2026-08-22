@@ -896,6 +896,8 @@ implemented with function overloading:
 | `+`, `-` | 6 | left | `Add.add`, `Subtract.subtract` |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | 4 | none | `Eq.equal`/`Eq.not_equal`, `PartialOrd.lt`/`le`/`gt`/`ge` |
 | `..`, `..=` | 3 | none | the prelude's `range`/`range_inclusive` functions |
+| `&&` | 2 | left | not a call; see below |
+| `\|\|` | 1 | left | not a call; see below |
 
 Function application and access bind tighter than every operator above.
 Chaining two non-associative operators at the same precedence (for example
@@ -904,6 +906,23 @@ integer implementations of `Add`, `Subtract`, `Multiply`, `Divide`, `Eq`, and
 `PartialOrd` are backed by private compiler intrinsics. `..`/`..=` are not
 trait-based: they call the prelude's `range`/`range_inclusive` functions
 directly, which construct `Range T`/`RangeInclusive T` values.
+
+`&&` and `||` are boolean and/or. Unlike every other operator, they are not
+backed by a trait and cannot be overloaded: both operands and the result are
+always `Bool`. They short-circuit — `right` is only evaluated when its value
+is needed to determine the result, so side effects in `right` do not happen
+otherwise:
+
+```staple
+def positive_and_even = n: I32 => n > 0 && n % 2 == 0
+```
+
+`a && b` evaluates `a`; if it is `False`, the result is `False` without
+evaluating `b`, otherwise the result is `b`. `a || b` evaluates `a`; if it is
+`True`, the result is `True` without evaluating `b`, otherwise the result is
+`b`. Both operators are left-associative and may be chained or mixed freely
+(`&&` binds tighter than `||`), unlike the non-associative comparison and
+range operators.
 
 ### Products
 
@@ -1723,7 +1742,9 @@ calls against the operator's trait method or prelude function.
 ```
 
 `1 + 2` desugars to `Add.add 1 2`; there is no way to write a custom infix
-operator or to pass a builtin operator as a bare value.
+operator or to pass a builtin operator as a bare value. `&&` and `||` are the
+exception: they do not desugar to a call at all, since a call would evaluate
+both operands eagerly and lose short-circuiting.
 
 ## Block expressions
 

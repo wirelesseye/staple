@@ -2328,6 +2328,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.compile_expression(environment, &satisfies.value)
             }
             Expression::Match(match_) => self.compile_match_expression(environment, match_),
+            Expression::Logical(logical) => self.compile_logical_expression(environment, logical),
             Expression::Loop(loop_) => self.compile_loop_expression(environment, loop_),
             Expression::Resource(resource) => {
                 let expected = self
@@ -3362,6 +3363,143 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map(|(value, block)| (value as &dyn BasicValue<'context>, *block))
             .collect::<Vec<_>>();
         phi.add_incoming(&incoming);
+        Ok(phi.as_basic_value().as_any_value_enum())
+    }
+
+    /// `&&`/`||` are not trait-based: codegen extracts `left`'s sum tag
+    /// directly and branches on it, rather than going through
+    /// `compile_match_pattern_branch`'s general (and here unneeded) pattern
+    /// dispatch. Unlike a `match`'s sequential per-arm retry loop, the two
+    /// outcomes here are genuinely exclusive successors of one conditional
+    /// branch, so there is no need for `compile_match_expression`'s
+    /// `branch_base`/`restore_local_state` bookkeeping between them — only
+    /// the evaluated `right` branch does any work, and its temporaries are
+    /// cleaned up with the same `drop_owned_since` used for a match arm.
+    fn compile_logical_expression(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        logical: &crate::LogicalExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let left = self.compile_expression(environment, &logical.left)?;
+        if environment.did_return {
+            return Ok(left);
+        }
+        let Some(left_value) = value_as_basic(left) else {
+            return Err(Diagnostic::new(
+                logical.left.syntax().span.clone(),
+                "logical operand is not first-class",
+            ));
+        };
+        let BasicValueEnum::StructValue(left_struct) = left_value else {
+            return Err(Diagnostic::new(
+                logical.left.syntax().span.clone(),
+                "`Bool` value has an invalid representation",
+            ));
+        };
+        let checked = self
+            .typed_module
+            .logical_for(logical.syntax.id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(logical.syntax.span.clone(), "missing checked logical")
+            })?;
+        let bool_type = substitute_type(checked.bool_type, &self.active_type_substitutions);
+        let CheckedType::Sum(sum) = &bool_type else {
+            return Err(Diagnostic::new(
+                logical.syntax.span.clone(),
+                "`&&`/`||` require `Bool` to be a sum type",
+            ));
+        };
+        let true_index = sum
+            .alternatives
+            .iter()
+            .position(|alternative| {
+                matches!(alternative, CheckedType::Distinct { name, .. } if name == "True")
+            })
+            .ok_or_else(|| {
+                Diagnostic::new(logical.syntax.span.clone(), "`Bool` has no `True` alternative")
+            })?;
+        let tag = self
+            .builder
+            .build_extract_value(left_struct, 0, "logical.tag")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let is_true = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                self.context.i32_type().const_int(true_index as u64, false),
+                "logical.is_true",
+            )
+            .map_err(compiler_diagnostic)?;
+
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .ok_or_else(|| {
+                Diagnostic::new(logical.syntax.span.clone(), "`&&`/`||` is not in a function")
+            })?;
+        let merge_block = self.context.append_basic_block(function, "logical.merge");
+        let right_block = self.context.append_basic_block(function, "logical.right");
+        let short_circuit_block = self
+            .context
+            .append_basic_block(function, "logical.short_circuit");
+        let (true_target, false_target) = match logical.operator {
+            crate::LogicalOperator::And => (right_block, short_circuit_block),
+            crate::LogicalOperator::Or => (short_circuit_block, right_block),
+        };
+        self.builder
+            .build_conditional_branch(is_true, true_target, false_target)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(short_circuit_block);
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(compiler_diagnostic)?;
+        let mut incoming = vec![(left_value, short_circuit_block)];
+
+        self.builder.position_at_end(right_block);
+        let owned_before = environment.owned_order.len();
+        environment.did_return = false;
+        let right = self.compile_expression(environment, &logical.right)?;
+        if !environment.did_return {
+            let right_value = value_as_basic(right).ok_or_else(|| {
+                Diagnostic::new(
+                    logical.right.syntax().span.clone(),
+                    "logical operand is not first-class",
+                )
+            })?;
+            self.drop_owned_since(environment, owned_before, logical.syntax.span.clone())?;
+            self.builder
+                .build_unconditional_branch(merge_block)
+                .map_err(compiler_diagnostic)?;
+            let predecessor = self
+                .builder
+                .get_insert_block()
+                .expect("logical right block");
+            incoming.push((right_value, predecessor));
+        } else {
+            let cleanup_start = owned_before.min(environment.owned_order.len());
+            for symbol in &environment.owned_order[cleanup_start..] {
+                environment.owned.remove(symbol);
+            }
+            environment.owned_order.truncate(cleanup_start);
+        }
+
+        self.builder.position_at_end(merge_block);
+        environment.did_return = false;
+        let result_type = self.compile_type(&bool_type)?;
+        let phi = self
+            .builder
+            .build_phi(result_type, "logical.value")
+            .map_err(compiler_diagnostic)?;
+        let incoming_refs = incoming
+            .iter()
+            .map(|(value, block)| (value as &dyn BasicValue<'context>, *block))
+            .collect::<Vec<_>>();
+        phi.add_incoming(&incoming_refs);
         Ok(phi.as_basic_value().as_any_value_enum())
     }
 
