@@ -40,6 +40,7 @@ struct MacroDefinition {
 enum MacroArgument {
     Expression(Expression),
     Visibility(VisibilitySyntax),
+    Sequence(Vec<Expression>),
 }
 
 #[derive(Clone)]
@@ -47,6 +48,7 @@ struct SelectedMacro {
     definition: MacroDefinition,
     arguments: Vec<MacroArgument>,
     consumed: usize,
+    effective_parameters: Vec<(MetaType, bool)>,
 }
 
 enum ModifierChainResult {
@@ -1026,11 +1028,11 @@ impl MacroExpander {
                     .declaration
                     .value
                     .as_ref()
-                    .is_some_and(invalid_delimited_collection_parameter)
+                    .is_some_and(invalid_separated_parameter)
             {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
-                    "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`",
+                    "`Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`",
                 ));
             }
             if let Some(annotation) = &definition.declaration.annotation
@@ -1039,10 +1041,9 @@ impl MacroExpander {
             {
                 self.diagnostics.push(Diagnostic::new(
                     annotation.syntax().span.clone(),
-                    if type_contains_named(annotation, "Sequence")
-                        || type_contains_named(annotation, "Separated")
+                    if type_contains_named(annotation, "Separated")
                     {
-                        "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
+                        "`Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
                     } else {
                         "a macro annotation must accept one or more syntax-category parameters and return a syntax category"
                     },
@@ -1058,16 +1059,7 @@ impl MacroExpander {
                     "`Optional` and product syntax shapes may only appear inside delimited contents",
                 ));
             }
-            if definition
-                .parameters
-                .iter()
-                .any(|parameter| matches!(parameter, MetaType::Sequence(_)))
-            {
-                self.diagnostics.push(Diagnostic::new(
-                    definition.declaration.syntax.span.clone(),
-                    "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`",
-                ));
-            }
+            validate_top_level_sequence(definition, &mut self.diagnostics);
             if definition.parameters.iter().any(invalid_raw_syntax_shape) {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
@@ -2503,10 +2495,11 @@ impl MacroExpander {
             .iter()
             .filter_map(|definition| {
                 match_macro_arguments(definition, arguments, call_visibility).map(
-                    |(matched_arguments, consumed)| SelectedMacro {
+                    |(matched_arguments, consumed, effective_parameters)| SelectedMacro {
                         definition: definition.clone(),
                         arguments: matched_arguments,
                         consumed,
+                        effective_parameters,
                     },
                 )
             })
@@ -2535,6 +2528,10 @@ impl MacroExpander {
             }
             if !has_visibility_parameters
                 && let [definition] = definitions.as_slice()
+                && !definition
+                    .parameters
+                    .iter()
+                    .any(|parameter| matches!(parameter, MetaType::Sequence(_)))
                 && arguments.len() >= definition.arity
             {
                 self.validate_macro_arguments(definition, &arguments[..definition.arity]);
@@ -2544,6 +2541,10 @@ impl MacroExpander {
                 .iter()
                 .filter(|definition| {
                     !has_visibility_parameters
+                        && !definition
+                            .parameters
+                            .iter()
+                            .any(|parameter| matches!(parameter, MetaType::Sequence(_)))
                         && arguments.len() < definition.arity
                         && definition
                             .parameters
@@ -2589,9 +2590,9 @@ impl MacroExpander {
             .filter(|candidate| {
                 !complete.iter().any(|other| {
                     other.definition.key != candidate.definition.key
-                        && signature_more_specific(
-                            &other.definition.parameters,
-                            &candidate.definition.parameters,
+                        && effective_signature_more_specific(
+                            &other.effective_parameters,
+                            &candidate.effective_parameters,
                         )
                 })
             })
@@ -2681,6 +2682,24 @@ impl MacroExpander {
                             }
                             MacroArgument::Visibility(visibility) => {
                                 SyntaxValue::Visibility(visibility)
+                            }
+                            MacroArgument::Sequence(arguments) => {
+                                let MetaType::Sequence(element) = expected else {
+                                    return None;
+                                };
+                                let values = arguments
+                                    .iter()
+                                    .map(|argument| {
+                                        self.meta_argument_value(element, argument)
+                                            .map(Value::Syntax)
+                                    })
+                                    .collect::<Option<Vec<_>>>()?;
+                                value = self.apply_value(
+                                    value,
+                                    Value::Sequence(values),
+                                    call_span.clone(),
+                                )?;
+                                continue;
                             }
                         };
                         value =
@@ -4409,7 +4428,7 @@ impl MacroExpander {
     }
 }
 
-fn invalid_delimited_collection_parameter(expression: &Expression) -> bool {
+fn invalid_separated_parameter(expression: &Expression) -> bool {
     let mut current = expression;
     while let Expression::Function(function) = current {
         let ty = match &function.pattern {
@@ -4418,15 +4437,70 @@ fn invalid_delimited_collection_parameter(expression: &Expression) -> bool {
             Pattern::Wildcard(wildcard) => Some(&wildcard.ty),
             _ => None,
         };
-        if ty.is_some_and(|ty| {
-            (type_contains_named(ty, "Sequence") || type_contains_named(ty, "Separated"))
-                && (meta_type(ty).is_none() || matches!(meta_type(ty), Some(MetaType::Sequence(_))))
-        }) {
+        if ty.is_some_and(|ty| type_contains_named(ty, "Separated") && meta_type(ty).is_none()) {
             return true;
         }
         current = &function.body;
     }
     false
+}
+
+fn validate_top_level_sequence(definition: &MacroDefinition, diagnostics: &mut Vec<Diagnostic>) {
+    let positions = definition
+        .parameters
+        .iter()
+        .enumerate()
+        .filter_map(|(index, parameter)| {
+            matches!(parameter, MetaType::Sequence(_)).then_some(index)
+        })
+        .collect::<Vec<_>>();
+    if positions.is_empty() {
+        return;
+    }
+    if definition.key.modifier {
+        diagnostics.push(Diagnostic::new(
+            definition.declaration.syntax.span.clone(),
+            "top-level `Sequence` parameters are not supported by modifier macros",
+        ));
+        return;
+    }
+    if positions.len() > 1 {
+        diagnostics.push(Diagnostic::new(
+            definition.declaration.syntax.span.clone(),
+            "a macro signature may contain at most one top-level `Sequence` parameter",
+        ));
+        return;
+    }
+    let position = positions[0];
+    let MetaType::Sequence(element) = &definition.parameters[position] else {
+        unreachable!();
+    };
+    if matches!(
+        element.as_ref(),
+        MetaType::Sequence(_) | MetaType::Optional(_) | MetaType::Product(_)
+    ) {
+        diagnostics.push(Diagnostic::new(
+            definition.declaration.syntax.span.clone(),
+            format!(
+                "a top-level `Sequence` element must be a single syntax category, found `{}`",
+                format_meta_type(element)
+            ),
+        ));
+        return;
+    }
+    if !definition.parameters[position + 1..]
+        .iter()
+        .any(meta_type_guarantees_source_consumption)
+    {
+        diagnostics.push(Diagnostic::new(
+            definition.declaration.syntax.span.clone(),
+            "a top-level `Sequence` parameter must be followed by a parameter that always consumes source syntax",
+        ));
+    }
+}
+
+fn meta_type_guarantees_source_consumption(meta: &MetaType) -> bool {
+    !matches!(meta, MetaType::Visibility | MetaType::MacroCallVisibility)
 }
 
 fn macro_is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId) -> bool {
@@ -4635,7 +4709,7 @@ fn sequence_meta_type(ty: &Type) -> Option<MetaType> {
         return None;
     }
     match arguments.as_slice() {
-        [element] => meta_type(element),
+        [element] => meta_type(unwrap_singleton_product(element)),
         [first, second] if matches!(first, Type::Named(name) if name.namespace.is_none() && name.name == "Ident") => {
             match second {
                 Type::Named(name) if name.namespace.is_none() && name.name == "String" => {
@@ -5107,10 +5181,10 @@ fn match_macro_arguments(
     definition: &MacroDefinition,
     arguments: &[&Expression],
     call_visibility: Option<&VisibilitySyntax>,
-) -> Option<(Vec<MacroArgument>, usize)> {
+) -> Option<(Vec<MacroArgument>, usize, Vec<(MetaType, bool)>)> {
     let mut matched = Vec::with_capacity(definition.parameters.len());
+    let mut effective = Vec::new();
     let mut parameter_index = 0;
-    let mut argument_index = 0;
 
     if definition.parameters.first() == Some(&MetaType::MacroCallVisibility) {
         matched.push(MacroArgument::Visibility(
@@ -5121,30 +5195,108 @@ fn match_macro_arguments(
         return None;
     }
 
-    for expected in &definition.parameters[parameter_index..] {
-        match expected {
-            MetaType::Visibility => {
-                if let Some(Expression::VisibilityArgument(visibility)) =
-                    arguments.get(argument_index).copied()
+    let consumed = match_macro_parameter_suffix(
+        &definition.parameters[parameter_index..],
+        arguments,
+        0,
+        &mut matched,
+        &mut effective,
+    )?;
+    Some((matched, consumed, effective))
+}
+
+fn match_macro_parameter_suffix(
+    parameters: &[MetaType],
+    arguments: &[&Expression],
+    argument_index: usize,
+    matched: &mut Vec<MacroArgument>,
+    effective: &mut Vec<(MetaType, bool)>,
+) -> Option<usize> {
+    let Some((expected, rest)) = parameters.split_first() else {
+        return Some(argument_index);
+    };
+    match expected {
+        MetaType::Visibility => {
+            let matched_len = matched.len();
+            let effective_len = effective.len();
+            if let Some(Expression::VisibilityArgument(visibility)) =
+                arguments.get(argument_index).copied()
+            {
+                matched.push(MacroArgument::Visibility(visibility.clone()));
+                effective.push((MetaType::Visibility, false));
+                if let Some(consumed) = match_macro_parameter_suffix(
+                    rest,
+                    arguments,
+                    argument_index + 1,
+                    matched,
+                    effective,
+                ) {
+                    return Some(consumed);
+                }
+                matched.truncate(matched_len);
+                effective.truncate(effective_len);
+            }
+            matched.push(MacroArgument::Visibility(private_visibility()));
+            let result =
+                match_macro_parameter_suffix(rest, arguments, argument_index, matched, effective);
+            if result.is_none() {
+                matched.truncate(matched_len);
+                effective.truncate(effective_len);
+            }
+            result
+        }
+        MetaType::Sequence(element) => {
+            let mut maximum = argument_index;
+            while arguments
+                .get(maximum)
+                .is_some_and(|argument| meta_type_matches(element, argument))
+            {
+                maximum += 1;
+            }
+            for end in (argument_index..=maximum).rev() {
+                let matched_len = matched.len();
+                let effective_len = effective.len();
+                matched.push(MacroArgument::Sequence(
+                    arguments[argument_index..end]
+                        .iter()
+                        .map(|argument| (*argument).clone())
+                        .collect(),
+                ));
+                effective.extend((argument_index..end).map(|_| ((**element).clone(), true)));
+                if let Some(consumed) =
+                    match_macro_parameter_suffix(rest, arguments, end, matched, effective)
                 {
-                    matched.push(MacroArgument::Visibility(visibility.clone()));
-                    argument_index += 1;
-                } else {
-                    matched.push(MacroArgument::Visibility(private_visibility()));
+                    return Some(consumed);
                 }
+                matched.truncate(matched_len);
+                effective.truncate(effective_len);
             }
-            MetaType::MacroCallVisibility => return None,
-            _ => {
-                let argument = arguments.get(argument_index).copied()?;
-                if !meta_type_matches(expected, argument) {
-                    return None;
-                }
-                matched.push(MacroArgument::Expression(argument.clone()));
-                argument_index += 1;
+            None
+        }
+        MetaType::MacroCallVisibility => None,
+        _ => {
+            let argument = arguments.get(argument_index).copied()?;
+            if !meta_type_matches(expected, argument) {
+                return None;
             }
+            let matched_len = matched.len();
+            let effective_len = effective.len();
+            matched.push(MacroArgument::Expression(argument.clone()));
+            effective.push((expected.clone(), false));
+            let result = match_macro_parameter_suffix(
+                rest,
+                arguments,
+                argument_index + 1,
+                matched,
+                effective,
+            );
+            if result.is_none() {
+                matched.truncate(matched_len);
+                effective.truncate(effective_len);
+            }
+            result
         }
     }
-    Some((matched, argument_index))
 }
 
 fn private_visibility() -> VisibilitySyntax {
@@ -5346,6 +5498,20 @@ fn signature_more_specific(left: &[MetaType], right: &[MetaType]) -> bool {
             .iter()
             .zip(right)
             .all(|(left, right)| meta_type_at_least_as_specific(left, right))
+        && left != right
+}
+
+fn effective_signature_more_specific(
+    left: &[(MetaType, bool)],
+    right: &[(MetaType, bool)],
+) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(
+            |((left_type, left_repeated), (right_type, right_repeated))| {
+                meta_type_at_least_as_specific(left_type, right_type)
+                    && (!left_repeated || *right_repeated)
+            },
+        )
         && left != right
 }
 

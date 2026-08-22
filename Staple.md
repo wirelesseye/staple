@@ -116,8 +116,24 @@ not require commas in the source, so `Parenthesized (Ident String, Ident
 String)` accepts `(left right)`. `Parenthesized`, `Bracketed`, and `Braced` may
 instead contain `Sequence T`, which accepts zero or more consecutive values of
 `T`; for example, `Bracketed (Sequence Ident String)` accepts `[]` and `[one
-two]`. As a source matcher, `Sequence` is valid only as the entire contents of
-one of these three delimiter types and never changes a macro's top-level arity.
+two]`. A function-style macro may also use one `Sequence T` as a top-level
+parameter when a later parameter is guaranteed to consume source syntax:
+
+```staple
+macro collect =
+    values: Sequence (Ident String) =>
+    _: Equals =>
+    body: Braced Syntax => ...
+```
+
+The sequence consumes zero or more consecutive top-level arguments. Matching
+starts greedily and backs up until the remaining parameters match, so the
+following `Equals` terminates `values`. `Visibility` and
+`MacroCallVisibility` do not count as terminators because they may supply an
+implicit `Private` value without consuming source. A top-level sequence may
+not be the last parameter, appear more than once in a signature, or be used by
+a modifier macro. `Sequence` inside delimiters remains restricted to the
+entire contents of one of the three delimiter types.
 Captured sequences may be passed through compile-time helpers and destructured
 as `Sequence ()` or `Sequence (first: T, rest: Sequence T)`. `Sequence
 SyntaxNode` uses shortest structural atoms, treating a nested balanced delimiter
@@ -401,17 +417,21 @@ parse_quote { $left | $right } satisfies Type
 
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while
-spliced expressions retain their caller environment. A macro consumes the
-number of arguments described by its curried syntax-node parameter types;
-further call arguments apply to the expanded expression.
+spliced expressions retain their caller environment. A macro normally consumes
+the number of arguments described by its curried syntax-node parameter types;
+a top-level `Sequence` instead consumes as many matching arguments as possible
+while preserving a match for its required suffix. Further call arguments apply
+to the expanded expression.
 
 Macros may be overloaded by declaring the same name more than once in one
 module. An invocation selects the complete matching overload that consumes the
 most syntax atoms. Same-length matches use pattern specificity: a literal
 identifier is narrower than `Ident String`, `Ident String` is narrower than
 `Expr`, specialized categories are narrower than `SyntaxNode`, and `SyntaxNode`
-is narrower than opaque `Syntax`. Specificity must hold at every parameter;
-incomparable matches are ambiguous. Exact duplicate patterns are rejected.
+is narrower than opaque `Syntax`. Specificity must hold at every consumed
+source atom; incomparable matches are ambiguous. A fixed parameter is more
+specific than an otherwise equivalent element captured by a top-level
+sequence. Exact duplicate patterns are rejected.
 
 An incomplete longer overload does not prevent a shorter complete overload
 from matching. Any syntax left after the shorter expansion is applied to its

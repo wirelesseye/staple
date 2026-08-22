@@ -4234,7 +4234,7 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
         .expect_err("bare Sequence should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message
-            == "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
+            == "a top-level `Sequence` parameter must be followed by a parameter that always consumes source syntax"
     }));
 
     let program = ProgramLoader::new()
@@ -4249,7 +4249,7 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
         .expect_err("bare Separated should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message
-            == "`Sequence` and `Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
+            == "`Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
     }));
 
     let program = ProgramLoader::new()
@@ -4267,6 +4267,135 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
             .message
             .starts_with("opaque `Syntax` may be a top-level argument")
     }));
+}
+
+#[test]
+fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
+    let module = type_check(concat!(
+        "macro count = _: Ident \"marker\" => values: Sequence (Ident String) => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => match values {\n",
+        "    Sequence () => quote { let $name: I32 = 0 },\n",
+        "    Sequence (first: Ident String, rest: Sequence Ident String) => match rest {\n",
+        "        Sequence () => quote { let $name: I32 = 1 },\n",
+        "        _ => quote { let $name: I32 = 3 },\n",
+        "    },\n",
+        "}\n",
+        "count marker = zero => {}\n",
+        "count marker alpha = one => {}\n",
+        "count marker alpha beta gamma = three => {}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("top-level macro sequences should compile");
+}
+
+#[test]
+fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
+    let module = type_check(concat!(
+        "macro classify = _: Ident \"marker\" =>\n",
+        "    values: Sequence (Ident String) =>\n",
+        "    visibility: Visibility =>\n",
+        "    _: Equals =>\n",
+        "    name: Ident String => _: FatArrow => _: Braced Syntax => match (values, visibility) {\n",
+        "        (Sequence (), Private) => quote { let $name: I32 = 40 },\n",
+        "        (Sequence (first: Ident String, rest: Sequence Ident String), Public) => quote { let $name: I32 = 41 },\n",
+        "        (Sequence (first: Ident String, rest: Sequence Ident String), PublicRepr) => quote { let $name: I32 = 42 },\n",
+        "        _ => quote { let $name: I32 = 43 },\n",
+        "    }\n",
+        "classify marker = private_value => {}\n",
+        "classify marker alpha beta pub = public_value => {}\n",
+        "classify marker alpha pub(repr) = public_repr_value => {}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("sequence suffix matching should handle implicit and explicit visibility");
+}
+
+#[test]
+fn fixed_and_more_specific_overloads_beat_top_level_sequences() {
+    let module = type_check(concat!(
+        "macro choose = _: Sequence Expr => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => quote { let $name: String = \"wrong\" }\n",
+        "macro choose = _: Sequence (Ident String) => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => quote { let $name: I32 = 1 }\n",
+        "macro choose = _: Ident String => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => quote { let $name: I32 = 2 }\n",
+        "choose value = fixed => {}\n",
+        "choose left right = repeated => {}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("fixed and category-specific overloads should win");
+}
+
+#[test]
+fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguous() {
+    let module = type_check(concat!(
+        "macro annotated: Sequence (Ident String) -> Equals -> Ident String -> FatArrow -> Braced Syntax -> Syntax =\n",
+        "    values: Sequence (Ident String) => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => quote { let $name: I32 = 42 }\n",
+        "annotated first second = generated => {}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("annotated top-level sequences should compile");
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            &with_syntax_imports(concat!(
+                "macro clash = _: Sequence Type => _: Equals => _: Ident String => _: FatArrow => _: Braced Syntax => quote { let generated: I32 = 1 }\n",
+                "macro clash = _: Sequence Pattern => _: Equals => _: Ident String => _: FatArrow => _: Braced Syntax => quote { let generated: I32 = 2 }\n",
+                "clash Value = output => {}\n",
+            )),
+            root,
+        )
+        .expect("ambiguous macro source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("incomparable repeated categories should be ambiguous");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message == "ambiguous invocation of macro `clash`"));
+}
+
+#[test]
+fn rejects_invalid_top_level_macro_sequence_signatures() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (source, expected) in [
+        (
+            "macro invalid = values: Sequence (Ident String) => parse_quote { 0 }\n",
+            "a top-level `Sequence` parameter must be followed by a parameter that always consumes source syntax",
+        ),
+        (
+            "macro invalid = first: Sequence (Ident String) => second: Sequence Expr => _: Equals => parse_quote { 0 }\n",
+            "a macro signature may contain at most one top-level `Sequence` parameter",
+        ),
+        (
+            "macro invalid = values: Sequence (Ident String) => _: Visibility => parse_quote { 0 }\n",
+            "a top-level `Sequence` parameter must be followed by a parameter that always consumes source syntax",
+        ),
+        (
+            "macro @invalid: Sequence (Ident String) -> Item -> Item = values => item => item\n",
+            "top-level `Sequence` parameters are not supported by modifier macros",
+        ),
+        (
+            "macro invalid = values: Sequence (Sequence (Ident String)) => _: Equals => parse_quote { 0 }\n",
+            "a top-level `Sequence` element must be a single syntax category, found `Sequence Ident String`",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&with_syntax_imports(source), root)
+            .expect("invalid macro declaration should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err("invalid top-level sequence should be rejected");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.message == expected),
+            "expected {expected:?}, found {diagnostics:#?}",
+        );
+    }
 }
 
 #[test]
