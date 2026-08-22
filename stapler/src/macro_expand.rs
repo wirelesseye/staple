@@ -5388,7 +5388,7 @@ fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
             declaration: definition.declaration.syntax.id,
             name: definition.key.name.clone(),
             modifier: false,
-            signature: "T => ParseQuoteResult T => Braced Syntax -> T".to_owned(),
+            signature: "<T where ParseQuoteResult T> Braced Syntax -> T".to_owned(),
         };
     }
     let parameters = format_meta_signature(&definition.parameters);

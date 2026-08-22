@@ -430,10 +430,16 @@ impl Collector<'_> {
                 )
             }
             DefinitionId::Type(id) => self.type_signature(id, from_syntax),
-            DefinitionId::Trait(id) => resolved
-                .traits()
-                .get(&id)
-                .map(|resolved| format!("trait {}", resolved.declaration.name)),
+            DefinitionId::Trait(id) => resolved.traits().get(&id).map(|resolved| {
+                let declaration = &resolved.declaration;
+                let (parameters, where_clause) = self.juxtaposed_generic_suffix(
+                    &declaration.type_parameters,
+                    &declaration.prerequisites,
+                    &declaration.subtype_bounds,
+                    &declaration.functional_dependencies,
+                );
+                format!("trait {}{parameters}{where_clause}", declaration.name)
+            }),
             DefinitionId::TraitMethod(id) => resolved.trait_method(id).map(|member| {
                 format!(
                     "<trait member> {}: {}",
@@ -471,6 +477,85 @@ impl Collector<'_> {
         }
     }
 
+    /// Source text of each type parameter, e.g. `T` or `(Spelling = String)`
+    /// for a defaulted one (the default is part of the parameter's own
+    /// syntax span, so it comes along for free).
+    fn parameter_names(&self, type_parameters: &[TypeParameterPattern]) -> Vec<String> {
+        type_parameters
+            .iter()
+            .map(|parameter| parameter.syntax().text().trim().to_owned())
+            .collect()
+    }
+
+    /// Builds the unified `where` clause text (trait bounds, subtype
+    /// bounds, and — for traits — functional dependencies), e.g.
+    /// ` where Debug T, T <: Super`, or an empty string when there are none.
+    fn where_clause(
+        &self,
+        trait_bounds: &[TraitBound],
+        subtype_bounds: &[SubtypeBound],
+        functional_dependencies: &[FunctionalDependency],
+    ) -> String {
+        let constraints = functional_dependencies
+            .iter()
+            .map(|dependency| dependency.syntax.text().trim().to_owned())
+            .chain(
+                subtype_bounds
+                    .iter()
+                    .map(|bound| bound.syntax.text().trim().to_owned()),
+            )
+            .chain(
+                trait_bounds
+                    .iter()
+                    .map(|bound| bound.syntax.text().trim().to_owned()),
+            )
+            .collect::<Vec<_>>();
+        if constraints.is_empty() {
+            String::new()
+        } else {
+            format!(" where {}", constraints.join(", "))
+        }
+    }
+
+    /// The bracketed generic-parameter prefix used by `let`/`def`, `impl`,
+    /// and `macro` signatures, e.g. `<T where Debug T> `, or an empty
+    /// string when there are no type parameters.
+    fn bracketed_generic_prefix(
+        &self,
+        type_parameters: &[TypeParameterPattern],
+        trait_bounds: &[TraitBound],
+        subtype_bounds: &[SubtypeBound],
+    ) -> String {
+        if type_parameters.is_empty() {
+            return String::new();
+        }
+        let parameters = self.parameter_names(type_parameters).join(", ");
+        let where_clause = self.where_clause(trait_bounds, subtype_bounds, &[]);
+        format!("<{parameters}{where_clause}> ")
+    }
+
+    /// The juxtaposed generic-parameter suffix used by `type`/`trait`
+    /// signatures: bare params directly after the name, then a `where`
+    /// clause. Returns `(" T U", " where Bound T")`, either half empty when
+    /// there's nothing to show.
+    fn juxtaposed_generic_suffix(
+        &self,
+        type_parameters: &[TypeParameterPattern],
+        trait_bounds: &[TraitBound],
+        subtype_bounds: &[SubtypeBound],
+        functional_dependencies: &[FunctionalDependency],
+    ) -> (String, String) {
+        let parameters = self.parameter_names(type_parameters).join(" ");
+        let parameters = if parameters.is_empty() {
+            String::new()
+        } else {
+            format!(" {parameters}")
+        };
+        let where_clause =
+            self.where_clause(trait_bounds, subtype_bounds, functional_dependencies);
+        (parameters, where_clause)
+    }
+
     fn type_signature(&self, id: TypeId, from_syntax: SyntaxId) -> Option<String> {
         let resolved = self.typed.resolved();
         let declaration = resolved.type_declarations().get(&id)?;
@@ -479,39 +564,34 @@ impl Collector<'_> {
             .unwrap_or_else(|| resolved.program().entry());
         let representation_is_visible = declaration.kind == TypeDeclarationKind::Alias
             || resolved.representation_visible_from(id, from_module);
-        if !representation_is_visible && declaration.type_parameters.is_empty() {
-            return Some(format!("type {}", declaration.name));
-        }
-        let representation = if representation_is_visible {
-            declaration
-                .underlying
-                .as_ref()
-                .map(|ty| ty.to_string())
-                .unwrap_or_else(|| match declaration.kind {
-                    TypeDeclarationKind::Opaque => "opaque".to_owned(),
-                    TypeDeclarationKind::Singleton => "()".to_owned(),
-                    TypeDeclarationKind::Alias | TypeDeclarationKind::Distinct => "...".to_owned(),
-                })
-        } else {
-            "...".to_owned()
-        };
         let alias = if declaration.kind == TypeDeclarationKind::Alias {
             " alias"
         } else {
             ""
         };
-        let parameters = declaration
-            .type_parameters
-            .iter()
-            .map(|parameter| parameter.syntax().text().trim().to_owned())
-            .collect::<Vec<_>>();
-        let parameters = if parameters.is_empty() {
-            String::new()
-        } else {
-            format!("{} => ", parameters.join(" => "))
-        };
+        let (parameters, where_clause) = self.juxtaposed_generic_suffix(
+            &declaration.type_parameters,
+            &declaration.trait_bounds,
+            &declaration.subtype_bounds,
+            &[],
+        );
+        if !representation_is_visible {
+            return Some(format!(
+                "type{alias} {}{parameters}{where_clause}",
+                declaration.name
+            ));
+        }
+        let representation = declaration
+            .underlying
+            .as_ref()
+            .map(|ty| ty.to_string())
+            .unwrap_or_else(|| match declaration.kind {
+                TypeDeclarationKind::Opaque => "opaque".to_owned(),
+                TypeDeclarationKind::Singleton => "()".to_owned(),
+                TypeDeclarationKind::Alias | TypeDeclarationKind::Distinct => "...".to_owned(),
+            });
         Some(format!(
-            "type{alias} {} = {parameters}{representation}",
+            "type{alias} {}{parameters}{where_clause} = {representation}",
             declaration.name
         ))
     }
@@ -612,10 +692,15 @@ impl Collector<'_> {
             .map(|value_type| self.display_type(value_type));
         if let Some(value_type) = value_type {
             let prefix = binding.keyword();
+            let generics = self.bracketed_generic_prefix(
+                &binding.type_parameters,
+                &binding.trait_bounds,
+                &binding.subtype_bounds,
+            );
             self.named(
                 &binding.syntax,
                 &binding.name,
-                format!("{prefix} {}: {value_type}", binding.name),
+                format!("{prefix} {}: {generics}{value_type}", binding.name),
             );
         }
         for parameter in &binding.type_parameters {
@@ -969,6 +1054,32 @@ mod tests {
     }
 
     #[test]
+    fn generic_def_and_type_signatures_use_the_new_syntax() {
+        let source = "pub(repr) type Box T = (value: T)\ndef unbox: <T> Box T -> T = Box value => value\n";
+        let path = std::env::temp_dir().join("staple-hover-generic-signatures.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        for (name, signature) in [
+            ("Box", "type Box T = (value: T)"),
+            ("unbox", "def unbox: <T> Box T -> T"),
+        ] {
+            assert!(
+                entries.iter().any(|entry| {
+                    &source[entry.range.clone()] == name && entry.signature == signature
+                }),
+                "missing {name}: {signature} in {entries:?}"
+            );
+        }
+    }
+
+    #[test]
     fn indexes_at_pattern_aliases_and_nested_bindings() {
         let source =
             "def sum = pair@(left: I32, right: I32) => pair.0 + left + right\nsum (20, 22)\n";
@@ -1290,7 +1401,7 @@ mod tests {
         for expected in [
             ("value", "let value: I32"),
             ("Number", "type alias Number = I32"),
-            ("Printable", "trait Printable"),
+            ("Printable", "trait Printable T"),
             ("identity", "macro identity: SyntaxNode -> Expr"),
             ("callable", "def callable: () -> I32"),
             ("invoke", "def callable: () -> I32"),
@@ -1370,11 +1481,11 @@ mod tests {
         let entries = entries(&module, &typed);
 
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Box" && entry.signature == "type Box = T => (value: T)"
+            &source[entry.range.clone()] == "Box" && entry.signature == "type Box T = (value: T)"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "Pair"
-                && entry.signature == "type alias Pair = (A, B) => (A, B)"
+                && entry.signature == "type alias Pair (A, B) = (A, B)"
         }));
     }
 
@@ -1417,7 +1528,7 @@ mod tests {
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "HiddenGeneric"
-                && entry.signature == "type HiddenGeneric = T => ..."
+                && entry.signature == "type HiddenGeneric T"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "Visible" && entry.signature == "type Visible = I32"
