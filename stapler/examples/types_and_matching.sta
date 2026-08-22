@@ -14,8 +14,8 @@ use Switch.*
 def unbox: <T> Box T -> T = Box value => value
 
 def switch_number = switch: Switch => match switch {
-    Enabled => 1,
-    Disabled => 0,
+    Switch.Enabled => 1,
+    Switch.Disabled => 0,
 }
 
 // A wildcard arm can make a product match exhaustive.

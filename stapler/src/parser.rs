@@ -1534,7 +1534,16 @@ impl Grammar {
                 )
             );
         if namespace.is_some() && !adjacent_argument {
-            return Err(self.error("expected an argument after nominal pattern"));
+            let argument = Box::new(Pattern::Product(ProductPattern {
+                syntax: self.syntax(start),
+                elements: Vec::new(),
+            }));
+            return Ok(Pattern::Nominal(NominalPattern {
+                syntax: self.syntax(start),
+                namespace,
+                name,
+                argument,
+            }));
         }
         if adjacent_argument {
             if mutable || reassignable {
