@@ -3131,7 +3131,7 @@ fn expands_visibility_aware_macros_and_contextual_visibility_splices() {
 #[test]
 fn expands_standard_typegroup_into_module_variants_and_alias() {
     let module = type_check(concat!(
-        "pub(repr) typegroup Pattern = {\n",
+        "pub(repr) typegroup Pattern {\n",
         "    Literal String,\n",
         "    Wildcard,\n",
         "}\n",
@@ -3150,7 +3150,7 @@ fn expands_standard_typegroup_into_module_variants_and_alias() {
 #[test]
 fn typegroup_supports_generic_groups_and_reexports_their_variants() {
     let module = type_check(concat!(
-        "pub(repr) typegroup Maybe = T => {\n",
+        "pub(repr) typegroup Maybe T {\n",
         "    Missing,\n",
         "    Present T,\n",
         "}\n",
@@ -3158,29 +3158,17 @@ fn typegroup_supports_generic_groups_and_reexports_their_variants() {
         "let missing: Maybe I32 = Missing\n",
         "let present: Maybe I32 = Present 1\n",
         "let qualified: Maybe String = Maybe.Present \"value\"\n",
-        "pub(repr) typegroup Either = (L, R,) => {\n",
+        "pub(repr) typegroup Either (L, R,) {\n",
         "    Left L,\n",
         "    Right R,\n",
         "}\n",
+        "pub(repr) typegroup Mixed A (B, C) D {\n",
+        "    Empty,\n",
+        "    Value (A, B, C, D),\n",
+        "}\n",
+        "let value: (I32, String, Bool, F64) = (1, \"two\", True, 4.0)\n",
+        "let mixed: Mixed I32 (String, Bool) F64 = Mixed.Value value\n",
     ));
-    let either = module
-        .resolved()
-        .syntax()
-        .items
-        .iter()
-        .find_map(|item| match item {
-            Item::TypeDeclaration(declaration) if declaration.name == "Either" => Some(declaration),
-            _ => None,
-        })
-        .expect("generated Either alias");
-    assert_eq!(
-        either
-            .type_parameters
-            .iter()
-            .flat_map(stapler::TypeParameterPattern::names)
-            .collect::<Vec<_>>(),
-        ["L", "R"],
-    );
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
@@ -3321,8 +3309,9 @@ fn parse_quote_rejects_spliced_visibility_result() {
 fn rejects_legacy_typegroup_call_syntax() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for source in [
-        "typegroup Legacy { Unit, }\n",
-        "typegroup Legacy (T) { Wrapped T, }\n",
+        "typegroup Legacy = { Unit, }\n",
+        "typegroup Legacy = T => { Wrapped T, }\n",
+        "typegroup Legacy = (T, E) => { Left T, Right E, }\n",
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -3350,7 +3339,7 @@ fn typegroup_variants_require_an_explicit_reexport() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "pub typegroup Status = { Ready, }\n",
+                "pub typegroup Status { Ready, }\n",
                 "let qualified: Status = Status.Ready\n",
                 "let unqualified: Status = Ready\n",
             ),
@@ -3371,14 +3360,14 @@ fn typegroup_variants_require_an_explicit_reexport() {
 #[test]
 fn typegroup_supports_private_construction_compound_types_and_trailing_commas() {
     let module = type_check(concat!(
-        "typegroup Local = {\n",
+        "typegroup Local {\n",
         "    Pair (I32, String),\n",
         "    Empty,\n",
         "}\n",
-        "pub(repr) typegroup Generic = {\n",
+        "pub(repr) typegroup Generic {\n",
         "    Wrapped Option I32,\n",
         "}\n",
-        "pub typegroup PublicGroup = {\n",
+        "pub typegroup PublicGroup {\n",
         "    Unit,\n",
         "}\n",
         "let pair: Local = Local.Pair (1, \"value\")\n",
@@ -3402,7 +3391,7 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for (source, expected) in [
         (
-            "typegroup Empty = {}\n",
+            "typegroup Empty {}\n",
             "compile-time match was not exhaustive",
         ),
         (

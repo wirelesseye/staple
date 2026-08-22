@@ -885,8 +885,8 @@ fn parses_visibility_aware_macro_calls_and_splices_losslessly() {
 #[test]
 fn parses_declaration_style_item_macro_punctuation_losslessly() {
     let source = concat!(
-        "typegroup Local = { Unit, }\n",
-        "pub(repr) typegroup Result = (T, E,) => { Ok T, Err E, }\n",
+        "typegroup Local { Unit, }\n",
+        "pub(repr) typegroup Result (T, E,) { Ok T, Err E, }\n",
         "value = 1\n",
         "identity = argument => argument\n",
     );

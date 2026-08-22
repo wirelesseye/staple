@@ -11,7 +11,7 @@ pub type USize = opaque
 pub type F32 = opaque
 pub type F64 = opaque
 
-pub(repr) typegroup Option = T => {
+pub(repr) typegroup Option T {
     None,
     Some T,
 }

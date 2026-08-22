@@ -995,7 +995,7 @@ mod tests {
         let source = concat!(
             "use std.io.println\n",
             "\n",
-            "typegroup A = {\n",
+            "typegroup A {\n",
             "    Hello\n",
             "}\n",
             "\n",

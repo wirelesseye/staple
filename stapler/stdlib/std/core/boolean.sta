@@ -1,4 +1,4 @@
-pub typegroup Bool = {
+pub typegroup Bool {
     True,
     False,
 }

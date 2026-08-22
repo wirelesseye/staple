@@ -2349,6 +2349,22 @@ pub(repr) typegroup Pattern {
 }
 ```
 
+Generic parameters are written between the group name and its body, using the
+same juxtaposed syntax as generic type declarations. Product parameter patterns
+and multiple parameter atoms may be mixed freely:
+
+```staple
+pub(repr) typegroup Result T E {
+    Ok T,
+    Err E,
+}
+
+pub(repr) typegroup Mixed A (B, C) D {
+    Empty,
+    Value (A, B, C, D),
+}
+```
+
 It generates a same-named inline module containing the nominal variants and a
 same-named parent-module alias whose alternatives are the qualified variants.
 Private groups use a private module and alias while keeping child variants

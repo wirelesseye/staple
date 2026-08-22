@@ -12,6 +12,12 @@ def typegroup_variant_visibility: Visibility -> Visibility = visibility => match
     PublicRepr => PublicRepr,
 }
 
+def typegroup_visibility_syntax: Visibility -> Syntax = visibility => match visibility {
+    Private => quote {},
+    Public => quote { pub },
+    PublicRepr => quote { pub(repr) },
+}
+
 def typegroup_items:
     Visibility ->
     Sequence (Ident String, Optional Type) ->
@@ -34,24 +40,23 @@ visibility => entries => match entries {
 }
 
 def typegroup_generic_items:
-    Visibility ->
-    Sequence (Ident String) ->
+    Syntax ->
+    Syntax ->
     Sequence (Ident String, Optional Type) ->
-    Sequence Item =
+    Syntax =
 visibility => parameters => entries => match entries {
-    Sequence () => Sequence (),
+    Sequence () => quote {},
     Sequence (
         first: (Ident String, Optional Type),
         rest: Sequence (Ident String, Optional Type),
-    ) => match first {
-        (variant: Ident String, None) => Sequence (
-            first: parse_quote { $visibility type $variant },
-            rest: typegroup_generic_items visibility parameters rest,
-        ),
-        (variant: Ident String, Some underlying) => Sequence (
-            first: parse_quote { $visibility type $variant $parameters... = $underlying },
-            rest: typegroup_generic_items visibility parameters rest,
-        ),
+    ) => {
+        let tail = typegroup_generic_items visibility parameters rest
+        match first {
+            (variant: Ident String, None) =>
+                quote { $visibility type $variant $tail },
+            (variant: Ident String, Some underlying) =>
+                quote { $visibility type $variant $parameters = $underlying $tail },
+        }
     },
 }
 
@@ -77,47 +82,37 @@ group => entries => match entries {
     },
 }
 
-def typegroup_apply_parameters:
-    Type ->
-    Sequence (Ident String) ->
-    Type =
-callee => parameters => match parameters {
+def typegroup_parameter_syntax: Sequence Type -> Syntax = parameters => match parameters {
+    Sequence () => quote {},
     Sequence (
-        first: Ident String,
-        rest: Sequence Ident String,
-    ) => match rest {
-        Sequence () => {
-            let argument: Type = parse_quote { $first }
-            parse_quote { $callee $argument } satisfies Type
-        },
-        _ => {
-            let arguments = Parenthesized parameters
-            parse_quote { $callee $arguments } satisfies Type
-        },
-    }
+        first: Type,
+        rest: Sequence Type,
+    ) => {
+        let tail = typegroup_parameter_syntax rest
+        quote { $first $tail }
+    },
 }
 
-def typegroup_generic_sum:
+def typegroup_generic_sum_syntax:
     Ident String ->
-    Sequence (Ident String) ->
+    Syntax ->
     Sequence (Ident String, Optional Type) ->
-    Type =
+    Syntax =
 group => parameters => entries => match entries {
     Sequence (
         first: (Ident String, Optional Type),
         rest: Sequence (Ident String, Optional Type),
     ) => match first {
         (variant: Ident String, underlying) => {
-            let constructor: Type = parse_quote { $group.$variant }
-            let head: Type = match underlying {
-                None => constructor,
-                Some _ => typegroup_apply_parameters constructor parameters,
+            let head: Syntax = match underlying {
+                None => quote { $group.$variant },
+                Some _ => quote { $group.$variant $parameters },
             }
             match rest {
                 Sequence () => head,
                 _ => {
-                    let tail = typegroup_generic_sum group parameters rest
-                    parse_quote { $head | $tail } satisfies Type
+                    let tail = typegroup_generic_sum_syntax group parameters rest
+                    quote { $head | $tail }
                 },
             }
         },
@@ -127,7 +122,7 @@ group => parameters => entries => match entries {
 pub macro typegroup =
 visibility: MacroCallVisibility =>
 group: Ident String =>
-equals: Equals =>
+parameters: Sequence Type =>
 body: Braced (Separated (Ident String, Optional Type) Comma) => match body {
     Braced (Separated (
         separator,
@@ -136,78 +131,30 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match body {
     )) => {
         let item_visibility = typegroup_variant_visibility visibility
         let public_visibility = typegroup_public_visibility visibility
-        let items = typegroup_items item_visibility elements
-        let sum: Type = typegroup_sum group elements
-        parse_quote {
-            $public_visibility mod $group {
-                $items...
-            }
-            $public_visibility type alias $group = $sum
-        }
-    },
-}
-
-pub macro typegroup =
-visibility: MacroCallVisibility =>
-group: Ident String =>
-equals: Equals =>
-parameter: Ident String =>
-arrow: FatArrow =>
-body: Braced (Separated (Ident String, Optional Type) Comma) => match (
-    body,
-) {
-    (
-        Braced (Separated (
-            separator,
-            elements,
-            trailing,
-        )),
-    ) => {
-        let parameters = Sequence (parameter)
-        let item_visibility = typegroup_variant_visibility visibility
-        let public_visibility = typegroup_public_visibility visibility
-        let items = typegroup_generic_items item_visibility parameters elements
-        let sum: Type = typegroup_generic_sum group parameters elements
-        parse_quote {
-            $public_visibility mod $group {
-                $items...
-            }
-            $public_visibility type alias $group $parameters... = $sum
-        }
-    },
-}
-
-pub macro typegroup =
-visibility: MacroCallVisibility =>
-group: Ident String =>
-equals: Equals =>
-parameter_group: Parenthesized (Separated (Ident String) Comma) =>
-arrow: FatArrow =>
-body: Braced (Separated (Ident String, Optional Type) Comma) => match (
-    parameter_group,
-    body,
-) {
-    (
-        Parenthesized (Separated (
-            parameter_separator,
-            parameters,
-            parameter_trailing,
-        )),
-        Braced (Separated (
-            separator,
-            elements,
-            trailing,
-        )),
-    ) => {
-        let item_visibility = typegroup_variant_visibility visibility
-        let public_visibility = typegroup_public_visibility visibility
-        let items = typegroup_generic_items item_visibility parameters elements
-        let sum: Type = typegroup_generic_sum group parameters elements
-        parse_quote {
-            $public_visibility mod $group {
-                $items...
-            }
-            $public_visibility type alias $group $parameters... = $sum
+        match parameters {
+            Sequence () => {
+                let items = typegroup_items item_visibility elements
+                let sum: Type = typegroup_sum group elements
+                parse_quote {
+                    $public_visibility mod $group {
+                        $items...
+                    }
+                    $public_visibility type alias $group = $sum
+                }
+            },
+            _ => {
+                let parameter_syntax = typegroup_parameter_syntax parameters
+                let generic_item_visibility = typegroup_visibility_syntax item_visibility
+                let generic_public_visibility = typegroup_visibility_syntax public_visibility
+                let items = typegroup_generic_items generic_item_visibility parameter_syntax elements
+                let sum = typegroup_generic_sum_syntax group parameter_syntax elements
+                parse_quote {
+                    $generic_public_visibility mod $group {
+                        $items
+                    }
+                    $generic_public_visibility type alias $group $parameter_syntax = $sum
+                }
+            },
         }
     },
 }
