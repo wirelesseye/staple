@@ -398,20 +398,6 @@ let alternative: Type = parse_quote { $group.$variant }
 parse_quote { $left | $right } satisfies Type
 ```
 
-The standard `typegroup` macro combines these facilities:
-
-```staple
-pub(repr) typegroup Pattern {
-    Literal String,
-    Wildcard,
-}
-```
-
-It generates a same-named inline module containing the nominal variants and a
-same-named parent-module alias whose alternatives are the qualified variants.
-Private groups use a private module and alias while keeping child variants
-public-representation inside that private boundary. `pub` groups expose opaque
-variants, and `pub(repr)` groups expose their representations.
 
 Macros are hygienic. Names and bindings written in a quotation retain the
 definition module's environment and receive a fresh expansion identity, while
@@ -431,30 +417,6 @@ An incomplete longer overload does not prevent a shorter complete overload
 from matching. Any syntax left after the shorter expansion is applied to its
 result as an ordinary call. Imports, renames, namespaces, and re-exports carry
 the whole overload set, but overload sets from unrelated imports do not merge.
-The standard prelude supplies a braced, clause-oriented `if` form:
-
-```staple
-if {
-    first_condition => first_branch,
-    second_condition => second_branch,
-    else => fallback,
-}
-```
-
-It evaluates conditions from top to bottom and evaluates only the branch
-belonging to the first true condition. Its optional final `else` clause supplies
-the fallback; without one, the fallback is `()`. An `else` clause must be last,
-and branch types join normally.
-
-The prelude also supplies a `while` form implemented in `std.core.flow` using
-`loop`, `break`, and a boolean match:
-
-```staple
-while condition body
-```
-
-The condition is evaluated before every iteration, and the loop returns `()`
-when it becomes `False`.
 
 Compile-time evaluation supports pure functions, bindings, reassignable and
 mutable local cells, products, matches, literals, recursion, and pure integer
@@ -1732,6 +1694,21 @@ the same rules used for inferred function results. Arms which return from the
 enclosing function do not contribute to the match value type. If every arm
 returns, the match itself does not continue.
 
+The standard prelude supplies a braced, clause-oriented `if` form implemented as a macro:
+
+```staple
+if {
+    first_condition => first_branch,
+    second_condition => second_branch,
+    else => fallback,
+}
+```
+
+It evaluates conditions from top to bottom and evaluates only the branch
+belonging to the first true condition. Its optional final `else` clause supplies
+the fallback; without one, the fallback is `()`. An `else` clause must be last,
+and branch types join normally.
+
 ## Return statements
 
 `return` immediately exits the nearest enclosing function with the value of
@@ -1768,6 +1745,16 @@ reachable break diverges and may be used wherever an expected type is available.
 not supported. Values owned by an iteration are dropped before a break,
 continue, or implicit next iteration; a value moved out by `break` becomes the
 loop result and is preserved.
+
+The prelude supplies a `while` form implemented in `std.core.flow` using
+`loop`, `break`, and a boolean match:
+
+```staple
+while condition body
+```
+
+The condition is evaluated before every iteration, and the loop returns `()`
+when it becomes `False`.
 
 ## Iteration and ranges
 
@@ -2281,6 +2268,21 @@ result must be contained in that type.
 
 Sum types use Staple's internal tagged inline representation and may not appear
 anywhere inside an `extern` binding type.
+
+The prelude supplies a `typegroup` macro that conveniently generates sum types:
+
+```staple
+pub(repr) typegroup Pattern {
+    Literal String,
+    Wildcard,
+}
+```
+
+It generates a same-named inline module containing the nominal variants and a
+same-named parent-module alias whose alternatives are the qualified variants.
+Private groups use a private module and alias while keeping child variants
+public-representation inside that private boundary. `pub` groups expose opaque
+variants, and `pub(repr)` groups expose their representations.
 
 ## Foreign declarations
 
