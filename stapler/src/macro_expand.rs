@@ -586,14 +586,12 @@ impl MacroExpander {
                         };
                         let (arity, mut parameters, mut result) =
                             if matches!(kind, MacroKind::Quote | MacroKind::ParseQuote) {
-                                (
-                                    1,
-                                    vec![MetaType::Delimited(
-                                        DelimiterKind::Braced,
-                                        DelimitedMetaContents::Fixed(vec![MetaType::Syntax]),
-                                    )],
-                                    MetaType::Syntax,
-                                )
+                                let (parameters, result) = declaration
+                                    .annotation
+                                    .as_ref()
+                                    .and_then(compiler_macro_signature)
+                                    .unwrap_or((Vec::new(), MetaType::Syntax));
+                                (parameters.len(), parameters, result)
                             } else {
                                 let arity = declaration
                                     .annotation
@@ -1194,18 +1192,6 @@ impl MacroExpander {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
                         "compiler-provided macro `c_string` must have signature `Expr -> Expr`",
-                    ));
-                }
-                MacroKind::Quote if !valid_quote_declaration(&definition.declaration) => {
-                    self.diagnostics.push(Diagnostic::new(
-                        definition.declaration.syntax.span.clone(),
-                        "compiler-provided macro `quote` must have signature `Braced Syntax -> Syntax`",
-                    ));
-                }
-                MacroKind::ParseQuote if !valid_parse_quote_declaration(&definition.declaration) => {
-                    self.diagnostics.push(Diagnostic::new(
-                        definition.declaration.syntax.span.clone(),
-                        "compiler-provided macro `parse_quote` must have signature `T => ParseQuoteResult T => Braced Syntax -> T`",
                     ));
                 }
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
@@ -3996,31 +3982,40 @@ impl MacroExpander {
         environment: &Environment,
         expected: &MetaType,
     ) -> Option<Value> {
-        let quote_is_imported = quote.qualified
-            || self.scopes[module.0]
-                .macros
-                .get(quote.kind.name())
-                .is_some_and(|definitions| {
-                    definitions.iter().any(|key| {
-                        self.definitions.get(key).is_some_and(|definition| {
-                            matches!(
-                                (&definition.kind, quote.kind),
-                                (MacroKind::Quote, crate::QuoteKind::Quote)
-                                    | (MacroKind::ParseQuote, crate::QuoteKind::ParseQuote)
-                            )
-                        })
-                    })
-                });
-        if !quote_is_imported {
+        let definitions = if quote.path.len() == 1 {
+            self.scopes[module.0].macros.get(&quote.path[0])
+        } else {
+            let namespace = quote.path[..quote.path.len() - 1].join(".");
+            self.scopes[module.0]
+                .namespaces
+                .get(&namespace)
+                .and_then(|target| self.scopes[target.0].macros.get(quote.path.last().unwrap()))
+        };
+        let matching = definitions.into_iter().flatten().filter(|key| {
+            self.definitions.get(*key).is_some_and(|definition| {
+                definition.declaration.visibility == Visibility::Public || quote.path.len() == 1
+            })
+        }).collect::<Vec<_>>();
+        if matching.len() != 1 || !self.definitions.get(matching[0]).is_some_and(|definition| {
+            matches!((&definition.kind, quote.kind),
+                (MacroKind::Quote, crate::QuoteKind::Quote)
+                    | (MacroKind::ParseQuote, crate::QuoteKind::ParseQuote))
+        }) {
             self.diagnostics.push(Diagnostic::new(
                 quote.syntax.span.clone(),
-                format!(
-                    "`{}` requires an explicit import from `std.syntax`",
-                    quote.kind.name()
-                ),
+                if quote.path.len() == 1 && matching.is_empty() {
+                    format!(
+                        "`{}` requires an explicit import from `std.syntax`",
+                        quote.kind.name()
+                    )
+                } else {
+                    format!("could not resolve quotation macro `{}`", quote.path.join("."))
+                },
             ));
             return None;
         }
+        let definition = self.definitions[matching[0]].clone();
+        self.record_invocation(quote.syntax.id, &definition);
         if *expected == MetaType::Syntax {
             let syntax = self.substitute_raw_quote(module, &quote.contents, environment)?;
             return Some(Value::Syntax(SyntaxValue::Raw(syntax)));
@@ -5383,12 +5378,41 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
 }
 
 fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
-    if matches!(definition.kind, MacroKind::ParseQuote) {
+    if matches!(definition.kind, MacroKind::Quote | MacroKind::ParseQuote)
+        && let Some(annotation) = &definition.declaration.annotation
+    {
+        let parameters = definition
+            .declaration
+            .type_parameters
+            .iter()
+            .flat_map(crate::TypeParameterPattern::names)
+            .collect::<Vec<_>>();
+        let bounds = definition
+            .declaration
+            .trait_bounds
+            .iter()
+            .map(|bound| {
+                let arguments = bound
+                    .arguments
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                format!("{} {arguments}", bound.trait_name.name)
+            })
+            .collect::<Vec<_>>();
+        let generic = if parameters.is_empty() {
+            String::new()
+        } else if bounds.is_empty() {
+            format!("<{}> ", parameters.join(", "))
+        } else {
+            format!("<{} where {}> ", parameters.join(", "), bounds.join(", "))
+        };
         return ResolvedMacro {
             declaration: definition.declaration.syntax.id,
             name: definition.key.name.clone(),
             modifier: false,
-            signature: "<T where ParseQuoteResult T> Braced Syntax -> T".to_owned(),
+            signature: format!("{generic}{annotation}"),
         };
     }
     let parameters = format_meta_signature(&definition.parameters);
@@ -5471,6 +5495,16 @@ fn macro_signature(annotation: &Type) -> Option<(Vec<MetaType>, MetaType)> {
     }
     let result = meta_type(current)?;
     (!parameters.is_empty()).then_some((parameters, result))
+}
+
+fn compiler_macro_signature(annotation: &Type) -> Option<(Vec<MetaType>, MetaType)> {
+    let Type::Function(function) = annotation else {
+        return None;
+    };
+    Some((
+        vec![meta_type(&function.parameter)?],
+        meta_type(&function.result).unwrap_or(MetaType::Syntax),
+    ))
 }
 
 fn inferred_macro_signature(value: Option<&Expression>) -> (Vec<MetaType>, MetaType) {
@@ -5880,56 +5914,6 @@ fn quote_result_type(meta: &MetaType) -> bool {
         MetaType::Delimited(_, _) => !invalid_raw_syntax_shape(meta),
         _ => false,
     }
-}
-
-fn braced_syntax_parameter(function: &crate::FunctionType) -> bool {
-    matches!(
-        function.parameter.as_ref(),
-        Type::Application(application)
-            if matches!(application.callee.as_ref(), Type::Named(name) if name.namespace.is_none() && name.name == "Braced")
-                && matches!(unwrap_singleton_product(&application.argument), Type::Named(name) if name.namespace.is_none() && name.name == "Syntax")
-    )
-}
-
-fn valid_quote_declaration(declaration: &MacroDeclaration) -> bool {
-    if !declaration.type_parameters.is_empty() || !declaration.trait_bounds.is_empty() {
-        return false;
-    }
-    let Some(Type::Function(function)) = declaration.annotation.as_ref() else {
-        return false;
-    };
-    braced_syntax_parameter(function)
-        && matches!(
-            function.result.as_ref(),
-            Type::Named(result) if result.namespace.is_none() && result.name == "Syntax"
-        )
-}
-
-fn valid_parse_quote_declaration(declaration: &MacroDeclaration) -> bool {
-    let [crate::TypeParameterPattern::Binding(parameter)] = declaration.type_parameters.as_slice()
-    else {
-        return false;
-    };
-    if parameter.name != "T" || !parameter.sized {
-        return false;
-    }
-    let [bound] = declaration.trait_bounds.as_slice() else {
-        return false;
-    };
-    if bound.trait_name.namespace.is_some()
-        || bound.trait_name.name != "ParseQuoteResult"
-        || !matches!(bound.arguments.as_slice(), [Type::Named(argument)] if argument.namespace.is_none() && argument.name == "T")
-    {
-        return false;
-    }
-    let Some(Type::Function(function)) = declaration.annotation.as_ref() else {
-        return false;
-    };
-    braced_syntax_parameter(function)
-        && matches!(
-            function.result.as_ref(),
-            Type::Named(result) if result.namespace.is_none() && result.name == "T"
-        )
 }
 
 fn valid_macro_parameter_patterns(expression: &Expression, arity: usize) -> bool {

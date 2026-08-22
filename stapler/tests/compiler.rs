@@ -2397,6 +2397,14 @@ fn syntax_types_and_quote_require_an_explicit_import() {
         "macro identity: Expr -> Expr = value => std.syntax.parse_quote { $value }\n",
         "let result: I32 = identity 42\n",
     ));
+
+    resolve(concat!(
+        "use std.syntax\n",
+        "use std.syntax.(Syntax, Expr)\n",
+        "macro capture: Syntax -> Syntax = value => syntax.quote { $value }\n",
+        "macro identity: Expr -> Expr = value => syntax.parse_quote { $value }\n",
+        "let result: I32 = identity 42\n",
+    ));
 }
 
 #[test]

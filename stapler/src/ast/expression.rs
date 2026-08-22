@@ -84,7 +84,7 @@ pub struct WithResourceExpression {
 pub struct QuoteExpression {
     pub syntax: Syntax,
     pub kind: QuoteKind,
-    pub qualified: bool,
+    pub path: Vec<String>,
     pub contents: Syntax,
     pub template: QuoteTemplate,
 }

@@ -732,6 +732,11 @@ impl Collector<'_> {
                         self.named_last(&access.syntax, name, macro_signature(info));
                     }
                 }
+                Expression::Quote(quote) => self.named_last(
+                    &quote.syntax,
+                    quote.kind.name(),
+                    macro_signature(info),
+                ),
                 _ => {}
             }
         }
@@ -817,11 +822,6 @@ impl Collector<'_> {
             }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
             Expression::Quote(quote) => {
-                let signature = match quote.kind {
-                    QuoteKind::Quote => "macro quote: Braced Syntax -> Syntax",
-                    QuoteKind::ParseQuote => "macro parse_quote: T => ParseQuoteResult T => Braced Syntax -> T",
-                };
-                self.named(&quote.syntax, quote.kind.name(), signature.to_owned());
                 match &quote.template {
                     QuoteTemplate::Expression(expression) => self.expression(expression),
                     QuoteTemplate::Item(item) => self.item(item),
@@ -1167,6 +1167,10 @@ mod tests {
         assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
         assert!(signatures.contains(&("inferred", "macro inferred: SyntaxNode -> Expr")));
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
+        assert!(signatures.contains(&(
+            "parse_quote",
+            "macro parse_quote: <T where ParseQuoteResult T> Braced Syntax -> T"
+        )));
         assert!(
             signatures
                 .iter()
