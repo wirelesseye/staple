@@ -1985,6 +1985,7 @@ F64
 Bool
 String
 Ref T
+Slice T
 CString
 CChar
 CPointer CChar
@@ -2006,7 +2007,7 @@ returns it unchanged. Floating-point values use round-trip decimal notation.
 
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation
-`Ref U8[]`. At runtime it contains a managed byte pointer and a byte length; it
+`Slice U8`. At runtime it contains a managed byte pointer and a byte length; it
 has no capacity field or separate descriptor allocation. Copying a `String`
 copies those two words and keeps the managed byte storage shared.
 Two strings can be concatenated with `+`; this dispatches through the standard
@@ -2038,10 +2039,6 @@ let value = Ref 10
 let previous = Ref.replace (value, 20)
 ```
 
-`Ref.replace` is not available for erased product payloads because an erased product
-cannot be passed by value. Individual elements of `Ref T[]` remain writable by
-index.
-
 `Ref` follows the ordinary literal representation rules when nested inside a
 nominal type. For example, this declaration retains both constructor layers:
 
@@ -2051,25 +2048,38 @@ let point = RefPoint (Ref (x: 10, y: 20))
 let RefPoint (Ref (x, y)) = point
 ```
 
-The length of a homogeneous product can be erased behind `Ref`:
+The length of a homogeneous product can be erased into a `Slice`:
 
 ```staple
 let fixed: Ref I32[3] = Ref (10, 20, 30)
-let values: Ref I32[] = fixed
-let count: USize = length values
+let values: Slice I32 = fixed
+let count: USize = Slice.length values
 let second = values.1
 let index: USize = 2
 let third = values[index]
 ```
 
-`Ref T[]` is a pointer-and-length view of an allocation whose concrete length
+`Slice T` is a pointer-and-length view of an allocation whose concrete length
 is still fixed. It is not a dynamic array and is not equal to any `Ref T[N]`;
-fixed references are implicitly converted when an erased reference is
-expected. Literal and variable indexing perform runtime bounds checks. Erased
-products are unsized: they cannot be used by value, spread, destructured, or
-passed through a foreign ABI. Transparent aliases may name unsized types, and
-those aliases may be used behind a constructor such as `Ref` whose parameter
-is declared `?Sized`.
+a fixed reference is implicitly converted wherever a `Slice T` is expected
+(as in the `let values: Slice I32 = fixed` binding above), and the companion
+function `Slice.from_ref: <T> Ref T -> Slice T` performs the same conversion
+explicitly — `Slice.from_ref fixed` — for use as a first-class function value
+or wherever an explicit spelling is clearer. `Slice.from_ref` also accepts a
+singleton `Ref T` (treated as a length-1 slice) and an empty `Ref ()`
+(treated as a length-0 slice, requiring an expected `Slice` type to infer its
+element type). Literal and variable indexing perform runtime bounds checks.
+Erased products are unsized: they cannot be used by value, spread,
+destructured, or passed through a foreign ABI.
+
+Transparent aliases may name the underlying unsized array shape (`type alias
+Elements T = T[]`), but that shape can only be completed into a usable type
+through `Slice` — writing `Ref` directly around an unsized array, whether
+spelled out (`Ref T[]`) or reached through such an alias, is rejected; use
+`Slice T` instead. `Ref` remains generic over `?Sized T` so that functions
+like `preserve: <T where ?Sized T> Ref T -> Ref T` work uniformly whether
+`T` ends up sized or erased, but constructing that erasure in the first
+place always goes through `Slice`.
 
 Managed references use a non-moving, single-threaded, stop-the-world
 mark-and-sweep collector. Collection occurs automatically as the live heap

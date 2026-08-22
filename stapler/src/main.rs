@@ -970,7 +970,7 @@ mod tests {
                 "let index: USize = 1\n",
                 "let product: I32[3] = UpdateIndex.update_index ((10, 20, 30), index, 21)\n",
                 "let fixed: Ref I32[3] = Ref product\n",
-                "let mut erased: Ref I32[] = fixed\n",
+                "let mut erased: Slice I32 = Slice.from_ref fixed\n",
                 "erased[index] = 22\n",
                 "def score: ((I32, String, Bool), USize) -> I32 = (values, position) => match values[position] {\n",
                 "  value: I32 => value,\n",
@@ -981,7 +981,7 @@ mod tests {
                 "let mixed: (I32, String, Bool) = (7, \"text\", False)\n",
                 "let mixed_result = (score (mixed, 0) - 7) + score (mixed, 1) + (score (mixed, 2) - 1)\n",
                 "let result = mixed_result + (erased[index] - 22) + (fixed[index] - 22) + (product[index] - 21)\n",
-                "match length erased == 3 { True() => exit result, False() => exit 1 }\n",
+                "match Slice.length erased == 3 { True() => exit result, False() => exit 1 }\n",
             ),
         )
         .expect("temporary erased-product source should be writable");

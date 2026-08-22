@@ -1,0 +1,7 @@
+@recursive_constructor
+pub(repr) type Slice T = T
+
+companion<T> Slice T {
+    pub def length: Slice T -> USize = value => 0
+    pub def from_ref: Ref T -> Slice T = value => value
+}

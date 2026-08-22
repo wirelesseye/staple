@@ -1,4 +1,4 @@
-pub type String = Ref U8[]
+pub type String = Slice U8
 
 extern "staple-intrinsic" {
     let __string_add: (String, String) -> String

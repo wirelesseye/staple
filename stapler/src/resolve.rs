@@ -72,6 +72,7 @@ pub enum BuiltinType {
     Float(FloatType),
     String,
     Ref,
+    Slice,
     CChar,
     CString,
     CPointer,
@@ -88,6 +89,7 @@ pub enum BuiltinType {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecursiveConstruction {
     ManagedReference,
+    Slice,
     Syntax,
 }
 
@@ -267,7 +269,8 @@ pub enum IntrinsicFunction {
     StringFromCString,
     StringToCString,
     StringAdd,
-    ErasedProductLength,
+    SliceLength,
+    SliceFromRef,
     RefReplace,
     Drop,
 }
@@ -1110,6 +1113,7 @@ impl NameResolver {
         }
         self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
+        self.register_builtin_type(core, "std.core", "Slice", BuiltinType::Slice);
         let Some(syntax) = program.standard_library_syntax() else {
             return;
         };
@@ -1261,10 +1265,6 @@ impl NameResolver {
             self.intrinsic_functions
                 .insert(symbol, IntrinsicFunction::Drop);
         }
-        if let Some(symbol) = self.interfaces[core.0].values.get("length").copied() {
-            self.intrinsic_functions
-                .insert(symbol, IntrinsicFunction::ErasedProductLength);
-        }
         if let Some(symbol) = self.interfaces[core.0]
             .namespaces
             .get("Ref")
@@ -1273,6 +1273,24 @@ impl NameResolver {
         {
             self.intrinsic_functions
                 .insert(symbol, IntrinsicFunction::RefReplace);
+        }
+        if let Some(symbol) = self.interfaces[core.0]
+            .namespaces
+            .get("Slice")
+            .and_then(|companion| self.interfaces[companion.0].values.get("length"))
+            .copied()
+        {
+            self.intrinsic_functions
+                .insert(symbol, IntrinsicFunction::SliceLength);
+        }
+        if let Some(symbol) = self.interfaces[core.0]
+            .namespaces
+            .get("Slice")
+            .and_then(|companion| self.interfaces[companion.0].values.get("from_ref"))
+            .copied()
+        {
+            self.intrinsic_functions
+                .insert(symbol, IntrinsicFunction::SliceFromRef);
         }
         for (name, _) in expected {
             if !found.contains_key(&name) {
@@ -1448,7 +1466,7 @@ impl NameResolver {
                 ));
             }
         } else if builtin != BuiltinType::Syntax {
-            let valid_kind = if builtin == BuiltinType::Ref {
+            let valid_kind = if matches!(builtin, BuiltinType::Ref | BuiltinType::Slice) {
                 declaration.kind == crate::TypeDeclarationKind::Distinct
                     && declaration.representation_visibility == Visibility::Public
             } else {
@@ -1461,8 +1479,10 @@ impl NameResolver {
                 ));
             }
         }
-        if matches!(builtin, BuiltinType::CPointer | BuiltinType::Ref)
-            && declaration.type_parameters.len() != 1
+        if matches!(
+            builtin,
+            BuiltinType::CPointer | BuiltinType::Ref | BuiltinType::Slice
+        ) && declaration.type_parameters.len() != 1
         {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
@@ -1488,6 +1508,7 @@ impl NameResolver {
         }
         let recursive_construction = match builtin {
             BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
+            BuiltinType::Slice => Some(RecursiveConstruction::Slice),
             BuiltinType::Syntax if declaration.kind == crate::TypeDeclarationKind::Distinct => {
                 Some(RecursiveConstruction::Syntax)
             }

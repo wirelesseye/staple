@@ -5360,7 +5360,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 return Ok(self.unit_value());
             }
-            IntrinsicFunction::ErasedProductLength => {
+            IntrinsicFunction::SliceLength => {
                 let value = self.compile_expression(environment, &call.argument)?;
                 let Some(BasicValueEnum::StructValue(reference)) = value_as_basic(value) else {
                     return Err(Diagnostic::new(
@@ -5373,6 +5373,23 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .build_extract_value(reference, 1, "erased_ref.length")
                     .map(|value| value.as_any_value_enum())
                     .map_err(compiler_diagnostic);
+            }
+            IntrinsicFunction::SliceFromRef => {
+                let source_type = self
+                    .concrete_expression_type(&call.argument)
+                    .unwrap_or(CheckedType::Error);
+                let target_type = self
+                    .concrete_expression_type(&Expression::Call(call.clone()))
+                    .ok_or_else(|| {
+                        Diagnostic::new(call.syntax.span.clone(), "unchecked from_ref result")
+                    })?;
+                let value = self.compile_expression(environment, &call.argument)?;
+                return self.coerce_erased_ref_value(
+                    value,
+                    &source_type,
+                    &target_type,
+                    call.syntax.span.clone(),
+                );
             }
             IntrinsicFunction::RefReplace => {
                 let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
@@ -5566,7 +5583,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             | IntrinsicFunction::ToString { .. }
             | IntrinsicFunction::FloatBinary { .. }
             | IntrinsicFunction::FloatCompare { .. }
-            | IntrinsicFunction::ErasedProductLength
+            | IntrinsicFunction::SliceLength
+            | IntrinsicFunction::SliceFromRef
             | IntrinsicFunction::RefReplace
             | IntrinsicFunction::Drop => {
                 unreachable!()

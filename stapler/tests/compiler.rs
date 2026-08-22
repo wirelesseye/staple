@@ -399,12 +399,12 @@ fn supports_repeated_spread_and_erased_product_references() {
         "let explicit: I32[3] = (1, 2, 3)\n",
         "let spread: (String, ...I32[2]) = (\"x\", 4, 5)\n",
         "let fixed: Ref I32[3] = Ref explicit\n",
-        "let erased: Ref I32[] = fixed\n",
-        "let constructed: Ref I32[] = Ref (6, 7)\n",
-        "let singleton: Ref I32[] = Ref 8\n",
-        "let empty: Ref I32[] = Ref ()\n",
-        "let count: USize = length erased\n",
-        "let fixed_count: USize = length fixed\n",
+        "let erased: Slice I32 = fixed\n",
+        "let constructed: Slice I32 = Ref (6, 7)\n",
+        "let singleton: Slice I32 = Ref 8\n",
+        "let empty: Slice I32 = Ref ()\n",
+        "let count: USize = Slice.length erased\n",
+        "let fixed_count: USize = Slice.length fixed\n",
         "let literal: I32 = erased.1\n",
         "let index: USize = 2\n",
         "let dynamic: I32 = erased[index]\n",
@@ -975,7 +975,7 @@ fn derives_trait_delegated_product_indexing() {
         "let mutate_operation: (Ref I32[3], USize, I32) ->{mut 0} () = MutateIndex.mutate_index\n",
         "mutate_operation (fixed, position, 6)\n",
         "fixed[position] = 7\n",
-        "let mut erased: Ref I32[] = fixed\n",
+        "let mut erased: Slice I32 = fixed\n",
         "erased[position] = 8\n",
     );
     let module = type_check(source);
@@ -1152,7 +1152,7 @@ fn rejects_erased_products_outside_refs_and_ref_destructuring() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "let fixed: Ref I32[2] = Ref (1, 2)\nlet erased: Ref I32[] = fixed\nlet Ref values = erased\n",
+            "let fixed: Ref I32[2] = Ref (1, 2)\nlet erased: Slice I32 = fixed\nlet Ref values = erased\n",
         ))
         .expect_err("an erased reference cannot be destructured");
     assert!(
@@ -1190,21 +1190,29 @@ fn handles_product_repetition_edges_and_limits() {
 #[test]
 fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
     type_check(concat!(
-        "type alias Ints = Ref I32[]\n",
+        "type alias Ints = Slice I32\n",
         "let fixed: Ref I32[2] = Ref (1, 2)\n",
         "let values: Ints = fixed\n",
-        "let count: USize = length values\n",
+        "let count: USize = Slice.length values\n",
     ));
 
-    type_check("type alias Slice = I32[]\n");
-    type_check(concat!(
-        "type alias Slice = I32[]\n",
-        "let fixed: Ref I32[2] = Ref (1, 2)\n",
-        "let values: Ref Slice = fixed\n",
-    ));
+    type_check("type alias MySlice = I32[]\n");
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("type alias Slice = I32[]\nlet invalid: Slice\n"))
+        .check(resolve(concat!(
+            "type alias MySlice = I32[]\n",
+            "let fixed: Ref I32[2] = Ref (1, 2)\n",
+            "let values: Ref MySlice = fixed\n",
+        )))
+        .expect_err("aliasing an unsized array does not let it bypass `Slice`");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("use `Slice T` instead")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("type alias MySlice = I32[]\nlet invalid: MySlice\n"))
         .expect_err("unsized aliases cannot be used by value");
     assert!(
         diagnostics
@@ -1214,6 +1222,13 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("extern \"c\" { let invalid: Ref I32[] -> I32 }\n"))
+        .expect_err("`Ref I32[]` is rejected before an FFI-specific check even runs");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("use `Slice T` instead")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("extern \"c\" { let invalid: Slice I32 -> I32 }\n"))
         .expect_err("erased references must not cross the FFI");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
@@ -1225,12 +1240,11 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
 #[test]
 fn enforces_implicit_sized_and_supports_question_sized_parameters() {
     type_check(concat!(
-        "type alias Slice E = E[]\n",
         "def preserve: <T where ?Sized T> Ref T -> Ref T = value => value\n",
         "def explicitly_sized: <T where ?Sized T, Sized T> Ref T -> Ref T = value => value\n",
         "let fixed: Ref I32[2] = Ref (1, 2)\n",
-        "let erased: Ref (Slice I32) = fixed\n",
-        "let same: Ref (Slice I32) = preserve erased\n",
+        "let erased: Slice I32 = fixed\n",
+        "let same: Slice I32 = preserve erased\n",
         "let same_fixed: Ref I32[2] = explicitly_sized fixed\n",
     ));
 
@@ -1238,7 +1252,7 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
         .check(resolve(concat!(
             "def sized_only: <T> Ref T -> Ref T = value => value\n",
             "let fixed: Ref I32[2] = Ref (1, 2)\n",
-            "let erased: Ref I32[] = fixed\n",
+            "let erased: Slice I32 = fixed\n",
             "let invalid = sized_only erased\n",
         )))
         .expect_err("ordinary generic parameters have an implicit Sized bound");
@@ -2458,9 +2472,9 @@ fn string_literals_have_the_canonical_string_type() {
 fn validates_the_standard_library_string_representation() {
     assert!(
         string_contract_diagnostics(concat!(
-            "pub type String = Ref U8[]\n",
-            "def bytes: String -> Ref U8[] = String value => value\n",
-            "def matched_bytes: String -> Ref U8[] = value => match value { String bytes => bytes, }\n",
+            "pub type String = Slice U8\n",
+            "def bytes: String -> Slice U8 = String value => value\n",
+            "def matched_bytes: String -> Slice U8 = value => match value { String bytes => bytes, }\n",
         ))
         .is_empty()
     );
@@ -2471,16 +2485,16 @@ fn validates_the_standard_library_string_representation() {
             "standard library type `String` must be a represented distinct type",
         ),
         (
-            "pub(repr) type String = Ref U8[]\n",
+            "pub(repr) type String = Slice U8\n",
             "standard library type `String` must keep its representation private",
         ),
         (
-            "pub type String T = Ref U8[]\n",
+            "pub type String T = Slice U8\n",
             "standard library type `String` must not accept compile-time arguments",
         ),
         (
-            "pub type String = Ref I8[]\n",
-            "standard library type `String` must be represented by `Ref U8[]`, found `Ref I8[]`",
+            "pub type String = Slice I8\n",
+            "standard library type `String` must be represented by `Slice U8`, found `Slice I8`",
         ),
     ] {
         let diagnostics = string_contract_diagnostics(declaration);

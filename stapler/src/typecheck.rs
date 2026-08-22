@@ -557,7 +557,10 @@ impl fmt::Display for CheckedType {
                 }
                 Ok(())
             }
-            Self::Ref(value) => format_type_application(formatter, "Ref", value),
+            Self::Ref(value) => match value.as_ref() {
+                Self::ErasedProduct(element) => format_type_application(formatter, "Slice", element),
+                _ => format_type_application(formatter, "Ref", value),
+            },
             Self::ErasedProduct(value) => write!(formatter, "{value}[]"),
             Self::CString => formatter.write_str("CString"),
             Self::CChar => formatter.write_str("CChar"),
@@ -1243,7 +1246,7 @@ impl TypeChecker {
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!(
-                    "standard library type `String` must be represented by `Ref U8[]`, found `{representation}`"
+                    "standard library type `String` must be represented by `Slice U8`, found `{representation}`"
                 ),
             ));
         }
@@ -2275,7 +2278,7 @@ impl TypeChecker {
                     resources: CheckedResourceSet::default(),
                     result: Box::new(CheckedType::String),
                 }),
-                crate::IntrinsicFunction::ErasedProductLength => self
+                crate::IntrinsicFunction::SliceLength => self
                     .symbol_types
                     .get(symbol)
                     .cloned()
@@ -2286,6 +2289,19 @@ impl TypeChecker {
                                 CheckedType::Ref(payload)
                                     if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)))
                                 && *function.result == CheckedType::USize
+                    ))
+                    .unwrap_or(CheckedType::Error),
+                crate::IntrinsicFunction::SliceFromRef => self
+                    .symbol_types
+                    .get(symbol)
+                    .cloned()
+                    .filter(|value_type| matches!(
+                        value_type,
+                        CheckedType::Function(function)
+                            if matches!(function.parameter.as_ref(), CheckedType::Ref(_))
+                                && matches!(function.result.as_ref(),
+                                    CheckedType::Ref(payload)
+                                        if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)))
                     ))
                     .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::RefReplace => self
@@ -4698,6 +4714,83 @@ impl TypeChecker {
                 normalize_product_type(elements, false)
             }
             Expression::Call(call) => {
+                if let Some(symbol) = module.symbol_for(call.callee.syntax().id)
+                    && module.intrinsic_function(symbol) == Some(crate::IntrinsicFunction::SliceFromRef)
+                {
+                    self.ensure_binding_checked(module, symbol);
+                    self.check_expression(module, &call.callee);
+                    let argument_type = self.check_expression(module, &call.argument);
+                    if self.did_return {
+                        return CheckedType::empty_product();
+                    }
+                    let element = match &argument_type {
+                        CheckedType::Ref(payload) => match payload.as_ref() {
+                            CheckedType::ErasedProduct(_) => {
+                                self.diagnostics.push(Diagnostic::new(
+                                    call.argument.syntax().span.clone(),
+                                    "`from_ref` requires a fixed-size `Ref`, found a `Slice`",
+                                ));
+                                None
+                            }
+                            CheckedType::Product(product) if !product.variadic => {
+                                match product.elements.as_slice() {
+                                    [] => match expected {
+                                        Some(CheckedType::Ref(expected_payload))
+                                            if matches!(
+                                                expected_payload.as_ref(),
+                                                CheckedType::ErasedProduct(_)
+                                            ) =>
+                                        {
+                                            let CheckedType::ErasedProduct(expected_element) =
+                                                expected_payload.as_ref()
+                                            else {
+                                                unreachable!()
+                                            };
+                                            Some(expected_element.as_ref().clone())
+                                        }
+                                        _ => {
+                                            self.diagnostics.push(Diagnostic::new(
+                                                call.syntax.span.clone(),
+                                                "cannot infer the element type of an empty slice; annotate the expected type",
+                                            ));
+                                            None
+                                        }
+                                    },
+                                    [first, rest @ ..] => {
+                                        if rest
+                                            .iter()
+                                            .all(|element| element.value_type == first.value_type)
+                                        {
+                                            Some(first.value_type.clone())
+                                        } else {
+                                            self.diagnostics.push(Diagnostic::new(
+                                                call.argument.syntax().span.clone(),
+                                                "`from_ref` requires a homogeneous array, found mixed element types",
+                                            ));
+                                            None
+                                        }
+                                    }
+                                }
+                            }
+                            other => Some(other.clone()),
+                        },
+                        CheckedType::Error => None,
+                        other => {
+                            self.diagnostics.push(Diagnostic::new(
+                                call.argument.syntax().span.clone(),
+                                format!("`from_ref` requires a `Ref` value, found `{other}`"),
+                            ));
+                            None
+                        }
+                    };
+                    let result = match element {
+                        Some(element) => {
+                            CheckedType::Ref(Box::new(CheckedType::ErasedProduct(Box::new(element))))
+                        }
+                        None => CheckedType::Error,
+                    };
+                    return self.finish_expression_type(expression, result, expected);
+                }
                 if let Expression::Access(selector) = call.callee.as_ref()
                     && let Accessor::Method(method) = &selector.accessor
                 {
@@ -7151,6 +7244,15 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         }
+        if module.builtin_type(id) == Some(BuiltinType::Ref)
+            && matches!(arguments.last(), Some(CheckedType::ErasedProduct(_)))
+        {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                "`Ref` cannot wrap an unsized slice type `T[]`; use `Slice T` instead",
+            ));
+            return CheckedType::Error;
+        }
         self.instantiate_type_declaration(module, id, arguments)
     }
 
@@ -7255,6 +7357,11 @@ impl TypeChecker {
         match module.recursive_construction(id) {
             Some(crate::RecursiveConstruction::ManagedReference) => {
                 return CheckedType::Ref(Box::new(arguments[0].clone()));
+            }
+            Some(crate::RecursiveConstruction::Slice) => {
+                return CheckedType::Ref(Box::new(CheckedType::ErasedProduct(Box::new(
+                    arguments[0].clone(),
+                ))));
             }
             Some(crate::RecursiveConstruction::Syntax) => {
                 return CheckedType::Opaque {
@@ -7510,6 +7617,11 @@ impl TypeChecker {
                 BuiltinType::Ref => CheckedType::TypeConstructor {
                     id,
                     name: "Ref".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::Slice => CheckedType::TypeConstructor {
+                    id,
+                    name: "Slice".to_owned(),
                     arguments: Vec::new(),
                 },
                 BuiltinType::CChar => CheckedType::CChar,
