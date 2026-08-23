@@ -2817,18 +2817,18 @@ impl NameResolver {
                 }
                 self.pop_type_parameter_scope();
             }
-            statement @ (Item::Binding(_)
+            item @ (Item::Binding(_)
             | Item::PatternBinding(_)
             | Item::Assignment(_)
             | Item::Return(_)
             | Item::Break(_)
             | Item::Continue(_)
-            | Item::Expression(_)) => self.resolve_statement(statement),
+            | Item::Expression(_)) => self.resolve_block_item(item),
         }
     }
 
-    fn resolve_statement(&mut self, statement: &Item) {
-        match statement {
+    fn resolve_block_item(&mut self, item: &Item) {
+        match item {
             Item::Binding(binding) => self.resolve_binding(binding),
             Item::PatternBinding(binding) => {
                 if binding.kind == PatternBindingKind::Propagating {
@@ -2859,30 +2859,30 @@ impl NameResolver {
                 self.resolve_expression(&assignment.target, None, None);
                 self.resolve_expression(&assignment.value, None, None);
             }
-            Item::Return(statement) => {
+            Item::Return(item) => {
                 if self.function_stack.is_empty() {
                     self.diagnostics.push(Diagnostic::new(
-                        statement.syntax.span.clone(),
+                        item.syntax.span.clone(),
                         "`return` is only allowed inside a function",
                     ));
                 }
-                self.resolve_expression(&statement.value, None, None);
+                self.resolve_expression(&item.value, None, None);
             }
-            Item::Break(statement) => {
+            Item::Break(item) => {
                 if self.loop_depth == 0 {
                     self.diagnostics.push(Diagnostic::new(
-                        statement.syntax.span.clone(),
+                        item.syntax.span.clone(),
                         "`break` is only allowed inside a loop",
                     ));
                 }
-                if let Some(value) = &statement.value {
+                if let Some(value) = &item.value {
                     self.resolve_expression(value, None, None);
                 }
             }
-            Item::Continue(statement) => {
+            Item::Continue(item) => {
                 if self.loop_depth == 0 {
                     self.diagnostics.push(Diagnostic::new(
-                        statement.syntax.span.clone(),
+                        item.syntax.span.clone(),
                         "`continue` is only allowed inside a loop",
                     ));
                 }
@@ -3886,8 +3886,8 @@ impl NameResolver {
         self.imported_types.push(HashMap::new());
         self.imported_macros.push(HashMap::new());
         self.imported_traits.push(HashMap::new());
-        for statement in &block.items {
-            match statement {
+        for item in &block.items {
+            match item {
                 Item::Binding(binding)
                     if matches!(binding.kind, BindingKind::Def | BindingKind::Const) =>
                 {
@@ -3899,8 +3899,8 @@ impl NameResolver {
                 _ => {}
             }
         }
-        for statement in &block.items {
-            self.resolve_statement(statement);
+        for item in &block.items {
+            self.resolve_block_item(item);
         }
         self.imported_traits.pop();
         self.imported_macros.pop();
@@ -4635,7 +4635,7 @@ impl<'a> InitializationAnalyzer<'a> {
                         | Item::Continue(_)
                         | Item::Expression(_)
                 ) {
-                    self.statement(item, &mut globals, &HashMap::new(), true);
+                    self.item(item, &mut globals, &HashMap::new(), true);
                 }
             }
         }
@@ -4647,14 +4647,14 @@ impl<'a> InitializationAnalyzer<'a> {
         }
     }
 
-    fn statement(
+    fn item(
         &mut self,
-        statement: &Item,
+        item: &Item,
         local: &mut HashMap<SymbolId, InitializationState>,
         outer: &HashMap<SymbolId, InitializationState>,
         module_level: bool,
     ) {
-        match statement {
+        match item {
             Item::Binding(binding) => {
                 let symbol = self.module.symbol_for(binding.syntax.id);
                 if binding.kind == BindingKind::Def {
@@ -4700,9 +4700,9 @@ impl<'a> InitializationAnalyzer<'a> {
                 self.expression(&assignment.target, local, outer);
                 self.expression(&assignment.value, local, outer);
             }
-            Item::Return(statement) => self.expression(&statement.value, local, outer),
-            Item::Break(statement) => {
-                if let Some(value) = &statement.value {
+            Item::Return(item) => self.expression(&item.value, local, outer),
+            Item::Break(item) => {
+                if let Some(value) = &item.value {
                     self.expression(value, local, outer);
                 }
             }
@@ -4756,16 +4756,16 @@ impl<'a> InitializationAnalyzer<'a> {
             }
             Expression::Block(block) => {
                 let original = local.clone();
-                for statement in &block.items {
-                    if let Item::Binding(binding) = statement
+                for item in &block.items {
+                    if let Item::Binding(binding) = item
                         && binding.kind == BindingKind::Def
                         && let Some(symbol) = self.module.symbol_for(binding.syntax.id)
                     {
                         local.insert(symbol, InitializationState::Declared);
                     }
                 }
-                for statement in &block.items {
-                    self.statement(statement, local, outer, false);
+                for item in &block.items {
+                    self.item(item, local, outer, false);
                 }
                 *local = original;
             }
@@ -4925,15 +4925,15 @@ fn find_block_type_declarations_in_item<'a>(item: &'a Item, out: &mut Vec<&'a Ty
         | Item::Return(_)
         | Item::Break(_)
         | Item::Continue(_)
-        | Item::Expression(_)) => find_block_type_declarations_in_statement(item, out),
+        | Item::Expression(_)) => find_block_type_declarations_in_block_item(item, out),
     }
 }
 
-fn find_block_type_declarations_in_statement<'a>(
-    statement: &'a Item,
+fn find_block_type_declarations_in_block_item<'a>(
+    item: &'a Item,
     out: &mut Vec<&'a TypeDeclaration>,
 ) {
-    match statement {
+    match item {
         Item::Binding(binding) => {
             if let Some(value) = &binding.value {
                 find_block_type_declarations_in_expression(value, out);
@@ -4946,11 +4946,11 @@ fn find_block_type_declarations_in_statement<'a>(
             find_block_type_declarations_in_expression(&assignment.target, out);
             find_block_type_declarations_in_expression(&assignment.value, out);
         }
-        Item::Return(statement) => {
-            find_block_type_declarations_in_expression(&statement.value, out)
+        Item::Return(item) => {
+            find_block_type_declarations_in_expression(&item.value, out)
         }
-        Item::Break(statement) => {
-            if let Some(value) = &statement.value {
+        Item::Break(item) => {
+            if let Some(value) = &item.value {
                 find_block_type_declarations_in_expression(value, out);
             }
         }
@@ -5025,8 +5025,8 @@ fn find_block_type_declarations_in_block<'a>(
     block: &'a BlockExpression,
     out: &mut Vec<&'a TypeDeclaration>,
 ) {
-    for statement in &block.items {
-        find_block_type_declarations_in_statement(statement, out);
+    for item in &block.items {
+        find_block_type_declarations_in_block_item(item, out);
     }
 }
 

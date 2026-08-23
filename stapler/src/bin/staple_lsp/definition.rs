@@ -142,7 +142,7 @@ impl DeclarationCollector<'_> {
             | Item::Return(_)
             | Item::Break(_)
             | Item::Continue(_)
-            | Item::Expression(_)) => self.statement(value),
+            | Item::Expression(_)) => self.block_item(value),
             Item::TraitImplementation(value) => {
                 for parameter in &value.type_parameters {
                     self.type_parameter(parameter);
@@ -152,8 +152,8 @@ impl DeclarationCollector<'_> {
         }
     }
 
-    fn statement(&mut self, statement: &Item) {
-        match statement {
+    fn block_item(&mut self, item: &Item) {
+        match item {
             Item::Binding(value) => self.binding(value),
             Item::PatternBinding(value) => self.pattern(&value.pattern),
             Item::Expression(value) => self.expression(value),
@@ -462,7 +462,7 @@ impl Collector<'_> {
             | Item::Return(_)
             | Item::Break(_)
             | Item::Continue(_)
-            | Item::Expression(_)) => self.statement(value),
+            | Item::Expression(_)) => self.block_item(value),
         }
     }
 
@@ -497,8 +497,8 @@ impl Collector<'_> {
         }
     }
 
-    fn statement(&mut self, statement: &Item) {
-        match statement {
+    fn block_item(&mut self, item: &Item) {
+        match item {
             Item::Binding(value) => self.binding(value),
             Item::PatternBinding(value) => {
                 self.pattern(&value.pattern);

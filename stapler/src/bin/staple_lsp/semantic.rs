@@ -386,12 +386,12 @@ impl<'a> Classifier<'a> {
             | Item::Return(_)
             | Item::Break(_)
             | Item::Continue(_)
-            | Item::Expression(_)) => self.statement(value, resolved),
+            | Item::Expression(_)) => self.block_item(value, resolved),
         }
     }
 
-    fn statement(&mut self, statement: &Item, resolved: Option<&ResolvedModule>) {
-        match statement {
+    fn block_item(&mut self, item: &Item, resolved: Option<&ResolvedModule>) {
+        match item {
             Item::Binding(value) => self.binding(value, resolved),
             Item::PatternBinding(value) => {
                 self.pattern(&value.pattern, VARIABLE, resolved);

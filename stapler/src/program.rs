@@ -1428,12 +1428,12 @@ fn find_block_submodules_in_item(item: &Item, out: &mut Vec<Submodule>) {
         | Item::Return(_)
         | Item::Break(_)
         | Item::Continue(_)
-        | Item::Expression(_)) => find_block_submodules_in_statement(item, out),
+        | Item::Expression(_)) => find_block_submodules_in_block_item(item, out),
     }
 }
 
-fn find_block_submodules_in_statement(statement: &Item, out: &mut Vec<Submodule>) {
-    match statement {
+fn find_block_submodules_in_block_item(item: &Item, out: &mut Vec<Submodule>) {
+    match item {
         Item::Binding(binding) => {
             if let Some(value) = &binding.value {
                 find_block_submodules_in_expression(value, out);
@@ -1446,9 +1446,9 @@ fn find_block_submodules_in_statement(statement: &Item, out: &mut Vec<Submodule>
             find_block_submodules_in_expression(&assignment.target, out);
             find_block_submodules_in_expression(&assignment.value, out);
         }
-        Item::Return(statement) => find_block_submodules_in_expression(&statement.value, out),
-        Item::Break(statement) => {
-            if let Some(value) = &statement.value {
+        Item::Return(item) => find_block_submodules_in_expression(&item.value, out),
+        Item::Break(item) => {
+            if let Some(value) = &item.value {
                 find_block_submodules_in_expression(value, out);
             }
         }
@@ -1513,8 +1513,8 @@ fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Su
 }
 
 fn find_block_submodules_in_block(block: &BlockExpression, out: &mut Vec<Submodule>) {
-    for statement in &block.items {
-        find_block_submodules_in_statement(statement, out);
+    for item in &block.items {
+        find_block_submodules_in_block_item(item, out);
     }
 }
 
@@ -1569,12 +1569,12 @@ fn find_block_use_declarations_in_item(item: &Item, out: &mut Vec<UseDeclaration
         | Item::Return(_)
         | Item::Break(_)
         | Item::Continue(_)
-        | Item::Expression(_)) => find_block_use_declarations_in_statement(item, out),
+        | Item::Expression(_)) => find_block_use_declarations_in_block_item(item, out),
     }
 }
 
-fn find_block_use_declarations_in_statement(statement: &Item, out: &mut Vec<UseDeclaration>) {
-    match statement {
+fn find_block_use_declarations_in_block_item(item: &Item, out: &mut Vec<UseDeclaration>) {
+    match item {
         Item::Binding(binding) => {
             if let Some(value) = &binding.value {
                 find_block_use_declarations_in_expression(value, out);
@@ -1587,11 +1587,11 @@ fn find_block_use_declarations_in_statement(statement: &Item, out: &mut Vec<UseD
             find_block_use_declarations_in_expression(&assignment.target, out);
             find_block_use_declarations_in_expression(&assignment.value, out);
         }
-        Item::Return(statement) => {
-            find_block_use_declarations_in_expression(&statement.value, out)
+        Item::Return(item) => {
+            find_block_use_declarations_in_expression(&item.value, out)
         }
-        Item::Break(statement) => {
-            if let Some(value) = &statement.value {
+        Item::Break(item) => {
+            if let Some(value) = &item.value {
                 find_block_use_declarations_in_expression(value, out);
             }
         }
@@ -1660,8 +1660,8 @@ fn find_block_use_declarations_in_expression(expression: &Expression, out: &mut 
 }
 
 fn find_block_use_declarations_in_block(block: &BlockExpression, out: &mut Vec<UseDeclaration>) {
-    for statement in &block.items {
-        find_block_use_declarations_in_statement(statement, out);
+    for item in &block.items {
+        find_block_use_declarations_in_block_item(item, out);
     }
 }
 

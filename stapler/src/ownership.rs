@@ -216,8 +216,8 @@ impl<'a> OwnershipChecker<'a> {
                 self.check_expression(&Expression::Block(value.body.clone()), consume)
             }
             Expression::Block(value) => {
-                for statement in &value.items {
-                    if !self.check_statement(statement) {
+                for item in &value.items {
+                    if !self.check_item(item) {
                         return false;
                     }
                 }
@@ -294,8 +294,8 @@ impl<'a> OwnershipChecker<'a> {
         }
     }
 
-    fn check_statement(&mut self, statement: &Item) -> bool {
-        match statement {
+    fn check_item(&mut self, item: &Item) -> bool {
+        match item {
             Item::Binding(binding) => {
                 if let Some(value) = &binding.value {
                     self.check_expression(value, true);
@@ -335,12 +335,12 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 true
             }
-            Item::Return(statement) => {
-                self.check_expression(&statement.value, true);
+            Item::Return(item) => {
+                self.check_expression(&item.value, true);
                 false
             }
-            Item::Break(statement) => {
-                if let Some(value) = &statement.value {
+            Item::Break(item) => {
+                if let Some(value) = &item.value {
                     self.check_expression(value, true);
                 }
                 if let Some(loop_) = self.loops.last_mut() {

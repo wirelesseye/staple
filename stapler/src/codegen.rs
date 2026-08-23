@@ -1359,7 +1359,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         | Item::Continue(_)
                         | Item::Expression(_)
                 ) {
-                    self.compile_top_level_statement(&mut environment, item)?;
+                    self.compile_top_level_item(&mut environment, item)?;
                 }
             }
             self.builder
@@ -1369,12 +1369,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(())
     }
 
-    fn compile_top_level_statement(
+    fn compile_top_level_item(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        statement: &Item,
+        item: &Item,
     ) -> CodeGenerationResult<()> {
-        match statement {
+        match item {
             Item::Binding(binding) => {
                 let symbol = self
                     .typed_module
@@ -1420,16 +1420,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.store_pattern_initialization_state(&binding.pattern, 2)
             }
             Item::Assignment(assignment) => self.compile_assignment(environment, assignment),
-            Item::Return(statement) => Err(Diagnostic::new(
-                statement.syntax.span.clone(),
+            Item::Return(item) => Err(Diagnostic::new(
+                item.syntax.span.clone(),
                 "`return` is only allowed inside a function",
             )),
-            Item::Break(statement) => Err(Diagnostic::new(
-                statement.syntax.span.clone(),
+            Item::Break(item) => Err(Diagnostic::new(
+                item.syntax.span.clone(),
                 "`break` is only allowed inside a loop",
             )),
-            Item::Continue(statement) => Err(Diagnostic::new(
-                statement.syntax.span.clone(),
+            Item::Continue(item) => Err(Diagnostic::new(
+                item.syntax.span.clone(),
                 "`continue` is only allowed inside a loop",
             )),
             Item::Expression(expression) => {
@@ -1710,12 +1710,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(())
     }
 
-    fn compile_statement(
+    fn compile_item(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        statement: &Item,
+        item: &Item,
     ) -> CodeGenerationResult<Option<AnyValueEnum<'context>>> {
-        match statement {
+        match item {
             Item::Binding(binding) => {
                 if !binding.type_parameters.is_empty() {
                     if let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) {
@@ -1808,26 +1808,26 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.compile_assignment(environment, assignment)?;
                 Ok(None)
             }
-            Item::Return(statement) => {
-                let value = self.compile_expression(environment, &statement.value)?;
+            Item::Return(item) => {
+                let value = self.compile_expression(environment, &item.value)?;
                 if environment.did_return {
                     return Ok(None);
                 }
                 let value = value_as_basic(value).ok_or_else(|| {
                     Diagnostic::new(
-                        statement.value.syntax().span.clone(),
+                        item.value.syntax().span.clone(),
                         "function result is not a first-class value",
                     )
                 })?;
-                self.drop_all_owned(environment, statement.syntax.span.clone())?;
+                self.drop_all_owned(environment, item.syntax.span.clone())?;
                 self.builder
                     .build_return(Some(&value))
                     .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
                 environment.did_return = true;
                 Ok(None)
             }
-            Item::Break(statement) => {
-                let value = if let Some(expression) = &statement.value {
+            Item::Break(item) => {
+                let value = if let Some(expression) = &item.value {
                     let value = self.compile_expression(environment, expression)?;
                     if environment.did_return {
                         return Ok(None);
@@ -1846,11 +1846,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .last()
                     .map(|loop_| (loop_.exit, loop_.owned_before))
                     .expect("break inside loop");
-                self.drop_owned_since(environment, owned_before, statement.syntax.span.clone())?;
+                self.drop_owned_since(environment, owned_before, item.syntax.span.clone())?;
                 self.builder
                     .build_unconditional_branch(exit)
                     .map_err(|error| {
-                        Diagnostic::new(statement.syntax.span.clone(), error.to_string())
+                        Diagnostic::new(item.syntax.span.clone(), error.to_string())
                     })?;
                 let predecessor = self.builder.get_insert_block().expect("break block");
                 environment
@@ -1862,17 +1862,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 environment.did_return = true;
                 Ok(None)
             }
-            Item::Continue(statement) => {
+            Item::Continue(item) => {
                 let (header, owned_before) = environment
                     .loops
                     .last()
                     .map(|loop_| (loop_.header, loop_.owned_before))
                     .expect("continue inside loop");
-                self.drop_owned_since(environment, owned_before, statement.syntax.span.clone())?;
+                self.drop_owned_since(environment, owned_before, item.syntax.span.clone())?;
                 self.builder
                     .build_unconditional_branch(header)
                     .map_err(|error| {
-                        Diagnostic::new(statement.syntax.span.clone(), error.to_string())
+                        Diagnostic::new(item.syntax.span.clone(), error.to_string())
                     })?;
                 environment.did_return = true;
                 Ok(None)
@@ -2486,8 +2486,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let owned_before = environment.owned_order.len();
                 self.predeclare_checked_bindings(environment, &block.items)?;
                 let mut value = None;
-                for statement in &block.items {
-                    value = self.compile_statement(environment, statement)?;
+                for item in &block.items {
+                    value = self.compile_item(environment, item)?;
                     if environment.did_return {
                         break;
                     }

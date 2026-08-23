@@ -1180,7 +1180,7 @@ impl TypeChecker {
 
         let module_order = module.program().initialization_order().to_vec();
         for module_id in module_order {
-            // Each module's top-level statements execute as their own
+            // Each module's top-level items execute as their own
             // initializer (a dedicated function in codegen), so reachability
             // tracking must be live here exactly as it is inside a function
             // body — otherwise a top-level `break`/`continue` never records
@@ -2408,7 +2408,7 @@ impl TypeChecker {
     /// call-site `mut` checks performed deep inside its body. Unlike
     /// `Item::Assignment`, an arbitrary expression's own syntax id is
     /// never in `syntax_modules` (only declarations and assignment
-    /// statements are), so `module.module_for_syntax` cannot be applied
+    /// items are), so `module.module_for_syntax` cannot be applied
     /// directly to a `Call` node — this is resolved once per function
     /// instead, from a symbol that reliably carries it: any parameter (a
     /// parameter necessarily lives in the same module as the function
@@ -2903,7 +2903,7 @@ impl TypeChecker {
         }
     }
 
-    /// `target_parameters` grows across the block's own statements, in
+    /// `target_parameters` grows across the block's own items, in
     /// order: a `let mut` binding whose value crosses a `Ref` rooted at a
     /// tracked parameter (or an already-tracked alias) makes the newly
     /// bound name an alias of that same position, so a later write through
@@ -2920,9 +2920,9 @@ impl TypeChecker {
         target_parameters: &HashMap<SymbolId, usize>,
     ) -> CheckedResourceSet {
         let mut resources = CheckedResourceSet::default();
-        for statement in &block.items {
+        for item in &block.items {
             let current = target_parameters;
-            let contribution = match statement {
+            let contribution = match item {
                 Item::Binding(value) => value
                     .value
                     .as_ref()
@@ -3238,7 +3238,7 @@ impl TypeChecker {
                         | Item::Continue(_)
                         | Item::Expression(_)
                 ) {
-                    changed |= self.refresh_statement_function_types(module, item);
+                    changed |= self.refresh_block_item_function_types(module, item);
                 }
             }
         }
@@ -3253,12 +3253,12 @@ impl TypeChecker {
         changed
     }
 
-    fn refresh_statement_function_types(
+    fn refresh_block_item_function_types(
         &mut self,
         module: &ResolvedModule,
-        statement: &Item,
+        item: &Item,
     ) -> bool {
-        match statement {
+        match item {
             Item::Binding(binding) => {
                 let mut changed = false;
                 if let Some(value) = &binding.value {
@@ -3326,20 +3326,20 @@ impl TypeChecker {
                     .body
                     .items
                     .iter()
-                    .fold(false, |changed, statement| {
-                        self.refresh_statement_function_types(module, statement) | changed
+                    .fold(false, |changed, item| {
+                        self.refresh_block_item_function_types(module, item) | changed
                     })
             }
             Expression::With(value) => {
                 let mut changed = self.refresh_expression_function_types(module, &value.value);
-                for statement in &value.body.items {
-                    changed |= self.refresh_statement_function_types(module, statement);
+                for item in &value.body.items {
+                    changed |= self.refresh_block_item_function_types(module, item);
                 }
                 changed
             }
             Expression::Block(value) => {
-                value.items.iter().fold(false, |changed, statement| {
-                    self.refresh_statement_function_types(module, statement) | changed
+                value.items.iter().fold(false, |changed, item| {
+                    self.refresh_block_item_function_types(module, item) | changed
                 })
             }
             Expression::Product(value) => value.elements.iter().fold(false, |changed, element| {
@@ -3443,10 +3443,10 @@ impl TypeChecker {
                 }
             }
             Expression::Loop(value) => {
-                for statement in &value.body.items {
-                    self.record_statement_resources(
+                for item in &value.body.items {
+                    self.record_block_item_resources(
                         module,
-                        statement,
+                        item,
                         target_parameters,
                         current_module,
                     );
@@ -3459,20 +3459,20 @@ impl TypeChecker {
                     target_parameters,
                     current_module,
                 );
-                for statement in &value.body.items {
-                    self.record_statement_resources(
+                for item in &value.body.items {
+                    self.record_block_item_resources(
                         module,
-                        statement,
+                        item,
                         target_parameters,
                         current_module,
                     );
                 }
             }
             Expression::Block(value) => {
-                for statement in &value.items {
-                    self.record_statement_resources(
+                for item in &value.items {
+                    self.record_block_item_resources(
                         module,
-                        statement,
+                        item,
                         target_parameters,
                         current_module,
                     );
@@ -3574,14 +3574,14 @@ impl TypeChecker {
         }
     }
 
-    fn record_statement_resources(
+    fn record_block_item_resources(
         &mut self,
         module: &ResolvedModule,
-        statement: &Item,
+        item: &Item,
         target_parameters: &HashMap<SymbolId, usize>,
         current_module: Option<ModuleId>,
     ) {
-        match statement {
+        match item {
             Item::Binding(value) => {
                 if let Some(value) = &value.value {
                     self.record_expression_resources(
@@ -3860,14 +3860,14 @@ impl TypeChecker {
                     self.check_binding(module, binding);
                 }
             }
-            statement @ (Item::Binding(_)
+            item @ (Item::Binding(_)
             | Item::PatternBinding(_)
             | Item::Assignment(_)
             | Item::Return(_)
             | Item::Break(_)
             | Item::Continue(_)
             | Item::Expression(_)) => {
-                self.check_statement(module, statement);
+                self.check_block_item(module, item);
             }
             Item::UseDeclaration(_)
             | Item::Modified(_)
@@ -3882,8 +3882,8 @@ impl TypeChecker {
         }
     }
 
-    fn check_statement(&mut self, module: &ResolvedModule, statement: &Item) -> CheckedType {
-        match statement {
+    fn check_block_item(&mut self, module: &ResolvedModule, item: &Item) -> CheckedType {
+        match item {
             Item::Binding(binding) => {
                 self.check_binding(module, binding);
                 CheckedType::empty_product()
@@ -3980,32 +3980,32 @@ impl TypeChecker {
                 }
                 CheckedType::empty_product()
             }
-            Item::Return(statement) => {
+            Item::Return(item) => {
                 let expected = self.return_contexts.last().cloned();
                 let concrete_expected = expected
                     .as_ref()
                     .filter(|value_type| **value_type != CheckedType::Inferred);
                 let value_type =
-                    self.check_expression_expected(module, &statement.value, concrete_expected);
+                    self.check_expression_expected(module, &item.value, concrete_expected);
                 if !self.did_return && self.return_reachable {
                     self.return_contributions
                         .last_mut()
                         .expect("return contribution inside function")
                         .push(ReturnContribution {
-                            syntax: Some(statement.value.syntax().id),
-                            span: statement.value.syntax().span.clone(),
+                            syntax: Some(item.value.syntax().id),
+                            span: item.value.syntax().span.clone(),
                             value_type,
                         });
                     self.did_return = true;
                 }
                 CheckedType::empty_product()
             }
-            Item::Break(statement) => {
+            Item::Break(item) => {
                 let expected = self
                     .loop_contexts
                     .last()
                     .and_then(|context| context.expected.clone());
-                let contribution = if let Some(value) = &statement.value {
+                let contribution = if let Some(value) = &item.value {
                     let value_type =
                         self.check_expression_expected(module, value, expected.as_ref());
                     ReturnContribution {
@@ -4018,14 +4018,14 @@ impl TypeChecker {
                         self.require_compatible(
                             CheckedType::empty_product(),
                             expected,
-                            statement.syntax.span.clone(),
+                            item.syntax.span.clone(),
                         )
                     } else {
                         CheckedType::empty_product()
                     };
                     ReturnContribution {
                         syntax: None,
-                        span: statement.syntax.span.clone(),
+                        span: item.syntax.span.clone(),
                         value_type,
                     }
                 };
@@ -4141,7 +4141,7 @@ impl TypeChecker {
     /// position. A `let` binding otherwise gives no real guarantee — a
     /// callee could freely mutate through it — so this is checked exactly
     /// like `check_assignment_place`, just at the boundary of a call
-    /// instead of a literal assignment statement. An argument with no root
+    /// instead of a literal assignment item. An argument with no root
     /// place (a temporary) is never checked: nothing holds a reference to
     /// it that mutation could surprise.
     fn check_call_mutations(
@@ -4623,7 +4623,7 @@ impl TypeChecker {
             Expression::Block(block) => {
                 let mut result = CheckedType::empty_product();
                 let mut block_returned = false;
-                for (index, statement) in block.items.iter().enumerate() {
+                for (index, item) in block.items.iter().enumerate() {
                     let outer_reachable = self.return_reachable;
                     if block_returned {
                         self.return_reachable = false;
@@ -4631,11 +4631,11 @@ impl TypeChecker {
                     }
                     if !block_returned
                         && index + 1 == block.items.len()
-                        && let Item::Expression(expression) = statement
+                        && let Item::Expression(expression) = item
                     {
                         result = self.check_expression_expected(module, expression, expected);
                     } else {
-                        result = self.check_statement(module, statement);
+                        result = self.check_block_item(module, item);
                     }
                     if block_returned {
                         self.did_return = true;

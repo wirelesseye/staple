@@ -197,8 +197,8 @@ impl Collector<'_> {
 
     fn sequential_item(&self, item: &Item, candidates: &mut Vec<Candidate>, start: usize) {
         match item {
-            statement @ (Item::Binding(_) | Item::PatternBinding(_)) => {
-                self.statement_declarations(statement, candidates, start)
+            item @ (Item::Binding(_) | Item::PatternBinding(_)) => {
+                self.item_declarations(item, candidates, start)
             }
             Item::ExternBlock(block) => {
                 for binding in &block.bindings {
@@ -211,15 +211,15 @@ impl Collector<'_> {
         }
     }
 
-    fn statement_declarations(
+    fn item_declarations(
         &self,
-        statement: &Item,
+        item: &Item,
         candidates: &mut Vec<Candidate>,
         scope_start: usize,
     ) {
-        match statement {
+        match item {
             Item::Modified(value) => {
-                self.statement_declarations(&value.item, candidates, scope_start)
+                self.item_declarations(&value.item, candidates, scope_start)
             }
             Item::Binding(binding) => {
                 let available = if matches!(binding.kind, BindingKind::Def | BindingKind::Const) {
@@ -289,13 +289,13 @@ impl Collector<'_> {
                     self.expression(&member.value, module_index);
                 }
             }
-            statement @ (Item::Binding(_)
+            item @ (Item::Binding(_)
             | Item::PatternBinding(_)
             | Item::Assignment(_)
             | Item::Return(_)
             | Item::Break(_)
             | Item::Continue(_)
-            | Item::Expression(_)) => self.statement(statement, module_index),
+            | Item::Expression(_)) => self.block_item(item, module_index),
             Item::RepeatedItemSplice(_) | Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
         }
     }
@@ -316,8 +316,8 @@ impl Collector<'_> {
         }
     }
 
-    fn statement(&mut self, statement: &Item, module_index: usize) {
-        match statement {
+    fn block_item(&mut self, item: &Item, module_index: usize) {
+        match item {
             Item::Binding(value) => self.binding(value, module_index),
             Item::PatternBinding(value) => self.expression(&value.value, module_index),
             Item::Assignment(value) => {
@@ -455,8 +455,8 @@ impl Collector<'_> {
     fn block(&mut self, block: &BlockExpression, module_index: usize) {
         let range = syntax_range(&block.syntax);
         let mut candidates = Vec::new();
-        for statement in &block.items {
-            self.statement_declarations(statement, &mut candidates, range.start);
+        for item in &block.items {
+            self.item_declarations(item, &mut candidates, range.start);
         }
         self.index.modules[module_index]
             .scopes

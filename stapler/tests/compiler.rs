@@ -192,7 +192,7 @@ fn standard_io_is_a_compiler_provided_resource_and_propagates_to_main() {
 #[test]
 fn allows_io_at_entry_module_top_level_but_rejects_non_builtin_opaque_resources() {
     // `IO` is implicitly available to the entry module's top-level
-    // statements, so a bare `println` there now compiles.
+    // items, so a bare `println` there now compiles.
     type_check("use std.io.println\nprintln \"entry module output\"\n");
 
     let diagnostics = TypeChecker::new()
@@ -2578,9 +2578,9 @@ fn generic_opaque_arguments_are_part_of_type_identity() {
 #[test]
 fn string_literals_have_the_canonical_string_type() {
     let module = type_check("\"hello\"\n");
-    let statement = &module.syntax().items[0];
-    let Item::Expression(expression) = statement else {
-        panic!("expected expression statement");
+    let item = &module.syntax().items[0];
+    let Item::Expression(expression) = item else {
+        panic!("expected expression item");
     };
 
     assert_eq!(
@@ -3079,8 +3079,8 @@ fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
         .items
         .iter()
         .find_map(|item| {
-            let statement = item;
-            let Item::Binding(binding) = statement else {
+            let item = item;
+            let Item::Binding(binding) = item else {
                 return None;
             };
             (binding.name == "pair").then_some(binding.value.as_ref()?)
@@ -3194,8 +3194,8 @@ fn expands_explicit_and_inferred_item_macros() {
         "let generated: Generated = Generated\n",
     ));
     assert!(module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, statement
-            if matches!(statement, Item::Binding(binding)
+        matches!(item, item
+            if matches!(item, Item::Binding(binding)
                 if binding.name == "answer"))
     }));
     assert!(module.resolved().syntax().items.iter().any(|item| {
@@ -3220,8 +3220,8 @@ fn expands_item_modifier_macros_with_nearest_modifier_first() {
         "let result: I32 = selected\n",
     ));
     assert!(module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, statement
-            if matches!(statement, Item::Binding(binding)
+        matches!(item, item
+            if matches!(item, Item::Binding(binding)
                 if binding.name == "selected"))
     }));
 }
@@ -3325,8 +3325,8 @@ fn modifier_macro_deletes_its_target_by_producing_zero_items() {
         "let result: I32 = 1\n",
     ));
     assert!(!module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, statement
-            if matches!(statement, Item::Binding(binding)
+        matches!(item, item
+            if matches!(item, Item::Binding(binding)
                 if binding.name == "removed"))
     }));
 }
@@ -3417,8 +3417,8 @@ fn non_outermost_modifier_applies_the_next_modifier_to_its_first_item() {
         "let result: I32 = transformed + second\n",
     ));
     assert!(!module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, statement
-            if matches!(statement, Item::Binding(binding)
+        matches!(item, item
+            if matches!(item, Item::Binding(binding)
                 if binding.name == "first"))
     }));
     let context = Context::create();
@@ -3865,8 +3865,8 @@ fn modifiers_compose_after_visibility_aware_item_calls() {
         "let result: I32 = generated\n",
     ));
     assert!(module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, statement
-            if matches!(statement, Item::Binding(binding)
+        matches!(item, item
+            if matches!(item, Item::Binding(binding)
                 if binding.name == "generated"
                     && binding.visibility == stapler::Visibility::Public))
     }));
@@ -5168,9 +5168,9 @@ fn subtype_bound_call_preserves_string_literal_type() {
         "def string_identity: <T where T <: String> T -> T = x => x\n",
         "string_identity \"foo\"\n",
     ));
-    let statement = &module.syntax().items[1];
-    let Item::Expression(expression) = statement else {
-        panic!("expected expression statement");
+    let item = &module.syntax().items[1];
+    let Item::Expression(expression) = item else {
+        panic!("expected expression item");
     };
     assert_eq!(
         module.type_of_expression(expression.syntax().id),
@@ -5414,7 +5414,7 @@ fn composes_nested_macros_and_applies_excess_arguments() {
 }
 
 #[test]
-fn applies_excess_arguments_to_a_bare_quote_invoked_as_a_top_level_statement() {
+fn applies_excess_arguments_to_a_bare_quote_invoked_as_a_top_level_item() {
     // `identity` returns opaque `Syntax`, so its expansion is reparsed as an
     // item, not an expression; that reparse must still apply the excess
     // `"..."` argument left after `println`, rather than silently dropping
@@ -6876,7 +6876,7 @@ fn returns_from_nested_expression_blocks() {
 
 #[test]
 fn rejects_returns_outside_functions_and_incompatible_return_values() {
-    let outside = parse("return 1\n").expect("return statement should parse");
+    let outside = parse("return 1\n").expect("return item should parse");
     let diagnostics = NameResolver::new()
         .resolve(&outside)
         .expect_err("top-level return should not resolve");

@@ -1399,13 +1399,13 @@ impl MacroExpander {
         }
         match item {
             Item::Binding(binding) if binding_is_compile_time_helper(binding) => {}
-            statement @ (Item::Binding(_)
+            item @ (Item::Binding(_)
             | Item::PatternBinding(_)
             | Item::Assignment(_)
             | Item::Return(_)
             | Item::Break(_)
             | Item::Continue(_)
-            | Item::Expression(_)) => self.expand_statement(module, statement, depth),
+            | Item::Expression(_)) => self.expand_block_item_contents(module, item, depth),
             Item::TraitImplementation(implementation) => {
                 for member in &mut implementation.members {
                     member.value = self.expand_expression(module, member.value.clone(), depth);
@@ -2185,8 +2185,8 @@ impl MacroExpander {
         true
     }
 
-    fn expand_statement(&mut self, module: ModuleId, statement: &mut Item, depth: usize) {
-        match statement {
+    fn expand_block_item_contents(&mut self, module: ModuleId, item: &mut Item, depth: usize) {
+        match item {
             Item::Binding(binding) => {
                 if let Some(value) = binding.value.take() {
                     binding.value = Some(self.expand_expression(module, value, depth));
@@ -2225,15 +2225,15 @@ impl MacroExpander {
             }
             // A block-scoped `mod` is its own flat `SourceModule`, expanded
             // independently when the top-level driver reaches it — mirrors
-            // the `Item::Submodule(_) => {}` catch-all in `expand_item`.
+            // the `Item::Submodule(_) => {}` catch-all in `expand_block_item`.
             Item::Submodule(_) => {}
             // Types carry no runtime macro calls to expand — mirrors the
-            // `Item::TypeDeclaration(_) => {}` catch-all in `expand_item`.
+            // `Item::TypeDeclaration(_) => {}` catch-all in `expand_block_item`.
             Item::TypeDeclaration(_) => {}
             // A use declaration's path carries no runtime macro calls either
-            // — mirrors `Item::UseDeclaration(_) => {}` in `expand_item`.
+            // — mirrors `Item::UseDeclaration(_) => {}` in `expand_block_item`.
             Item::UseDeclaration(_) => {}
-            _ => unreachable!("unsupported item reached statement expansion"),
+            _ => unreachable!("unsupported item reached item expansion"),
         }
     }
 
@@ -2293,7 +2293,7 @@ impl MacroExpander {
                 let items = std::mem::take(&mut submodule.module.items);
                 submodule.module.items = self.expand_generated_items(module, items, depth + 1);
             }
-            self.expand_statement(module, &mut generated_item, depth + 1);
+            self.expand_block_item_contents(module, &mut generated_item, depth + 1);
             expanded.push(generated_item);
         }
         expanded
@@ -3469,8 +3469,8 @@ impl MacroExpander {
             Expression::Block(block) => {
                 let mut local = environment.clone();
                 let mut result = Value::Product(Vec::new());
-                for statement in &block.items {
-                    match statement {
+                for item in &block.items {
+                    match item {
                         Item::Binding(binding) => {
                             let Some(value) = &binding.value else {
                                 self.diagnostics.push(Diagnostic::new(
@@ -4759,8 +4759,8 @@ impl MacroExpander {
             }
             Expression::Loop(loop_) => {
                 self.freshen_syntax(&mut loop_.body.syntax, module, mark);
-                for statement in &mut loop_.body.items {
-                    freshen_statement(self, statement, module, mark);
+                for item in &mut loop_.body.items {
+                    freshen_item(self, item, module, mark);
                 }
             }
             Expression::Resource(resource) => {
@@ -4770,13 +4770,13 @@ impl MacroExpander {
                 freshen_type(self, &mut with.resource, module, mark);
                 self.freshen_expression(&mut with.value, module, mark);
                 self.freshen_syntax(&mut with.body.syntax, module, mark);
-                for statement in &mut with.body.items {
-                    freshen_statement(self, statement, module, mark);
+                for item in &mut with.body.items {
+                    freshen_item(self, item, module, mark);
                 }
             }
             Expression::Block(block) => {
-                for statement in &mut block.items {
-                    freshen_statement(self, statement, module, mark);
+                for item in &mut block.items {
+                    freshen_item(self, item, module, mark);
                 }
             }
             Expression::Product(product) => {
@@ -6089,7 +6089,7 @@ fn inferred_result_meta_type(expression: &Expression) -> MetaType {
         Expression::Block(block) => block
             .items
             .last()
-            .and_then(|statement| match statement {
+            .and_then(|item| match item {
                 Item::Expression(expression) => Some(inferred_result_meta_type(expression)),
                 Item::Return(return_) => Some(inferred_result_meta_type(&return_.value)),
                 _ => None,
@@ -6348,7 +6348,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
             block
                 .items
                 .last()
-                .is_none_or(|statement| match statement {
+                .is_none_or(|item| match item {
                     Item::Expression(expression) => obviously_not_syntax(expression, 0),
                     Item::Return(return_) => obviously_not_syntax(&return_.value, 0),
                     Item::Binding(_)
@@ -6393,7 +6393,7 @@ fn quote_at_tail(expression: &Expression, arity: usize) -> bool {
         Expression::Block(block) => block
             .items
             .last()
-            .is_some_and(|statement| match statement {
+            .is_some_and(|item| match item {
                 Item::Expression(expression) => quote_at_tail(expression, 0),
                 Item::Return(return_) => quote_at_tail(&return_.value, 0),
                 _ => false,
@@ -6904,8 +6904,8 @@ fn substitute_splices(
             }
         }
         Expression::Loop(loop_) => {
-            for statement in &mut loop_.body.items {
-                substitute_statement(statement, environment, diagnostics)?;
+            for item in &mut loop_.body.items {
+                substitute_block_item(item, environment, diagnostics)?;
             }
         }
         Expression::Resource(resource) => {
@@ -6914,13 +6914,13 @@ fn substitute_splices(
         Expression::With(with) => {
             substitute_type(&mut with.resource, environment, diagnostics)?;
             *with.value = substitute_splices(&with.value, environment, diagnostics)?;
-            for statement in &mut with.body.items {
-                substitute_statement(statement, environment, diagnostics)?;
+            for item in &mut with.body.items {
+                substitute_block_item(item, environment, diagnostics)?;
             }
         }
         Expression::Block(block) => {
-            for statement in &mut block.items {
-                substitute_statement(statement, environment, diagnostics)?;
+            for item in &mut block.items {
+                substitute_block_item(item, environment, diagnostics)?;
             }
         }
         Expression::Product(product) => {
@@ -6956,12 +6956,12 @@ fn substitute_splices(
     Some(result)
 }
 
-fn substitute_statement(
-    statement: &mut Item,
+fn substitute_block_item(
+    item: &mut Item,
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
-    match statement {
+    match item {
         Item::Binding(binding) => {
             substitute_binding(binding, environment, diagnostics)?;
         }
@@ -7029,7 +7029,7 @@ fn substitute_statement(
                 )?;
             }
         }
-        _ => unreachable!("unsupported item reached statement substitution"),
+        _ => unreachable!("unsupported item reached item substitution"),
     }
     Some(())
 }
@@ -7135,12 +7135,12 @@ fn item_syntax(item: &Item) -> &Syntax {
         | Item::Return(_)
         | Item::Break(_)
         | Item::Continue(_)
-        | Item::Expression(_)) => statement_syntax(value),
+        | Item::Expression(_)) => block_item_syntax(value),
     }
 }
 
-fn statement_syntax(statement: &Item) -> &Syntax {
-    match statement {
+fn block_item_syntax(item: &Item) -> &Syntax {
+    match item {
         Item::Binding(value) => &value.syntax,
         Item::PatternBinding(value) => &value.syntax,
         Item::Assignment(value) => &value.syntax,
@@ -7151,7 +7151,7 @@ fn statement_syntax(statement: &Item) -> &Syntax {
         Item::Submodule(value) => &value.syntax,
         Item::TypeDeclaration(value) => &value.syntax,
         Item::UseDeclaration(value) => &value.syntax,
-        _ => unreachable!("statement-only syntax helper received a declaration item"),
+        _ => unreachable!("item-only syntax helper received a declaration item"),
     }
 }
 
@@ -7555,14 +7555,14 @@ fn substitute_item(
                 member.value = substitute_splices(&member.value, environment, diagnostics)?;
             }
         }
-        statement @ (Item::Binding(_)
+        item @ (Item::Binding(_)
         | Item::PatternBinding(_)
         | Item::Assignment(_)
         | Item::Return(_)
         | Item::Break(_)
         | Item::Continue(_)
         | Item::Expression(_)) => {
-            substitute_statement(statement, environment, diagnostics)?;
+            substitute_block_item(item, environment, diagnostics)?;
         }
         Item::TypeDeclaration(declaration) => {
             substitute_identifier(
@@ -7838,13 +7838,13 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
                 alpha_rename_expression(&mut member.value, mark, &mut scopes);
             }
         }
-        statement @ (Item::Binding(_)
+        item @ (Item::Binding(_)
         | Item::PatternBinding(_)
         | Item::Assignment(_)
         | Item::Return(_)
         | Item::Break(_)
         | Item::Continue(_)
-        | Item::Expression(_)) => match statement {
+        | Item::Expression(_)) => match item {
             Item::Binding(binding) => {
                 if let Some(value) = &mut binding.value {
                     alpha_rename_expression(value, mark, &mut scopes);
@@ -8001,8 +8001,8 @@ fn alpha_rename_block(
     scopes: &mut Vec<HashMap<String, String>>,
 ) {
     scopes.push(HashMap::new());
-    for statement in &mut block.items {
-        match statement {
+    for item in &mut block.items {
+        match item {
             Item::Binding(binding) => {
                 if let Some(value) = &mut binding.value {
                     alpha_rename_expression(value, mark, scopes);
@@ -8110,13 +8110,13 @@ fn freshen_pattern(
     }
 }
 
-fn freshen_statement(
+fn freshen_block_item(
     expander: &mut MacroExpander,
-    statement: &mut Item,
+    item: &mut Item,
     module: ModuleId,
     mark: u64,
 ) {
-    match statement {
+    match item {
         Item::Binding(binding) => freshen_binding(expander, binding, module, mark),
         Item::PatternBinding(binding) => {
             expander.freshen_syntax(&mut binding.syntax, module, mark);
@@ -8170,7 +8170,7 @@ fn freshen_statement(
         Item::UseDeclaration(declaration) => {
             expander.freshen_syntax(&mut declaration.syntax, module, mark);
         }
-        _ => unreachable!("unsupported item reached statement freshening"),
+        _ => unreachable!("unsupported item reached item freshening"),
     }
 }
 
@@ -8355,13 +8355,13 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
                 expander.freshen_expression(&mut member.value, module, mark);
             }
         }
-        statement @ (Item::Binding(_)
+        item @ (Item::Binding(_)
         | Item::PatternBinding(_)
         | Item::Assignment(_)
         | Item::Return(_)
         | Item::Break(_)
         | Item::Continue(_)
-        | Item::Expression(_)) => freshen_statement(expander, statement, module, mark),
+        | Item::Expression(_)) => freshen_block_item(expander, item, module, mark),
         Item::Submodule(submodule) => {
             expander.freshen_syntax(&mut submodule.syntax, module, mark);
             expander.freshen_syntax(&mut submodule.module.syntax, module, mark);

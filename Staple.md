@@ -267,7 +267,7 @@ Constructed identifiers use the macro definition's hygiene context. Syntax
 values inserted as call children retain their existing context.
 
 A macro may return one item when its invocation is the entire top-level
-expression-statement item:
+expression item:
 
 ```staple
 macro define_answer: Expr -> Item =
@@ -488,8 +488,7 @@ staple source files use the `.sta` extension.
 Whitespace and comments are preserved by the parser, so parsing and reproducing
 a source file does not change its text. Newlines also separate adjacent
 statements where they would otherwise form a single expression. A semicolon may
-be written after any statement or top-level item as an explicit separator,
-including after the last item in a sequence.
+be written after any item as an explicit separator, including after the last item in a sequence.
 
 Line comments begin with `//` and continue to the end of the line.
 
@@ -759,7 +758,7 @@ let answer: I32 = 42
 ### `mut`
 
 `mut` marks a binding that may both be reassigned and have its value written
-into. Reassignment is a statement whose right-hand side must have the type of
+into. Reassignment is an item whose right-hand side must have the type of
 the destination; writing into fields of a by-value product, or through a
 `Ref`, requires the same `mut` root:
 

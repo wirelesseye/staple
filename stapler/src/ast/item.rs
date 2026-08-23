@@ -32,9 +32,9 @@ pub enum Item {
     Binding(Binding),
     PatternBinding(PatternBinding),
     Assignment(Assignment),
-    Return(ReturnStatement),
-    Break(BreakStatement),
-    Continue(ContinueStatement),
+    Return(ReturnItem),
+    Break(BreakItem),
+    Continue(ContinueItem),
     Expression(Expression),
 }
 
@@ -146,19 +146,19 @@ pub struct Assignment {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReturnStatement {
+pub struct ReturnItem {
     pub syntax: Syntax,
     pub value: Expression,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BreakStatement {
+pub struct BreakItem {
     pub syntax: Syntax,
     pub value: Option<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContinueStatement {
+pub struct ContinueItem {
     pub syntax: Syntax,
 }
 

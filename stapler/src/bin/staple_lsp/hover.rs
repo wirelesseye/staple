@@ -101,19 +101,19 @@ impl Collector<'_> {
                     self.collect_expression_declarations(&member.value);
                 }
             }
-            statement @ (Item::Binding(_)
+            item @ (Item::Binding(_)
             | Item::PatternBinding(_)
             | Item::Assignment(_)
             | Item::Return(_)
             | Item::Break(_)
             | Item::Continue(_)
-            | Item::Expression(_)) => self.collect_statement_declarations(statement),
+            | Item::Expression(_)) => self.collect_block_item_declarations(item),
             Item::UseDeclaration(_) | Item::TypeDeclaration(_) => {}
         }
     }
 
-    fn collect_statement_declarations(&mut self, statement: &Item) {
-        match statement {
+    fn collect_block_item_declarations(&mut self, item: &Item) {
+        match item {
             Item::Binding(binding) => self.collect_binding_declaration(binding),
             Item::PatternBinding(binding) => {
                 self.collect_pattern_declarations(&binding.pattern, true);
@@ -428,13 +428,13 @@ impl Collector<'_> {
                 }
             }
             Item::TypeDeclaration(declaration) => self.type_declaration(declaration),
-            statement @ (Item::Binding(_)
+            item @ (Item::Binding(_)
             | Item::PatternBinding(_)
             | Item::Assignment(_)
             | Item::Return(_)
             | Item::Break(_)
             | Item::Continue(_)
-            | Item::Expression(_)) => self.statement(statement),
+            | Item::Expression(_)) => self.block_item(item),
             Item::UseDeclaration(declaration) => self.use_declaration(declaration),
         }
     }
@@ -674,8 +674,8 @@ impl Collector<'_> {
         ))
     }
 
-    fn statement(&mut self, statement: &Item) {
-        match statement {
+    fn block_item(&mut self, item: &Item) {
+        match item {
             Item::Binding(binding) => self.binding(binding),
             Item::PatternBinding(binding) => {
                 self.pattern(&binding.pattern);

@@ -15,8 +15,8 @@ fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
     );
     let module = parse(source).expect("resource syntax should parse");
     assert_eq!(module.syntax.text(), source);
-    let statement = &module.items[1];
-    let Item::Binding(binding) = statement else {
+    let item = &module.items[1];
+    let Item::Binding(binding) = item else {
         panic!("expected binding")
     };
     let Some(Type::Function(function)) = &binding.annotation else {
@@ -63,7 +63,7 @@ fn parses_mut_effect_sets_losslessly() {
     let module = parse(source).expect("mut effect sets should parse");
     assert_eq!(module.text(), source);
 
-    let Item::Binding(f1) = statement(&module.items[0]) else {
+    let Item::Binding(f1) = unmodified_item(&module.items[0]) else {
         panic!("expected binding");
     };
     assert!(matches!(
@@ -74,7 +74,7 @@ fn parses_mut_effect_sets_losslessly() {
         }]
     ));
 
-    let Item::Binding(f2) = statement(&module.items[1]) else {
+    let Item::Binding(f2) = unmodified_item(&module.items[1]) else {
         panic!("expected binding");
     };
     assert!(matches!(
@@ -85,7 +85,7 @@ fn parses_mut_effect_sets_losslessly() {
         }]
     ));
 
-    let Item::Binding(f3) = statement(&module.items[2]) else {
+    let Item::Binding(f3) = unmodified_item(&module.items[2]) else {
         panic!("expected binding");
     };
     let [MutationTarget {
@@ -97,7 +97,7 @@ fn parses_mut_effect_sets_losslessly() {
     };
     assert_eq!(name, "a");
 
-    let Item::Binding(f4) = statement(&module.items[3]) else {
+    let Item::Binding(f4) = unmodified_item(&module.items[3]) else {
         panic!("expected binding");
     };
     let Some(Type::Function(function)) = &f4.annotation else {
@@ -109,7 +109,7 @@ fn parses_mut_effect_sets_losslessly() {
     assert!(parse("def bad: A ->{mut mut} () = a => ()\n").is_err());
 }
 
-fn statement(item: &Item) -> &Item {
+fn unmodified_item(item: &Item) -> &Item {
     item
 }
 
@@ -120,18 +120,18 @@ fn parses_float_literals_losslessly_without_stealing_access_dots() {
     assert_eq!(root.text(), source);
     for item in &root.items[..6] {
         assert!(matches!(
-            statement(item),
+            unmodified_item(item),
             Item::Expression(Expression::Float(_))
         ));
     }
     assert!(matches!(
-        statement(&root.items[6]),
+        unmodified_item(&root.items[6]),
         Item::Expression(Expression::Access(access))
             if matches!(access.value.as_ref(), Expression::Integer(_))
                 && access.accessor == Accessor::Name("field".into())
     ));
     assert!(matches!(
-        statement(&root.items[7]),
+        unmodified_item(&root.items[7]),
         Item::Expression(Expression::Access(access))
             if access.accessor == Accessor::Index("0".into())
     ));
@@ -153,7 +153,7 @@ fn parses_match_expressions_and_wildcards_losslessly() {
     );
     let root = parse(source).expect("match expression should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(choose) = statement(&root.items[0]) else {
+    let Item::Binding(choose) = unmodified_item(&root.items[0]) else {
         panic!("expected choose binding");
     };
     let Some(Expression::Function(function)) = &choose.value else {
@@ -166,7 +166,7 @@ fn parses_match_expressions_and_wildcards_losslessly() {
     assert!(matches!(match_.arms[0].pattern, Pattern::Nominal(_)));
     assert!(matches!(match_.arms[1].pattern, Pattern::Nominal(_)));
 
-    let Item::Binding(discard) = statement(&root.items[1]) else {
+    let Item::Binding(discard) = unmodified_item(&root.items[1]) else {
         panic!("expected discard binding");
     };
     let Some(Expression::Function(function)) = &discard.value else {
@@ -180,7 +180,7 @@ fn parses_typed_wildcard_parameters_losslessly() {
     let source = "def discard = _: String => ()\n";
     let root = parse(source).expect("typed wildcard parameter should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(discard) = statement(&root.items[0]) else {
+    let Item::Binding(discard) = unmodified_item(&root.items[0]) else {
         panic!("expected discard binding");
     };
     let Some(Expression::Function(function)) = &discard.value else {
@@ -215,7 +215,7 @@ fn parses_string_literal_types_and_patterns_losslessly() {
         panic!("expected Answer type alias");
     };
     assert!(matches!(answer.underlying, Some(Type::Sum(_))));
-    let Item::Binding(render) = statement(&root.items[1]) else {
+    let Item::Binding(render) = unmodified_item(&root.items[1]) else {
         panic!("expected render binding");
     };
     let Some(Expression::Function(function)) = &render.value else {
@@ -260,7 +260,7 @@ fn parses_traits_implementations_and_bounds_losslessly() {
             if implementation.trait_name.name == "ToString"
                 && implementation.members.len() == 1
     ));
-    let Item::Binding(binding) = statement(&root.items[2]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[2]) else {
         panic!("expected bounded function binding")
     };
     assert_eq!(binding.type_parameters.len(), 1);
@@ -348,7 +348,7 @@ fn parses_curried_and_product_trait_parameters_and_arguments() {
     };
     assert_eq!(convert_impl.arguments.len(), 1);
 
-    let Item::Binding(combine) = statement(&root.items[4]) else {
+    let Item::Binding(combine) = unmodified_item(&root.items[4]) else {
         panic!("expected bounded function");
     };
     assert_eq!(combine.trait_bounds[0].arguments.len(), 3);
@@ -410,11 +410,11 @@ fn parses_trait_functional_dependencies_losslessly() {
     assert_eq!(add.functional_dependencies[0].dependent.name, "Output");
     assert_eq!(add.prerequisites.len(), 1);
 
-    let Item::Binding(iterate) = statement(&root.items[2]) else {
+    let Item::Binding(iterate) = unmodified_item(&root.items[2]) else {
         panic!("expected iterate binding");
     };
     assert_eq!(iterate.trait_bounds[0].arguments.len(), 1);
-    let Item::Binding(add_use) = statement(&root.items[3]) else {
+    let Item::Binding(add_use) = unmodified_item(&root.items[3]) else {
         panic!("expected add binding");
     };
     assert_eq!(add_use.trait_bounds[0].arguments.len(), 3);
@@ -482,7 +482,7 @@ fn parses_use_declarations_and_public_items_losslessly() {
             .text()
             .ends_with("pub type alias PublicType = I32")
     );
-    let Item::Binding(binding) = statement(&root.items[7]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[7]) else {
         panic!("expected binding")
     };
     assert_eq!(binding.visibility, Visibility::Public);
@@ -524,7 +524,7 @@ fn parses_block_scoped_submodules_losslessly() {
     let source = "let x = {\n    mod foo { pub def value = 42 }\n    0\n}\n";
     let root = parse(source).expect("block-scoped submodules should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding")
     };
     let Some(Expression::Block(block)) = &binding.value else {
@@ -546,7 +546,7 @@ fn parses_block_scoped_type_declarations_losslessly() {
     let source = "let x = {\n    type Wrapped = I32\n    0\n}\n";
     let root = parse(source).expect("block-scoped type declarations should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding")
     };
     let Some(Expression::Block(block)) = &binding.value else {
@@ -576,7 +576,7 @@ fn parses_block_scoped_use_declarations_losslessly() {
     );
     let root = parse(source).expect("block-scoped use declarations should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding")
     };
     let Some(Expression::Block(block)) = &binding.value else {
@@ -612,7 +612,7 @@ fn parses_block_scoped_use_declarations_losslessly() {
 #[test]
 fn parses_namespace_qualified_types() {
     let root = parse("let value: types.Number = 1\n").expect("qualified type should parse");
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding")
     };
     let Some(Type::Named(named)) = &binding.annotation else {
@@ -788,8 +788,8 @@ fn parses_expression_and_single_item_quotations_losslessly() {
     assert!(matches!(
         templates[1],
         stapler::QuoteTemplate::Item(item)
-            if matches!(item.as_ref(), statement
-                if matches!(statement, Item::Binding(_)))
+            if matches!(item.as_ref(), item
+                if matches!(item, Item::Binding(_)))
     ));
     assert!(matches!(
         templates[2],
@@ -923,8 +923,8 @@ fn parses_declaration_style_item_macro_punctuation_losslessly() {
     assert_eq!(root.text(), source);
     assert!(matches!(
         &root.items[0],
-        statement
-            if matches!(statement, Item::Expression(Expression::Call(_)))
+        item
+            if matches!(item, Item::Expression(Expression::Call(_)))
     ));
     assert!(matches!(
         &root.items[1],
@@ -932,11 +932,11 @@ fn parses_declaration_style_item_macro_punctuation_losslessly() {
             if invocation.visibility.kind == stapler::VisibilityKind::PublicRepr
     ));
     assert!(matches!(
-        statement(&root.items[2]),
+        unmodified_item(&root.items[2]),
         Item::Assignment(_)
     ));
     assert!(matches!(
-        statement(&root.items[3]),
+        unmodified_item(&root.items[3]),
         Item::Assignment(_)
     ));
 }
@@ -983,8 +983,8 @@ fn parses_grouped_type_and_pattern_macro_arguments_losslessly() {
     );
     let root = parse(source).expect("grouped category arguments should parse");
     assert_eq!(root.text(), source);
-    let statement = &root.items[0];
-    let Item::Expression(Expression::Call(call)) = statement else {
+    let item = &root.items[0];
+    let Item::Expression(Expression::Call(call)) = item else {
         panic!("expected macro call");
     };
     assert!(matches!(
@@ -1003,8 +1003,8 @@ fn parses_hello_world_losslessly() {
     assert!(matches!(root.items[0], Item::UseDeclaration(_)));
     assert!(matches!(
         root.items[1],
-        ref statement
-            if matches!(statement, Item::Expression(Expression::Call(_)))
+        ref item
+            if matches!(item, Item::Expression(Expression::Call(_)))
     ));
 }
 
@@ -1013,7 +1013,7 @@ fn parses_product_parameter_and_expression_body() {
     let source = "def add: _ -> I32 = (a: I32, b: I32) => a + b\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding");
     };
     let Expression::Function(function) = binding.value.as_ref().expect("function value") else {
@@ -1041,7 +1041,7 @@ fn parses_product_parameter_and_expression_body() {
 fn parses_low_precedence_satisfies_expression() {
     let source = "let add = (a: I32, b: I32) => a + b satisfies I32\n";
     let root = parse(source).expect("function should parse");
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding");
     };
     let Some(Expression::Function(function)) = &binding.value else {
@@ -1065,7 +1065,7 @@ fn rejects_removed_inline_function_result_annotation() {
 fn parses_contextually_typed_curried_parameters() {
     let source = "def add: I32 -> I32 -> I32 = a => b => a + b\n";
     let root = parse(source).expect("curried function should parse");
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding");
     };
     let Some(Expression::Function(outer)) = &binding.value else {
@@ -1081,7 +1081,7 @@ fn parses_contextually_typed_curried_parameters() {
 fn parses_mixed_precedence_builtin_operator_expression() {
     let source = "1 + 2 * 3\n";
     let root = parse(source).expect("builtin operator expression should parse");
-    let Item::Expression(Expression::Call(outer)) = statement(&root.items[0]) else {
+    let Item::Expression(Expression::Call(outer)) = unmodified_item(&root.items[0]) else {
         panic!("expected desugared `+` call");
     };
     let Expression::Call(add_call) = outer.callee.as_ref() else {
@@ -1114,7 +1114,7 @@ fn parses_mixed_precedence_builtin_operator_expression() {
 fn parses_logical_and_or_as_dedicated_nodes_not_calls() {
     let source = "a && b || c\n";
     let root = parse(source).expect("logical operator expression should parse");
-    let Item::Expression(Expression::Logical(or)) = statement(&root.items[0]) else {
+    let Item::Expression(Expression::Logical(or)) = unmodified_item(&root.items[0]) else {
         panic!("expected top-level `||` as a `Logical` node, not a desugared call");
     };
     assert_eq!(or.operator, LogicalOperator::Or);
@@ -1132,7 +1132,7 @@ fn parses_logical_and_or_as_dedicated_nodes_not_calls() {
 fn parses_left_associative_logical_and_chains() {
     let source = "a && b && c\n";
     let root = parse(source).expect("chained `&&` should parse");
-    let Item::Expression(Expression::Logical(outer)) = statement(&root.items[0]) else {
+    let Item::Expression(Expression::Logical(outer)) = unmodified_item(&root.items[0]) else {
         panic!("expected `&&` chain to parse as `Logical` nodes");
     };
     assert_eq!(outer.operator, LogicalOperator::And);
@@ -1149,7 +1149,7 @@ fn parses_left_associative_logical_and_chains() {
 fn logical_operators_bind_looser_than_comparisons() {
     let source = "1 == 1 && 2 == 2\n";
     let root = parse(source).expect("`&&` mixed with comparisons should parse");
-    let Item::Expression(Expression::Logical(and)) = statement(&root.items[0]) else {
+    let Item::Expression(Expression::Logical(and)) = unmodified_item(&root.items[0]) else {
         panic!("expected `&&` at the top, binding looser than `==`");
     };
     assert_eq!(and.operator, LogicalOperator::And);
@@ -1205,7 +1205,7 @@ fn parses_single_parameter_and_application() {
     let source = "def identity: _ -> String = (s: String) => consume (s)\n";
     let root = parse(source).expect("function should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding");
     };
     let Expression::Function(function) = binding.value.as_ref().expect("function value") else {
@@ -1229,7 +1229,7 @@ fn parses_single_parameter_and_application() {
 fn parses_nested_product_patterns_losslessly() {
     let source = "let first = (x: I32, (y: I32, z: I32)) => x + y\n";
     let root = parse(source).expect("nested product pattern should parse");
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding");
     };
     let Some(Expression::Function(function)) = &binding.value else {
@@ -1253,12 +1253,12 @@ fn parses_at_patterns_losslessly_and_right_associatively() {
     let root = parse(source).expect("at-patterns should parse");
     assert_eq!(root.text(), source);
 
-    let Item::PatternBinding(point) = statement(&root.items[0]) else {
+    let Item::PatternBinding(point) = unmodified_item(&root.items[0]) else {
         panic!("expected destructuring binding");
     };
     assert!(matches!(point.pattern, Pattern::At(_)));
 
-    let Item::PatternBinding(outer_let) = statement(&root.items[1]) else {
+    let Item::PatternBinding(outer_let) = unmodified_item(&root.items[1]) else {
         panic!("expected destructuring binding");
     };
     let Pattern::At(outer) = &outer_let.pattern else {
@@ -1267,7 +1267,7 @@ fn parses_at_patterns_losslessly_and_right_associatively() {
     assert!(outer.binding.mutable);
     assert!(matches!(outer.pattern.as_ref(), Pattern::At(_)));
 
-    let Item::Binding(copy) = statement(&root.items[2]) else {
+    let Item::Binding(copy) = unmodified_item(&root.items[2]) else {
         panic!("expected function binding");
     };
     let Some(Expression::Function(function)) = &copy.value else {
@@ -1283,7 +1283,7 @@ fn parses_at_patterns_losslessly_and_right_associatively() {
     assert!(parse("let point@ = (1, 2)\n").is_err());
     let marked = parse("def marked = mut outer@(left, right) => outer\n")
         .expect("a top-level at-pattern alias may declare whole-parameter mutation");
-    let Item::Binding(marked) = statement(&marked.items[0]) else {
+    let Item::Binding(marked) = unmodified_item(&marked.items[0]) else {
         panic!("expected function binding");
     };
     let Some(Expression::Function(function)) = &marked.value else {
@@ -1323,7 +1323,7 @@ fn parses_named_product_types_values_and_access() {
     let root = parse(source).expect("named product syntax should parse");
 
     assert_eq!(root.text(), source);
-    let Item::Binding(args) = statement(&root.items[0]) else {
+    let Item::Binding(args) = unmodified_item(&root.items[0]) else {
         panic!("expected args binding");
     };
     let Type::Product(args_type) = args.annotation.as_ref().expect("args type") else {
@@ -1338,7 +1338,7 @@ fn parses_named_product_types_values_and_access() {
             if declaration.kind == TypeDeclarationKind::Distinct
     ));
 
-    let Item::Binding(value) = statement(&root.items[2]) else {
+    let Item::Binding(value) = unmodified_item(&root.items[2]) else {
         panic!("expected value binding");
     };
     let Expression::Product(value) = value.value.as_ref().expect("product value") else {
@@ -1346,7 +1346,7 @@ fn parses_named_product_types_values_and_access() {
     };
     assert_eq!(value.elements[0].name.as_deref(), Some("name"));
 
-    let Item::Binding(by_name) = statement(&root.items[3]) else {
+    let Item::Binding(by_name) = unmodified_item(&root.items[3]) else {
         panic!("expected name access binding");
     };
     assert!(matches!(
@@ -1354,7 +1354,7 @@ fn parses_named_product_types_values_and_access() {
         Some(Expression::Access(ref access)) if access.accessor == Accessor::Name("name".into())
     ));
 
-    let Item::Binding(by_index) = statement(&root.items[4]) else {
+    let Item::Binding(by_index) = unmodified_item(&root.items[4]) else {
         panic!("expected index access binding");
     };
     assert!(matches!(
@@ -1370,7 +1370,7 @@ fn type_declaration_underlying_type_stops_at_newline() {
         "\n",
         "std.io.println \"Hello, world!\"\n",
     );
-    let root = parse(source).expect("statement after a type alias should parse");
+    let root = parse(source).expect("item after a type alias should parse");
     assert_eq!(root.text(), source);
     assert_eq!(root.items.len(), 2);
 
@@ -1383,8 +1383,8 @@ fn type_declaration_underlying_type_stops_at_newline() {
             )
     ));
 
-    let statement = &root.items[1];
-    let Item::Expression(Expression::Call(call)) = statement else {
+    let item = &root.items[1];
+    let Item::Expression(Expression::Call(call)) = item else {
         panic!("expected a call expression, not a continued type application");
     };
     let Expression::Access(println) = call.callee.as_ref() else {
@@ -1407,11 +1407,11 @@ fn parses_compile_time_parameters_and_type_application() {
         panic!("expected type declaration");
     };
     assert_eq!(pair.type_parameters.len(), 1);
-    let Item::Binding(identity) = statement(&root.items[2]) else {
+    let Item::Binding(identity) = unmodified_item(&root.items[2]) else {
         panic!("expected generic function binding");
     };
     assert_eq!(identity.type_parameters.len(), 1);
-    let Item::Binding(value) = statement(&root.items[3]) else {
+    let Item::Binding(value) = unmodified_item(&root.items[3]) else {
         panic!("expected annotated binding");
     };
     assert!(matches!(value.annotation, Some(Type::Application(_))));
@@ -1522,7 +1522,7 @@ fn parses_sized_relaxations_losslessly() {
         [stapler::TypeParameterPattern::Binding(binding)] if !binding.sized
     ));
 
-    let Item::Binding(preserve) = statement(&root.items[1]) else {
+    let Item::Binding(preserve) = unmodified_item(&root.items[1]) else {
         panic!("expected generic binding");
     };
     assert!(matches!(
@@ -1530,7 +1530,7 @@ fn parses_sized_relaxations_losslessly() {
         [stapler::TypeParameterPattern::Binding(binding)] if !binding.sized
     ));
 
-    let Item::Binding(ordinary) = statement(&root.items[2]) else {
+    let Item::Binding(ordinary) = unmodified_item(&root.items[2]) else {
         panic!("expected generic binding");
     };
     assert!(matches!(
@@ -1556,11 +1556,11 @@ fn parses_public_representations_and_nominal_patterns() {
     };
     assert_eq!(declaration.representation_visibility, Visibility::Public);
     assert!(matches!(
-        statement(&root.items[1]),
+        unmodified_item(&root.items[1]),
         Item::PatternBinding(binding)
             if matches!(binding.pattern, Pattern::Nominal(_))
     ));
-    let Item::Binding(binding) = statement(&root.items[2]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[2]) else {
         panic!("expected function binding");
     };
     let Some(Expression::Function(function)) = &binding.value else {
@@ -1582,7 +1582,7 @@ fn rejects_invalid_public_representation_and_pattern_visibility_syntax() {
 fn block_items_are_typed() {
     let source = "def answer = () => { let x = 40 }\n";
     let root = parse(source).expect("block should parse");
-    let Item::Binding(binding) = statement(&root.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[0]) else {
         panic!("expected binding");
     };
     let Some(Expression::Function(function)) = &binding.value else {
@@ -1621,15 +1621,15 @@ fn parses_modifiers_on_block_items() {
 }
 
 #[test]
-fn parses_multiple_top_level_statements() {
+fn parses_multiple_top_level_items() {
     let source = "let greeting = \"hello\"\nprintln greeting\nprintln \"second\"\n";
-    let root = parse(source).expect("top-level statements should parse");
+    let root = parse(source).expect("top-level items should parse");
 
     assert_eq!(root.text(), source);
     assert_eq!(root.items.len(), 3);
     assert!(matches!(
         root.items[0],
-        ref statement if matches!(statement, Item::Binding(_))
+        ref item if matches!(item, Item::Binding(_))
     ));
     assert!(matches!(root.items[1], Item::Expression(_)));
     assert!(matches!(root.items[2], Item::Expression(_)));
@@ -1648,7 +1648,7 @@ fn parses_returns_and_semicolon_separated_items_losslessly() {
 
     assert_eq!(root.text(), source);
     assert_eq!(root.items.len(), 5);
-    let Item::Binding(answer) = statement(&root.items[3]) else {
+    let Item::Binding(answer) = unmodified_item(&root.items[3]) else {
         panic!("expected answer binding");
     };
     let Some(Expression::Function(function)) = &answer.value else {
@@ -1687,13 +1687,13 @@ fn parses_sum_types_and_propagating_patterns_losslessly() {
     );
     let root = parse(source).expect("sum and propagation syntax should parse");
     assert_eq!(root.text(), source);
-    let Item::Binding(read) = statement(&root.items[0]) else {
+    let Item::Binding(read) = unmodified_item(&root.items[0]) else {
         panic!("expected read binding");
     };
     assert!(
         matches!(read.annotation, Some(Type::Function(ref function)) if matches!(function.result.as_ref(), Type::Sum(_)))
     );
-    let Item::Binding(parse_binding) = statement(&root.items[1]) else {
+    let Item::Binding(parse_binding) = unmodified_item(&root.items[1]) else {
         panic!("expected parse binding");
     };
     let Some(Expression::Function(function)) = &parse_binding.value else {
@@ -1721,12 +1721,12 @@ fn parses_repeated_spread_erased_and_variable_index_syntax() {
     let module = parse(source).expect("product extensions should parse");
     assert_eq!(module.text(), source);
 
-    let Item::Binding(fixed) = statement(&module.items[0]) else {
+    let Item::Binding(fixed) = unmodified_item(&module.items[0]) else {
         panic!("expected fixed binding");
     };
     assert!(matches!(fixed.annotation, Some(Type::Application(_))));
 
-    let Item::Binding(expanded) = statement(&module.items[3]) else {
+    let Item::Binding(expanded) = unmodified_item(&module.items[3]) else {
         panic!("expected expanded binding");
     };
     let Some(Expression::Product(expanded)) = &expanded.value else {
@@ -1734,7 +1734,7 @@ fn parses_repeated_spread_erased_and_variable_index_syntax() {
     };
     assert!(expanded.elements[1].spread);
 
-    let Item::Binding(value) = statement(&module.items[4]) else {
+    let Item::Binding(value) = unmodified_item(&module.items[4]) else {
         panic!("expected indexed binding");
     };
     assert!(matches!(value.value, Some(Expression::Access(_))));
@@ -1752,7 +1752,7 @@ fn parses_named_product_value_spread_syntax() {
     let module = parse(source).expect("named product spreads should parse");
     assert_eq!(module.text(), source);
 
-    let Item::Binding(config) = statement(&module.items[1]) else {
+    let Item::Binding(config) = unmodified_item(&module.items[1]) else {
         panic!("expected config binding");
     };
     let Some(Expression::Product(config)) = &config.value else {
@@ -1773,7 +1773,7 @@ fn rejects_a_named_element_before_a_named_product_spread() {
 }
 
 #[test]
-fn parses_mutable_patterns_and_assignment_statements_losslessly() {
+fn parses_mutable_patterns_and_assignment_items_losslessly() {
     let source = concat!(
         "let mut value = 1\n",
         "let (mut left, right) = (2, 3)\n",
@@ -1782,11 +1782,11 @@ fn parses_mutable_patterns_and_assignment_statements_losslessly() {
     );
     let module = parse(source).expect("mutable bindings and assignments should parse");
     assert_eq!(module.text(), source);
-    let Item::Binding(value) = statement(&module.items[0]) else {
+    let Item::Binding(value) = unmodified_item(&module.items[0]) else {
         panic!("expected mutable binding");
     };
     assert!(value.mutable);
-    let Item::PatternBinding(pair) = statement(&module.items[1]) else {
+    let Item::PatternBinding(pair) = unmodified_item(&module.items[1]) else {
         panic!("expected pattern binding");
     };
     let Pattern::Product(pattern) = &pair.pattern else {
@@ -1794,13 +1794,13 @@ fn parses_mutable_patterns_and_assignment_statements_losslessly() {
     };
     assert!(matches!(&pattern.elements[0], Pattern::Binding(binding) if binding.mutable));
     assert!(matches!(
-        statement(&module.items[3]),
+        unmodified_item(&module.items[3]),
         Item::Assignment(_)
     ));
     assert!(parse("extern \"c\" { let mut value: I32 }\n").is_err());
     let parameter = parse("def update = (mut parameter: I32) => { parameter = 4 }\n")
         .expect("a direct parameter binding may declare a mutation effect");
-    let Item::Binding(update) = statement(&parameter.items[0]) else {
+    let Item::Binding(update) = unmodified_item(&parameter.items[0]) else {
         panic!("expected function binding");
     };
     let Some(Expression::Function(function)) = &update.value else {
@@ -1823,7 +1823,7 @@ fn parses_per_name_mut_pattern_forms_losslessly() {
     let module = parse(source).expect("mut pattern forms should parse");
     assert_eq!(module.text(), source);
 
-    let Item::PatternBinding(pair) = statement(&module.items[0]) else {
+    let Item::PatternBinding(pair) = unmodified_item(&module.items[0]) else {
         panic!("expected per-name pattern binding");
     };
     let Pattern::Product(pattern) = &pair.pattern else {
@@ -1834,7 +1834,7 @@ fn parses_per_name_mut_pattern_forms_losslessly() {
         Pattern::Binding(binding) if binding.mutable
     )));
 
-    let Item::Binding(update) = statement(&module.items[1]) else {
+    let Item::Binding(update) = unmodified_item(&module.items[1]) else {
         panic!("expected function binding");
     };
     let Some(Expression::Function(function)) = &update.value else {
@@ -1862,7 +1862,7 @@ fn parses_loop_break_and_continue_losslessly() {
     );
     let module = parse(source).expect("loop control should parse");
     assert_eq!(module.text(), source);
-    let Item::Binding(binding) = statement(&module.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&module.items[0]) else {
         panic!("expected function binding");
     };
     let Some(Expression::Function(function)) = &binding.value else {
@@ -1907,7 +1907,7 @@ fn parses_loop_break_and_continue_losslessly() {
 fn uses_newline_as_the_unit_break_boundary() {
     let module = parse("def value = () => loop { break\n42 }\n")
         .expect("newline should terminate a unit break");
-    let Item::Binding(binding) = statement(&module.items[0]) else {
+    let Item::Binding(binding) = unmodified_item(&module.items[0]) else {
         panic!("expected binding");
     };
     let Some(Expression::Function(function)) = &binding.value else {
@@ -1936,14 +1936,14 @@ fn parses_const_bindings_losslessly_at_top_level_and_in_blocks() {
     let module = parse(source).expect("const bindings should parse");
     assert_eq!(module.syntax.text(), source);
 
-    let Item::Binding(x) = statement(&module.items[0]) else {
+    let Item::Binding(x) = unmodified_item(&module.items[0]) else {
         panic!("expected const binding");
     };
     assert_eq!(x.kind, BindingKind::Const);
     assert_eq!(x.name, "x");
     assert!(x.value.is_some());
 
-    let Item::Binding(wrapper) = statement(&module.items[1]) else {
+    let Item::Binding(wrapper) = unmodified_item(&module.items[1]) else {
         panic!("expected wrapper binding");
     };
     let Some(Expression::Function(function)) = &wrapper.value else {
