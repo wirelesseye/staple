@@ -1159,6 +1159,62 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_list_bracket_indexing_mutation_and_iteration() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-list-index-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-list-index-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let mut values: List I32 = List.new ()\n",
+                "List.push values 10\n",
+                "List.push values 20\n",
+                "List.push values 30\n",
+                "let index: USize = 1 satisfies USize\n",
+                "let read = values[index]\n",
+                "values[index] = 99\n",
+                "let mut sum: I32 = 0\n",
+                "for item in values {\n",
+                "  sum = sum + item\n",
+                "}\n",
+                "match read == 20 {\n",
+                "  True() => match values[index] == 99 {\n",
+                "    True() => match sum == 139 {\n",
+                "      True() => exit 0,\n",
+                "      False() => exit 3,\n",
+                "    },\n",
+                "    False() => exit 2,\n",
+                "  },\n",
+                "  False() => exit 1,\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary List index source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("List index executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("List index executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "List index executable exited with {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_erased_product_length_and_indexing() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -903,6 +903,8 @@ impl TypedModule {
             trait_id,
             arguments,
             &mut seen,
+            self.copy_trait,
+            &|value_type| self.is_copy_type(value_type),
         )
         .into_iter()
         .next()?;
@@ -931,28 +933,45 @@ impl TypedModule {
         if !arguments.iter().any(contains_inferred_type) {
             return Some(arguments.to_vec());
         }
-        let parameters = self.trait_parameter_arguments.get(&trait_id)?;
         let dependencies = self.trait_functional_dependencies.get(&trait_id)?;
         if dependencies.is_empty() {
             return None;
         }
-        let query = trait_parameter_values(parameters, arguments);
+        // See the matching comment in `resolve_trait_obligation`: a candidate
+        // impl's header may itself contain free type parameters, so the
+        // known (non-inferred) positions of `arguments` must be unified
+        // against it, and the unknown positions completed by substituting
+        // into the header — not compared with `==`.
         let mut matches = self
             .trait_implementations
             .iter()
             .filter(|implementation| implementation.trait_id == trait_id)
-            .filter(|implementation| {
-                let candidate = trait_parameter_values(parameters, &implementation.arguments);
-                query.iter().all(|(parameter, value)| {
-                    contains_inferred_type(value)
-                        || candidate
-                            .get(parameter)
-                            .is_some_and(|candidate| candidate == value)
-                })
+            .filter_map(|implementation| {
+                if implementation.arguments.len() != arguments.len() {
+                    return None;
+                }
+                let mut substitutions = HashMap::new();
+                let unifies = implementation.arguments.iter().zip(arguments).all(
+                    |(template, actual)| {
+                        contains_inferred_type(actual)
+                            || infer_type_parameters(template, actual, &mut substitutions)
+                    },
+                );
+                if !unifies {
+                    return None;
+                }
+                Some(
+                    implementation
+                        .arguments
+                        .iter()
+                        .cloned()
+                        .map(|argument| substitute_type(argument, &substitutions))
+                        .collect::<Vec<_>>(),
+                )
             });
-        let mut completed = matches.next()?.arguments.clone();
+        let mut completed = matches.next()?;
         for candidate in matches {
-            completed = merge_trait_arguments(&completed, &candidate.arguments)?;
+            completed = merge_trait_arguments(&completed, &candidate)?;
         }
         Some(completed)
     }
@@ -6324,32 +6343,50 @@ impl TypeChecker {
             return Some(arguments);
         }
         if arguments.iter().any(contains_inferred_type) {
-            let parameters = self.trait_parameter_arguments.get(&trait_id)?;
-            let query = trait_parameter_values(parameters, arguments);
-            let mut matches = self
+            let bound_candidates = self
                 .active_function_bounds
                 .iter()
                 .flatten()
                 .filter(|bound| bound.trait_id == trait_id)
-                .map(|bound| bound.arguments.as_slice())
-                .chain(
-                    self.trait_implementations
-                        .iter()
-                        .filter(|implementation| implementation.trait_id == trait_id)
-                        .map(|implementation| implementation.arguments.as_slice()),
-                )
-                .filter(|candidate| {
-                    let candidate = trait_parameter_values(parameters, candidate);
-                    query.iter().all(|(parameter, value)| {
-                        contains_inferred_type(value)
-                            || candidate.get(parameter).is_some_and(|candidate| {
-                                !contains_inferred_type(candidate) && candidate == value
-                            })
-                    })
+                .map(|bound| bound.arguments.clone());
+            // A candidate impl's own header may itself contain free type
+            // parameters (e.g. `impl<T where Bound T> Convert T T`), so the
+            // known (non-inferred) positions of `arguments` must be unified
+            // against the header — not compared with `==` — to bind those
+            // parameters. The still-unknown positions are then completed by
+            // substituting into the (now partially or fully concrete)
+            // header, rather than being matched against directly.
+            let implementation_candidates = self
+                .trait_implementations
+                .iter()
+                .filter(|implementation| implementation.trait_id == trait_id)
+                .filter_map(|implementation| {
+                    if implementation.arguments.len() != arguments.len() {
+                        return None;
+                    }
+                    let mut substitutions = HashMap::new();
+                    let unifies = implementation.arguments.iter().zip(arguments).all(
+                        |(template, actual)| {
+                            contains_inferred_type(actual)
+                                || infer_type_parameters(template, actual, &mut substitutions)
+                        },
+                    );
+                    if !unifies {
+                        return None;
+                    }
+                    Some(
+                        implementation
+                            .arguments
+                            .iter()
+                            .cloned()
+                            .map(|argument| substitute_type(argument, &substitutions))
+                            .collect::<Vec<_>>(),
+                    )
                 });
-            let mut completed = matches.next()?.to_vec();
+            let mut matches = bound_candidates.chain(implementation_candidates);
+            let mut completed = matches.next()?;
             for candidate in matches {
-                completed = merge_trait_arguments(&completed, candidate)?;
+                completed = merge_trait_arguments(&completed, &candidate)?;
             }
             return Some(completed);
         }
@@ -8250,6 +8287,8 @@ fn dispatch_matching_implementations<'a>(
     trait_id: TraitId,
     arguments: &[CheckedType],
     seen: &mut Vec<(TraitId, Vec<CheckedType>)>,
+    copy_trait: Option<TraitId>,
+    is_copy: &dyn Fn(&CheckedType) -> bool,
 ) -> Vec<(usize, HashMap<TypeParameterId, CheckedType>)> {
     let key = (trait_id, arguments.to_vec());
     if seen.len() > 64 || seen.contains(&key) {
@@ -8279,11 +8318,22 @@ fn dispatch_matching_implementations<'a>(
                     .cloned()
                     .map(|argument| substitute_type(argument, &substitutions))
                     .collect::<Vec<_>>();
+                // `Copy` is never itself in `implementations` (it is
+                // compiler-inferred structurally, not hand-implemented — see
+                // `is_copy_type`), so a recursive impl-list search can never
+                // discharge a `where Copy T` bound on a candidate impl. Ask
+                // the structural check directly instead, by concrete
+                // arguments are already substituted at this point.
+                if Some(bound.trait_id) == copy_trait {
+                    return bound_arguments.first().is_some_and(is_copy);
+                }
                 !dispatch_matching_implementations(
                     implementations,
                     bound.trait_id,
                     &bound_arguments,
                     seen,
+                    copy_trait,
+                    is_copy,
                 )
                 .is_empty()
             });

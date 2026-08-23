@@ -13,14 +13,22 @@ while (i < 8) {
 println (ToString.to_string (List.length numbers))
 println (ToString.to_string (List.capacity numbers))
 
-// `List.get` (and, soon, `list[i]` bracket syntax once a compiler limitation
-// with generic trait dispatch is fixed) reads an element by copy, so it
-// requires `Copy T` the way `List.get_ref` — which borrows instead — does
-// not.
-let first: I32 = List.get numbers (0 satisfies USize)
+// `List.get` and `list[i]` bracket indexing both read an element by copy, so
+// they require `Copy T` the way `List.get_ref` — which borrows instead —
+// does not.
+let index: USize = 0 satisfies USize
+let first: I32 = numbers[index]
 let last: I32 = List.get numbers (7 satisfies USize)
 println (ToString.to_string first)
 println (ToString.to_string last)
+
+// `list[i] = v` and `for item in list` are also available.
+numbers[index] = 100
+let mut total: I32 = 0
+for item in numbers {
+    total = total + item
+}
+println (ToString.to_string total)
 
 match List.pop numbers {
     Some(value) => println (ToString.to_string value),

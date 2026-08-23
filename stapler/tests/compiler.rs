@@ -2685,6 +2685,50 @@ fn list_get_requires_copy_element_type() {
 }
 
 #[test]
+fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_traits() {
+    // Regression test: a generic `impl<T where Bound T> Trait Source Target`
+    // of a multi-parameter trait with a functional dependency used to fail
+    // dispatch entirely, even at a fully concrete call site, because the
+    // dependency-completion and codegen dispatch paths compared a candidate
+    // impl's (possibly still-generic) header against the query with plain
+    // equality instead of unification.
+    let module = type_check(concat!(
+        "trait Bound T { check: T -> Bool }\n",
+        "trait Convert Source Target where Source ~> Target { convert: Source -> Target }\n",
+        "impl Bound I32 { def check = value => True }\n",
+        "impl <T where Bound T> Convert T T {\n",
+        "    def convert = value => value\n",
+        "}\n",
+        "let result: I32 = Convert.convert (5 satisfies I32)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a generic impl of a multi-parameter functional-dependency trait should dispatch and compile");
+}
+
+#[test]
+fn list_supports_bracket_indexing_mutation_and_iteration() {
+    let module = type_check(concat!(
+        "let mut values: List I32 = List.new ()\n",
+        "List.push values 10\n",
+        "List.push values 20\n",
+        "List.push values 30\n",
+        "let index: USize = 1 satisfies USize\n",
+        "let read: I32 = values[index]\n",
+        "values[index] = 99\n",
+        "let mut sum: I32 = 0\n",
+        "for item in values {\n",
+        "  sum = sum + item\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("List Index/MutateIndex/Iterator/IntoIterator should compile");
+}
+
+#[test]
 fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
     // Regression test: a user-defined function wrapping a curried, 2-argument
     // `mut`-effect callee (like `Buffer.push: Buffer T ->{mut} T -> ()`) used

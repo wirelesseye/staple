@@ -1,3 +1,7 @@
+use std.core.iterator.(Iterator, IntoIterator)
+use std.core.iterator.IterStep.(Done, Yield)
+use std.core.index.(Index, MutateIndex)
+
 pub(repr) type List T = Buffer T
 
 // Doubles capacity (minimum 4 on first growth) and moves every element
@@ -70,12 +74,32 @@ companion<T where Copy T> List T {
     }
 }
 
-// `Index`/`MutateIndex` (for `list[i]` / `list[i] = v`) and `Iterator`/
-// `IntoIterator` (for `for item in list`) are intentionally not implemented
-// yet: the compiler currently fails to dispatch a generic `impl<T where ...>`
-// of any multi-parameter functional-dependency trait (Index, MutateIndex,
-// Iterator, and IntoIterator are all shaped this way), even for fully
-// concrete instantiations at the call site. This is tracked separately from
-// `List` itself; see the standalone repro filed alongside this change. Add
-// these impls once that dispatch bug is fixed — `List.get`/`List.get_ref`
-// already provide the same functionality by explicit call.
+impl<T where Copy T> Index (List T) USize T {
+    def index = (list, position) => List.get list position
+}
+
+impl<T> MutateIndex (List T) USize T {
+    def mutate_index = (list, position, value) => {
+        let mut reference = List.get_ref list position
+        Ref.replace (reference, value)
+        ()
+    }
+}
+
+pub(repr) type ListIter T = (list: List T, index: USize)
+
+// Copy-T-gated, like `get`/`Index` — yields owned copies. A Ref-yielding
+// iterator for non-Copy element types is intentionally left for later.
+impl<T where Copy T> Iterator (ListIter T) T {
+    def next = ListIter (list, index) => match index < List.length list {
+        True() => Yield (
+            List.get list index,
+            ListIter (list: list, index: index + (1 satisfies USize)),
+        ),
+        False() => Done (ListIter (list: list, index: index)),
+    }
+}
+
+impl<T where Copy T> IntoIterator (List T) (ListIter T) {
+    def into_iterator = list => ListIter (list: list, index: 0 satisfies USize)
+}
