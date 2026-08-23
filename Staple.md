@@ -768,18 +768,24 @@ A `mut` binding must have an initializer.
 Bracket assignment is delegated to `MutateIndex`, whose `Target` parameter
 carries a `mut` effect (see the "Mutation effects" subsection under
 "Functions"); `a[i] = v` therefore also requires `a`'s root binding to be
-declared `mut`. Homogeneous values instead use `UpdateIndex` to produce a
-replacement product, which needs no `mut` at all. Bindings captured by
-functions are shared cells whenever they are declared `mut`, so the defining
-scope and all closures observe subsequent assignments. A public `mut` module
-binding remains reassignable and writable only from its declaring module.
+declared `mut`. Bindings captured by functions are shared cells whenever they
+are declared `mut`, so the defining scope and all closures observe subsequent
+assignments. A public `mut` module binding remains reassignable and writable
+only from its declaring module.
 
-`mut` is not one of the patterns a function parameter may carry at all: a
-parameter's writability is declared on the function's own signature instead,
-as a `mut` effect, and a parameter cannot be locally reassigned via any
-modifier either. A function that needs a mutable local seeded from a
-parameter's initial value should shadow it with a `let mut` binding in the
-body:
+A `mut` marker on a function parameter is a different thing from `mut` on a
+`let` binding: it declares a mutation effect on that parameter position (see
+the "Mutation effects" subsection under "Functions") rather than an ordinary
+mutable local, and it is allowed only on a whole parameter binding or a
+direct element of the top-level parameter product — never on a pattern
+nested any deeper, and never combined with another binding-pattern modifier.
+Without a marker (or a matching explicit `->{mut ...}` effect on the
+function's type), a parameter can neither be written into nor reassigned.
+With one, both are available, and because the marked position is passed by
+address, the caller observes the change too. A function that instead wants a
+private local seeded from a parameter's initial value — one whose mutations
+stay invisible to the caller and need no effect declaration at all — should
+shadow it with a `let mut` binding in the body:
 
 ```staple
 def increment = (value: I32) => {
@@ -1066,26 +1072,21 @@ for fixed and erased homogeneous references when their element type is `Copy`.
 Known bad fixed-product indices are rejected and dynamic out-of-bounds indices
 trap.
 
-Two related traits provide replacement operations. `UpdateIndex` consumes a
-homogeneous fixed product and returns a product with one element replaced:
+`MutateIndex` replaces one element through a target in place. Indexed
+assignment delegates only to this trait:
 
 ```staple
-let updated = UpdateIndex.update_index (values, index, replacement)
+target[index] = replacement
+// Equivalent to MutateIndex.mutate_index (target, index, replacement)
 ```
 
-`MutateIndex` replaces through a target in place. Indexed assignment delegates
-only to this trait:
-
-```staple
-reference[index] = replacement
-// Equivalent to MutateIndex.mutate_index (reference, index, replacement)
-```
-
-The compiler derives `UpdateIndex` for non-empty homogeneous fixed products and
-`MutateIndex` for fixed and erased homogeneous references. By-value products do
-not receive `MutateIndex`; use `UpdateIndex` instead. These structural
-implementations cannot be overridden. Other types may define ordinary explicit
-implementations of all three traits.
+The compiler derives `MutateIndex` for non-empty homogeneous fixed products, by
+value, and for fixed and erased homogeneous references. `Target`'s `mut 0`
+effect passes it by address either way (see the "Mutation effects" subsection
+under "Functions"), so a by-value target's root binding must be declared
+`mut` just as a `Ref` target's must. These structural implementations cannot
+be overridden. Other types may define ordinary explicit implementations of
+both traits.
 
 Products have a structural `Default` implementation when every element type
 implements `Default`. The expected type determines the result of `default ()`:

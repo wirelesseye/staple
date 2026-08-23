@@ -3531,7 +3531,7 @@ impl NameResolver {
                             self.trait_method_traits
                                 .get(method)
                                 .is_some_and(|trait_id| {
-                                    ["Index", "UpdateIndex", "MutateIndex"].iter().any(|name| {
+                                    ["Index", "MutateIndex"].iter().any(|name| {
                                         self.prelude_traits.get(*name) == Some(trait_id)
                                     })
                                 })

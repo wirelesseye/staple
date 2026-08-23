@@ -2865,12 +2865,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 &arguments[2],
                 span.clone(),
             )?,
-            crate::StructuralTraitMethod::UpdateIndex => self.compile_structural_update_body(
-                values,
-                &arguments[0],
-                &arguments[2],
-                span.clone(),
-            )?,
             crate::StructuralTraitMethod::MutateIndex => self.compile_structural_mutate_body(
                 values,
                 &arguments[0],
@@ -3054,52 +3048,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
     }
 
-    fn compile_structural_update_body(
-        &mut self,
-        values: &[BasicValueEnum<'context>],
-        target: &CheckedType,
-        element: &CheckedType,
-        span: Span,
-    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
-        let [
-            product_value,
-            BasicValueEnum::IntValue(position),
-            replacement,
-        ] = values
-        else {
-            return Err(Diagnostic::new(
-                span,
-                "invalid structural UpdateIndex arguments",
-            ));
-        };
-        let CheckedType::Product(product) = target else {
-            return Err(Diagnostic::new(
-                span,
-                "invalid structural UpdateIndex target",
-            ));
-        };
-        let llvm_type = self.compile_type(target)?;
-        let pointer = self
-            .builder
-            .build_alloca(llvm_type, "update.product")
-            .map_err(compiler_diagnostic)?;
-        self.builder
-            .build_store(pointer, *product_value)
-            .map_err(compiler_diagnostic)?;
-        self.compile_structural_replace(
-            pointer,
-            *position,
-            self.size_type
-                .const_int(product.elements.len() as u64, false),
-            *replacement,
-            element,
-            span.clone(),
-        )?;
-        self.builder
-            .build_load(llvm_type, pointer, "update.value")
-            .map_err(|error| Diagnostic::new(span, error.to_string()))
-    }
-
     fn compile_structural_mutate_body(
         &mut self,
         values: &[BasicValueEnum<'context>],
@@ -3113,10 +3061,24 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "invalid structural MutateIndex arguments",
             ));
         };
-        let reference = self.builder
-            .build_load(self.compile_type(target)?, *reference_pointer, "mutation.target")
-            .map_err(compiler_diagnostic)?;
-        let (pointer, length) = self.structural_index_storage(reference, target, span.clone())?;
+        // `Target`'s `mut 0` effect passes it by address either way, but a
+        // by-value product's address *is* its storage, while a `Ref` target
+        // is itself the value at that address and must be loaded and
+        // unwrapped to reach the storage it points to.
+        let (pointer, length) = match target {
+            CheckedType::Product(product) => (
+                *reference_pointer,
+                self.size_type
+                    .const_int(product.elements.len() as u64, false),
+            ),
+            CheckedType::Ref(_) => {
+                let reference = self.builder
+                    .build_load(self.compile_type(target)?, *reference_pointer, "mutation.target")
+                    .map_err(compiler_diagnostic)?;
+                self.structural_index_storage(reference, target, span.clone())?
+            }
+            _ => return Err(Diagnostic::new(span, "invalid structural MutateIndex target")),
+        };
         self.compile_structural_replace(
             pointer,
             *position,

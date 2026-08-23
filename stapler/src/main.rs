@@ -1030,7 +1030,8 @@ mod tests {
             concat!(
                 "extern \"c\" { let exit: I32 -> () }\n",
                 "let index: USize = 1\n",
-                "let product: I32[3] = UpdateIndex.update_index ((10, 20, 30), index, 21)\n",
+                "let mut product: I32[3] = (10, 20, 30)\n",
+                "product[index] = 21\n",
                 "let fixed: Ref I32[3] = Ref product\n",
                 "let mut erased: Slice I32 = Slice.from_ref fixed\n",
                 "erased[index] = 22\n",

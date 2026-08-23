@@ -1081,10 +1081,11 @@ fn derives_trait_delegated_product_indexing() {
         "let selected: I32 | String = pair[position]\n",
         "let operation: ((I32, String), USize) -> I32 | String = Index.index\n",
         "let selected_again: I32 | String = operation (pair, position)\n",
-        "let updated: I32[3] = UpdateIndex.update_index ((1, 2, 3), position, 9)\n",
-        "let update_operation: (I32[3], USize, I32) -> I32[3] = UpdateIndex.update_index\n",
-        "let updated_again: I32[3] = update_operation (updated, position, 10)\n",
-        "let mut fixed: Ref I32[3] = Ref updated_again\n",
+        "let mut updated: I32[3] = (1, 2, 3)\n",
+        "updated[position] = 9\n",
+        "let mutate_by_value: (I32[3], USize, I32) ->{mut 0} () = MutateIndex.mutate_index\n",
+        "mutate_by_value (updated, position, 10)\n",
+        "let mut fixed: Ref I32[3] = Ref updated\n",
         "let mutate_operation: (Ref I32[3], USize, I32) ->{mut 0} () = MutateIndex.mutate_index\n",
         "mutate_operation (fixed, position, 6)\n",
         "fixed[position] = 7\n",
@@ -1097,7 +1098,6 @@ fn derives_trait_delegated_product_indexing() {
         .compile_module(&module)
         .expect("derived indexing traits should generate LLVM");
     assert!(llvm.contains("structural_Index"));
-    assert!(llvm.contains("structural_UpdateIndex"));
     assert!(llvm.contains("structural_MutateIndex"));
     assert!(llvm.contains("index.case"));
 }
@@ -1118,16 +1118,24 @@ fn delegates_brackets_to_explicit_indexing_implementations() {
 }
 
 #[test]
-fn rejects_by_value_indexed_assignment() {
+fn allows_by_value_indexed_assignment_for_mut_bindings() {
+    let source = "let mut values: I32[2] = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n";
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("by-value indexed assignment through a `mut` binding should generate LLVM");
+}
+
+#[test]
+fn rejects_by_value_indexed_assignment_without_mut_binding() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "let mut values: I32[2] = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n",
+            "let values: I32[2] = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n",
         ))
-        .expect_err("by-value product assignment requires MutateIndex");
+        .expect_err("by-value product assignment requires a `mut` binding");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("indexed assignment requires a `MutateIndex` implementation")
+        diagnostic.message.contains("not declared `mut`")
     }));
 
     let diagnostics = TypeChecker::new()
@@ -1143,11 +1151,11 @@ fn rejects_by_value_indexed_assignment() {
 }
 
 #[test]
-fn updates_and_mutates_move_only_homogeneous_products() {
+fn derives_mutate_index_for_move_only_homogeneous_products() {
     let source = concat!(
         "use std.cinterop.CString\n",
-        "def update = (values: CString[2], position: USize, replacement: CString) => ",
-        "UpdateIndex.update_index (values, position, replacement)\n",
+        "def mutate_by_value = (mut values: CString[2], position: USize, replacement: CString) => { ",
+        "values[position] = replacement; () }\n",
         "def mutate = (mut values: Ref CString[2], position: USize, replacement: CString) => { ",
         "values[position] = replacement; () }\n",
     );

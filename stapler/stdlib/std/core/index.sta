@@ -2,10 +2,6 @@ pub trait Index Target Position Output where {Target, Position} ~> Output {
     index: (Target, Position) -> Output
 }
 
-pub trait UpdateIndex Target Position Value where {Target, Position} ~> Value {
-    update_index: (Target, Position, Value) -> Target
-}
-
 pub trait MutateIndex Target Position Value where {Target, Position} ~> Value {
     mutate_index: (Target, Position, Value) ->{mut 0} ()
 }

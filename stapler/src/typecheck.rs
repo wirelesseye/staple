@@ -77,7 +77,6 @@ pub struct CheckedTraitDispatch {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructuralTraitMethod {
     Index,
-    UpdateIndex,
     MutateIndex,
     IntoIterator,
     Iterator,
@@ -682,7 +681,6 @@ pub struct TypedModule {
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
     index_trait: Option<TraitId>,
-    update_index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
     into_iterator_trait: Option<TraitId>,
     iterator_trait: Option<TraitId>,
@@ -858,7 +856,6 @@ impl TypedModule {
             trait_id,
             arguments,
             self.index_trait,
-            self.update_index_trait,
             self.mutate_index_trait,
             self.into_iterator_trait,
             self.iterator_trait,
@@ -924,7 +921,6 @@ impl TypedModule {
             trait_id,
             arguments,
             self.index_trait,
-            self.update_index_trait,
             self.mutate_index_trait,
             self.into_iterator_trait,
             self.iterator_trait,
@@ -1025,7 +1021,6 @@ pub struct TypeChecker {
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
     index_trait: Option<TraitId>,
-    update_index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
     into_iterator_trait: Option<TraitId>,
     iterator_trait: Option<TraitId>,
@@ -1105,7 +1100,6 @@ impl TypeChecker {
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
         self.index_trait = module.standard_trait("Index");
-        self.update_index_trait = module.standard_trait("UpdateIndex");
         self.mutate_index_trait = module.standard_trait("MutateIndex");
         self.into_iterator_trait = module.standard_trait("IntoIterator");
         self.iterator_trait = module.standard_trait("Iterator");
@@ -1184,7 +1178,6 @@ impl TypeChecker {
             drop_trait: self.drop_trait,
             default_trait: self.default_trait,
             index_trait: self.index_trait,
-            update_index_trait: self.update_index_trait,
             mutate_index_trait: self.mutate_index_trait,
             into_iterator_trait: self.into_iterator_trait,
             iterator_trait: self.iterator_trait,
@@ -1293,7 +1286,6 @@ impl TypeChecker {
         }
         for (trait_id, trait_name, member_name) in [
             (self.index_trait, "Index", "index"),
-            (self.update_index_trait, "UpdateIndex", "update_index"),
             (self.mutate_index_trait, "MutateIndex", "mutate_index"),
         ] {
             let valid = trait_id
@@ -1481,7 +1473,6 @@ impl TypeChecker {
                 implementation.trait_id,
                 &arguments,
                 self.index_trait,
-                self.update_index_trait,
                 self.mutate_index_trait,
                 self.into_iterator_trait,
                 self.iterator_trait,
@@ -1612,7 +1603,6 @@ impl TypeChecker {
     fn validate_indexing_trait_method_types(&mut self, module: &ResolvedModule) {
         for (trait_id, trait_name, arity, result_parameter, mutations) in [
             (self.index_trait, "Index", 2, Some(2usize), Vec::new()),
-            (self.update_index_trait, "UpdateIndex", 3, Some(0usize), Vec::new()),
             (
                 self.mutate_index_trait,
                 "MutateIndex",
@@ -6316,7 +6306,6 @@ impl TypeChecker {
             trait_id,
             arguments,
             self.index_trait,
-            self.update_index_trait,
             self.mutate_index_trait,
             self.into_iterator_trait,
             self.iterator_trait,
@@ -6382,7 +6371,6 @@ impl TypeChecker {
             trait_id,
             arguments,
             self.index_trait,
-            self.update_index_trait,
             self.mutate_index_trait,
             self.into_iterator_trait,
             self.iterator_trait,
@@ -8752,7 +8740,6 @@ fn structural_trait_arguments(
     trait_id: TraitId,
     arguments: &[CheckedType],
     index_trait: Option<TraitId>,
-    update_index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
     into_iterator_trait: Option<TraitId>,
     iterator_trait: Option<TraitId>,
@@ -8853,32 +8840,18 @@ fn structural_trait_arguments(
         return None;
     }
 
-    if Some(trait_id) == update_index_trait {
-        let CheckedType::Product(product) = target else {
-            return None;
-        };
-        if product.variadic {
-            return None;
-        }
-        let element = product.homogeneous_element()?.clone();
-        if accepts(&element) {
-            return Some((
-                vec![target.clone(), CheckedType::USize, element],
-                StructuralTraitMethod::UpdateIndex,
-            ));
-        }
-        return None;
-    }
-
     if Some(trait_id) == mutate_index_trait {
-        let CheckedType::Ref(payload) = target else {
-            return None;
-        };
-        let element = match payload.as_ref() {
+        let element = match target {
             CheckedType::Product(product) if !product.variadic => {
                 product.homogeneous_element()?.clone()
             }
-            CheckedType::ErasedProduct(element) => element.as_ref().clone(),
+            CheckedType::Ref(payload) => match payload.as_ref() {
+                CheckedType::Product(product) if !product.variadic => {
+                    product.homogeneous_element()?.clone()
+                }
+                CheckedType::ErasedProduct(element) => element.as_ref().clone(),
+                _ => return None,
+            },
             _ => return None,
         };
         if accepts(&element) {
