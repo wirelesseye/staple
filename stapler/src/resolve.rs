@@ -758,6 +758,7 @@ fn export_interface_item(
 #[derive(Default)]
 pub struct NameResolver {
     scopes: Vec<HashMap<String, SymbolId>>,
+    shadowable: Vec<HashMap<String, bool>>,
     namespaces: Vec<HashMap<String, ModuleId>>,
     submodule_ids: HashMap<SyntaxId, ModuleId>,
     block_types: Vec<HashMap<String, TypeId>>,
@@ -934,6 +935,7 @@ impl NameResolver {
         for source_module in program.modules() {
             self.current_module = source_module.id;
             self.scopes.clear();
+            self.shadowable.clear();
             self.namespaces.clear();
             self.block_types.clear();
             self.imported_types.clear();
@@ -2385,11 +2387,11 @@ impl NameResolver {
             match item {
                 Item::ExternBlock(block) => {
                     for binding in &block.bindings {
-                        self.declare_allocated(binding);
+                        self.declare_allocated(binding, None);
                     }
                 }
                 Item::Binding(binding) if binding.kind == BindingKind::Def => {
-                        self.declare_allocated(binding);
+                        self.declare_allocated(binding, None);
                 }
                 Item::UseDeclaration(_)
                 | Item::Modified(_)
@@ -2844,7 +2846,7 @@ impl NameResolver {
                 }
                 self.resolve_pattern_types(&binding.pattern);
                 self.resolve_expression(&binding.value, None, None);
-                self.declare_pattern(&binding.pattern);
+                self.declare_pattern(&binding.pattern, Some(false), &mut HashSet::new());
             }
             Item::Assignment(assignment) => {
                 self.syntax_modules
@@ -2940,7 +2942,7 @@ impl NameResolver {
             );
         }
         if binding.kind == BindingKind::Let {
-            self.declare_allocated(binding);
+            self.declare_allocated(binding, Some(binding.visibility == Visibility::Public));
             if (binding.mutable || binding.reassignable) && binding.value.is_none() {
                 self.diagnostics.push(Diagnostic::new(
                     binding.syntax.span.clone(),
@@ -3346,7 +3348,7 @@ impl NameResolver {
                 let outer_loop_depth = self.loop_depth;
                 self.loop_depth = 0;
                 self.push_scope();
-                self.declare_pattern(&function.pattern);
+                self.declare_pattern(&function.pattern, None, &mut HashSet::new());
                 let expected_result = (|| {
                     let Type::Function(function_type) = expected_type? else {
                         return None;
@@ -3408,7 +3410,7 @@ impl NameResolver {
                 for arm in &match_.arms {
                     self.resolve_pattern_types(&arm.pattern);
                     self.push_scope();
-                    self.declare_pattern(&arm.pattern);
+                    self.declare_pattern(&arm.pattern, None, &mut HashSet::new());
                     self.resolve_expression(&arm.body, expected_type, None);
                     self.pop_scope();
                 }
@@ -3872,7 +3874,7 @@ impl NameResolver {
         for statement in &block.items {
             match statement {
                 Item::Binding(binding) if binding.kind == BindingKind::Def => {
-                    self.declare_fresh(binding);
+                    self.declare_fresh(binding, None);
                 }
                 Item::Submodule(submodule) => self.declare_block_namespace(submodule),
                 Item::TypeDeclaration(declaration) => self.declare_block_type(declaration),
@@ -3951,11 +3953,18 @@ impl NameResolver {
         }
     }
 
-    fn declare_pattern(&mut self, pattern: &Pattern) {
+    fn declare_pattern(&mut self, pattern: &Pattern, shadow: Option<bool>, seen: &mut HashSet<String>) {
         match pattern {
             Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
             Pattern::Binding(binding) => {
                 if self.nominal_patterns.contains_key(&binding.syntax.id) {
+                    return;
+                }
+                if !seen.insert(binding.name.clone()) {
+                    self.diagnostics.push(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        format!("`{}` is bound more than once in the same pattern", binding.name),
+                    ));
                     return;
                 }
                 if let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied() {
@@ -3964,12 +3973,14 @@ impl NameResolver {
                         binding.syntax.id,
                         binding.syntax.span.clone(),
                         symbol,
+                        shadow,
                     );
                 } else {
                     self.declare_fresh_name(
                         &binding.name,
                         binding.syntax.id,
                         binding.syntax.span.clone(),
+                        shadow,
                     );
                 }
                 if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
@@ -3983,18 +3994,27 @@ impl NameResolver {
             }
             Pattern::At(at) => {
                 let binding = &at.binding;
+                if !seen.insert(binding.name.clone()) {
+                    self.diagnostics.push(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        format!("`{}` is bound more than once in the same pattern", binding.name),
+                    ));
+                    return;
+                }
                 if let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied() {
                     self.declare_symbol(
                         &binding.name,
                         binding.syntax.id,
                         binding.syntax.span.clone(),
                         symbol,
+                        shadow,
                     );
                 } else {
                     self.declare_fresh_name(
                         &binding.name,
                         binding.syntax.id,
                         binding.syntax.span.clone(),
+                        shadow,
                     );
                 }
                 if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
@@ -4005,11 +4025,11 @@ impl NameResolver {
                         self.reassignable_symbols.insert(symbol);
                     }
                 }
-                self.declare_pattern(&at.pattern);
+                self.declare_pattern(&at.pattern, shadow, seen);
             }
             Pattern::Product(product) => {
                 for element in &product.elements {
-                    self.declare_pattern(element);
+                    self.declare_pattern(element, shadow, seen);
                 }
             }
             Pattern::Nominal(pattern) => {
@@ -4035,21 +4055,22 @@ impl NameResolver {
                         self.nominal_patterns.insert(pattern.syntax.id, id);
                     }
                 }
-                self.declare_pattern(&pattern.argument);
+                self.declare_pattern(&pattern.argument, shadow, seen);
             }
         }
     }
 
-    fn declare_allocated(&mut self, binding: &Binding) {
+    fn declare_allocated(&mut self, binding: &Binding, shadow: Option<bool>) {
         if let Some(symbol) = self.declared_symbols.get(&binding.syntax.id).copied() {
             self.declare_symbol(
                 &binding.name,
                 binding.syntax.id,
                 binding.syntax.span.clone(),
                 symbol,
+                shadow,
             );
         } else {
-            self.declare_fresh(binding);
+            self.declare_fresh(binding, shadow);
         }
         if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
             if binding.mutable {
@@ -4061,22 +4082,23 @@ impl NameResolver {
         }
     }
 
-    fn declare_fresh(&mut self, binding: &Binding) {
+    fn declare_fresh(&mut self, binding: &Binding, shadow: Option<bool>) {
         self.declare_fresh_name(
             &binding.name,
             binding.syntax.id,
             binding.syntax.span.clone(),
+            shadow,
         );
     }
 
-    fn declare_fresh_name(&mut self, name: &str, syntax: SyntaxId, span: Span) {
+    fn declare_fresh_name(&mut self, name: &str, syntax: SyntaxId, span: Span, shadow: Option<bool>) {
         let symbol = SymbolId(self.next_symbol_id);
         self.next_symbol_id += 1;
         self.symbol_owners
             .insert(symbol, self.function_stack.last().copied());
         self.symbol_modules.insert(symbol, self.current_module);
         self.symbol_declarations.insert(symbol, syntax);
-        self.declare_symbol(name, syntax, span, symbol);
+        self.declare_symbol(name, syntax, span, symbol, shadow);
     }
 
     fn record_capture(&mut self, symbol: SymbolId) {
@@ -4098,17 +4120,47 @@ impl NameResolver {
         }
     }
 
-    fn declare_symbol(&mut self, name: &str, syntax: SyntaxId, span: Span, symbol: SymbolId) {
-        if self.current_scope().contains_key(name)
-            || self.namespaces.iter().any(|frame| frame.contains_key(name))
-        {
+    fn declare_symbol(
+        &mut self,
+        name: &str,
+        syntax: SyntaxId,
+        span: Span,
+        symbol: SymbolId,
+        shadow: Option<bool>,
+    ) {
+        if self.namespaces.iter().any(|frame| frame.contains_key(name)) {
             self.diagnostics.push(Diagnostic::new(
                 span,
                 format!("duplicate definition of `{name}`"),
             ));
             return;
         }
+        if self.current_scope().contains_key(name) {
+            let can_shadow = match shadow {
+                Some(new_is_pub) => self
+                    .current_shadowable()
+                    .get(name)
+                    .is_some_and(|&existing_is_pub| !(existing_is_pub && new_is_pub)),
+                None => false,
+            };
+            if !can_shadow {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!("duplicate definition of `{name}`"),
+                ));
+                return;
+            }
+        }
         self.current_scope_mut().insert(name.to_owned(), symbol);
+        match shadow {
+            Some(is_pub) => {
+                self.current_shadowable_mut()
+                    .insert(name.to_owned(), is_pub);
+            }
+            None => {
+                self.current_shadowable_mut().remove(name);
+            }
+        }
         self.symbols.insert(syntax, symbol);
         self.syntax_modules.insert(syntax, self.current_module);
     }
@@ -4171,15 +4223,23 @@ impl NameResolver {
     }
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+        self.shadowable.push(HashMap::new());
     }
     fn pop_scope(&mut self) {
         self.scopes.pop();
+        self.shadowable.pop();
     }
     fn current_scope(&self) -> &HashMap<String, SymbolId> {
         self.scopes.last().expect("resolver scope")
     }
     fn current_scope_mut(&mut self) -> &mut HashMap<String, SymbolId> {
         self.scopes.last_mut().expect("resolver scope")
+    }
+    fn current_shadowable(&self) -> &HashMap<String, bool> {
+        self.shadowable.last().expect("resolver scope")
+    }
+    fn current_shadowable_mut(&mut self) -> &mut HashMap<String, bool> {
+        self.shadowable.last_mut().expect("resolver scope")
     }
 }
 

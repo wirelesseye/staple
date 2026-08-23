@@ -707,6 +707,26 @@ value already held by the binding may be written into. The two axes combine:
 | `let mut a = ...` | No | Yes |
 | `var mut a = ...` | Yes | Yes |
 
+A later `let` or `var` may shadow an earlier one of the same name in the same
+scope, in either combination:
+
+```staple
+let x = 1
+let x = x + 1   // shadows the first `x`; refers to it while initializing
+var x = x * 2   // shadows again; `x` is now reassignable
+```
+
+Shadowing has two exceptions. First, `def` bindings are hoisted (see below)
+and so participate in neither direction of shadowing: a `def` can never
+coexist with another binding of the same name in its scope, regardless of
+declaration order. Second, two `pub` bindings of the same name in the same
+scope remain a "duplicate definition" error, since a public name is an
+export and two of them would leave it ambiguous what an importer sees; a
+`pub` binding and a private binding of the same name may still shadow each
+other in either direction. A single pattern also may not bind the same name
+twice — `let (a, a) = (1, 2)` is rejected, since there is no earlier/later
+between two names introduced by one pattern.
+
 ### `let`
 
 `let` declares or defines a value. The binding itself cannot be reassigned:

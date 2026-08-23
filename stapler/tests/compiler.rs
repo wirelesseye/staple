@@ -5202,13 +5202,93 @@ fn reports_unknown_names_without_panicking() {
 
 #[test]
 fn reports_duplicate_definitions() {
-    let syntax = parse("let value = 1\nlet value = 2\n").expect("source should parse");
+    let syntax = parse("def value = 1\ndef value = 2\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
         .expect_err("duplicate name should fail resolution");
 
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].message, "duplicate definition of `value`");
+}
+
+#[test]
+fn a_later_let_or_var_shadows_an_earlier_one_in_the_same_scope() {
+    let syntax = parse("let value = 1\nlet value = 2\n").expect("source should parse");
+    NameResolver::new()
+        .resolve(&syntax)
+        .expect("a later `let` should be allowed to shadow an earlier one");
+
+    let syntax = parse("let value = 1\nvar value = 2\n").expect("source should parse");
+    NameResolver::new()
+        .resolve(&syntax)
+        .expect("`var` should be allowed to shadow an earlier `let`");
+
+    let syntax = parse("var value = 1\nlet value = 2\n").expect("source should parse");
+    NameResolver::new()
+        .resolve(&syntax)
+        .expect("`let` should be allowed to shadow an earlier `var`");
+
+    let syntax = parse("let a = 1\nlet (a, b) = (2, 3)\n").expect("source should parse");
+    NameResolver::new()
+        .resolve(&syntax)
+        .expect("a destructuring `let` should be allowed to shadow an earlier binding");
+}
+
+#[test]
+fn rejects_a_name_bound_more_than_once_in_the_same_pattern() {
+    let syntax = parse("let (a, a) = (1, 2)\n").expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve(&syntax)
+        .expect_err("a pattern must not bind the same name twice");
+
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("`a` is bound more than once in the same pattern")));
+}
+
+#[test]
+fn rejects_a_def_colliding_with_a_let_of_the_same_name_regardless_of_order() {
+    let syntax = parse("let x = 1\ndef x = () => x\n").expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve(&syntax)
+        .expect_err("a `let` must not be shadowed by a `def`");
+    assert_eq!(diagnostics[0].message, "duplicate definition of `x`");
+
+    let syntax = parse("def x = () => x\nlet x = 1\n").expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve(&syntax)
+        .expect_err("a `def` must not be shadowed by a `let`");
+    assert_eq!(diagnostics[0].message, "duplicate definition of `x`");
+}
+
+#[test]
+fn rejects_two_pub_bindings_of_the_same_name_but_allows_pub_and_private_to_shadow() {
+    let syntax =
+        parse("pub let value = 1\npub let value = 2\n").expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve(&syntax)
+        .expect_err("two `pub` bindings of the same name must stay an error");
+    assert_eq!(diagnostics[0].message, "duplicate definition of `value`");
+
+    let syntax = parse("pub let value = 1\nlet value = 2\n").expect("source should parse");
+    NameResolver::new()
+        .resolve(&syntax)
+        .expect("a private binding should be allowed to shadow a `pub` one");
+
+    let syntax = parse("let value = 1\npub let value = 2\n").expect("source should parse");
+    NameResolver::new()
+        .resolve(&syntax)
+        .expect("a `pub` binding should be allowed to shadow a private one");
+}
+
+#[test]
+fn a_shadowing_let_produces_the_later_value_at_codegen() {
+    let module = type_check("let value = 1\nlet value = value + 1\nvalue\n");
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a shadowing `let` should compile");
+    assert!(llvm.contains("add"));
 }
 
 #[test]
