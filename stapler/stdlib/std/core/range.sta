@@ -28,7 +28,7 @@ impl Iterator (Range I8) I8 {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies I8),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -54,7 +54,7 @@ impl Iterator (RangeInclusive I8) I8 {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies I8),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),
@@ -87,7 +87,7 @@ impl Iterator (Range I16) I16 {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies I16),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -113,7 +113,7 @@ impl Iterator (RangeInclusive I16) I16 {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies I16),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),
@@ -146,7 +146,7 @@ impl Iterator (Range I32) I32 {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies I32),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -172,7 +172,7 @@ impl Iterator (RangeInclusive I32) I32 {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies I32),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),
@@ -205,7 +205,7 @@ impl Iterator (Range I64) I64 {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies I64),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -231,7 +231,7 @@ impl Iterator (RangeInclusive I64) I64 {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies I64),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),
@@ -264,7 +264,7 @@ impl Iterator (Range U8) U8 {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies U8),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -290,7 +290,7 @@ impl Iterator (RangeInclusive U8) U8 {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies U8),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),
@@ -323,7 +323,7 @@ impl Iterator (Range U16) U16 {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies U16),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -349,7 +349,7 @@ impl Iterator (RangeInclusive U16) U16 {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies U16),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),
@@ -382,7 +382,7 @@ impl Iterator (Range U32) U32 {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies U32),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -408,7 +408,7 @@ impl Iterator (RangeInclusive U32) U32 {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies U32),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),
@@ -441,7 +441,7 @@ impl Iterator (Range U64) U64 {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies U64),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -467,7 +467,7 @@ impl Iterator (RangeInclusive U64) U64 {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies U64),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),
@@ -500,7 +500,7 @@ impl Iterator (Range ISize) ISize {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies ISize),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -526,7 +526,7 @@ impl Iterator (RangeInclusive ISize) ISize {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies ISize),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),
@@ -559,7 +559,7 @@ impl Iterator (Range USize) USize {
         True() => Yield (
             current,
             Range (
-                current: current + (1 satisfies USize),
+                current: current + 1,
                 end: end,
             ),
         ),
@@ -585,7 +585,7 @@ impl Iterator (RangeInclusive USize) USize {
             True() => Yield (
                 current,
                 RangeInclusive (
-                    current: current + (1 satisfies USize),
+                    current: current + 1,
                     end: end,
                     finished: False satisfies Bool,
                 ),

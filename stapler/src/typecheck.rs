@@ -4485,6 +4485,11 @@ impl TypeChecker {
         expression: &Expression,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        // `Inferred` carries no information (it's the wildcard `erase_type_parameters`
+        // substitutes for a still-generic subtype, and also what a source-level `_`
+        // annotation resolves to), so treat it exactly like "no expected type" rather
+        // than letting it take the `Some(_)` branch of expected-type-driven logic below.
+        let expected = expected.filter(|expected| **expected != CheckedType::Inferred);
         let trait_methods = module.trait_methods_for_expression(expression.syntax().id);
         if !trait_methods.is_empty() && !matches!(expression, Expression::Call(_)) {
             let value_type = self.resolve_trait_method_use(
@@ -4864,14 +4869,13 @@ impl TypeChecker {
                     if self.did_return {
                         return CheckedType::empty_product();
                     }
-                    let argument_expected = match &raw_callee_type {
-                        CheckedType::Function(function)
-                            if !contains_type_parameter(&raw_callee_type) =>
-                        {
-                            Some(function.parameter.as_ref())
+                    let argument_expected_owned = match &raw_callee_type {
+                        CheckedType::Function(function) => {
+                            Some(erase_type_parameters(&function.parameter))
                         }
                         _ => None,
                     };
+                    let argument_expected = argument_expected_owned.as_ref();
                     let bare_parameter_string_literal = match (&raw_callee_type, call.argument.as_ref())
                     {
                         (CheckedType::Function(function), Expression::String(string))
@@ -7705,10 +7709,16 @@ pub(crate) fn erased_ref_length(actual: &CheckedType, expected: &CheckedType) ->
     let CheckedType::ErasedProduct(element) = expected else {
         return None;
     };
+    // An `Inferred` element (e.g. from `erase_type_parameters`, or a source
+    // `_`) is an unconstrained wildcard: any single homogeneous element type
+    // satisfies it, not just a literal match against `Inferred` itself.
+    let element_matches = |candidate: &CheckedType| {
+        matches!(element.as_ref(), CheckedType::Inferred) || candidate == element.as_ref()
+    };
     if let CheckedType::ErasedProduct(actual_element) = actual {
-        return (actual_element.as_ref() == element.as_ref()).then_some(usize::MAX);
+        return element_matches(actual_element).then_some(usize::MAX);
     }
-    if actual == element.as_ref() {
+    if element_matches(actual) {
         return Some(1);
     }
     let CheckedType::Product(product) = actual else {
@@ -7717,11 +7727,8 @@ pub(crate) fn erased_ref_length(actual: &CheckedType, expected: &CheckedType) ->
     if product.elements.is_empty() {
         return Some(0);
     }
-    product
-        .elements
-        .iter()
-        .all(|candidate| candidate.value_type == **element)
-        .then_some(product.elements.len())
+    let homogeneous = product.homogeneous_element()?;
+    element_matches(homogeneous).then_some(product.elements.len())
 }
 
 fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType> {
@@ -7857,11 +7864,16 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
                 arguments: expected_arguments,
                 representation: expected_representation,
             },
-        ) if actual_id == expected_id && actual_arguments == expected_arguments => {
+        ) if actual_id == expected_id && actual_arguments.len() == expected_arguments.len() => {
+            let arguments = actual_arguments
+                .into_iter()
+                .zip(expected_arguments)
+                .map(|(actual, expected)| merge_types(actual, expected))
+                .collect::<Option<Vec<_>>>()?;
             Some(CheckedType::Distinct {
                 id: actual_id,
                 name: actual_name,
-                arguments: actual_arguments,
+                arguments,
                 representation: Box::new(merge_types(
                     *actual_representation,
                     *expected_representation,
@@ -8107,6 +8119,70 @@ fn normalize_substituted_sum(alternatives: Vec<CheckedType>) -> CheckedType {
         _ => CheckedType::Sum(CheckedSumType {
             alternatives: flattened,
         }),
+    }
+}
+
+/// Replaces every free type parameter within `value_type` with `Inferred`.
+/// Used to build a literal-defaulting expectation from a still-generic
+/// parameter type: `merge_types` treats `Inferred` as a wildcard, so concrete
+/// substructure (e.g. `USize` in `(list: List T, index: USize)`) still steers
+/// literal defaulting, while parameter-dependent substructure (`List T`) is
+/// left unconstrained instead of being asserted as a literal `T`, which
+/// `merge_types` would reject. Does not descend into `Function` (its
+/// `resources` are compared for exact equality elsewhere, so erasing inside
+/// one risks a false mismatch); a still-generic function-typed field is left
+/// as-is, matching prior behavior for that narrow case.
+fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
+    match value_type {
+        CheckedType::Parameter { .. } => CheckedType::Inferred,
+        CheckedType::CPointer { pointee } => CheckedType::CPointer {
+            pointee: Box::new(erase_type_parameters(pointee)),
+        },
+        CheckedType::Ref(value) => CheckedType::Ref(Box::new(erase_type_parameters(value))),
+        CheckedType::Buffer(value) => CheckedType::Buffer(Box::new(erase_type_parameters(value))),
+        CheckedType::ErasedProduct(value) => {
+            CheckedType::ErasedProduct(Box::new(erase_type_parameters(value)))
+        }
+        CheckedType::Opaque {
+            id,
+            name,
+            arguments,
+        } => CheckedType::Opaque {
+            id: *id,
+            name: name.clone(),
+            arguments: arguments.iter().map(erase_type_parameters).collect(),
+        },
+        CheckedType::Product(product) => CheckedType::Product(CheckedProductType {
+            elements: product
+                .elements
+                .iter()
+                .map(|element| CheckedTypeElement {
+                    name: element.name.clone(),
+                    value_type: erase_type_parameters(&element.value_type),
+                })
+                .collect(),
+            variadic: product.variadic,
+        }),
+        CheckedType::Sum(sum) => CheckedType::Sum(CheckedSumType {
+            alternatives: sum.alternatives.iter().map(erase_type_parameters).collect(),
+        }),
+        CheckedType::Distinct {
+            id,
+            name,
+            arguments,
+            representation,
+        } => CheckedType::Distinct {
+            id: *id,
+            name: name.clone(),
+            arguments: arguments.iter().map(erase_type_parameters).collect(),
+            representation: Box::new(erase_type_parameters(representation)),
+        },
+        CheckedType::TypeConstructor { id, name, arguments } => CheckedType::TypeConstructor {
+            id: *id,
+            name: name.clone(),
+            arguments: arguments.iter().map(erase_type_parameters).collect(),
+        },
+        other => other.clone(),
     }
 }
 

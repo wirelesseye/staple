@@ -16,9 +16,9 @@ println (ToString.to_string (List.capacity numbers))
 // `List.get` and `list[i]` bracket indexing both read an element by copy, so
 // they require `Copy T` the way `List.get_ref` — which borrows instead —
 // does not.
-let index: USize = 0 satisfies USize
+let index: USize = 0
 let first: I32 = numbers[index]
-let last: I32 = List.get numbers (7 satisfies USize)
+let last: I32 = List.get numbers 7
 println (ToString.to_string first)
 println (ToString.to_string last)
 
