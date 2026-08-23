@@ -46,7 +46,18 @@ companion<T> List T {
         Buffer.pop buffer
     }
 
-    pub def get_ref: List T -> USize -> Ref T = list => index => {
+    pub def get_ref: List T -> USize -> Option (Ref T) = list => index => {
+        let List buffer = list
+        match index < Buffer.length buffer {
+            True() => Some (Buffer.get_ref buffer index),
+            False() => None,
+        }
+    }
+
+    // Traps instead of returning `None` for an out-of-bounds index. Backs
+    // `MutateIndex` (and, via `get_unchecked`, `Index`) where a definite
+    // `Ref T` is required rather than an `Option`.
+    pub def get_ref_unchecked: List T -> USize -> Ref T = list => index => {
         let List buffer = list
         Buffer.get_ref buffer index
     }
@@ -66,21 +77,35 @@ companion<T> List T {
     }
 }
 
-// Copy-T-gated companion: `get` reads a value out of the borrowed Ref by copy.
+// Copy-T-gated companion: `get`/`get_unchecked` read a value out of the
+// borrowed Ref by copy.
 companion<T where Copy T> List T {
-    pub def get: List T -> USize -> T = list => index => {
-        let Ref value = List.get_ref list index
+    pub def get: List T -> USize -> Option T = list => index => {
+        let List buffer = list
+        match index < Buffer.length buffer {
+            True() => {
+                let Ref value = Buffer.get_ref buffer index
+                Some value
+            },
+            False() => None,
+        }
+    }
+
+    // Traps instead of returning `None` for an out-of-bounds index. Backs
+    // `Index`, so that `list[i]` keeps its trapping behaviour.
+    pub def get_unchecked: List T -> USize -> T = list => index => {
+        let Ref value = List.get_ref_unchecked list index
         value
     }
 }
 
 impl<T where Copy T> Index (List T) USize T {
-    def index = (list, position) => List.get list position
+    def index = (list, position) => List.get_unchecked list position
 }
 
 impl<T> MutateIndex (List T) USize T {
     def mutate_index = (list, position, value) => {
-        let mut reference = List.get_ref list position
+        let mut reference = List.get_ref_unchecked list position
         Ref.replace (reference, value)
         ()
     }
@@ -92,8 +117,10 @@ pub(repr) type ListIter T = (list: List T, index: USize)
 // iterator for non-Copy element types is intentionally left for later.
 impl<T where Copy T> Iterator (ListIter T) T {
     def next = ListIter (list, index) => match index < List.length list {
+        // The bounds check just above already guarantees `index` is valid,
+        // so `get_unchecked` avoids a second, redundant one.
         True() => Yield (
-            List.get list index,
+            List.get_unchecked list index,
             ListIter (list: list, index: index + 1),
         ),
         False() => Done (ListIter (list: list, index: index)),

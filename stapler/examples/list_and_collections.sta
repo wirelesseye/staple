@@ -13,12 +13,18 @@ while (i < 8) {
 println (ToString.to_string (List.length numbers))
 println (ToString.to_string (List.capacity numbers))
 
-// `List.get` and `list[i]` bracket indexing both read an element by copy, so
-// they require `Copy T` the way `List.get_ref` — which borrows instead —
+// `list[i]` bracket indexing reads an element by copy and traps on an
+// out-of-bounds index (it's backed by `List.get_unchecked`), matching how
+// indexing works elsewhere in the language. `List.get` is the checked
+// counterpart: it returns `Option T` instead of trapping. Both require
+// `Copy T` the way `List.get_ref` — which borrows instead of copying —
 // does not.
 let index: USize = 0
 let first: I32 = numbers[index]
-let last: I32 = List.get numbers 7
+let last: I32 = match List.get numbers 7 {
+    Some(value) => value,
+    None() => 0,
+}
 println (ToString.to_string first)
 println (ToString.to_string last)
 

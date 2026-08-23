@@ -436,6 +436,7 @@ impl Grammar {
 
     fn parse_companion(&mut self, start: usize) -> Result<Submodule, ParseError> {
         self.expect(TokenKind::Companion, "expected `companion`")?;
+        let generics_start = self.position;
         let (type_parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
         let target = self.parse_type()?;
         let name = companion_target_name(&target)
@@ -452,13 +453,30 @@ impl Grammar {
         }
         for item in &mut items {
             if let Item::Binding(binding) = item {
-                let mut parameters = type_parameters.clone();
+                // Re-parse the companion's own `<...>` clause fresh for each
+                // member, rather than `.clone()`ing the one parsed above. A
+                // plain clone would give every member's spliced parameters
+                // and bounds the same `SyntaxId`s as each other (and as the
+                // companion's own copy) — later resolver passes that cache
+                // a `SyntaxId`'s resolved `TypeParameterId` (e.g. which type
+                // parameter a `where`-clause argument refers to) would then
+                // have each member overwrite that shared cache entry, so
+                // only the last-processed member's bounds resolve to the
+                // right parameter. Re-parsing gives each member independent,
+                // genuinely fresh `SyntaxId`s for the identical token range.
+                let resume = self.position;
+                self.position = generics_start;
+                let (member_type_parameters, member_trait_bounds, member_subtype_bounds) =
+                    self.parse_bracketed_generics()?;
+                self.position = resume;
+
+                let mut parameters = member_type_parameters;
                 parameters.extend(binding.type_parameters.clone());
                 binding.type_parameters = parameters;
-                let mut bounds = trait_bounds.clone();
+                let mut bounds = member_trait_bounds;
                 bounds.extend(binding.trait_bounds.clone());
                 binding.trait_bounds = bounds;
-                let mut bounds = subtype_bounds.clone();
+                let mut bounds = member_subtype_bounds;
                 bounds.extend(binding.subtype_bounds.clone());
                 binding.subtype_bounds = bounds;
             }

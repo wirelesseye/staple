@@ -2656,9 +2656,10 @@ fn list_grows_past_initial_capacity_and_type_checks() {
         "List.push values 5\n",
         "let length: USize = List.length values\n",
         "let capacity: USize = List.capacity values\n",
-        "let first: I32 = List.get values (0 satisfies USize)\n",
-        "let last: I32 = List.get values (4 satisfies USize)\n",
-        "let last_ref: Ref I32 = List.get_ref values (4 satisfies USize)\n",
+        "let first: Option I32 = List.get values (0 satisfies USize)\n",
+        "let last: I32 = List.get_unchecked values (4 satisfies USize)\n",
+        "let last_ref: Option (Ref I32) = List.get_ref values (4 satisfies USize)\n",
+        "let last_ref_unchecked: Ref I32 = List.get_ref_unchecked values (4 satisfies USize)\n",
         "let popped: Option I32 = List.pop values\n",
         "let sized: List I32 = List.with_capacity (10 satisfies USize)\n",
     ));
@@ -2682,6 +2683,34 @@ fn list_get_requires_copy_element_type() {
         result.is_err(),
         "List.get should be rejected for a non-Copy element type"
     );
+}
+
+#[test]
+fn companion_where_bound_resolves_independently_for_every_member() {
+    // Regression test: a `companion<T where Bound T> Type T { ... }` with
+    // two or more members used to splice the *same* `SyntaxId`s for the
+    // companion's own generics into every member (a plain `.clone()`, not a
+    // fresh re-parse). Any resolver pass that caches a `SyntaxId`'s resolved
+    // `TypeParameterId` then had every member overwrite the same cache
+    // entry, so only the last-declared member's bound resolved to the right
+    // type parameter — every earlier member's `where` bound stayed
+    // unresolved (referencing another member's parameter), and calling it
+    // failed with "trait bound is not satisfied" even when the bound
+    // plainly held.
+    let module = type_check(concat!(
+        "pub(repr) type Box T = (value: T)\n",
+        "companion<T where Copy T> Box T {\n",
+        "    pub def first: Box T -> T = Box value => value\n",
+        "    pub def second: Box T -> T = Box value => value\n",
+        "}\n",
+        "let boxed: Box I32 = Box (value: 5)\n",
+        "let a: I32 = Box.first boxed\n",
+        "let b: I32 = Box.second boxed\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("every member of a where-bounded companion should resolve its own bound");
 }
 
 #[test]
