@@ -9,6 +9,19 @@ use crate::{
 
 const MAX_EXPANSION_DEPTH: usize = 128;
 const MAX_EVALUATION_STEPS: usize = 1_000_000;
+/// Bounds `MacroExpander::helper_eval_depth`: nesting of "look up a named
+/// binding and evaluate its raw initializer" or "apply a compile-time
+/// function" calls, which is where a self-referential or mutually
+/// recursive `def`/`const` (or one whose base case is unreachable) would
+/// otherwise overflow the native stack — well before
+/// `MAX_EVALUATION_STEPS` steps accumulate, since each nesting level costs
+/// real Rust stack, not just a step count. Chosen with a comfortable
+/// safety margin below the depth empirically observed to overflow the
+/// stack of the dedicated 256 MiB thread `NameResolver::resolve_program`
+/// spawns for this (unoptimized debug builds use dramatically more stack
+/// per frame than release builds, so this is calibrated against the
+/// worst case).
+const MAX_HELPER_EVAL_DEPTH: usize = 150;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 struct MacroKey {
@@ -532,6 +545,14 @@ struct MacroExpander {
     emitted_items: Option<Vec<Item>>,
     invocations: HashMap<SyntaxId, ResolvedMacro>,
     quote_context: Option<MetaType>,
+    /// Depth of nested "look up a named binding and evaluate its raw
+    /// initializer from scratch" calls (see `eval_helper_value`) currently
+    /// on the Rust call stack. Bounds a self-referential or mutually
+    /// recursive `def`/`const` (e.g. `const x = x + 1`) to a diagnostic
+    /// instead of a native stack overflow — `MAX_EVALUATION_STEPS`
+    /// alone doesn't help here, since the crash happens well before a
+    /// million steps accumulate.
+    helper_eval_depth: usize,
 }
 
 fn provisional_use_kind(program: &Program, declaration: &UseDeclaration) -> UseKind {
@@ -998,6 +1019,7 @@ impl MacroExpander {
             emitted_items: None,
             invocations: HashMap::new(),
             quote_context: None,
+            helper_eval_depth: 0,
         }
     }
 
@@ -2169,6 +2191,17 @@ impl MacroExpander {
                 if let Some(value) = binding.value.take() {
                     binding.value = Some(self.expand_expression(module, value, depth));
                 }
+                if binding.kind == BindingKind::Const
+                    && let Some(value) = &binding.value
+                {
+                    let span = value.syntax().span.clone();
+                    let folded = self
+                        .eval_expression(module, value, &mut Environment::new())
+                        .and_then(|result| self.value_to_expression(result, span));
+                    if let Some(folded) = folded {
+                        binding.value = Some(folded);
+                    }
+                }
             }
             Item::PatternBinding(binding) => {
                 binding.value = self.expand_expression(module, binding.value.clone(), depth);
@@ -3072,7 +3105,7 @@ impl MacroExpander {
                             return Some(Value::Helper(helper.module, helper.binding));
                         }
                         let value = helper.binding.value?;
-                        return self.eval_expression(helper.module, &value, &mut Environment::new());
+                        return self.eval_helper_value(helper.module, &value, name.syntax.span.clone());
                     }
                     if !self.companion_modules[cursor.0] {
                         break;
@@ -3986,7 +4019,57 @@ impl MacroExpander {
         }
     }
 
+    /// Evaluates a named binding's raw initializer from scratch — the
+    /// operation `Expression::Name` and `Value::Helper` application both
+    /// perform to resolve a reference to a `def`/`const`/`let`. Bounded by
+    /// `helper_eval_depth` so a self-referential or mutually recursive
+    /// binding (e.g. `const x = x + 1`) fails with a diagnostic instead of
+    /// overflowing the native stack — this can happen well before
+    /// `MAX_EVALUATION_STEPS` steps accumulate, since each nesting level
+    /// costs real Rust stack, not just a step count.
+    fn eval_helper_value(
+        &mut self,
+        module: ModuleId,
+        value: &Expression,
+        span: Span,
+    ) -> Option<Value> {
+        if self.helper_eval_depth >= MAX_HELPER_EVAL_DEPTH {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                "compile-time evaluation recursed too deeply; check for a self-referential binding",
+            ));
+            return None;
+        }
+        self.helper_eval_depth += 1;
+        let result = self.eval_expression(module, value, &mut Environment::new());
+        self.helper_eval_depth -= 1;
+        result
+    }
+
+    /// Applies a compile-time callable to an argument, bounded by
+    /// `helper_eval_depth` so unbounded compile-time recursion (a
+    /// self-referential `def`/`const`, or one whose base case can never be
+    /// reached) fails with a diagnostic instead of overflowing the native
+    /// stack. Evaluating a function's body is where recursive compile-time
+    /// calls actually nest (each further call re-enters `apply_value`
+    /// before the current one returns), so this — not the point where a
+    /// bare `Expression::Function` node is wrapped into a `Value::Function`
+    /// — is where depth needs to be tracked.
     fn apply_value(&mut self, callee: Value, argument: Value, span: Span) -> Option<Value> {
+        if self.helper_eval_depth >= MAX_HELPER_EVAL_DEPTH {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                "compile-time evaluation recursed too deeply; check for a self-referential binding",
+            ));
+            return None;
+        }
+        self.helper_eval_depth += 1;
+        let result = self.apply_value_inner(callee, argument, span);
+        self.helper_eval_depth -= 1;
+        result
+    }
+
+    fn apply_value_inner(&mut self, callee: Value, argument: Value, span: Span) -> Option<Value> {
         match callee {
             Value::Function {
                 module,
@@ -4017,13 +4100,111 @@ impl MacroExpander {
                     .and_then(function_result_meta_type)
                     .map(|expected| self.quote_context.replace(expected))
                     .unwrap_or_else(|| self.quote_context.take());
-                let function = self.eval_expression(module, &value, &mut Environment::new());
+                let function = self.eval_helper_value(module, &value, span.clone());
                 self.quote_context = previous_context;
-                self.apply_value(function?, argument, span)
+                // Unwrapping a helper into the function it names and then
+                // applying that function is one logical call, not two — go
+                // through `apply_value_inner` directly so `helper_eval_depth`
+                // (and the resulting recursion-depth budget) tracks actual
+                // call nesting rather than this implementation detail.
+                self.apply_value_inner(function?, argument, span)
             }
             _ => {
                 self.diagnostics
                     .push(Diagnostic::new(span, "cannot call this compile-time value"));
+                None
+            }
+        }
+    }
+
+    /// Converts a compile-time `Value` produced by folding a `const`
+    /// initializer back into a literal `Expression` the rest of the
+    /// pipeline (resolve, typecheck, codegen) can treat like any other
+    /// literal-valued binding. Only integers, strings, and (possibly
+    /// nested) products of those can be represented this way; anything
+    /// else is reported as a diagnostic.
+    fn value_to_expression(&mut self, value: Value, span: Span) -> Option<Expression> {
+        match value {
+            Value::Integer(integer) if integer >= 0 => {
+                Some(Expression::Integer(crate::IntegerExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span),
+                    literal: integer.to_string(),
+                }))
+            }
+            Value::Integer(integer) => {
+                // Integer literals can never carry a leading `-` and the
+                // language has no unary minus, so a negative compile-time
+                // result is represented the same way the parser desugars
+                // `0 - n`: `Subtract.subtract 0 |n|`.
+                let zero = Expression::Integer(crate::IntegerExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    literal: "0".to_string(),
+                });
+                let magnitude = Expression::Integer(crate::IntegerExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    literal: integer.unsigned_abs().to_string(),
+                });
+                let access = Expression::Access(crate::AccessExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    value: Box::new(Expression::Name(crate::NameExpression {
+                        syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                        name: "Subtract".to_string(),
+                    })),
+                    accessor: Accessor::Name("subtract".to_string()),
+                });
+                Some(Expression::Call(crate::CallExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    callee: Box::new(Expression::Call(crate::CallExpression {
+                        syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                        callee: Box::new(access),
+                        argument: Box::new(zero),
+                    })),
+                    argument: Box::new(magnitude),
+                }))
+            }
+            // `Value::String`'s payload is already the raw, quoted source
+            // literal (see `Expression::String`'s handling in
+            // `eval_expression`, which clones `StringExpression::literal`
+            // verbatim rather than decoding it) — reuse it as-is rather
+            // than re-encoding, which would double-quote the result.
+            Value::String(string) => Some(Expression::String(crate::StringExpression {
+                syntax: Syntax::synthetic(self.fresh_id(), span),
+                literal: string,
+            })),
+            Value::Product(fields) => {
+                let elements = fields
+                    .into_iter()
+                    .map(|(name, value)| {
+                        Some(crate::ProductElement {
+                            syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                            name,
+                            value: self.value_to_expression(value, span.clone())?,
+                            spread: false,
+                            named_spread: false,
+                        })
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                Some(Expression::Product(crate::ProductExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span),
+                    elements,
+                }))
+            }
+            other => {
+                let description = match other {
+                    Value::Function { .. } | Value::Helper(..) => "a function value",
+                    Value::Syntax(_) => "a syntax value",
+                    Value::Sequence(_) => "a sequence value",
+                    Value::Separated { .. } => "a separated sequence value",
+                    Value::Nominal(..) => "a nominal value",
+                    Value::Integer(_) | Value::String(_) | Value::Product(_) => unreachable!(),
+                };
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "{description} cannot be represented as a compile-time constant; \
+                         `const` initializers must fold to an integer, a string, or a product of those"
+                    ),
+                ));
                 None
             }
         }
@@ -6374,6 +6555,21 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 return binding.name == *name
                     && matches!(argument.as_ref(), Value::Product(values) if values.is_empty());
             }
+            // A single unnamed, non-spread element in parentheses is
+            // grouping, not a genuine 1-element tuple, matching the
+            // transparency rule the type checker applies to the same shape
+            // (e.g. `typecheck.rs`'s `product.elements.len() == 1 &&
+            // !product.elements[0].spread` checks) — so a call argument
+            // like `f (a - b)` binds `f`'s plain parameter directly to the
+            // result of `a - b` rather than to a product wrapping it. Only
+            // a bare binding pattern unwraps this way; `Pattern::Product`
+            // still requires a genuine product/sequence value below.
+            let value = match value {
+                Value::Product(mut fields) if fields.len() == 1 && fields[0].0.is_none() => {
+                    fields.pop().expect("length checked above").1
+                }
+                other => other,
+            };
             if !matches_pattern_type(&binding.ty, &value) {
                 return false;
             }

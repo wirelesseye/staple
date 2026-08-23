@@ -117,6 +117,7 @@ impl<'a> Classifier<'a> {
                 | TokenKind::Break
                 | TokenKind::Continue
                 | TokenKind::Def
+                | TokenKind::Const
                 | TokenKind::Extern
                 | TokenKind::Type
                 | TokenKind::Mod

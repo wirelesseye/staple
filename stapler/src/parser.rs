@@ -940,6 +940,9 @@ impl Grammar {
             Some(TokenKind::Def) => self
                 .parse_binding(visibility, start)
                 .map(Item::Binding),
+            Some(TokenKind::Const) => self
+                .parse_binding(visibility, start)
+                .map(Item::Binding),
             Some(TokenKind::Mod) => self
                 .parse_submodule(visibility, start.unwrap_or(self.position))
                 .map(Item::Submodule),
@@ -1251,7 +1254,11 @@ impl Grammar {
                 self.bump_token();
                 BindingKind::Def
             }
-            _ => return Err(self.error("expected `let`, `def`, `type`, or `extern`")),
+            Some(TokenKind::Const) => {
+                self.bump_token();
+                BindingKind::Const
+            }
+            _ => return Err(self.error("expected `let`, `def`, `const`, `type`, or `extern`")),
         };
         let mutable = self.eat(TokenKind::Mut);
         if mutable && kind != BindingKind::Let {
@@ -1283,6 +1290,9 @@ impl Grammar {
         } else {
             None
         };
+        if value.is_none() && kind == BindingKind::Const {
+            return Err(self.error("`const` bindings require an initializer"));
+        }
         Ok(Binding {
             syntax: self.syntax(start),
             docs: Vec::new(),

@@ -7456,3 +7456,109 @@ fn rejects_non_bool_logical_operands() {
             .any(|diagnostic| diagnostic.message.contains("True | False"))
     );
 }
+
+#[test]
+fn folds_const_arithmetic_and_recursive_calls_at_compile_time() {
+    let module = type_check(concat!(
+        "const x: I32 = 1 + 3\n",
+        "def fibonacci: I32 -> I32 = n =>\n",
+        "    match n < 2 {\n",
+        "        True() => n,\n",
+        "        False() => fibonacci (n - 1) + fibonacci (n - 2),\n",
+        "    }\n",
+        "const y = fibonacci 10\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("const bindings should fold and compile");
+    // `x` and `y` are folded to plain literals by the compiler, not
+    // computed by generated code at program startup: the initializer
+    // functions store the already-computed constants directly, with no
+    // trace of `fibonacci`'s recursive calls in `y`'s initialization.
+    assert!(llvm.contains("i32 4"));
+    assert!(llvm.contains("i32 55"));
+}
+
+#[test]
+fn folds_const_strings_and_products() {
+    let module = type_check(concat!(
+        "const greeting: String = \"hello, const!\"\n",
+        "const point: (x: I32, y: I32) = (x: 1 + 1, y: 2 + 2)\n",
+        "def read_point: () -> I32 = () => point.x + point.y\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("string and product consts should fold and compile");
+    assert!(llvm.contains("hello, const!"));
+}
+
+#[test]
+fn rejects_const_initializers_that_cannot_be_folded_to_a_compile_time_constant() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("const f = () => 1\n", root)
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("a function value cannot be a compile-time constant");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot be represented as a compile-time constant")
+    }));
+}
+
+#[test]
+fn rejects_self_referential_const_bindings() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("const x = x + 1\n", root)
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("a self-referential const should be rejected, not hang or crash");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("recursed too deeply"))
+    );
+}
+
+#[test]
+fn resolves_local_const_names_before_their_textual_position_like_def() {
+    // Local bindings' types aren't seeded ahead of time for forward
+    // reference — a pre-existing limitation shared by local `def` — so
+    // this still fails to *type-check*. What this asserts is that name
+    // *resolution* succeeds (the `resolve_block` hoisting change in
+    // `resolve.rs` finds `later` at all, the same way it already does for
+    // `def`), rather than failing earlier with "unknown name `later`".
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            concat!(
+                "def wrapper: () -> I32 = () => {\n",
+                "    let result = later\n",
+                "    const later: I32 = 1 + 2\n",
+                "    result\n",
+                "}\n",
+            ),
+            root,
+        )
+        .expect("source should parse");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .expect("a hoisted local const's name should resolve, like a local def's");
+    let diagnostics = TypeChecker::new()
+        .check(resolved)
+        .expect_err("reading a local binding before its initializer still fails to type-check");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("later"))
+    );
+}

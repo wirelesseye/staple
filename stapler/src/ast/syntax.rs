@@ -27,6 +27,7 @@ pub enum TokenKind {
     Break,
     Continue,
     Def,
+    Const,
     Extern,
     Type,
     Mod,

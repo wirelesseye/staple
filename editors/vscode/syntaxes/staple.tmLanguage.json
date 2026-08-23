@@ -92,6 +92,14 @@
             "2": { "name": "storage.modifier.mutable.staple" },
             "3": { "name": "variable.other.readwrite.staple" }
           }
+        },
+        {
+          "name": "meta.binding.staple",
+          "match": "\\b(const)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
+          "captures": {
+            "1": { "name": "storage.type.binding.staple" },
+            "2": { "name": "variable.other.readwrite.staple" }
+          }
         }
       ]
     },
@@ -120,7 +128,7 @@
         },
         {
           "name": "keyword.declaration.staple",
-          "match": "\\b(?:def|extern|impl|let|macro|mod|trait|type)\\b"
+          "match": "\\b(?:const|def|extern|impl|let|macro|mod|trait|type)\\b"
         },
         {
           "name": "storage.modifier.staple",

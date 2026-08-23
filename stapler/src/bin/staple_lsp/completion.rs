@@ -8,6 +8,7 @@ const KEYWORDS: &[&str] = &[
     "alias",
     "as",
     "break",
+    "const",
     "continue",
     "def",
     "extern",
@@ -221,7 +222,7 @@ impl Collector<'_> {
                 self.statement_declarations(&value.item, candidates, scope_start)
             }
             Item::Binding(binding) => {
-                let available = if binding.kind == BindingKind::Def {
+                let available = if matches!(binding.kind, BindingKind::Def | BindingKind::Const) {
                     scope_start
                 } else {
                     syntax_range(&binding.syntax).end

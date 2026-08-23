@@ -866,6 +866,44 @@ Calling such a closure before all values it needs have been initialized still
 produces an initialization error. Function-valued bindings otherwise follow the
 same initialization rules as bindings of every other value type.
 
+### `const`
+
+`const` declares a named compile-time value. A use of the name behaves as the
+value itself, rather than as a read from runtime storage:
+
+```staple
+const x: I32 = 1 + 3
+```
+
+The initializer is evaluated by the compiler, and may call ordinary functions,
+including recursively:
+
+```staple
+def fibonacci: I32 -> I32 = n =>
+    match n < 2 {
+        True() => n,
+        False() => fibonacci (n - 1) + fibonacci (n - 2),
+    }
+
+const y = fibonacci 10
+```
+
+An initializer must fold to an integer, a string, or a product (including a
+nested product) of those; a value that cannot be represented this way —
+a function, a resource, and so on — is a compile-time error. `const` requires
+an initializer, and, like a compile-time helper's evaluation generally, an
+initializer that recurses without bound (including through a self-referential
+`const`) is rejected rather than left to hang or exhaust memory.
+
+Like `def`, `const` is hoisted: its name is available throughout its
+containing scope regardless of declaration order. Unlike `def`, it has no
+`Declared`/`Initializing`/`Initialized` runtime state, since its value is
+already fully known before type checking begins — there is no initialization
+order for a compiler-computed constant to violate.
+
+`const` cannot be marked `mut`, and does not accept compile-time (`<...>`)
+parameters.
+
 ### Binding type annotations
 
 The optional type annotation on a binding describes the complete type of its

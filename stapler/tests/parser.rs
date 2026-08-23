@@ -1,6 +1,6 @@
 use stapler::{
-    Accessor, Expression, Item, LogicalOperator, Pattern, TokenKind, Type, TypeDeclarationKind,
-    UseKind, Visibility, parse,
+    Accessor, BindingKind, Expression, Item, LogicalOperator, Pattern, TokenKind, Type,
+    TypeDeclarationKind, UseKind, Visibility, parse,
 };
 
 #[test]
@@ -1922,4 +1922,45 @@ fn uses_newline_as_the_unit_break_boundary() {
     ));
     assert!(matches!(loop_.body.items[1], Item::Expression(_)));
     assert!(parse("def invalid = () => loop { continue 42 }\n").is_err());
+}
+
+#[test]
+fn parses_const_bindings_losslessly_at_top_level_and_in_blocks() {
+    let source = concat!(
+        "const x: I32 = 1 + 3\n",
+        "def wrapper = () => {\n",
+        "  const y = x + 1\n",
+        "  y\n",
+        "}\n",
+    );
+    let module = parse(source).expect("const bindings should parse");
+    assert_eq!(module.syntax.text(), source);
+
+    let Item::Binding(x) = statement(&module.items[0]) else {
+        panic!("expected const binding");
+    };
+    assert_eq!(x.kind, BindingKind::Const);
+    assert_eq!(x.name, "x");
+    assert!(x.value.is_some());
+
+    let Item::Binding(wrapper) = statement(&module.items[1]) else {
+        panic!("expected wrapper binding");
+    };
+    let Some(Expression::Function(function)) = &wrapper.value else {
+        panic!("expected wrapper function");
+    };
+    let Expression::Block(block) = function.body.as_ref() else {
+        panic!("expected block body");
+    };
+    let Item::Binding(y) = &block.items[0] else {
+        panic!("expected local const binding");
+    };
+    assert_eq!(y.kind, BindingKind::Const);
+}
+
+#[test]
+fn rejects_malformed_const_bindings() {
+    assert!(parse("const x: I32\n").is_err());
+    assert!(parse("const mut x = 1\n").is_err());
+    assert!(parse("const x<T> = 1\n").is_err());
 }

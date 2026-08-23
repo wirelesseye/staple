@@ -878,7 +878,7 @@ impl NameResolver {
     /// with a smaller default stack than a typical `main` thread provides.
     pub fn resolve_program(self, program: Program) -> Result<ResolvedModule, Vec<Diagnostic>> {
         std::thread::Builder::new()
-            .stack_size(64 * 1024 * 1024)
+            .stack_size(256 * 1024 * 1024)
             .spawn(move || self.resolve_program_inner(program))
             .expect("name resolution thread should spawn")
             .join()
@@ -2393,8 +2393,10 @@ impl NameResolver {
                         self.declare_allocated(binding, None);
                     }
                 }
-                Item::Binding(binding) if binding.kind == BindingKind::Def => {
-                        self.declare_allocated(binding, None);
+                Item::Binding(binding)
+                    if matches!(binding.kind, BindingKind::Def | BindingKind::Const) =>
+                {
+                    self.declare_allocated(binding, None);
                 }
                 Item::UseDeclaration(_)
                 | Item::Modified(_)
@@ -3886,7 +3888,9 @@ impl NameResolver {
         self.imported_traits.push(HashMap::new());
         for statement in &block.items {
             match statement {
-                Item::Binding(binding) if binding.kind == BindingKind::Def => {
+                Item::Binding(binding)
+                    if matches!(binding.kind, BindingKind::Def | BindingKind::Const) =>
+                {
                     self.declare_fresh(binding, None);
                 }
                 Item::Submodule(submodule) => self.declare_block_namespace(submodule),

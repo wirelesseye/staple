@@ -77,6 +77,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
                 "break" => TokenKind::Break,
                 "continue" => TokenKind::Continue,
                 "def" => TokenKind::Def,
+                "const" => TokenKind::Const,
                 "extern" => TokenKind::Extern,
                 "type" => TokenKind::Type,
                 "mod" => TokenKind::Mod,

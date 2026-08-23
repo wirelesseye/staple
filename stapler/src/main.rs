@@ -756,6 +756,45 @@ mod tests {
     }
 
     #[test]
+    fn runs_a_const_folded_recursive_computation_end_to_end() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-run-const-{nonce}.sta"));
+        std::fs::write(
+            &source,
+            concat!(
+                "const x: I32 = 1 + 3\n",
+                "def fibonacci: I32 -> I32 = n =>\n",
+                "    match n < 2 {\n",
+                "        True() => n,\n",
+                "        False() => fibonacci (n - 1) + fibonacci (n - 2),\n",
+                "    }\n",
+                "const y = fibonacci 10\n",
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "exit (x + y)\n",
+            ),
+        )
+        .expect("temporary run source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let outcome = run([
+            "run".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("const-folded source should run");
+        let _ = std::fs::remove_file(source);
+
+        let Outcome::Executed(status) = outcome else {
+            panic!("run mode should return a process status");
+        };
+        // x = 4, fibonacci(10) = 55, evaluated entirely at compile time.
+        assert_eq!(status.code(), Some(59));
+    }
+
+    #[test]
     fn run_reports_compiler_errors() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

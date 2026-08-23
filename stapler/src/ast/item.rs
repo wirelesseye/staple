@@ -276,6 +276,7 @@ pub struct ImplementationMember {
 pub enum BindingKind {
     Let,
     Def,
+    Const,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -298,6 +299,7 @@ impl Binding {
         match self.kind {
             BindingKind::Def => "def",
             BindingKind::Let => "let",
+            BindingKind::Const => "const",
         }
     }
 }
