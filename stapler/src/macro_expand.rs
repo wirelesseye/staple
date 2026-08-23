@@ -517,6 +517,13 @@ struct MacroExpander {
     use_kinds: HashMap<SyntaxId, UseKind>,
     child_modules: HashMap<SyntaxId, ModuleId>,
     parent_modules: Vec<Option<ModuleId>>,
+    /// Whether each module is a `companion` submodule. A companion is an
+    /// extension of its declaring module's namespace (`Staple.md`'s "Type
+    /// companions" section: "Its body therefore sees the parent's
+    /// declarations without spelling `use super.*`"), so macro/name lookup
+    /// for a companion falls back to its parent's scope — see the walk in
+    /// `resolve_macro`.
+    companion_modules: Vec<bool>,
     diagnostics: Vec<Diagnostic>,
     next_syntax_id: usize,
     next_mark: u64,
@@ -690,10 +697,30 @@ impl MacroExpander {
                     .map(move |(name, helper)| ((module.id, name.clone()), helper.clone()))
             })
             .collect::<HashMap<_, _>>();
+        // A companion (or ordinary `pub mod`) submodule is a macro-callable
+        // namespace, e.g. `List.of(...)` for a macro `of` declared inside
+        // `companion<T> List T { ... }`. Seeded here and carried through the
+        // same re-export fixed point as `public_macros`/`public_helpers`
+        // below, so `pub use Module.(Name)` re-exports the namespace the
+        // same way it re-exports a value or type — mirroring how
+        // `resolve.rs`'s `export_interface_item` treats `namespaces` as just
+        // another kind of interface entry.
+        let mut public_namespaces = HashMap::<(ModuleId, String), ModuleId>::new();
+        for source_module in program.modules() {
+            for item in &source_module.syntax.items {
+                if let Item::Submodule(submodule) = item
+                    && submodule.visibility == Visibility::Public
+                    && let Some(child) = program.child_module(submodule.syntax.id)
+                {
+                    public_namespaces.insert((source_module.id, submodule.name.clone()), child);
+                }
+            }
+        }
 
         loop {
             let previous_macros = public_macros.clone();
             let previous_helpers = public_helpers.clone();
+            let previous_namespaces = public_namespaces.clone();
             let mut changed = false;
             for source_module in program.modules() {
                 for item in &source_module.syntax.items {
@@ -715,6 +742,12 @@ impl MacroExpander {
                             .map(|(_, name, _)| (name.clone(), name.clone()))
                             .chain(
                                 previous_helpers
+                                    .keys()
+                                    .filter(|(module, _)| *module == imported)
+                                    .map(|(_, name)| (name.clone(), name.clone())),
+                            )
+                            .chain(
+                                previous_namespaces
                                     .keys()
                                     .filter(|(module, _)| *module == imported)
                                     .map(|(_, name)| (name.clone(), name.clone())),
@@ -741,9 +774,14 @@ impl MacroExpander {
                                     .is_none();
                             }
                         }
-                        if let Some(helper) = previous_helpers.get(&(imported, item)) {
+                        if let Some(helper) = previous_helpers.get(&(imported, item.clone())) {
                             changed |= public_helpers
-                                .insert((source_module.id, alias), helper.clone())
+                                .insert((source_module.id, alias.clone()), helper.clone())
+                                .is_none();
+                        }
+                        if let Some(namespace) = previous_namespaces.get(&(imported, item)) {
+                            changed |= public_namespaces
+                                .insert((source_module.id, alias), *namespace)
                                 .is_none();
                         }
                     }
@@ -775,6 +813,19 @@ impl MacroExpander {
                     .map(move |(name, helper)| ((module.id, name.clone()), helper.clone()))
             })
             .collect::<HashMap<_, _>>();
+        let all_namespaces = program
+            .modules()
+            .iter()
+            .flat_map(|module| {
+                module.syntax.items.iter().filter_map(move |item| {
+                    let Item::Submodule(submodule) = item else {
+                        return None;
+                    };
+                    let child = program.child_module(submodule.syntax.id)?;
+                    Some(((module.id, submodule.name.clone()), child))
+                })
+            })
+            .collect::<HashMap<_, _>>();
 
         for source_module in program.modules() {
             if let Some(core) = core
@@ -801,6 +852,14 @@ impl MacroExpander {
                             .or_insert_with(|| binding.clone());
                     }
                 }
+                for ((module, name), target) in &public_namespaces {
+                    if *module == core {
+                        scopes[source_module.id.0]
+                            .namespaces
+                            .entry(name.clone())
+                            .or_insert_with(|| *target);
+                    }
+                }
             }
             for (namespace, target) in program.root_qualified_modules(source_module.id) {
                 scopes[source_module.id.0]
@@ -823,12 +882,12 @@ impl MacroExpander {
                 let Some(imported) = program.imported_module(use_.syntax.id) else {
                     continue;
                 };
-                let (macros, helpers) = if use_.visibility == Visibility::Private
+                let (macros, helpers, namespaces) = if use_.visibility == Visibility::Private
                     && macro_is_ancestor(program, imported, source_module.id)
                 {
-                    (&all_macros, &all_helpers)
+                    (&all_macros, &all_helpers, &all_namespaces)
                 } else {
-                    (&public_macros, &public_helpers)
+                    (&public_macros, &public_helpers, &public_namespaces)
                 };
                 match provisional_use_kind(program, use_) {
                     UseKind::Dotted => {}
@@ -861,6 +920,14 @@ impl MacroExpander {
                                     .or_insert_with(|| binding.clone());
                             }
                         }
+                        for ((module, name), target) in namespaces {
+                            if *module == imported {
+                                scopes[source_module.id.0]
+                                    .namespaces
+                                    .entry(name.clone())
+                                    .or_insert_with(|| *target);
+                            }
+                        }
                     }
                     UseKind::Selected(names) => {
                         for name in names {
@@ -871,6 +938,7 @@ impl MacroExpander {
                                 &name,
                                 macros,
                                 helpers,
+                                namespaces,
                             );
                         }
                     }
@@ -881,6 +949,7 @@ impl MacroExpander {
                         &alias,
                         macros,
                         helpers,
+                        namespaces,
                     ),
                 }
             }
@@ -915,6 +984,11 @@ impl MacroExpander {
                 .modules()
                 .iter()
                 .map(|module| program.parent_module(module.id))
+                .collect(),
+            companion_modules: program
+                .modules()
+                .iter()
+                .map(|module| module.companion)
                 .collect(),
             diagnostics: Vec::new(),
             next_syntax_id,
@@ -956,6 +1030,7 @@ impl MacroExpander {
         local: &str,
         public_macros: &HashMap<(ModuleId, String, bool), Vec<MacroKey>>,
         public_helpers: &HashMap<(ModuleId, String), HelperDefinition>,
+        public_namespaces: &HashMap<(ModuleId, String), ModuleId>,
     ) {
         for modifier in [false, true] {
             if let Some(keys) = public_macros.get(&(imported, item.to_owned(), modifier)) {
@@ -974,6 +1049,12 @@ impl MacroExpander {
                 .helpers
                 .entry(local.to_owned())
                 .or_insert_with(|| helper.clone());
+        }
+        if let Some(target) = public_namespaces.get(&(imported, item.to_owned())) {
+            scope
+                .namespaces
+                .entry(local.to_owned())
+                .or_insert_with(|| *target);
         }
     }
 
@@ -2455,16 +2536,33 @@ impl MacroExpander {
                     .definition_module()
                     .map(ModuleId)
                     .unwrap_or(module);
-                if self.scopes[context.0].helpers.contains_key(&name.name) {
-                    None
-                } else {
-                    self.scopes[context.0].macros.get(&name.name).cloned()
+                let mut cursor = context;
+                loop {
+                    if self.scopes[cursor.0].helpers.contains_key(&name.name) {
+                        return None;
+                    }
+                    if let Some(keys) = self.scopes[cursor.0].macros.get(&name.name) {
+                        return Some(keys.clone());
+                    }
+                    if !self.companion_modules[cursor.0] {
+                        return None;
+                    }
+                    cursor = self.parent_modules[cursor.0]?;
                 }
             }
             Expression::Access(access) => {
                 let (namespace, item, definition_module) = qualified_macro_access_path(access)?;
                 let context = definition_module.map(ModuleId).unwrap_or(module);
-                let target = self.scopes[context.0].namespaces.get(&namespace)?;
+                let mut cursor = context;
+                let target = loop {
+                    if let Some(target) = self.scopes[cursor.0].namespaces.get(&namespace) {
+                        break *target;
+                    }
+                    if !self.companion_modules[cursor.0] {
+                        return None;
+                    }
+                    cursor = self.parent_modules[cursor.0]?;
+                };
                 self.scopes[target.0].macros.get(&item).map(|keys| {
                     keys.iter()
                         .filter(|key| {
@@ -2925,12 +3023,22 @@ impl MacroExpander {
                 if let Some(value) = environment.get(&name.name) {
                     return Some(value.get());
                 }
-                if let Some(helper) = self.scopes[module.0].helpers.get(&name.name).cloned() {
-                    if matches!(helper.binding.value, Some(Expression::Function(_))) {
-                        return Some(Value::Helper(helper.module, helper.binding));
+                let mut cursor = module;
+                loop {
+                    if let Some(helper) = self.scopes[cursor.0].helpers.get(&name.name).cloned() {
+                        if matches!(helper.binding.value, Some(Expression::Function(_))) {
+                            return Some(Value::Helper(helper.module, helper.binding));
+                        }
+                        let value = helper.binding.value?;
+                        return self.eval_expression(helper.module, &value, &mut Environment::new());
                     }
-                    let value = helper.binding.value?;
-                    return self.eval_expression(helper.module, &value, &mut Environment::new());
+                    if !self.companion_modules[cursor.0] {
+                        break;
+                    }
+                    let Some(parent) = self.parent_modules[cursor.0] else {
+                        break;
+                    };
+                    cursor = parent;
                 }
                 if name.name == "Comma" {
                     return Some(Value::Syntax(SyntaxValue::Comma(name.syntax.clone())));
@@ -4028,13 +4136,35 @@ impl MacroExpander {
         expected: &MetaType,
     ) -> Option<Value> {
         let definitions = if quote.path.len() == 1 {
-            self.scopes[module.0].macros.get(&quote.path[0])
+            let mut cursor = module;
+            loop {
+                if let Some(keys) = self.scopes[cursor.0].macros.get(&quote.path[0]) {
+                    break Some(keys);
+                }
+                if !self.companion_modules[cursor.0] {
+                    break None;
+                }
+                let Some(parent) = self.parent_modules[cursor.0] else {
+                    break None;
+                };
+                cursor = parent;
+            }
         } else {
             let namespace = quote.path[..quote.path.len() - 1].join(".");
-            self.scopes[module.0]
-                .namespaces
-                .get(&namespace)
-                .and_then(|target| self.scopes[target.0].macros.get(quote.path.last().unwrap()))
+            let mut cursor = module;
+            let target = loop {
+                if let Some(target) = self.scopes[cursor.0].namespaces.get(&namespace) {
+                    break Some(*target);
+                }
+                if !self.companion_modules[cursor.0] {
+                    break None;
+                }
+                let Some(parent) = self.parent_modules[cursor.0] else {
+                    break None;
+                };
+                cursor = parent;
+            };
+            target.and_then(|target| self.scopes[target.0].macros.get(quote.path.last().unwrap()))
         };
         let matching = definitions.into_iter().flatten().filter(|key| {
             self.definitions.get(*key).is_some_and(|definition| {

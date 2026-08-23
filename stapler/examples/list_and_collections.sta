@@ -42,3 +42,7 @@ match List.pop numbers {
 }
 
 println (ToString.to_string (List.length numbers))
+
+// `List.of` builds a list from a fixed set of values in one expression.
+let letters: List I32 = List.of (72, 105, 33)
+println (ToString.to_string (List.length letters))

@@ -1215,6 +1215,63 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_list_of_macro() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-list-of-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-list-of-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let empty: List I32 = List.of ()\n",
+                "let one: List I32 = List.of (42)\n",
+                "let five: List I32 = List.of (1, 2, 3, 4, 5)\n",
+                "match List.length empty == 0 {\n",
+                "  True() => match List.length one == 1 {\n",
+                "    True() => match List.get_unchecked one 0 == 42 {\n",
+                "      True() => match List.length five == 5 {\n",
+                "        True() => match List.get_unchecked five 0 == 1 {\n",
+                "          True() => match List.get_unchecked five 4 == 5 {\n",
+                "            True() => exit 0,\n",
+                "            False() => exit 6,\n",
+                "          },\n",
+                "          False() => exit 5,\n",
+                "        },\n",
+                "        False() => exit 4,\n",
+                "      },\n",
+                "      False() => exit 3,\n",
+                "    },\n",
+                "    False() => exit 2,\n",
+                "  },\n",
+                "  False() => exit 1,\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary List.of source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("List.of executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("List.of executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "List.of executable exited with {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_erased_product_length_and_indexing() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

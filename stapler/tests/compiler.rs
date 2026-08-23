@@ -2714,6 +2714,34 @@ fn companion_where_bound_resolves_independently_for_every_member() {
 }
 
 #[test]
+fn macro_declared_inside_a_companion_resolves_as_type_dot_macro() {
+    // Regression test: a `macro` declared inside `companion<T> Type T { ... }`
+    // parsed fine, but macro expansion never learned that `Type` is a
+    // macro-callable namespace. Value/type/trait lookup broadcasts every
+    // companion from `std.core` into every module's prelude (so
+    // `List.new()` etc. need no import), but macro expansion's own,
+    // separate scope-construction pass only ever broadcast macros/helpers
+    // that way, never namespaces — so `Type.macro(...)` was unreachable
+    // from any file that didn't import the type in an unusual, unbraced
+    // form. Also exercises a companion body resolving a `use`d name from
+    // its *parent* module (here, `quote`/`parse_quote` from `std.syntax`)
+    // without repeating the import inside the companion itself.
+    let module = type_check(concat!(
+        "use std.syntax.*\n",
+        "pub(repr) type Box T = (value: T)\n",
+        "companion<T> Box T {\n",
+        "    pub macro of = value: Expr => parse_quote { Box (value: $value) }\n",
+        "}\n",
+        "let boxed: Box I32 = Box.of 5\n",
+        "let value: I32 = boxed.value\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a macro declared inside a companion should resolve as Type.macro");
+}
+
+#[test]
 fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_traits() {
     // Regression test: a generic `impl<T where Bound T> Trait Source Target`
     // of a multi-parameter trait with a functional dependency used to fail
@@ -2755,6 +2783,19 @@ fn list_supports_bracket_indexing_mutation_and_iteration() {
     CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("List Index/MutateIndex/Iterator/IntoIterator should compile");
+}
+
+#[test]
+fn list_of_macro_builds_a_list_from_values() {
+    let module = type_check(concat!(
+        "let empty: List I32 = List.of ()\n",
+        "let one: List I32 = List.of (42)\n",
+        "let many: List I32 = List.of (1, 2, 3, 4, 5)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("List.of should compile for the empty, singleton, and multi-element cases");
 }
 
 #[test]

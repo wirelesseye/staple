@@ -1,6 +1,7 @@
 use std.core.iterator.(Iterator, IntoIterator)
 use std.core.iterator.IterStep.(Done, Yield)
 use std.core.index.(Index, MutateIndex)
+use std.syntax.*
 
 pub(repr) type List T = Buffer T
 
@@ -75,6 +76,84 @@ companion<T> List T {
         let buffer: Buffer T = Buffer.with_capacity capacity
         List buffer
     }
+}
+
+companion<T> List T {
+    // Builds a one-element list. Public because `List.of`'s expansion
+    // (below) needs to call it from outside this companion, but it mainly
+    // exists to seed that expansion with a call whose type parameter is
+    // inferable from an ordinary argument (`value`) rather than from
+    // nothing — the way `List.new ()`/`List.with_capacity n`'s would be —
+    // see `list_of_expression`'s comment for why that distinction matters.
+    pub def singleton: T -> List T = value => {
+        let mut list: List T = List.with_capacity (1 satisfies USize)
+        List.push list value
+        list
+    }
+
+    // Pushes and returns the same handle `List.push` was given — or, if
+    // pushing grew the list, the new handle `List.push` reassigned it to.
+    // Public for the same reason as `singleton`, and for the same reason
+    // this exists too: it lets `List.of` build a list without ever naming
+    // an intermediate. A synthesized name shared between a macro-generated
+    // binder and macro-generated uses of it, built up across more than one
+    // `parse_quote` call, isn't expressible yet — each `parse_quote` call
+    // freshens the identifiers it introduces independently, and
+    // `Pattern`/`Expr` values have no identity-preserving way to convert
+    // between each other to route around that. Splicing an already-built
+    // `Expr` *value* (never rewriting a name) has no such problem, so
+    // `List.of` threads the list handle through nested calls to this
+    // instead.
+    pub def push_and_return: List T ->{mut} T -> List T = list => value => {
+        List.push list value
+        list
+    }
+}
+
+// Builds `List.push_and_return (... (List.push_and_return base first) ...) last`,
+// left-to-right, so elements are pushed in the order they were written.
+// `accumulator` is a previously-built `Expr` value, spliced in — not a name
+// — so this never runs into the binder/use hygiene mismatch described above.
+def list_of_pushes: Expr -> Sequence Expr -> Expr = accumulator => elements => match elements {
+    Sequence () => accumulator,
+    Sequence (first: Expr, rest: Sequence Expr) => {
+        let pushed: Expr = parse_quote { List.push_and_return $accumulator $first }
+        list_of_pushes pushed rest
+    },
+}
+
+// An explicit `-> Expr` result lets the trailing `parse_quote` infer its
+// contextual type, the same way `if`'s `if_clauses` helper (in `flow.sta`)
+// does — a `parse_quote` called directly from a macro's own match arm,
+// with no result type in scope, cannot infer what to parse into.
+//
+// The base case seeds the chain with `List.singleton $first` rather than
+// `List.new ()`, and only when there's a first element to do that with:
+// nested generic calls only infer their type parameter from their own
+// arguments or an annotation in the immediate context, not from an
+// annotation several calls further out (`List.new ()` nested inside
+// `List.push_and_return (List.push_and_return (List.new ()) 1) 2`
+// cannot infer its element type this way, even though the whole
+// expression's expected type is known). `List.singleton first`'s type
+// parameter, by contrast, is pinned down immediately by `first`'s own
+// type, so every `push_and_return` layered on top of it infers cleanly
+// from the (now concrete) accumulator beneath it.
+def list_of_expression: Sequence Expr -> Expr = elements => match elements {
+    Sequence () => parse_quote { List.new () },
+    Sequence (first: Expr, rest: Sequence Expr) => {
+        let base: Expr = parse_quote { List.singleton $first }
+        list_of_pushes base rest
+    },
+}
+
+companion<T> List T {
+    // Builds a `List T` from a fixed, comma-separated set of values:
+    // `List.of (1, 2, 3)`. `T` is inferred from the pushed values (or from
+    // an expected type), exactly as with `List.new` followed by `List.push`.
+    pub macro of =
+        body: Parenthesized (Separated Expr Comma) => match body {
+            Parenthesized (Separated (_, elements, _)) => list_of_expression elements,
+        }
 }
 
 // Copy-T-gated companion: `get`/`get_unchecked` read a value out of the

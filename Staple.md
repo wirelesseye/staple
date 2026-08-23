@@ -2150,6 +2150,14 @@ once the current capacity is exhausted it allocates a larger `Buffer`
 across with `Buffer.transfer` before appending. `List.pop` removes and
 returns the last element as an `Option T`, exactly like `Buffer.pop`.
 
+`List.of` is a macro that builds a list from a fixed, comma-separated set of
+values in one expression — `List.of (1, 2, 3)` — inferring the element type
+from the values the same way `List.new` followed by a sequence of
+`List.push` calls would. It is declared inside `List`'s own companion, so
+`Type.macro(...)` call syntax resolves a macro through the type's companion
+namespace the same way ordinary `Type.method(...)` calls already resolve a
+function through it.
+
 `List.get_ref` and, where `Copy T`, `List.get` return an element by
 reference or by copy respectively, each wrapped in `Option (Ref T)`/
 `Option T` so that an out-of-bounds index produces `None` instead of
