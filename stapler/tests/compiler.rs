@@ -2503,6 +2503,30 @@ fn buffer_intrinsics_type_check_and_compile() {
 }
 
 #[test]
+fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
+    // Regression test: a user-defined function wrapping a curried, 2-argument
+    // `mut`-effect callee (like `Buffer.push: Buffer T ->{mut} T -> ()`) used
+    // to require *both* of its own arguments to be `mut`, because the
+    // resource/mutation inference resolved every curry depth of the call
+    // chain back to the callee's full, outermost-arrow signature instead of
+    // the residual type at that specific depth. Only the argument in the
+    // buffer's own position should ever need to be `mut`.
+    let module = type_check(concat!(
+        "def push_value: (Buffer I32, I32) ->{mut 0} () = (buffer, value) => {\n",
+        "  Buffer.push buffer value\n",
+        "}\n",
+        "let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+        "push_value (values, 10)\n",
+        "push_value (values, 20)\n",
+        "let length: USize = Buffer.length values\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("wrapped curried Buffer.push should compile");
+}
+
+#[test]
 fn validates_the_standard_library_string_representation() {
     assert!(
         string_contract_diagnostics(concat!(

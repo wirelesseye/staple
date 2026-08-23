@@ -2789,15 +2789,23 @@ impl TypeChecker {
                         &value.argument,
                         target_parameters,
                     ));
-                let called_type = self
-                    .function_origin(module, &value.callee)
-                    .and_then(|function| self.function_types.get(&function).cloned())
-                    .or_else(|| {
-                        match self.expression_types.get(&value.callee.syntax().id) {
-                            Some(CheckedType::Function(function)) => Some(function.clone()),
-                            _ => None,
-                        }
-                    });
+                // Prefer the callee sub-expression's own checked type over
+                // the root function's full declared signature: for a
+                // curried call `f a b`, `value.callee` is itself the call
+                // `f a`, whose recorded type is already narrowed to the
+                // *residual* function type (`f`'s type after applying `a`).
+                // `function_origin` walks through every nesting level back
+                // to `f` itself, so using `function_types.get` first would
+                // reapply `f`'s outermost arrow's mutation/resource set at
+                // every curry depth instead of just the matching one —
+                // misattributing an early argument's `mut` effect onto a
+                // later, unrelated argument.
+                let called_type = match self.expression_types.get(&value.callee.syntax().id) {
+                    Some(CheckedType::Function(function)) => Some(function.clone()),
+                    _ => self
+                        .function_origin(module, &value.callee)
+                        .and_then(|function| self.function_types.get(&function).cloned()),
+                };
                 if let Some(function_type) = &called_type {
                     result = result.union(&CheckedResourceSet::canonical(
                         function_type.resources.resources.clone(),
@@ -3403,7 +3411,18 @@ impl TypeChecker {
         target_parameters: &HashMap<SymbolId, usize>,
         current_module: Option<ModuleId>,
     ) {
-        if let Some(function_id) = self.function_origin(module, expression)
+        // Backfills a bare function reference's resources once an
+        // unannotated callee's effects have settled (see the comment on the
+        // `Expression::Call` arm below). Restricted to a bare reference
+        // (curry depth 0): `function_origin` walks straight through any
+        // number of `Call` wrappers to the same root function, but a
+        // partially-applied `Call` node's own recorded type is already the
+        // *residual* function type for its specific curry depth, correctly
+        // narrowed during ordinary checking. Backfilling it with the root's
+        // full (first-arrow) resources would reapply an early argument's
+        // effects at every later curry depth too.
+        if !matches!(expression, Expression::Call(_))
+            && let Some(function_id) = self.function_origin(module, expression)
             && let Some(resources) = self
                 .function_types
                 .get(&function_id)
@@ -3505,13 +3524,23 @@ impl TypeChecker {
                 // unannotated callee's mutations: during the earlier
                 // top-down check, an unannotated callee's `mutations` were
                 // still empty.
-                let called_type = self
-                    .function_origin(module, &value.callee)
-                    .and_then(|function| self.function_types.get(&function).cloned())
-                    .or_else(|| match self.expression_types.get(&value.callee.syntax().id) {
-                        Some(CheckedType::Function(function)) => Some(function.clone()),
-                        _ => None,
-                    });
+                //
+                // Prefer the callee sub-expression's own checked type over
+                // the root function's full declared signature: for a
+                // curried call `f a b`, `value.callee` is itself the call
+                // `f a`, whose recorded type is already narrowed to the
+                // *residual* function type. `function_origin` walks through
+                // every nesting level back to `f`, so using
+                // `function_types.get` first would reapply `f`'s outermost
+                // arrow's mutation set at every curry depth instead of just
+                // the matching one (see the identical fix in
+                // `expression_resources_now`'s `Expression::Call` arm).
+                let called_type = match self.expression_types.get(&value.callee.syntax().id) {
+                    Some(CheckedType::Function(function)) => Some(function.clone()),
+                    _ => self
+                        .function_origin(module, &value.callee)
+                        .and_then(|function| self.function_types.get(&function).cloned()),
+                };
                 if let Some(function_type) = called_type
                     && !function_type.resources.mutations.is_empty()
                 {
