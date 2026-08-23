@@ -2624,6 +2624,67 @@ fn buffer_intrinsics_type_check_and_compile() {
 }
 
 #[test]
+fn buffer_transfer_type_checks_and_compiles() {
+    let module = type_check(concat!(
+        "let mut source: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
+        "Buffer.push source 1\n",
+        "Buffer.push source 2\n",
+        "let mut destination: Buffer I32 = Buffer.with_capacity (5 satisfies USize)\n",
+        "Buffer.push destination 0\n",
+        "Buffer.transfer (source, destination)\n",
+        "let moved_length: USize = Buffer.length destination\n",
+        "let emptied_length: USize = Buffer.length source\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("Buffer.transfer should compile");
+    assert!(llvm.contains("buffer.transfer.aliased"));
+    assert!(llvm.contains("buffer.transfer.insufficient_capacity"));
+    assert!(llvm.contains("buffer.transfer.dest.write"));
+    assert!(llvm.contains("llvm.memcpy"));
+}
+
+#[test]
+fn list_grows_past_initial_capacity_and_type_checks() {
+    let module = type_check(concat!(
+        "let mut values: List I32 = List.new ()\n",
+        "List.push values 1\n",
+        "List.push values 2\n",
+        "List.push values 3\n",
+        "List.push values 4\n",
+        "List.push values 5\n",
+        "let length: USize = List.length values\n",
+        "let capacity: USize = List.capacity values\n",
+        "let first: I32 = List.get values (0 satisfies USize)\n",
+        "let last: I32 = List.get values (4 satisfies USize)\n",
+        "let last_ref: Ref I32 = List.get_ref values (4 satisfies USize)\n",
+        "let popped: Option I32 = List.pop values\n",
+        "let sized: List I32 = List.with_capacity (10 satisfies USize)\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("List operations should compile");
+    assert!(llvm.contains("buffer.transfer.dest.write"));
+}
+
+#[test]
+fn list_get_requires_copy_element_type() {
+    let resolved = resolve(concat!(
+        "use std.cinterop.*\n",
+        "let mut values: List CString = List.new ()\n",
+        "List.push values (c_string \"a\")\n",
+        "let first: CString = List.get values (0 satisfies USize)\n",
+    ));
+    let result = TypeChecker::new().check(resolved);
+    assert!(
+        result.is_err(),
+        "List.get should be rejected for a non-Copy element type"
+    );
+}
+
+#[test]
 fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
     // Regression test: a user-defined function wrapping a curried, 2-argument
     // `mut`-effect callee (like `Buffer.push: Buffer T ->{mut} T -> ()`) used

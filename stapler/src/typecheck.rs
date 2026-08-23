@@ -2278,7 +2278,8 @@ impl TypeChecker {
                 | crate::IntrinsicFunction::BufferPush
                 | crate::IntrinsicFunction::BufferPop
                 | crate::IntrinsicFunction::BufferGet
-                | crate::IntrinsicFunction::BufferFreeze => self
+                | crate::IntrinsicFunction::BufferFreeze
+                | crate::IntrinsicFunction::BufferTransfer => self
                     .symbol_types
                     .get(symbol)
                     .cloned()
@@ -9050,6 +9051,21 @@ fn valid_buffer_intrinsic_type(
             (CheckedType::Buffer(element), CheckedType::Ref(result))
                 if matches!(result.as_ref(), CheckedType::ErasedProduct(result) if result == element)
         ) && function.resources == no_effects,
+        crate::IntrinsicFunction::BufferTransfer => {
+            let CheckedType::Product(product) = function.parameter.as_ref() else {
+                return false;
+            };
+            let [source, destination] = product.elements.as_slice() else {
+                return false;
+            };
+            matches!(
+                (&source.value_type, &destination.value_type),
+                (CheckedType::Buffer(a), CheckedType::Buffer(b)) if a == b
+            ) && function.result.as_ref() == &CheckedType::empty_product()
+                && function.resources.mutations
+                    == [CheckedMutation::Element(0), CheckedMutation::Element(1)]
+                && function.resources.resources.is_empty()
+        }
         _ => false,
     }
 }

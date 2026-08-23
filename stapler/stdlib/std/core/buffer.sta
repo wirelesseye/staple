@@ -7,6 +7,7 @@ pub def __buffer_push: <T> (Buffer T, T) ->{mut 0} () = (buffer, value) => __buf
 pub def __buffer_pop: <T> Buffer T ->{mut} Option T = buffer => __buffer_pop buffer
 pub def __buffer_get: <T> (Buffer T, USize) -> Ref T = (buffer, position) => __buffer_get (buffer, position)
 pub def __buffer_freeze: <T> Buffer T -> Slice T = buffer => __buffer_freeze buffer
+pub def __buffer_transfer: <T> (Buffer T, Buffer T) ->{mut 0, mut 1} () = (source, destination) => __buffer_transfer (source, destination)
 
 companion<T> Buffer T {
     // Allocates storage for exactly capacity elements without initialising any T values.
@@ -29,4 +30,8 @@ companion<T> Buffer T {
 
     // Seals the buffer against mutation and returns a zero-copy slice of its contents.
     pub def freeze: Buffer T -> Slice T = buffer => __buffer_freeze buffer
+
+    // Moves every initialised element from source onto the end of destination, in order, and empties source.
+    // Traps if either buffer is frozen, if destination lacks capacity, or if source and destination are the same buffer.
+    pub def transfer: (Buffer T, Buffer T) ->{mut 0, mut 1} () = (source, destination) => __buffer_transfer (source, destination)
 }

@@ -1,0 +1,81 @@
+pub(repr) type List T = Buffer T
+
+// Doubles capacity (minimum 4 on first growth) and moves every element
+// across in one Buffer.transfer call.
+def grow: <T> List T ->{mut} () = list => {
+    let List(mut source) = list
+    let old_capacity = Buffer.capacity source
+    let new_capacity = match old_capacity == (0 satisfies USize) {
+        True() => 4 satisfies USize,
+        False() => old_capacity * (2 satisfies USize),
+    }
+    let mut destination: Buffer T = Buffer.with_capacity new_capacity
+    Buffer.transfer (source, destination)
+    list = List destination
+}
+
+companion<T> List T {
+    pub def length: List T -> USize = list => {
+        let List buffer = list
+        Buffer.length buffer
+    }
+
+    pub def capacity: List T -> USize = list => {
+        let List buffer = list
+        Buffer.capacity buffer
+    }
+
+    pub def push: List T ->{mut} T -> () = list => value => {
+        let List(mut buffer) = list
+        match Buffer.length buffer < Buffer.capacity buffer {
+            True() => Buffer.push buffer value,
+            False() => {
+                grow list
+                let List(mut grown) = list
+                Buffer.push grown value
+            },
+        }
+    }
+
+    pub def pop: List T ->{mut} Option T = list => {
+        let List(mut buffer) = list
+        Buffer.pop buffer
+    }
+
+    pub def get_ref: List T -> USize -> Ref T = list => index => {
+        let List buffer = list
+        Buffer.get_ref buffer index
+    }
+}
+
+companion<T> List T {
+    pub def new: () -> List T = () => {
+        let buffer: Buffer T = Buffer.with_capacity (0 satisfies USize)
+        List buffer
+    }
+}
+
+companion<T> List T {
+    pub def with_capacity: USize -> List T = capacity => {
+        let buffer: Buffer T = Buffer.with_capacity capacity
+        List buffer
+    }
+}
+
+// Copy-T-gated companion: `get` reads a value out of the borrowed Ref by copy.
+companion<T where Copy T> List T {
+    pub def get: List T -> USize -> T = list => index => {
+        let Ref value = List.get_ref list index
+        value
+    }
+}
+
+// `Index`/`MutateIndex` (for `list[i]` / `list[i] = v`) and `Iterator`/
+// `IntoIterator` (for `for item in list`) are intentionally not implemented
+// yet: the compiler currently fails to dispatch a generic `impl<T where ...>`
+// of any multi-parameter functional-dependency trait (Index, MutateIndex,
+// Iterator, and IntoIterator are all shaped this way), even for fully
+// concrete instantiations at the call site. This is tracked separately from
+// `List` itself; see the standalone repro filed alongside this change. Add
+// these impls once that dispatch bug is fixed — `List.get`/`List.get_ref`
+// already provide the same functionality by explicit call.

@@ -279,6 +279,7 @@ pub enum IntrinsicFunction {
     BufferPop,
     BufferGet,
     BufferFreeze,
+    BufferTransfer,
     RefReplace,
     Drop,
 }
@@ -1312,6 +1313,7 @@ impl NameResolver {
             ("__buffer_pop", IntrinsicFunction::BufferPop),
             ("__buffer_get", IntrinsicFunction::BufferGet),
             ("__buffer_freeze", IntrinsicFunction::BufferFreeze),
+            ("__buffer_transfer", IntrinsicFunction::BufferTransfer),
         ] {
             let symbol = program
                 .modules()

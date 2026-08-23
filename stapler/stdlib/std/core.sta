@@ -7,6 +7,7 @@ pub use std.core.equality.*
 pub use std.core.flow.*
 pub use std.core.index.*
 pub use std.core.iterator.*
+pub use std.core.list.(List)
 pub use std.core.number.*
 pub use std.core.range.*
 pub use std.core.reference.(Ref)

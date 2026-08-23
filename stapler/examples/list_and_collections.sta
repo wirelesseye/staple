@@ -1,0 +1,30 @@
+// `List T` is a growable array built on top of `Buffer T`. Pushing past
+// capacity grows automatically (doubling, backed by `Buffer.transfer`), so
+// unlike `Buffer` there is no fixed size to plan around up front.
+use std.io.println
+
+let mut numbers: List I32 = List.new ()
+let mut i: I32 = 0
+while (i < 8) {
+    List.push numbers i
+    i = i + 1
+}
+
+println (ToString.to_string (List.length numbers))
+println (ToString.to_string (List.capacity numbers))
+
+// `List.get` (and, soon, `list[i]` bracket syntax once a compiler limitation
+// with generic trait dispatch is fixed) reads an element by copy, so it
+// requires `Copy T` the way `List.get_ref` — which borrows instead — does
+// not.
+let first: I32 = List.get numbers (0 satisfies USize)
+let last: I32 = List.get numbers (7 satisfies USize)
+println (ToString.to_string first)
+println (ToString.to_string last)
+
+match List.pop numbers {
+    Some(value) => println (ToString.to_string value),
+    None() => println "list was empty",
+}
+
+println (ToString.to_string (List.length numbers))

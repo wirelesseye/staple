@@ -1018,6 +1018,147 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_buffer_transfer_and_moves_elements_in_order() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-transfer-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-transfer-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let mut from: Buffer I32 = Buffer.with_capacity (3 satisfies USize)\n",
+                "Buffer.push from 10\n",
+                "Buffer.push from 20\n",
+                "Buffer.push from 30\n",
+                "let mut into: Buffer I32 = Buffer.with_capacity (5 satisfies USize)\n",
+                "Buffer.push into 1\n",
+                "Buffer.transfer (from, into)\n",
+                "let into_length = Buffer.length into\n",
+                "let from_length = Buffer.length from\n",
+                "match into_length == (4 satisfies USize) {\n",
+                "  True() => match from_length == (0 satisfies USize) {\n",
+                "    True() => {\n",
+                "      let Ref a = Buffer.get_ref into (0 satisfies USize)\n",
+                "      let Ref b = Buffer.get_ref into (1 satisfies USize)\n",
+                "      let Ref c = Buffer.get_ref into (2 satisfies USize)\n",
+                "      let Ref d = Buffer.get_ref into (3 satisfies USize)\n",
+                "      match a == 1 {\n",
+                "        True() => match b == 10 {\n",
+                "          True() => match c == 20 {\n",
+                "            True() => match d == 30 {\n",
+                "              True() => exit 0,\n",
+                "              False() => exit 5,\n",
+                "            },\n",
+                "            False() => exit 4,\n",
+                "          },\n",
+                "          False() => exit 3,\n",
+                "        },\n",
+                "        False() => exit 2,\n",
+                "      }\n",
+                "    },\n",
+                "    False() => exit 1,\n",
+                "  },\n",
+                "  False() => exit 1,\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary Buffer.transfer source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("Buffer.transfer executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("Buffer.transfer executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(
+            status.success(),
+            "Buffer.transfer executable exited with {status}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runs_list_growth_and_preserves_order() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-list-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-list-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let mut values: List I32 = List.new ()\n",
+                "let mut i: I32 = 0\n",
+                "while (i < 10) {\n",
+                "  List.push values i\n",
+                "  i = i + 1\n",
+                "}\n",
+                "let length = List.length values\n",
+                "let capacity = List.capacity values\n",
+                "let first = List.get values (0 satisfies USize)\n",
+                "let last = List.get values (9 satisfies USize)\n",
+                "let popped = List.pop values\n",
+                "let length_after_pop = List.length values\n",
+                "match length == (10 satisfies USize) {\n",
+                "  True() => match capacity >= (10 satisfies USize) {\n",
+                "    True() => match first == 0 {\n",
+                "      True() => match last == 9 {\n",
+                "        True() => match popped {\n",
+                "          Some(value) => match value == 9 {\n",
+                "            True() => match length_after_pop == (9 satisfies USize) {\n",
+                "              True() => exit 0,\n",
+                "              False() => exit 6,\n",
+                "            },\n",
+                "            False() => exit 5,\n",
+                "          },\n",
+                "          None() => exit 4,\n",
+                "        },\n",
+                "        False() => exit 3,\n",
+                "      },\n",
+                "      False() => exit 2,\n",
+                "    },\n",
+                "    False() => exit 1,\n",
+                "  },\n",
+                "  False() => exit 1,\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary List source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("List executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("List executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "List executable exited with {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_erased_product_length_and_indexing() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

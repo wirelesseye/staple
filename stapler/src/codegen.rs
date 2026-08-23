@@ -5472,6 +5472,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             IntrinsicFunction::BufferFreeze => {
                 return self.compile_buffer_freeze(environment, call);
             }
+            IntrinsicFunction::BufferTransfer => {
+                return self.compile_buffer_transfer(environment, call);
+            }
             IntrinsicFunction::Drop => {
                 let value_type = self
                     .concrete_expression_type(&call.argument)
@@ -5714,6 +5717,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             | IntrinsicFunction::BufferPop
             | IntrinsicFunction::BufferGet
             | IntrinsicFunction::BufferFreeze
+            | IntrinsicFunction::BufferTransfer
             | IntrinsicFunction::RefReplace
             | IntrinsicFunction::Drop => {
                 unreachable!()
@@ -7686,6 +7690,72 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         result = self.builder.build_insert_value(result, data, 0, "buffer.slice.pointer").map_err(compiler_diagnostic)?.into_struct_value();
         result = self.builder.build_insert_value(result, length, 1, "buffer.slice.length").map_err(compiler_diagnostic)?.into_struct_value();
         Ok(result.as_any_value_enum())
+    }
+
+    fn compile_buffer_transfer(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
+        let [
+            inkwell::values::BasicMetadataValueEnum::PointerValue(source),
+            inkwell::values::BasicMetadataValueEnum::PointerValue(destination),
+        ] = arguments.as_slice() else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "Buffer.transfer requires two buffers"));
+        };
+        let CheckedType::Product(product) = self
+            .concrete_expression_type(&call.argument)
+            .unwrap_or(CheckedType::Error)
+        else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer.transfer arguments"));
+        };
+        let CheckedType::Buffer(element) = &product.elements[0].value_type else {
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer.transfer source"));
+        };
+        let llvm_element = self.compile_type(element)?;
+        let header = self.buffer_header_type(llvm_element);
+
+        let aliased = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::EQ, *source, *destination, "buffer.transfer.aliased")
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(aliased, call.syntax.span.clone())?;
+
+        self.trap_if_buffer_frozen(*source, header, call.syntax.span.clone())?;
+        self.trap_if_buffer_frozen(*destination, header, call.syntax.span.clone())?;
+
+        let source_length_slot = self.builder.build_struct_gep(header, *source, 0, "buffer.transfer.source.length.slot").map_err(compiler_diagnostic)?;
+        let source_length = self.builder.build_load(self.size_type, source_length_slot, "buffer.transfer.source.length").map_err(compiler_diagnostic)?.into_int_value();
+
+        let dest_length_slot = self.builder.build_struct_gep(header, *destination, 0, "buffer.transfer.dest.length.slot").map_err(compiler_diagnostic)?;
+        let dest_length = self.builder.build_load(self.size_type, dest_length_slot, "buffer.transfer.dest.length").map_err(compiler_diagnostic)?.into_int_value();
+        let dest_capacity_slot = self.builder.build_struct_gep(header, *destination, 1, "buffer.transfer.dest.capacity.slot").map_err(compiler_diagnostic)?;
+        let dest_capacity = self.builder.build_load(self.size_type, dest_capacity_slot, "buffer.transfer.dest.capacity").map_err(compiler_diagnostic)?.into_int_value();
+
+        let dest_remaining = self.builder.build_int_sub(dest_capacity, dest_length, "buffer.transfer.dest.remaining").map_err(compiler_diagnostic)?;
+        let insufficient = self
+            .builder
+            .build_int_compare(inkwell::IntPredicate::ULT, dest_remaining, source_length, "buffer.transfer.insufficient_capacity")
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(insufficient, call.syntax.span.clone())?;
+
+        let source_data = self.buffer_data_pointer(*source, llvm_element)?;
+        let dest_data = self.buffer_data_pointer(*destination, llvm_element)?;
+        let dest_write = unsafe { self.builder.build_gep(llvm_element, dest_data, &[dest_length], "buffer.transfer.dest.write") }.map_err(compiler_diagnostic)?;
+
+        let stride = self.target_data.get_abi_size(&llvm_element);
+        let bytes = self.builder.build_int_mul(source_length, self.size_type.const_int(stride, false), "buffer.transfer.bytes").map_err(compiler_diagnostic)?;
+        let alignment = self.target_data.get_abi_alignment(&llvm_element);
+        self.builder
+            .build_memcpy(dest_write, alignment, source_data, alignment, bytes)
+            .map_err(compiler_diagnostic)?;
+
+        let new_dest_length = self.builder.build_int_add(dest_length, source_length, "buffer.transfer.dest.next_length").map_err(compiler_diagnostic)?;
+        self.builder.build_store(dest_length_slot, new_dest_length).map_err(compiler_diagnostic)?;
+        self.builder.build_store(source_length_slot, self.size_type.const_zero()).map_err(compiler_diagnostic)?;
+
+        Ok(self.unit_value())
     }
 
     fn trap_if_buffer_frozen(

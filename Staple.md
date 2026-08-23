@@ -2129,6 +2129,17 @@ pop and returns a zero-copy `Slice T` over its initialized prefix. Repeated
 freezes are harmless. The allocation drops exactly its initialized elements
 when unreachable; an element reference or frozen slice keeps it alive.
 
+`Buffer.transfer` moves every initialized element of one buffer onto the end
+of another's initialized prefix, in order, and empties the source. Both
+buffer arguments must be mutable. It traps if either buffer is frozen, if the
+destination lacks enough spare capacity for the source's elements, or if the
+source and destination are the same buffer. No allocation occurs: elements
+are moved in place by one bulk copy, and any references into the moved
+elements of the source are invalidated exactly as `Buffer.pop` invalidates a
+reference to a popped element. This is the primitive higher-level growable
+containers such as `List` use to move an initialized prefix into a larger
+allocation.
+
 Managed references use a non-moving, single-threaded, stop-the-world
 mark-and-sweep collector. Collection occurs automatically as the live heap
 crosses a growing allocation threshold. Stack/register values, module globals,
