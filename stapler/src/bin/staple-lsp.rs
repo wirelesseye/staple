@@ -101,7 +101,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(false),
-            trigger_characters: None,
+            trigger_characters: Some(vec!["^".to_owned()]),
             all_commit_characters: None,
             work_done_progress_options: WorkDoneProgressOptions::default(),
             completion_item: None,
@@ -200,7 +200,15 @@ impl Server {
                     let successful = document.last_successful.as_ref()?;
                     let previous_offset =
                         TextChange::between(&successful.source, &document.text).old_offset(offset);
-                    Some(successful.completion_index.items(previous_offset))
+                    let method_receiver =
+                        method_completion_receiver(&document.text, offset).map(|receiver| {
+                            TextChange::between(&successful.source, &document.text)
+                                .old_offset(receiver)
+                        });
+                    Some(match method_receiver {
+                        Some(receiver) => successful.completion_index.method_items(receiver),
+                        None => successful.completion_index.items(previous_offset),
+                    })
                 })
                 .unwrap_or_else(staple_lsp::completion::keywords);
             let result = CompletionResponse::Array(items);
@@ -638,6 +646,23 @@ struct TextChange {
     unchanged_prefix: usize,
     old_suffix_start: usize,
     new_suffix_start: usize,
+}
+
+fn method_completion_receiver(text: &str, offset: usize) -> Option<usize> {
+    let before_cursor = text.get(..offset)?;
+    let line_start = before_cursor.rfind('\n').map_or(0, |index| index + 1);
+    let line = &before_cursor[line_start..];
+    let caret = line.rfind('^')?;
+    let prefix = &line[caret + 1..];
+    if prefix
+        .chars()
+        .all(|character| character == '_' || character.is_alphanumeric())
+        && caret > 0
+    {
+        Some(line_start + caret)
+    } else {
+        None
+    }
 }
 
 impl TextChange {

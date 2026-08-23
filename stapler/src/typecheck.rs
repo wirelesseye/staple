@@ -687,6 +687,9 @@ pub struct TypedModule {
     io_type: Option<TypeId>,
     mutated_parameter_symbols: HashSet<SymbolId>,
     method_symbols: HashMap<SyntaxId, SymbolId>,
+    symbol_companion_types: HashMap<SymbolId, TypeId>,
+    function_result_companion_types: HashMap<FunctionId, TypeId>,
+    function_symbols: HashMap<SymbolId, FunctionId>,
 }
 
 impl TypedModule {
@@ -727,6 +730,38 @@ impl TypedModule {
 
     pub fn type_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.expression_types.get(&syntax_id)
+    }
+
+    pub fn companion_type_of_expression(&self, expression: &Expression) -> Option<TypeId> {
+        let preserved = match expression {
+            Expression::Name(name) => self
+                .resolved
+                .symbol_for(name.syntax.id)
+                .and_then(|symbol| self.symbol_companion_types.get(&symbol).copied()),
+            Expression::Call(call) => self
+                .function_origin(&call.callee)
+                .and_then(|function| self.function_result_companion_types.get(&function).copied()),
+            Expression::Product(product)
+                if product.elements.len() == 1 && !product.elements[0].spread =>
+            {
+                self.companion_type_of_expression(&product.elements[0].value)
+            }
+            _ => None,
+        };
+        preserved.or_else(|| {
+            self.type_of_expression(expression.syntax().id)
+                .and_then(checked_type_id)
+        })
+    }
+
+    fn function_origin(&self, expression: &Expression) -> Option<FunctionId> {
+        match expression {
+            Expression::Name(name) => self.resolved.symbol_for(name.syntax.id),
+            Expression::Access(access) => self.resolved.symbol_for(access.syntax.id),
+            Expression::Call(call) => return self.function_origin(&call.callee),
+            _ => None,
+        }
+        .and_then(|symbol| self.function_symbols.get(&symbol).copied())
     }
 
     pub fn resources_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedResourceSet> {
@@ -874,6 +909,14 @@ impl TypedModule {
 
     pub fn type_of_symbol(&self, symbol: SymbolId) -> Option<&CheckedType> {
         self.symbol_types.get(&symbol)
+    }
+
+    pub fn is_companion_method(&self, symbol: SymbolId, receiver: TypeId) -> bool {
+        matches!(
+            self.type_of_symbol(symbol),
+            Some(CheckedType::Function(function))
+                if checked_type_id(&function.parameter) == Some(receiver)
+        )
     }
 
     pub fn type_of_function(&self, function: FunctionId) -> Option<&CheckedFunctionType> {
@@ -1203,6 +1246,9 @@ impl TypeChecker {
             io_type: self.io_type,
             mutated_parameter_symbols: self.mutated_parameter_symbols,
             method_symbols: self.method_symbols,
+            symbol_companion_types: self.symbol_companion_types,
+            function_result_companion_types: self.function_result_companion_types,
+            function_symbols: self.function_symbols,
         };
         let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
         if ownership_diagnostics.is_empty() {

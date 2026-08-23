@@ -58,6 +58,7 @@ struct Scope {
 
 #[derive(Debug, Clone)]
 struct ModuleIndex {
+    id: ModuleId,
     range: Range<usize>,
     scopes: Vec<Scope>,
 }
@@ -65,6 +66,13 @@ struct ModuleIndex {
 #[derive(Debug, Clone, Default)]
 pub struct CompletionIndex {
     modules: Vec<ModuleIndex>,
+    methods: Vec<MethodSite>,
+}
+
+#[derive(Debug, Clone)]
+struct MethodSite {
+    receiver_end: usize,
+    items: Vec<CompletionItem>,
 }
 
 pub fn index(module: &Module, typed: &TypedModule) -> CompletionIndex {
@@ -130,6 +138,15 @@ impl CompletionIndex {
         );
         items.into_iter().map(|(_, item)| item).collect()
     }
+
+    pub fn method_items(&self, receiver_end: usize) -> Vec<CompletionItem> {
+        self.methods
+            .iter()
+            .filter(|site| site.receiver_end == receiver_end)
+            .max_by_key(|site| site.items.len())
+            .map(|site| site.items.clone())
+            .unwrap_or_default()
+    }
 }
 
 struct Collector<'a> {
@@ -155,6 +172,7 @@ impl Collector<'_> {
         }
         self.sequential_items(&module.items, &mut root.candidates, range.start);
         self.index.modules.push(ModuleIndex {
+            id,
             range: range.clone(),
             scopes: vec![root],
         });
@@ -330,6 +348,32 @@ impl Collector<'_> {
     }
 
     fn expression(&mut self, expression: &Expression, module_index: usize) {
+        if let Some(ty) = self.typed.companion_type_of_expression(expression) {
+            let accessing_module = Some(self.index.modules[module_index].id);
+            let mut items = self
+                .typed
+                .resolved()
+                .companion_members(ty, accessing_module)
+                .into_iter()
+                .filter_map(|(name, symbol)| {
+                    if !self.typed.is_companion_method(symbol, ty) {
+                        return None;
+                    }
+                    self.definition(name, DefinitionId::Symbol(symbol), 0)
+                        .map(|candidate| CompletionItem {
+                            kind: Some(CompletionItemKind::METHOD),
+                            ..candidate.item
+                        })
+                })
+                .collect::<Vec<_>>();
+            items.sort_by(|left, right| left.label.cmp(&right.label));
+            if !items.is_empty() {
+                self.index.methods.push(MethodSite {
+                    receiver_end: syntax_range(expression.syntax()).end,
+                    items,
+                });
+            }
+        }
         match expression {
             Expression::Function(value) => {
                 let mut candidates = Vec::new();
@@ -753,5 +797,29 @@ mod tests {
         }
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn completes_accessible_companion_methods_for_a_typed_receiver() {
+        let source = concat!("let mut numbers: List I32 = List.new ()\n", "numbers\n",);
+        let path = std::env::temp_dir().join("staple-completion-methods.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let receiver_end = source.rfind("numbers").unwrap() + "numbers".len();
+        let items = index(&module, &typed).method_items(receiver_end);
+
+        assert!(
+            items.iter().any(|item| {
+                item.label == "push" && item.kind == Some(CompletionItemKind::METHOD)
+            }),
+            "items: {items:?}"
+        );
+        assert!(!items.iter().any(|item| item.label == "new"));
+        assert!(!items.iter().any(|item| item.label == "grow"));
     }
 }

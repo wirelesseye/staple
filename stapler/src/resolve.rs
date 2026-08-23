@@ -403,6 +403,22 @@ impl ResolvedModule {
             .then_some(member.symbol)
     }
 
+    pub fn companion_members(
+        &self,
+        ty: TypeId,
+        accessing_module: Option<ModuleId>,
+    ) -> Vec<(&str, SymbolId)> {
+        self.companion_members
+            .get(&ty)
+            .into_iter()
+            .flat_map(|members| members.iter())
+            .filter_map(|(name, member)| {
+                (member.public || accessing_module == Some(member.declaring_module))
+                    .then_some((name.as_str(), member.symbol))
+            })
+            .collect()
+    }
+
     pub fn macro_for(&self, id: MacroId) -> Option<&ResolvedMacro> {
         self.macro_declarations
             .get(&id)
