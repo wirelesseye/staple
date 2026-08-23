@@ -394,15 +394,13 @@ fn separated_parenthesized(
 struct EnvironmentBinding {
     value: Rc<RefCell<Value>>,
     mutable: bool,
-    reassignable: bool,
 }
 
 impl EnvironmentBinding {
-    fn new(value: Value, mutable: bool, reassignable: bool) -> Self {
+    fn new(value: Value, mutable: bool) -> Self {
         Self {
             value: Rc::new(RefCell::new(value)),
             mutable,
-            reassignable,
         }
     }
 
@@ -3319,7 +3317,7 @@ impl MacroExpander {
                             };
                             local.insert(
                                 binding.name.clone(),
-                                EnvironmentBinding::new(value, binding.mutable, binding.reassignable),
+                                EnvironmentBinding::new(value, binding.mutable),
                             );
                         }
                         Item::PatternBinding(binding) => {
@@ -3732,7 +3730,7 @@ impl MacroExpander {
             return false;
         };
         if fields.is_empty() {
-            if !binding.reassignable {
+            if !binding.mutable {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     format!(
@@ -6168,7 +6166,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             }
             environment.insert(
                 at.binding.name.clone(),
-                EnvironmentBinding::new(value.clone(), at.binding.mutable, at.binding.reassignable),
+                EnvironmentBinding::new(value.clone(), at.binding.mutable),
             );
             bind_pattern(&at.pattern, value, environment)
         }
@@ -6207,7 +6205,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             }
             environment.insert(
                 binding.name.clone(),
-                EnvironmentBinding::new(value, binding.mutable, binding.reassignable),
+                EnvironmentBinding::new(value, binding.mutable),
             );
             true
         }

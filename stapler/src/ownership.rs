@@ -373,10 +373,10 @@ impl<'a> OwnershipChecker<'a> {
                         .module
                         .type_of_symbol(symbol)
                         .is_some_and(|ty| !self.module.is_copy_in_function(ty, self.function));
-                if frozen && value.reassignable {
+                if frozen && value.mutable {
                     self.diagnostics.push(Diagnostic::new(
                         value.syntax.span.clone(),
-                        "a move-only value borrowed through `Ref` cannot be bound as `var`",
+                        "a move-only value borrowed through `Ref` cannot be bound as `mut`",
                     ));
                 }
                 self.states.insert(

@@ -827,12 +827,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved pattern binding")
                     })?;
-                // `has_mutable_storage` subsumes `binding.mutable ||
-                // binding.reassignable` (the resolver's sets are built from
-                // exactly those flags) and additionally covers a function
-                // parameter that a `mut` effect permits writing into —
-                // parameter mutability is declared on the signature, not
-                // readable from `binding` here.
+                // `has_mutable_storage` subsumes `binding.mutable` (the
+                // resolver's set is built from exactly that flag) and
+                // additionally covers a function parameter that a `mut`
+                // effect permits writing into — parameter mutability is
+                // declared on the signature, not readable from `binding`
+                // here.
                 if self.typed_module.has_mutable_storage(symbol) && !self.storage.contains_key(&symbol)
                 {
                     let cell = self.allocate_binding_cell(
@@ -1640,7 +1640,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
                     })?;
-                if binding.mutable || binding.reassignable {
+                if binding.mutable {
                     self.allocate_binding_cell(environment, symbol, binding.syntax.span.clone())?;
                 }
                 if environment.binding_cells.contains_key(&symbol) {

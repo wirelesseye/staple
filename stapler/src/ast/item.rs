@@ -276,7 +276,6 @@ pub struct Binding {
     pub visibility: Visibility,
     pub kind: BindingKind,
     pub mutable: bool,
-    pub reassignable: bool,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
@@ -289,7 +288,6 @@ impl Binding {
     pub fn keyword(&self) -> &'static str {
         match self.kind {
             BindingKind::Def => "def",
-            BindingKind::Let if self.reassignable => "var",
             BindingKind::Let => "let",
         }
     }

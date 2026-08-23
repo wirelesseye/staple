@@ -855,7 +855,7 @@ impl Grammar {
         start: Option<usize>,
     ) -> Result<Item, ParseError> {
         match self.peek() {
-            Some(TokenKind::Let | TokenKind::Var) => self.parse_let_statement(visibility, start),
+            Some(TokenKind::Let) => self.parse_let_statement(visibility, start),
             Some(TokenKind::Return) if visibility == Visibility::Private => {
                 self.parse_return_statement(start)
             }
@@ -964,20 +964,12 @@ impl Grammar {
     ) -> Result<Item, ParseError> {
         let checkpoint = self.position;
         let pattern_start = start.unwrap_or(self.position);
-        let is_var = self.at(TokenKind::Var);
-        if is_var {
-            self.expect(TokenKind::Var, "expected `var`")?;
-        } else {
-            self.expect(TokenKind::Let, "expected `let`")?;
-        }
-        let mut pattern = self.parse_pattern()?;
+        self.expect(TokenKind::Let, "expected `let`")?;
+        let pattern = self.parse_pattern()?;
         let propagating = self.eat_operator("?");
         if !matches!(pattern, Pattern::Binding(_)) {
             if visibility == Visibility::Public {
                 return Err(self.error("destructuring `let` bindings cannot be public"));
-            }
-            if is_var {
-                mark_pattern_reassignable(&mut pattern);
             }
             self.expect(
                 TokenKind::Equals,
@@ -1088,9 +1080,6 @@ impl Grammar {
             if binding.mutable {
                 return Err(self.error("external bindings cannot be mutable"));
             }
-            if binding.reassignable {
-                return Err(self.error("external bindings cannot be reassignable"));
-            }
             if !binding.type_parameters.is_empty() {
                 return Err(self.error("external bindings cannot have compile-time parameters"));
             }
@@ -1177,24 +1166,20 @@ impl Grammar {
         start: Option<usize>,
     ) -> Result<Binding, ParseError> {
         let start = start.unwrap_or(self.position);
-        let (kind, reassignable) = match self.peek() {
+        let kind = match self.peek() {
             Some(TokenKind::Let) => {
                 self.bump_token();
-                (BindingKind::Let, false)
-            }
-            Some(TokenKind::Var) => {
-                self.bump_token();
-                (BindingKind::Let, true)
+                BindingKind::Let
             }
             Some(TokenKind::Def) => {
                 self.bump_token();
-                (BindingKind::Def, false)
+                BindingKind::Def
             }
-            _ => return Err(self.error("expected `let`, `var`, `def`, `type`, or `extern`")),
+            _ => return Err(self.error("expected `let`, `def`, `type`, or `extern`")),
         };
         let mutable = self.eat(TokenKind::Mut);
         if mutable && kind != BindingKind::Let {
-            return Err(self.error("`mut` is only allowed on `let` and `var` bindings"));
+            return Err(self.error("`mut` is only allowed on `let` bindings"));
         }
         let name = self.parse_binding_name()?;
         let annotation = if self.eat(TokenKind::Colon) {
@@ -1227,7 +1212,6 @@ impl Grammar {
             visibility,
             kind,
             mutable,
-            reassignable,
             name,
             type_parameters,
             trait_bounds,
@@ -1450,10 +1434,9 @@ impl Grammar {
                 repeated,
             }));
         }
-        let reassignable = self.eat(TokenKind::Var);
         let mutable = self.eat(TokenKind::Mut);
-        let mut pattern = if reassignable || mutable {
-            self.parse_named_pattern_from(start, mutable, reassignable)?
+        let mut pattern = if mutable {
+            self.parse_named_pattern_from(start, mutable)?
         } else if self.eat(TokenKind::Underscore) {
             let ty = if self.eat(TokenKind::Colon) {
                 self.parse_type_union()?
@@ -1506,14 +1489,13 @@ impl Grammar {
 
     fn parse_named_pattern(&mut self) -> Result<Pattern, ParseError> {
         let start = self.position;
-        self.parse_named_pattern_from(start, false, false)
+        self.parse_named_pattern_from(start, false)
     }
 
     fn parse_named_pattern_from(
         &mut self,
         start: usize,
         mutable: bool,
-        reassignable: bool,
     ) -> Result<Pattern, ParseError> {
         let first = match self.peek() {
             Some(TokenKind::Identifier) => self.bump_token().expect("peeked pattern").text,
@@ -1528,7 +1510,6 @@ impl Grammar {
                 Some(
                     TokenKind::Identifier
                         | TokenKind::Mut
-                        | TokenKind::Var
                         | TokenKind::Underscore
                         | TokenKind::LParen
                         | TokenKind::String
@@ -1548,8 +1529,8 @@ impl Grammar {
             }));
         }
         if adjacent_argument {
-            if mutable || reassignable {
-                return Err(self.error("`mut` and `var` can only modify a binding pattern"));
+            if mutable {
+                return Err(self.error("`mut` can only modify a binding pattern"));
             }
             let argument = Box::new(self.parse_pattern()?);
             return Ok(Pattern::Nominal(NominalPattern {
@@ -1569,7 +1550,6 @@ impl Grammar {
         Ok(Pattern::Binding(BindingPattern {
             syntax: self.syntax(start),
             mutable,
-            reassignable,
             name,
             resolution_name: None,
             ty,
@@ -2926,25 +2906,6 @@ fn companion_target_name(ty: &Type) -> Option<String> {
         Type::Application(application) => companion_target_name(&application.callee),
         Type::Splice(splice) => Some(format!("${}", splice.name)),
         _ => None,
-    }
-}
-
-/// Marks every binding pattern reachable from `pattern` as reassignable, used
-/// to propagate a leading `var` across a destructuring pattern.
-fn mark_pattern_reassignable(pattern: &mut Pattern) {
-    match pattern {
-        Pattern::Binding(binding) => binding.reassignable = true,
-        Pattern::At(at) => {
-            at.binding.reassignable = true;
-            mark_pattern_reassignable(&mut at.pattern);
-        }
-        Pattern::Product(product) => {
-            for element in &mut product.elements {
-                mark_pattern_reassignable(element);
-            }
-        }
-        Pattern::Nominal(nominal) => mark_pattern_reassignable(&mut nominal.argument),
-        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
     }
 }
 

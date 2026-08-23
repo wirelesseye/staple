@@ -520,7 +520,7 @@ fn rejects_invalid_named_product_spreads() {
 #[test]
 fn type_checks_and_lowers_mutable_places_and_ref_replace() {
     let source = concat!(
-        "var value = 1\n",
+        "let mut value = 1\n",
         "value = 2\n",
         "let mut pair = (x: 3, y: 4)\n",
         "pair.x = value\n",
@@ -530,7 +530,7 @@ fn type_checks_and_lowers_mutable_places_and_ref_replace() {
         "fixed[index] = 7\n",
         "let mut scalar = Ref 8\n",
         "let old = Ref.replace (scalar, 9)\n",
-        "def local = () => { var inside = 10; inside = old; inside }\n",
+        "def local = () => { let mut inside = 10; inside = old; inside }\n",
     );
     let module = type_check(source);
     let context = Context::create();
@@ -543,43 +543,31 @@ fn type_checks_and_lowers_mutable_places_and_ref_replace() {
 }
 
 #[test]
-fn type_checks_the_four_binding_mutability_forms() {
+fn type_checks_the_two_binding_mutability_forms() {
     // `let`: neither reassignable nor mutable.
     let diagnostics = TypeChecker::new()
         .check(resolve("let a = (x: 1, y: 2)\na = (x: 3, y: 4)\n"))
         .expect_err("`let` cannot be reassigned");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `var`")));
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
     let diagnostics = TypeChecker::new()
         .check(resolve("let a = (x: 1, y: 2)\na.x = 3\n"))
         .expect_err("`let` cannot be written through");
     assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
 
-    // `var`: reassignable, not mutable.
-    type_check("var a = (x: 1, y: 2)\na = (x: 3, y: 4)\n");
-    let diagnostics = TypeChecker::new()
-        .check(resolve("var a = (x: 1, y: 2)\na.x = 3\n"))
-        .expect_err("`var` cannot be written through");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
-
-    // `let mut`: mutable, not reassignable.
-    type_check("let mut a = (x: 1, y: 2)\na.x = 3\n");
-    let diagnostics = TypeChecker::new()
-        .check(resolve("let mut a = (x: 1, y: 2)\na = (x: 3, y: 4)\n"))
-        .expect_err("`let mut` cannot be reassigned");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `var`")));
-
-    // `var mut`: both.
-    type_check("var mut a = (x: 1, y: 2)\na = (x: 3, y: 4)\na.x = 5\n");
+    // `let mut`: both reassignable and mutable.
+    type_check("let mut a = (x: 1, y: 2)\na = (x: 3, y: 4)\na.x = 5\n");
 
     // Function parameters and match binders follow the same rules — except
     // that a parameter's `mut` write must also cross a `Ref`: unlike an
     // ordinary binding, a by-value parameter write is never visible to the
     // caller, so it is rejected outright regardless of any declared effect.
+    // A parameter itself can never be `mut`; a function that needs to
+    // reassign its own copy shadows it with a `let mut` local instead.
     type_check(concat!(
         "type Box = I32\n",
-        "def parameter = (var value: I32) => { value = value + 1; value }\n",
+        "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
         "def field_write: Ref (x: I32, y: I32) ->{mut} () = value => { value.x = 1 }\n",
-        "def matched = (value: Box) => match value { Box (var inner) => { inner = 2; inner } }\n",
+        "def matched = (value: Box) => match value { Box (mut inner) => { inner = 2; inner } }\n",
     ));
 
     let diagnostics = TypeChecker::new()
@@ -855,7 +843,7 @@ fn rejects_invalid_assignment_targets_and_uninitialized_mutable_lets() {
         .expect_err("immutable names cannot be reassigned");
     assert!(diagnostics.iter().any(|diagnostic| diagnostic
         .message
-        .contains("not declared `var`")));
+        .contains("not declared `mut`")));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
@@ -874,7 +862,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
         "def local = (first: CString, second: CString) => {\n",
-        "  var value = first\n",
+        "  let mut value = first\n",
         "  value = second\n",
         "  let moved = value\n",
         "  value = c_string \"replacement\"\n",
@@ -882,7 +870,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "  drop value\n",
         "}\n",
         "def captured = (initial: CString) => {\n",
-        "  var value = initial\n",
+        "  let mut value = initial\n",
         "  () => { let old = value; value = c_string \"next\"; drop old }\n",
         "}\n",
         "def managed = (initial: CString, next: CString) => {\n",
@@ -905,22 +893,22 @@ fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
     type_check(concat!(
         "type Box = I32\n",
         "type Empty\n",
-        "def parameter = (var value: I32) => { value = value + 1; value }\n",
-        "def matched = (value: Box | Empty) => match value { Box (var inner) => { inner = 3; inner }, Empty() => 0 }\n",
-        "def borrowed = (value: Ref I32) => { let Ref (var inner) = value; inner = 4; inner }\n",
+        "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
+        "def matched = (value: Box | Empty) => match value { Box (mut inner) => { inner = 3; inner }, Empty() => 0 }\n",
+        "def borrowed = (value: Ref I32) => { let Ref (mut inner) = value; inner = 4; inner }\n",
     ));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type Resource = I32\n",
             "impl Drop Resource { def drop = Resource value => () }\n",
-            "def invalid = (value: Ref Resource) => { let Ref (var inner) = value; inner }\n",
+            "def invalid = (value: Ref Resource) => { let Ref (mut inner) = value; inner }\n",
         )))
-        .expect_err("move-only Ref borrows cannot become reassignable locals");
+        .expect_err("move-only Ref borrows cannot become mutable locals");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("borrowed through `Ref` cannot be bound as `var`")
+            .contains("borrowed through `Ref` cannot be bound as `mut`")
     }));
 }
 
@@ -1077,7 +1065,7 @@ fn derives_iterator_item_as_a_sum_of_product_elements() {
 fn derives_structural_iteration_for_products() {
     let source = concat!(
         "def sum_pair = pair: (I32, I32) => {\n",
-        "  var total = 0\n",
+        "  let mut total = 0\n",
         "  for value in pair { total = total + value }\n",
         "  total\n",
         "}\n",
@@ -1087,7 +1075,7 @@ fn derives_structural_iteration_for_products() {
         "  text: String => 0,\n",
         "}\n",
         "def sum_mixed = triple: (I32, String, I32) => {\n",
-        "  var total = 0\n",
+        "  let mut total = 0\n",
         "  for value in triple { total = total + classify(value) }\n",
         "  total\n",
         "}\n",
@@ -1110,7 +1098,7 @@ fn rejects_structural_iteration_for_non_copy_products() {
         .check(resolve(concat!(
             "use std.cinterop.CString\n",
             "def invalid = pair: (CString, I32) => {\n",
-            "  var count = 0\n",
+            "  let mut count = 0\n",
             "  for value in pair { count = count + 1 }\n",
             "  count\n",
             "}\n",
@@ -4634,7 +4622,7 @@ fn requires_else_to_be_the_last_braced_if_clause() {
 fn expands_standard_while_with_loop_control() {
     let module = type_check(concat!(
         "def run = () => {\n",
-        "  var keep_going: Bool = True\n",
+        "  let mut keep_going: Bool = True\n",
         "  while keep_going { keep_going = False; continue }\n",
         "}\n",
         "run ()\n",
@@ -4659,7 +4647,7 @@ fn expands_standard_for_over_ranges_and_product_iterators() {
         "}\n",
         "impl IntoIterator PairIterator PairIterator { def into_iterator = iterator => iterator }\n",
         "def run = () => {\n",
-        "  var total = 0\n",
+        "  let mut total = 0\n",
         "  for value in (0 ..= 4) {\n",
         "    match value == 2 { True() => { continue }, False() => () }\n",
         "    total = total + value\n",
@@ -5212,21 +5200,21 @@ fn reports_duplicate_definitions() {
 }
 
 #[test]
-fn a_later_let_or_var_shadows_an_earlier_one_in_the_same_scope() {
+fn a_later_let_shadows_an_earlier_one_in_the_same_scope() {
     let syntax = parse("let value = 1\nlet value = 2\n").expect("source should parse");
     NameResolver::new()
         .resolve(&syntax)
         .expect("a later `let` should be allowed to shadow an earlier one");
 
-    let syntax = parse("let value = 1\nvar value = 2\n").expect("source should parse");
+    let syntax = parse("let value = 1\nlet mut value = 2\n").expect("source should parse");
     NameResolver::new()
         .resolve(&syntax)
-        .expect("`var` should be allowed to shadow an earlier `let`");
+        .expect("`let mut` should be allowed to shadow an earlier `let`");
 
-    let syntax = parse("var value = 1\nlet value = 2\n").expect("source should parse");
+    let syntax = parse("let mut value = 1\nlet value = 2\n").expect("source should parse");
     NameResolver::new()
         .resolve(&syntax)
-        .expect("`let` should be allowed to shadow an earlier `var`");
+        .expect("`let` should be allowed to shadow an earlier `let mut`");
 
     let syntax = parse("let a = 1\nlet (a, b) = (2, 3)\n").expect("source should parse");
     NameResolver::new()
@@ -7019,7 +7007,7 @@ fn checks_reachability_correctly_after_a_top_level_loop_with_break() {
     // code the checker (wrongly) considers unreachable, so this exercises
     // both symptoms at once.
     let source = concat!(
-        "var total = 0\n",
+        "let mut total = 0\n",
         "for value in (0 ..= 2) {\n",
         "  total = total + value\n",
         "}\n",

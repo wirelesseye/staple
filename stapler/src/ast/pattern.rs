@@ -100,7 +100,6 @@ pub struct WildcardPattern {
 pub struct BindingPattern {
     pub syntax: Syntax,
     pub mutable: bool,
-    pub reassignable: bool,
     pub name: String,
     /// The spelling before macro hygiene, used to resolve singleton patterns
     /// in the macro definition context.

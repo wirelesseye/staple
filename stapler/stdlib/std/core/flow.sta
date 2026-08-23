@@ -51,7 +51,7 @@ pub macro for =
     body: Expr =>
     parse_quote {
         {
-            var iterator = IntoIterator.into_iterator $source
+            let mut iterator = IntoIterator.into_iterator $source
             loop {
                 match Iterator.next iterator {
                     Done _ => { break },

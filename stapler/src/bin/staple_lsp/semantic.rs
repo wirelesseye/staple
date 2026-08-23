@@ -111,7 +111,6 @@ impl<'a> Classifier<'a> {
                 | TokenKind::As
                 | TokenKind::Pub
                 | TokenKind::Let
-                | TokenKind::Var
                 | TokenKind::Mut
                 | TokenKind::Return
                 | TokenKind::Loop
@@ -524,7 +523,7 @@ impl<'a> Classifier<'a> {
             .unwrap_or(VARIABLE);
         let modifiers = DECLARATION
             | DEFINITION
-            | if binding.mutable || binding.reassignable {
+            | if binding.mutable {
                 0
             } else {
                 READONLY
@@ -764,7 +763,7 @@ impl<'a> Classifier<'a> {
                     kind,
                     DECLARATION
                         | DEFINITION
-                        | if value.mutable || value.reassignable {
+                        | if value.mutable {
                             0
                         } else {
                             READONLY

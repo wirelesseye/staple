@@ -13,7 +13,7 @@ use crate::{
 const MAX_PRODUCT_ARITY: usize = 65_535;
 
 enum PlaceIssue {
-    /// The root binding is not declared `var` and cannot be reassigned.
+    /// The root binding is not declared `mut` and cannot be reassigned.
     NotReassignable(String),
     /// The root binding is not declared `mut` and cannot be written through.
     NotMutable(String),
@@ -703,7 +703,7 @@ impl TypedModule {
     }
 
     /// Whether `symbol` needs addressable, cell-backed storage rather than
-    /// a plain SSA value: a `mut`/`var` binding (from the resolver), or a
+    /// a plain SSA value: a `mut` binding (from the resolver), or a
     /// function parameter that a `mut` effect — declared or inferred — is
     /// actually known to write into. Parameter mutability cannot be read
     /// off the parameter's own binding pattern; `mut` was moved to the
@@ -1071,7 +1071,7 @@ pub struct TypeChecker {
     diagnostics: Vec<Diagnostic>,
     io_type: Option<TypeId>,
     /// Every symbol bound by some function's parameter pattern, across the
-    /// whole module. Unlike `mut`/`var` on ordinary bindings, a parameter's
+    /// whole module. Unlike `mut` on ordinary bindings, a parameter's
     /// writability is declared on the function's *signature* rather than the
     /// pattern, so this stands in for `ResolvedModule::is_mutable_symbol` at
     /// every parameter root: a function may always write into any of its own
@@ -2856,7 +2856,7 @@ impl TypeChecker {
     }
 
     /// `target_parameters` grows across the block's own statements, in
-    /// order: a `let`/`var` binding whose value crosses a `Ref` rooted at a
+    /// order: a `let mut` binding whose value crosses a `Ref` rooted at a
     /// tracked parameter (or an already-tracked alias) makes the newly
     /// bound name an alias of that same position, so a later write through
     /// it — including via a helper function like `replace` — is correctly
@@ -2927,7 +2927,7 @@ impl TypeChecker {
     /// If `statement` is a binding whose value crosses a `Ref` rooted at one
     /// of `target_parameters`, returns the newly bound symbol and the
     /// position it aliases. Scoped to the direct forms only: a bare
-    /// `let`/`var` binding (`Item::Binding`, or a destructuring
+    /// `let` binding (`Item::Binding`, or a destructuring
     /// `Pattern::Binding`), or one level of nominal unwrap
     /// (`let Name inner = <value>`) — not nested or product patterns, which
     /// would need to decide which of several bound names aliases which part
@@ -4084,7 +4084,7 @@ impl TypeChecker {
         {
             let message = match issue {
                 PlaceIssue::NotReassignable(name) => {
-                    format!("cannot reassign `{name}`; its binding is not declared `var`")
+                    format!("cannot reassign `{name}`; its binding is not declared `mut`")
                 }
                 PlaceIssue::NotMutable(name) => {
                     format!("cannot write through `{name}`; its binding is not declared `mut`")
@@ -4104,15 +4104,15 @@ impl TypeChecker {
     /// Checks whether `expression` may appear as an assignment target.
     ///
     /// `projected` is `true` once the walk has crossed at least one field or
-    /// index access away from the root binding: rebinding the root requires
-    /// `var`, while writing through a projection into an already-owned value
-    /// requires `mut` on the root instead. `crossed_ref` tracks whether any
-    /// step so far has passed through a `Ref`-typed value — for a parameter
-    /// root this is required, not merely `mut`: a write that never crosses a
-    /// `Ref` is invisible to the caller no matter what the signature
-    /// declares, so it is rejected outright rather than gated by an effect.
-    /// An ordinary (non-parameter) binding is unaffected by this: its own
-    /// `mut` flag continues to permit by-value writes exactly as before.
+    /// index access away from the root binding: both rebinding the root and
+    /// writing through a projection into an already-owned value require the
+    /// same `mut` flag on the root. `crossed_ref` tracks whether any step so
+    /// far has passed through a `Ref`-typed value — for a parameter root this
+    /// is required in addition to `mut`: a write that never crosses a `Ref`
+    /// is invisible to the caller no matter what the signature declares, so
+    /// it is rejected outright rather than gated by an effect. An ordinary
+    /// (non-parameter) binding is unaffected by this: its own `mut` flag
+    /// continues to permit by-value writes exactly as before.
     fn writable_place_issue(
         &self,
         module: &ResolvedModule,
@@ -4130,7 +4130,7 @@ impl TypeChecker {
                     module.is_mutable_symbol(symbol)
                 }
             } else {
-                module.is_reassignable_symbol(symbol)
+                module.is_mutable_symbol(symbol)
             };
             if permitted && module.symbol_module(symbol) == current_module {
                 return None;

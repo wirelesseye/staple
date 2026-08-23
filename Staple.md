@@ -261,8 +261,8 @@ macro build_call = _: Expr => {
 ```
 
 Syntax mutation follows ordinary value semantics: changing `changed` does not
-change `original`. A `var` or `mut` syntax binding captured by a compile-time
-function is a shared cell, like an ordinary captured `var` or `mut` binding.
+change `original`. A `mut` syntax binding captured by a compile-time function
+is a shared cell, like an ordinary captured `mut` binding.
 Constructed identifiers use the macro definition's hygiene context. Syntax
 values inserted as call children retain their existing context.
 
@@ -695,25 +695,15 @@ initialization error; globals never expose a default representation.
 
 ## Bindings
 
-staple has three binding keywords: `let`, `var`, and `def`. `let` and `var`
-share a grammar and differ only in whether the binding may be reassigned;
-`mut` is a separate modifier, orthogonal to both, that governs whether the
-value already held by the binding may be written into. The two axes combine:
-
-| Binding form | Reassign binding | Mutate through binding |
-| --- | --- | --- |
-| `let a = ...` | No | No |
-| `var a = ...` | Yes | No |
-| `let mut a = ...` | No | Yes |
-| `var mut a = ...` | Yes | Yes |
-
-A later `let` or `var` may shadow an earlier one of the same name in the same
-scope, in either combination:
+staple has two binding keywords: `let` and `def`. `mut` is a modifier on
+`let` that governs both whether the binding may be reassigned and whether the
+value already held by the binding may be written into.
+A later `let` may shadow an earlier one of the same name in the same scope:
 
 ```staple
 let x = 1
-let x = x + 1   // shadows the first `x`; refers to it while initializing
-var x = x * 2   // shadows again; `x` is now reassignable
+let x = x + 1       // shadows the first `x`; refers to it while initializing
+let mut x = x * 2   // shadows again; `x` is now mutable
 ```
 
 Shadowing has two exceptions. First, `def` bindings are hoisted (see below)
@@ -729,11 +719,12 @@ between two names introduced by one pattern.
 
 ### `let`
 
-`let` declares or defines a value. The binding itself cannot be reassigned:
+`let` declares or defines a value. The binding itself cannot be reassigned,
+and its value cannot be written into:
 
 ```staple
 let answer = 42
-answer = 43 // error: `answer` is not declared `var`
+answer = 43 // error: `answer` is not declared `mut`
 ```
 
 A type may be written after the binding name:
@@ -742,44 +733,19 @@ A type may be written after the binding name:
 let answer: I32 = 42
 ```
 
-### `var`
-
-`var` declares a binding that may be reassigned. Assignment is a statement and
-its right-hand side must have the type of the destination:
-
-```staple
-var counter = 0
-counter = counter + 1
-```
-
-`var` may mark individual names in any binding pattern, including function
-parameters and match arms, and a leading `var` on a destructuring pattern
-marks every name it binds:
-
-```staple
-var (left, right) = (1, 2)
-left = right
-
-def increment = (var value: I32) => {
-    value = value + 1
-    value
-}
-```
-
-A `var` binding must have an initializer.
-
 ### `mut`
 
-`mut` marks a binding whose value may be written into without reassigning the
-binding itself: writes into fields of a by-value product, or through a `Ref`,
-both require the root binding to be declared `mut`. `mut` may combine with
-`var` (`var mut`) to allow both. Like `var`, `mut` may mark individual names
-in most binding patterns, and a `mut` binding must have an initializer:
+`mut` marks a binding that may both be reassigned and have its value written
+into. Reassignment is a statement whose right-hand side must have the type of
+the destination; writing into fields of a by-value product, or through a
+`Ref`, requires the same `mut` root:
 
 ```staple
+let mut counter = 0
+counter = counter + 1
+
 let mut point = (x: 3, y: 4)
 point.x = 5
-point = (x: 0, y: 0) // error: `point` is not declared `var`
 
 let mut cell: Ref I32 = Ref 1
 cell.0 = 2
@@ -788,21 +754,40 @@ let borrowed: Ref I32 = Ref 3
 borrowed.0 = 4 // error: `borrowed` is not declared `mut`
 ```
 
+`mut` may mark individual names in any binding pattern, including match arms
+— each destructured name that needs to be mutable carries its own `mut`;
+there is no form that marks every name in a destructuring pattern at once:
+
+```staple
+let (mut left, mut right) = (1, 2)
+left = right
+```
+
+A `mut` binding must have an initializer.
+
 Bracket assignment is delegated to `MutateIndex`, whose `Target` parameter
 carries a `mut` effect (see the "Mutation effects" subsection under
 "Functions"); `a[i] = v` therefore also requires `a`'s root binding to be
 declared `mut`. Homogeneous values instead use `UpdateIndex` to produce a
 replacement product, which needs no `mut` at all. Bindings captured by
-functions are shared cells whenever they are declared `var` or `mut`, so the
-defining scope and all closures observe subsequent assignments. Public `var`
-and `mut` module bindings remain reassignable or writable, respectively, only
-from their declaring module.
+functions are shared cells whenever they are declared `mut`, so the defining
+scope and all closures observe subsequent assignments. A public `mut` module
+binding remains reassignable and writable only from its declaring module.
 
-`mut` is not one of the patterns a function parameter may carry: a
+`mut` is not one of the patterns a function parameter may carry at all: a
 parameter's writability is declared on the function's own signature instead,
-as a `mut` effect. `var` remains legal on a parameter, since reassigning the
-callee's own copy is never visible to the caller and needs no such
-declaration.
+as a `mut` effect, and a parameter cannot be locally reassigned via any
+modifier either. A function that needs a mutable local seeded from a
+parameter's initial value should shadow it with a `let mut` binding in the
+body:
+
+```staple
+def increment = (value: I32) => {
+    let mut value = value
+    value = value + 1
+    value
+}
+```
 
 An external declaration may omit its value because its implementation is
 provided outside staple:
@@ -1205,8 +1190,8 @@ let first@second@(left, right) = (1, 2)
 ```
 
 The name before `@` is always a binding, even when capitalized, and may use
-the usual `var` modifier, or `mut` outside function parameter position, or a
-type annotation. An annotation constrains the complete value at that pattern
+the usual `mut` modifier outside function parameter position, or a type
+annotation. An annotation constrains the complete value at that pattern
 position; it does not select a sum alternative independently of the nested
 pattern. At-patterns are available in `let` bindings, function parameters,
 match arms, propagating bindings, and quoted or spliced patterns.
@@ -1827,7 +1812,7 @@ match value {
 ```
 
 Bare names which do not resolve to singleton values remain binding patterns.
-An annotation, `mut`, or `var` always makes a name a binding. The explicit empty
+An annotation or `mut` always makes a name a binding. The explicit empty
 representation forms `True()` and `False()` remain accepted.
 
 A binding pattern at the root is a catch-all and binds the complete subject value.

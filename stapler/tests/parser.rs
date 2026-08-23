@@ -1219,7 +1219,7 @@ fn parses_at_patterns_losslessly_and_right_associatively() {
     let source = concat!(
         "let point@(x, y) = (1, 2)\n",
         "let mut outer: (I32, I32)@inner@(left, right) = (1, 2)\n",
-        "def copy = var outer@(left, right) => outer\n",
+        "def copy = outer@(left, right) => outer\n",
     );
     let root = parse(source).expect("at-patterns should parse");
     assert_eq!(root.text(), source);
@@ -1247,7 +1247,7 @@ fn parses_at_patterns_losslessly_and_right_associatively() {
     let Pattern::At(parameter) = &function.pattern else {
         panic!("expected parameter at-pattern");
     };
-    assert!(parameter.binding.reassignable);
+    assert_eq!(parameter.binding.name, "outer");
 
     assert!(parse("let _@(x, y) = (1, 2)\n").is_err());
     assert!(parse("let (x, y)@point = (1, 2)\n").is_err());
@@ -1740,7 +1740,7 @@ fn parses_mutable_patterns_and_assignment_statements_losslessly() {
     let source = concat!(
         "let mut value = 1\n",
         "let (mut left, right) = (2, 3)\n",
-        "def update = (var parameter: I32) => { parameter = 4; parameter }\n",
+        "def update = (parameter: I32) => { let mut parameter = parameter; parameter = 4; parameter }\n",
         "value = left\n",
     );
     let module = parse(source).expect("mutable bindings and assignments should parse");
@@ -1765,57 +1765,27 @@ fn parses_mutable_patterns_and_assignment_statements_losslessly() {
 }
 
 #[test]
-fn parses_var_bindings_and_pattern_propagation_losslessly() {
+fn parses_per_name_mut_pattern_forms_losslessly() {
     let source = concat!(
-        "var value = 1\n",
-        "var mut counter = 2\n",
-        "var (left, right) = (3, 4)\n",
-        "let (var alpha, mut beta) = (5, 6)\n",
-        "def update = (var parameter: I32) => { parameter = 7; parameter }\n",
-        "match update 0 { Box (var inner) => inner, _ => 0 }\n",
-        "var outer@(nested_left, nested_right) = (8, 9)\n",
-        "value = right\n",
+        "let (mut alpha, mut beta) = (5, 6)\n",
+        "def update = (parameter: I32) => { let mut parameter = parameter; parameter = 7; parameter }\n",
+        "match update 0 { Box (mut inner) => inner, _ => 0 }\n",
     );
-    let module = parse(source).expect("var bindings should parse");
+    let module = parse(source).expect("mut pattern forms should parse");
     assert_eq!(module.text(), source);
 
-    let Item::Binding(value) = statement(&module.items[0]) else {
-        panic!("expected var binding");
-    };
-    assert!(value.reassignable && !value.mutable);
-
-    let Item::Binding(counter) = statement(&module.items[1]) else {
-        panic!("expected var mut binding");
-    };
-    assert!(counter.reassignable && counter.mutable);
-
-    let Item::PatternBinding(pair) = statement(&module.items[2]) else {
-        panic!("expected propagated var pattern binding");
+    let Item::PatternBinding(pair) = statement(&module.items[0]) else {
+        panic!("expected per-name pattern binding");
     };
     let Pattern::Product(pattern) = &pair.pattern else {
         panic!("expected product pattern");
     };
     assert!(pattern.elements.iter().all(|element| matches!(
         element,
-        Pattern::Binding(binding) if binding.reassignable && !binding.mutable
+        Pattern::Binding(binding) if binding.mutable
     )));
 
-    let Item::PatternBinding(mixed) = statement(&module.items[3]) else {
-        panic!("expected per-name pattern binding");
-    };
-    let Pattern::Product(mixed_pattern) = &mixed.pattern else {
-        panic!("expected product pattern");
-    };
-    assert!(matches!(
-        &mixed_pattern.elements[0],
-        Pattern::Binding(binding) if binding.reassignable && !binding.mutable
-    ));
-    assert!(matches!(
-        &mixed_pattern.elements[1],
-        Pattern::Binding(binding) if binding.mutable && !binding.reassignable
-    ));
-
-    let Item::Binding(update) = statement(&module.items[4]) else {
+    let Item::Binding(update) = statement(&module.items[1]) else {
         panic!("expected function binding");
     };
     let Some(Expression::Function(function)) = &update.value else {
@@ -1824,30 +1794,12 @@ fn parses_var_bindings_and_pattern_propagation_losslessly() {
     let Pattern::Product(parameters) = &function.pattern else {
         panic!("expected product pattern");
     };
-    assert!(matches!(
-        &parameters.elements[0],
-        Pattern::Binding(binding) if binding.reassignable && !binding.mutable
-    ));
+    assert!(matches!(&parameters.elements[0], Pattern::Binding(binding) if !binding.mutable));
 
-    let Item::PatternBinding(outer) = statement(&module.items[6]) else {
-        panic!("expected at-pattern var propagation");
-    };
-    let Pattern::At(at) = &outer.pattern else {
-        panic!("expected at-pattern");
-    };
-    assert!(at.binding.reassignable);
-    let Pattern::Product(nested) = at.pattern.as_ref() else {
-        panic!("expected nested product pattern");
-    };
-    assert!(nested.elements.iter().all(|element| matches!(
-        element,
-        Pattern::Binding(binding) if binding.reassignable
-    )));
-
-    assert!(parse("def var value = 1\n").is_err());
-    assert!(parse("extern \"c\" { var value: I32 }\n").is_err());
-    assert!(parse("mut var value = 1\n").is_err());
-    assert!(parse("let (var Box inner, extra) = pair\n").is_err());
+    // `var` is no longer a keyword; the whole-pattern propagation it used to
+    // provide over a destructuring `let` has no `mut` equivalent.
+    assert!(parse("let mut (a, b) = pair\n").is_err());
+    assert!(parse("let (mut Box inner, extra) = pair\n").is_err());
 }
 
 #[test]

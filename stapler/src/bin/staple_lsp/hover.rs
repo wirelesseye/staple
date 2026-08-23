@@ -231,8 +231,8 @@ impl Collector<'_> {
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.typed.symbol_for(binding.syntax.id) {
                     let prefix = is_let_context.then(|| {
-                        if binding.reassignable {
-                            "var"
+                        if binding.mutable {
+                            "mut"
                         } else {
                             "let"
                         }
