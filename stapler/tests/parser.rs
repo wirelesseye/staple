@@ -857,18 +857,10 @@ fn parses_triple_slash_docs_on_named_declarations_and_members() {
     );
     let module = parse(source).expect("doc comments should parse");
     assert_eq!(module.text(), source);
-    let Item::Modified(documented) = &module.items[0] else {
+    let Item::TypeDeclaration(documented) = &module.items[0] else {
         panic!("expected documented type declaration");
     };
-    assert_eq!(
-        documented
-            .modifiers
-            .iter()
-            .filter_map(|modifier| modifier.doc.as_deref())
-            .collect::<Vec<_>>(),
-        [" Type line 1", " Type line 2"]
-    );
-    assert!(matches!(documented.item.as_ref(), Item::TypeDeclaration(_)));
+    assert_eq!(documented.docs, [" Type line 1", " Type line 2"]);
     let Item::TraitDeclaration(declaration) = &module.items[1] else {
         panic!("expected trait declaration");
     };

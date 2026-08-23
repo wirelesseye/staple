@@ -232,6 +232,19 @@ impl Grammar {
         let previous = self.newline_terminates_expression;
         self.newline_terminates_expression = true;
         let item_start = self.position;
+        let docs = self.leading_doc_comments(item_start);
+        if !docs.is_empty() {
+            self.position = self.next_non_trivia(item_start);
+            if !self.at(TokenKind::At) {
+                let mut item = self.parse_item()?;
+                if !attach_parsed_docs(&mut item, docs) {
+                    return Err(self.error("documentation comments require a named declaration"));
+                }
+                self.newline_terminates_expression = previous;
+                return Ok(item);
+            }
+            self.position = item_start;
+        }
         let mut modifiers = self.doc_comment_modifiers(item_start);
         if !modifiers.is_empty() || self.at(TokenKind::At) {
             while self.at(TokenKind::At) {
@@ -866,6 +879,18 @@ impl Grammar {
     /// Parses one of the item forms supported in a block expression.
     fn parse_block_item(&mut self) -> Result<Item, ParseError> {
         let item_start = self.position;
+        let docs = self.leading_doc_comments(item_start);
+        if !docs.is_empty() {
+            self.position = self.next_non_trivia(item_start);
+            if !self.at(TokenKind::At) {
+                let mut item = self.parse_block_item()?;
+                if !attach_parsed_docs(&mut item, docs) {
+                    return Err(self.error("documentation comments require a named declaration"));
+                }
+                return Ok(item);
+            }
+            self.position = item_start;
+        }
         let mut modifiers = self.doc_comment_modifiers(item_start);
         if !modifiers.is_empty() || self.at(TokenKind::At) {
             while self.at(TokenKind::At) {
@@ -2996,6 +3021,18 @@ fn split_trait_arguments(mut ty: Type) -> Vec<Type> {
     arguments.push(ty);
     arguments.reverse();
     arguments
+}
+
+fn attach_parsed_docs(item: &mut Item, docs: Vec<String>) -> bool {
+    match item {
+        Item::Submodule(value) => value.docs.extend(docs),
+        Item::TypeDeclaration(value) => value.docs.extend(docs),
+        Item::MacroDeclaration(value) => value.docs.extend(docs),
+        Item::TraitDeclaration(value) => value.docs.extend(docs),
+        Item::Binding(value) => value.docs.extend(docs),
+        _ => return false,
+    }
+    true
 }
 
 fn companion_target_name(ty: &Type) -> Option<String> {

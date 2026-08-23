@@ -1,4 +1,7 @@
+/// Provides equality and inequality comparisons.
 pub trait Eq T where Copy T {
+    /// Returns whether two values are equal.
     equal: T -> T -> Bool
+    /// Returns whether two values are unequal.
     not_equal: T -> T -> Bool
 }

@@ -1,5 +1,8 @@
+/// Marks types with custom cleanup behavior.
 pub trait Drop T {
+    /// Cleans up a value before it is discarded.
     drop: T -> ()
 }
 
+/// Consumes a value and runs its cleanup behavior when applicable.
 pub def drop: <T> T -> () = value => ()

@@ -1,4 +1,6 @@
+/// Marks types that have a default value.
 pub trait Default T {
+    /// Creates the default value.
     default: () -> T
 }
 

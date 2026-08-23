@@ -1,14 +1,26 @@
+/// An 8-bit signed integer.
 pub type I8 = opaque
+/// A 16-bit signed integer.
 pub type I16 = opaque
+/// A 32-bit signed integer.
 pub type I32 = opaque
+/// A 64-bit signed integer.
 pub type I64 = opaque
+/// An 8-bit unsigned integer.
 pub type U8 = opaque
+/// A 16-bit unsigned integer.
 pub type U16 = opaque
+/// A 32-bit unsigned integer.
 pub type U32 = opaque
+/// A 64-bit unsigned integer.
 pub type U64 = opaque
+/// A pointer-width signed integer.
 pub type ISize = opaque
+/// A pointer-width unsigned integer.
 pub type USize = opaque
+/// A 32-bit floating-point number.
 pub type F32 = opaque
+/// A 64-bit floating-point number.
 pub type F64 = opaque
 
 pub(repr) typegroup Option T {
@@ -17,42 +29,60 @@ pub(repr) typegroup Option T {
 }
 pub use Option.*
 
+/// An ordering result indicating the left value is smaller.
 pub type Less
+/// An ordering result indicating equal values.
 pub type Equal
+/// An ordering result indicating the left value is greater.
 pub type Greater
+/// The result of comparing two ordered values.
 pub type alias Ordering = Less | Equal | Greater
 
+/// Provides addition.
 pub trait Add T where Copy T {
+    /// Adds two values.
     add: T -> T -> T
 }
 
+/// Provides subtraction.
 pub trait Subtract T where Copy T {
+    /// Subtracts the right value from the left value.
     subtract: T -> T -> T
 }
 
+/// Provides multiplication.
 pub trait Multiply T where Copy T {
+    /// Multiplies two values.
     multiply: T -> T -> T
 }
 
+/// Provides division.
 pub trait Divide T where Copy T {
+    /// Divides the left value by the right value.
     divide: T -> T -> T
 }
 
+/// Provides comparisons that may be unordered.
 pub trait PartialOrd T where Copy T {
+    /// Compares two values, returning `None` when they are unordered.
     partial_cmp: T -> T -> Option Ordering
+    /// Returns whether the left value is less than the right value.
     lt: T -> T -> Bool = left => right => match (partial_cmp left right) {
         Some Less() => True,
         _ => False,
     }
+    /// Returns whether the left value is less than or equal to the right value.
     le: T -> T -> Bool = left => right => match (partial_cmp left right) {
         Some Less() => True,
         Some Equal() => True,
         _ => False,
     }
+    /// Returns whether the left value is greater than the right value.
     gt: T -> T -> Bool = left => right => match (partial_cmp left right) {
         Some Greater() => True,
         _ => False,
     }
+    /// Returns whether the left value is greater than or equal to the right value.
     ge: T -> T -> Bool = left => right => match (partial_cmp left right) {
         Some Greater() => True,
         Some Equal() => True,
@@ -60,6 +90,8 @@ pub trait PartialOrd T where Copy T {
     }
 }
 
+/// Provides a total ordering.
 pub trait Ord T where Eq T, PartialOrd T {
+    /// Compares two values with a total ordering.
     cmp: T -> T -> Ordering
 }

@@ -1,55 +1,78 @@
-// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
-// their data in the first structured-syntax slice; the remaining expression
-// forms round-trip through UnstructuredExpr without exposing their fields yet.
+/// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
+/// their data in the first structured-syntax slice; remaining expressions round-trip
+/// through `UnstructuredExpr` without exposing fields.
+/// An identifier syntax node, optionally constrained to one spelling.
 @recursive_constructor
 pub(repr) type Ident (Spelling = String) where Spelling <: String = Spelling
+/// A structured call expression syntax node.
 @recursive_constructor
 pub(repr) type CallExpr = (
     callee: Expr,
     argument: Expr,
 )
+/// A sequence of syntax values.
 @recursive_constructor
 pub(repr) type Sequence Element =
     () |
     (first: Element, rest: Sequence Element)
+/// An optional syntax value.
 @recursive_constructor
 pub(repr) type Optional Element = None | Some Element
+/// A separated syntax sequence with its separator and trailing state.
 @recursive_constructor
 pub(repr) type Separated Element Separator = (
     separator: Separator,
     elements: Sequence Element,
     trailing: Bool,
 )
+/// A comma punctuation syntax node.
 pub type Comma
+/// An equals-sign punctuation syntax node.
 pub type Equals
+/// A fat-arrow punctuation syntax node.
 pub type FatArrow
+/// A parenthesized syntax fragment.
 @recursive_constructor
 pub(repr) type Parenthesized Contents = Contents
+/// A bracketed syntax fragment.
 @recursive_constructor
 pub(repr) type Bracketed Contents = Contents
+/// A braced syntax fragment.
 @recursive_constructor
 pub(repr) type Braced Contents = Contents
+/// An expression syntax node without structured fields.
 pub type UnstructuredExpr = opaque
+/// The syntax category for expressions.
 pub type alias Expr = Ident String | CallExpr | UnstructuredExpr
 
+/// The syntax category for types.
 pub type Type = opaque
+/// The syntax category for patterns.
 pub type Pattern = opaque
+/// The syntax category for items.
 pub type Item = opaque
 
-// Compiler-owned visibility syntax. MacroCallVisibility is an invocation
-// marker whose value is usable as Visibility inside compile-time code.
+/// Compiler-owned visibility syntax. `MacroCallVisibility` is an invocation
+/// marker whose value is usable as `Visibility` in compile-time code.
+/// Private visibility syntax.
 pub type Private
+/// Public visibility syntax.
 pub type Public
+/// Public visibility with representation access.
 pub type PublicRepr
+/// The syntax category for visibility markers.
 pub type alias Visibility = Private | Public | PublicRepr
+/// Visibility supplied by a visibility-aware macro invocation.
 pub type MacroCallVisibility = opaque
 
-// An arbitrary lossless syntax fragment. SyntaxNode is exactly one structural
-// node; delimiter nodes retain their complete, opaque contents.
+/// An arbitrary lossless syntax fragment. `SyntaxNode` is exactly one structural
+/// node; delimiter nodes retain their complete opaque contents.
+/// An opaque lossless syntax fragment.
 pub type Syntax = opaque
+/// Exactly one structural syntax node.
 pub type alias SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
 
-// A sealed compiler-defined marker for the contextual result of `parse_quote`.
+/// A sealed compiler-defined marker for the contextual result of `parse_quote`.
 pub trait ParseQuoteResult T {}
 
 pub macro quote: Braced Syntax -> Syntax

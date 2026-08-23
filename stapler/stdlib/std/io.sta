@@ -1,16 +1,19 @@
 use std.cinterop.*
 
+/// The capability required for standard output operations.
 pub type IO = opaque
 
 extern "c" {
     let printf: (CPointer CChar, ...) -> I32
 }
 
+/// Writes a string to standard output without a trailing newline.
 pub def print: String ->{IO} () = value => {
     let _ = printf (c_string "%s", CString.from_string value)
     ()
 }
 
+/// Writes a string followed by a newline to standard output.
 pub def println: String ->{IO} () = value => {
     let _ = printf (c_string "%s\n", CString.from_string value)
     ()

@@ -1,7 +1,10 @@
 use std.syntax.(Expr)
 
+/// A C-compatible character.
 pub type CChar = opaque
+/// An opaque pointer to a C value of type `Pointee`.
 pub type CPointer Pointee = opaque
+/// A null-terminated C string.
 pub type CString = opaque
 
 pub macro c_string: Expr -> Expr
@@ -12,6 +15,8 @@ extern "staple-intrinsic" {
 }
 
 companion CString {
+    /// Converts a C string to a Staple string.
     pub def to_string: CString -> String = value => __string_from_c_string value
+    /// Converts a Staple string to a C string.
     pub def from_string: String -> CString = value => __string_to_c_string value
 }

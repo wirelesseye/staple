@@ -1,6 +1,8 @@
+/// A managed mutable reference to a value.
 @recursive_constructor
 pub(repr) type Ref T where ?Sized T = T
 
 companion<T> Ref T {
+    /// Replaces the referenced value and returns the old value.
     pub def replace: (Ref T, T) ->{mut 0} T = (reference, value) => value
 }

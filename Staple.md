@@ -300,6 +300,29 @@ macro @replace: Parenthesized Expr -> Item -> Item =
 def original = () => 0
 ```
 
+`@doc` is a built-in modifier that attaches Markdown documentation to a named
+declaration. It requires one string literal, may be repeated, and is shown by
+editor hover:
+
+```staple
+@doc("Returns the number of items.")
+pub def length: List T -> USize = list => ...
+```
+
+Triple-slash comments are shorthand for `@doc`, with the text after `///`
+used verbatim. Consecutive documentation comments preserve their source order:
+
+```staple
+/// Returns the number of items.
+/// This operation does not mutate the list.
+pub def length: List T -> USize = list => ...
+```
+
+Documentation may be attached to types, bindings, modules, macros, traits,
+trait members, implementation members, and extern bindings. It has no runtime
+effect. `@doc` is compiler-reserved; qualified user modifiers named `doc`
+remain ordinary modifiers.
+
 A modifier has signature `Item -> Item`, `Item -> Sequence Item`, or
 `Item -> Syntax`, optionally preceded by one optional explicit
 `Parenthesized Expr`, `Parenthesized Type`, or `Parenthesized Pattern`

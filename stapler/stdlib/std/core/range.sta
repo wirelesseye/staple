@@ -1,22 +1,26 @@
 use std.core.iterator.(IntoIterator, Iterator)
 use std.core.iterator.IterStep.(Done, Yield)
 
+/// A half-open range from `current` up to, but excluding, `end`.
 pub(repr) type Range T = (
     current: T,
     end: T,
 )
 
+/// A range that includes its final `end` value.
 pub(repr) type RangeInclusive T = (
     current: T,
     end: T,
     finished: Bool,
 )
 
+/// Creates a half-open range from `start` to `end`.
 pub def range : <T where Copy T> T -> T -> Range T = start => end => Range (
     current: start,
     end: end,
 )
 
+/// Creates an inclusive range from `start` to `end`.
 pub def range_inclusive : <T where Copy T> T -> T -> RangeInclusive T = start => end => RangeInclusive (
     current: start,
     end: end,

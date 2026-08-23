@@ -1,10 +1,13 @@
+/// A UTF-8 byte slice used as Staple's string type.
 pub type String = Slice U8
 
 extern "staple-intrinsic" {
     let __string_add: (String, String) -> String
 }
 
+/// Converts a value to its string representation.
 pub trait ToString T {
+    /// Converts this value to a string.
     to_string: T -> String
 }
 
