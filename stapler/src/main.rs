@@ -1085,6 +1085,7 @@ mod tests {
                 "def release = () => { let mut resource = Resource 1; resource = Resource 2 }\n",
                 "def abandon = () => { let mut resource = Resource 4; let update = () => { resource = Resource 5 }; update () }\n",
                 "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Ref n; churn (n - 1) } }\n",
+                "def update_data = mut data: I32 => { data = 42 }\n",
                 "def make_counter = () => {\n",
                 "  let mut value = 1\n",
                 "  () => { value = value + 1; value }\n",
@@ -1097,11 +1098,14 @@ mod tests {
                 "let mut scalar = Ref 7\n",
                 "let old = Ref.replace (scalar, 8)\n",
                 "let Ref current = scalar\n",
+                "let mut data = 1\n",
+                "update_data data\n",
+                "update_data (20 + 22)\n",
                 "release ()\n",
                 "abandon ()\n",
                 "churn 40000\n",
                 "churn 40000\n",
-                "exit ((first - 2) + (second - 3) + (point.x - 6) + (old - 7) + (current - 8) + (drops - 12))\n",
+                "exit ((first - 2) + (second - 3) + (point.x - 6) + (old - 7) + (current - 8) + (data - 42) + (drops - 12))\n",
             ),
         )
         .expect("temporary mutable source should be writable");

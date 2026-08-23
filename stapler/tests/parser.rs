@@ -1252,7 +1252,15 @@ fn parses_at_patterns_losslessly_and_right_associatively() {
     assert!(parse("let _@(x, y) = (1, 2)\n").is_err());
     assert!(parse("let (x, y)@point = (1, 2)\n").is_err());
     assert!(parse("let point@ = (1, 2)\n").is_err());
-    assert!(parse("def bad = mut outer@(left, right) => outer\n").is_err());
+    let marked = parse("def marked = mut outer@(left, right) => outer\n")
+        .expect("a top-level at-pattern alias may declare whole-parameter mutation");
+    let Item::Binding(marked) = statement(&marked.items[0]) else {
+        panic!("expected function binding");
+    };
+    let Some(Expression::Function(function)) = &marked.value else {
+        panic!("expected function");
+    };
+    assert!(matches!(&function.pattern, Pattern::At(at) if at.binding.mutable));
 }
 
 #[test]
@@ -1761,7 +1769,19 @@ fn parses_mutable_patterns_and_assignment_statements_losslessly() {
         Item::Assignment(_)
     ));
     assert!(parse("extern \"c\" { let mut value: I32 }\n").is_err());
-    assert!(parse("def bad = (mut parameter: I32) => parameter\n").is_err());
+    let parameter = parse("def update = (mut parameter: I32) => { parameter = 4 }\n")
+        .expect("a direct parameter binding may declare a mutation effect");
+    let Item::Binding(update) = statement(&parameter.items[0]) else {
+        panic!("expected function binding");
+    };
+    let Some(Expression::Function(function)) = &update.value else {
+        panic!("expected function expression");
+    };
+    let Pattern::Product(parameters) = &function.pattern else {
+        panic!("expected product parameter");
+    };
+    assert!(matches!(&parameters.elements[0], Pattern::Binding(binding) if binding.mutable));
+    assert!(parse("def bad = ((mut nested: I32, other: I32), last: I32) => nested\n").is_err());
 }
 
 #[test]

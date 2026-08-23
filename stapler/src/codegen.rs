@@ -20,10 +20,10 @@ use crate::typecheck::{
     substitute_type,
 };
 use crate::{
-    CallExpression, CheckedFunctionType, CheckedProductType, CheckedResource, CheckedResourceSet,
+    CallExpression, CheckedFunctionType, CheckedMutation, CheckedProductType, CheckedResource, CheckedResourceSet,
     CheckedType, CheckedTypeElement, Diagnostic, Expression, FloatType, FunctionId,
     IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction,
-    ModuleId, NumericType, Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, Span,
+    ModuleId, NumericType, Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, ResolvedModule, Span,
     Item, SymbolId, TypeParameterId, TypedModule,
 };
 
@@ -67,6 +67,11 @@ struct SumStorage<'context> {
     alignment: u32,
 }
 
+struct CompiledCallArguments<'context> {
+    values: Vec<inkwell::values::BasicMetadataValueEnum<'context>>,
+    temporaries: Vec<(inkwell::values::PointerValue<'context>, CheckedType)>,
+}
+
 #[derive(Clone, Default)]
 struct FunctionEnvironment<'context> {
     locals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
@@ -81,6 +86,7 @@ struct FunctionEnvironment<'context> {
     owned_order: Vec<SymbolId>,
     owned_cells: HashSet<SymbolId>,
     binding_cells: HashMap<SymbolId, inkwell::values::PointerValue<'context>>,
+    parameter_pointers: HashMap<SymbolId, inkwell::values::PointerValue<'context>>,
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
     resources: Vec<(CheckedResource, inkwell::values::AnyValueEnum<'context>)>,
@@ -95,6 +101,7 @@ impl<'context> FunctionEnvironment<'context> {
         self.owned_order = snapshot.owned_order.clone();
         self.owned_cells = snapshot.owned_cells.clone();
         self.binding_cells = snapshot.binding_cells.clone();
+        self.parameter_pointers = snapshot.parameter_pointers.clone();
     }
 }
 
@@ -748,19 +755,108 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .requires_initialization_state(symbol)
                     || self.typed_module.has_mutable_storage(symbol)
                 {
-                    environment
-                        .binding_cells
-                        .insert(symbol, value.into_pointer_value());
+                    if self.typed_module.is_mutated_parameter(symbol) {
+                        environment
+                            .parameter_pointers
+                            .insert(symbol, value.into_pointer_value());
+                    } else {
+                        environment
+                            .binding_cells
+                            .insert(symbol, value.into_pointer_value());
+                    }
                 } else {
                     environment.locals.insert(symbol, value.as_any_value_enum());
                 }
             }
         }
-        self.bind_top_level_pattern(
+        let raw_parameters = &parameters[1 + resource_count..];
+        let whole_mutation = function_type
+            .resources
+            .mutations
+            .contains(&CheckedMutation::Whole);
+        let logical_types = flattened_parameter_types(&function_type.parameter);
+        let mutation_mask = mutation_parameter_mask(
+            logical_types.len(),
+            &function_type.resources.mutations,
+        );
+        let mut values = Vec::new();
+        let mut mutable_pointers = Vec::new();
+        if whole_mutation {
+            let pointer = raw_parameters[0].into_pointer_value();
+            let llvm_type = self.compile_type(&function_type.parameter)?;
+            values.push(
+                self.builder
+                    .build_load(llvm_type, pointer, "parameter.value")
+                    .map_err(compiler_diagnostic)?,
+            );
+            mutable_pointers.push((0, pointer));
+        } else {
+            for (index, parameter) in raw_parameters.iter().copied().enumerate() {
+                if mutation_mask[index] {
+                    let pointer = parameter.into_pointer_value();
+                    let llvm_type = self.compile_type(logical_types[index])?;
+                    values.push(
+                        self.builder
+                            .build_load(llvm_type, pointer, "parameter.value")
+                            .map_err(compiler_diagnostic)?,
+                    );
+                    mutable_pointers.push((index, pointer));
+                } else {
+                    values.push(parameter);
+                }
+            }
+        }
+        self.bind_mutable_parameter_pointers(
             environment,
             &function.pattern,
-            &parameters[1 + resource_count..],
-        )
+            &function_type.parameter,
+            whole_mutation,
+            &mutable_pointers,
+        )?;
+        self.bind_top_level_pattern(environment, &function.pattern, &values)
+    }
+
+    fn bind_mutable_parameter_pointers(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        pattern: &Pattern,
+        parameter_type: &CheckedType,
+        whole: bool,
+        pointers: &[(usize, inkwell::values::PointerValue<'context>)],
+    ) -> CodeGenerationResult<()> {
+        let symbols = top_level_pattern_symbols(self.typed_module.resolved(), pattern);
+        if whole {
+            let pointer = pointers[0].1;
+            if symbols.len() == 1 {
+                if let Some(symbol) = symbols[0] {
+                    environment.binding_cells.remove(&symbol);
+                    environment.parameter_pointers.insert(symbol, pointer);
+                }
+                return Ok(());
+            }
+            let CheckedType::Product(product) = parameter_type else {
+                return Ok(());
+            };
+            let llvm_type = self.compile_type(parameter_type)?.into_struct_type();
+            for (index, symbol) in symbols.into_iter().enumerate() {
+                if let Some(symbol) = symbol {
+                    let field = self.builder
+                        .build_struct_gep(llvm_type, pointer, index as u32, "parameter.field")
+                        .map_err(compiler_diagnostic)?;
+                    environment.binding_cells.remove(&symbol);
+                    environment.parameter_pointers.insert(symbol, field);
+                }
+            }
+            let _ = product;
+            return Ok(());
+        }
+        for (index, pointer) in pointers {
+            if let Some(Some(symbol)) = symbols.get(*index) {
+                environment.binding_cells.remove(symbol);
+                environment.parameter_pointers.insert(*symbol, *pointer);
+            }
+        }
+        Ok(())
     }
 
     fn bind_top_level_pattern(
@@ -827,6 +923,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved pattern binding")
                     })?;
+                if environment.parameter_pointers.contains_key(&symbol) {
+                    environment.locals.insert(symbol, value.as_any_value_enum());
+                    return Ok(());
+                }
                 // `has_mutable_storage` subsumes `binding.mutable` (the
                 // resolver's set is built from exactly that flag) and
                 // additionally covers a function parameter that a `mut`
@@ -1903,10 +2003,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .ok_or_else(|| {
                 Diagnostic::new(assignment.syntax.span.clone(), "unchecked MutateIndex call")
             })?;
-        let target = self.compile_expression(environment, &index.value)?;
-        if environment.did_return {
-            return Ok(());
-        }
+        let CheckedType::Product(parameter) = function_type.parameter.as_ref() else {
+            return Err(Diagnostic::new(assignment.syntax.span.clone(), "invalid MutateIndex signature"));
+        };
+        let target_type = &parameter.elements[0].value_type;
+        let (target, target_temporary) = self.compile_mutation_argument_pointer(
+            environment,
+            &index.value,
+            target_type,
+        )?;
         let position = self.compile_expression(environment, &index.index)?;
         if environment.did_return {
             return Ok(());
@@ -1927,8 +2032,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .const_null()
                 .into(),
         );
+        call_arguments.push(target.into());
         for (value, span) in [
-            (target, index.value.syntax().span.clone()),
             (position, index.index.syntax().span.clone()),
             (replacement, assignment.value.syntax().span.clone()),
         ] {
@@ -1943,6 +2048,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder
             .build_direct_call(function, &call_arguments, "mutate_index.call")
             .map_err(|error| Diagnostic::new(assignment.syntax.span.clone(), error.to_string()))?;
+        self.drop_mutation_temporaries(
+            target_temporary.into_iter().collect(),
+            assignment.syntax.span.clone(),
+        )?;
         Ok(())
     }
 
@@ -1964,6 +2073,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .ok_or_else(|| {
                     Diagnostic::new(expression.syntax().span.clone(), "unchecked place")
                 })?;
+            if let Some(pointer) = environment.parameter_pointers.get(&symbol).copied() {
+                return Ok((pointer, value_type, Some(symbol)));
+            }
             if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
                 let cell_type = self.compile_binding_cell_type(symbol)?;
                 let slot = self
@@ -2995,13 +3107,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         element: &CheckedType,
         span: Span,
     ) -> CodeGenerationResult<BasicValueEnum<'context>> {
-        let [reference, BasicValueEnum::IntValue(position), replacement] = values else {
+        let [BasicValueEnum::PointerValue(reference_pointer), BasicValueEnum::IntValue(position), replacement] = values else {
             return Err(Diagnostic::new(
                 span,
                 "invalid structural MutateIndex arguments",
             ));
         };
-        let (pointer, length) = self.structural_index_storage(*reference, target, span.clone())?;
+        let reference = self.builder
+            .build_load(self.compile_type(target)?, *reference_pointer, "mutation.target")
+            .map_err(compiler_diagnostic)?;
+        let (pointer, length) = self.structural_index_storage(reference, target, span.clone())?;
         self.compile_structural_replace(
             pointer,
             *position,
@@ -4893,6 +5008,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         span: Span,
         unavailable: String,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let Some(pointer) = environment.parameter_pointers.get(&symbol).copied() {
+            let value_type = self
+                .typed_module
+                .type_of_symbol(symbol)
+                .cloned()
+                .map(|ty| substitute_type(ty, &self.active_type_substitutions))
+                .ok_or_else(|| Diagnostic::new(span.clone(), "unchecked parameter"))?;
+            return self.builder
+                .build_load(self.compile_type(&value_type)?, pointer, "parameter")
+                .map(|value| value.as_any_value_enum())
+                .map_err(|error| Diagnostic::new(span, error.to_string()));
+        }
         if let Some(value) = environment.locals.get(&symbol).copied() {
             return Ok(value);
         }
@@ -5066,11 +5193,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .typed_module
                 .instantiated_trait_method_type(trait_id, &arguments, dispatch.method)
                 .ok_or_else(|| Diagnostic::new(call.syntax.span.clone(), "unchecked trait call"))?;
-            let expected_count = self
-                .compile_parameter_types(&function_type.parameter)?
-                .len();
-            let mut arguments =
-                self.compile_arguments(environment, &call.argument, expected_count, false)?;
+            let compiled = self.compile_effect_arguments(environment, &call.argument, &function_type)?;
+            let mut arguments = compiled.values;
             if environment.did_return {
                 return Ok(self.unit_value());
             }
@@ -5092,6 +5216,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .builder
                 .build_direct_call(function, &arguments, "trait.call")
                 .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+            self.drop_mutation_temporaries(compiled.temporaries, call.syntax.span.clone())?;
             return Ok(call_site
                 .try_as_basic_value()
                 .unwrap_basic()
@@ -5138,11 +5263,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 ));
             };
             let function = self.ensure_function_specialization(function_id, &function_type)?;
-            let expected_count = self
-                .compile_parameter_types(&function_type.parameter)?
-                .len();
-            let mut arguments =
-                self.compile_arguments(environment, &call.argument, expected_count, false)?;
+            let compiled = self.compile_effect_arguments(environment, &call.argument, &function_type)?;
+            let mut arguments = compiled.values;
             if environment.did_return {
                 return Ok(self.unit_value());
             }
@@ -5165,6 +5287,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .builder
                 .build_direct_call(function, &arguments, "generic.call")
                 .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+            self.drop_mutation_temporaries(compiled.temporaries, call.syntax.span.clone())?;
             return Ok(call_site
                 .try_as_basic_value()
                 .unwrap_basic()
@@ -5195,12 +5318,23 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     function.count_params() as usize - usize::from(internal),
                     |types| types.len(),
                 );
-            let mut arguments = self.compile_arguments(
-                environment,
-                &call.argument,
-                expected_count,
-                function.get_type().is_var_arg(),
-            )?;
+            let compiled = if internal {
+                function_type.as_ref()
+                    .map(|ty| self.compile_effect_arguments(environment, &call.argument, ty))
+                    .transpose()?
+            } else {
+                None
+            };
+            let mut arguments = if let Some(compiled) = &compiled {
+                compiled.values.clone()
+            } else {
+                self.compile_arguments(
+                    environment,
+                    &call.argument,
+                    expected_count,
+                    function.get_type().is_var_arg(),
+                )?
+            };
             if environment.did_return {
                 return Ok(self.unit_value());
             }
@@ -5231,6 +5365,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .builder
                 .build_direct_call(function, &arguments, "call")
                 .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+            if let Some(compiled) = compiled {
+                self.drop_mutation_temporaries(compiled.temporaries, call.syntax.span.clone())?;
+            }
             if scoped_c_string_temporary
                 && let Some(inkwell::values::BasicMetadataValueEnum::PointerValue(pointer)) =
                     arguments.first().copied()
@@ -5265,11 +5402,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "called expression has no function type",
             ));
         };
-        let expected_count = self
-            .compile_parameter_types(&function_type.parameter)?
-            .len();
-        let mut arguments =
-            self.compile_arguments(environment, &call.argument, expected_count, false)?;
+        let compiled = self.compile_effect_arguments(environment, &call.argument, &function_type)?;
+        let mut arguments = compiled.values;
         if environment.did_return {
             return Ok(self.unit_value());
         }
@@ -5300,6 +5434,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "closure.call",
             )
             .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
+        self.drop_mutation_temporaries(compiled.temporaries, call.syntax.span.clone())?;
         Ok(call_site
             .try_as_basic_value()
             .unwrap_basic()
@@ -6428,10 +6563,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .requires_initialization_state(symbol)
                     || self.typed_module.has_mutable_storage(symbol)
                 {
-                    environment
-                        .binding_cells
-                        .get(&symbol)
-                        .copied()
+                    environment.parameter_pointers.get(&symbol).copied()
+                        .or_else(|| environment.binding_cells.get(&symbol).copied())
                         .ok_or_else(|| {
                             Diagnostic::new(span.clone(), "captured binding cell is not available")
                         })?
@@ -6775,6 +6908,131 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .collect()
     }
 
+    fn compile_effect_arguments(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        argument: &Expression,
+        function_type: &CheckedFunctionType,
+    ) -> CodeGenerationResult<CompiledCallArguments<'context>> {
+        let mutations = &function_type.resources.mutations;
+        if mutations.is_empty() {
+            let expected = self.compile_parameter_types(&function_type.parameter)?.len();
+            return Ok(CompiledCallArguments {
+                values: self.compile_arguments(environment, argument, expected, false)?,
+                temporaries: Vec::new(),
+            });
+        }
+        if mutations.contains(&CheckedMutation::Whole) {
+            let (pointer, temporary) = self.compile_mutation_argument_pointer(
+                environment,
+                argument,
+                &function_type.parameter,
+            )?;
+            return Ok(CompiledCallArguments {
+                values: vec![pointer.into()],
+                temporaries: temporary.into_iter().collect(),
+            });
+        }
+
+        let types = flattened_parameter_types(&function_type.parameter);
+        let mask = mutation_parameter_mask(types.len(), mutations);
+        let expressions = match argument {
+            Expression::Product(product) if product.elements.len() == types.len() => Some(
+                product.elements.iter().map(|element| &element.value).collect::<Vec<_>>(),
+            ),
+            _ => None,
+        };
+        if let Some(expressions) = expressions {
+            let mut values = Vec::new();
+            let mut temporaries = Vec::new();
+            for (index, expression) in expressions.into_iter().enumerate() {
+                if mask[index] {
+                    let (pointer, temporary) = self.compile_mutation_argument_pointer(
+                        environment,
+                        expression,
+                        types[index],
+                    )?;
+                    values.push(pointer.into());
+                    temporaries.extend(temporary);
+                } else {
+                    let value = self.compile_expression(environment, expression)?;
+                    values.push(value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(expression.syntax().span.clone(), "argument is not first-class")
+                    })?.into());
+                }
+            }
+            return Ok(CompiledCallArguments { values, temporaries });
+        }
+
+        // A product-valued place passed without literal destructuring: take
+        // addresses of mutated fields and load the remaining fields.
+        if let CheckedType::Product(product) = &*function_type.parameter
+            && let Ok((base, _, _)) = self.compile_place_pointer(environment, argument)
+        {
+            let llvm_product = self.compile_type(&function_type.parameter)?.into_struct_type();
+            let mut values = Vec::new();
+            for (index, element) in product.elements.iter().enumerate() {
+                let field = self.builder
+                    .build_struct_gep(llvm_product, base, index as u32, "argument.field")
+                    .map_err(compiler_diagnostic)?;
+                if mask[index] {
+                    values.push(field.into());
+                } else {
+                    values.push(self.builder
+                        .build_load(self.compile_type(&element.value_type)?, field, "argument.value")
+                        .map_err(compiler_diagnostic)?.into());
+                }
+            }
+            return Ok(CompiledCallArguments { values, temporaries: Vec::new() });
+        }
+
+        Err(Diagnostic::new(
+            argument.syntax().span.clone(),
+            "mutation-affected product argument cannot be addressed",
+        ))
+    }
+
+    fn compile_mutation_argument_pointer(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        expression: &Expression,
+        value_type: &CheckedType,
+    ) -> CodeGenerationResult<(
+        inkwell::values::PointerValue<'context>,
+        Option<(inkwell::values::PointerValue<'context>, CheckedType)>,
+    )> {
+        if expression_has_place_root(self.typed_module.resolved(), expression) {
+            let (pointer, _, _) = self.compile_place_pointer(environment, expression)?;
+            return Ok((pointer, None));
+        }
+        let value = self.compile_expression(environment, expression)?;
+        let value = value_as_basic(value).ok_or_else(|| {
+            Diagnostic::new(expression.syntax().span.clone(), "argument is not storable")
+        })?;
+        let concrete = substitute_type(value_type.clone(), &self.active_type_substitutions);
+        let pointer = self.builder
+            .build_alloca(self.compile_type(&concrete)?, "mutation.temporary")
+            .map_err(compiler_diagnostic)?;
+        self.builder.build_store(pointer, value).map_err(compiler_diagnostic)?;
+        Ok((pointer, Some((pointer, concrete))))
+    }
+
+    fn drop_mutation_temporaries(
+        &mut self,
+        temporaries: Vec<(inkwell::values::PointerValue<'context>, CheckedType)>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        for (pointer, value_type) in temporaries.into_iter().rev() {
+            if self.typed_module.type_needs_drop(&value_type) {
+                let value = self.builder
+                    .build_load(self.compile_type(&value_type)?, pointer, "mutation.temporary.final")
+                    .map_err(compiler_diagnostic)?;
+                self.compile_drop_value(value, &value_type, span.clone())?;
+            }
+        }
+        Ok(())
+    }
+
     fn compile_arguments(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
@@ -6891,7 +7149,26 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         for resource in &function_type.resources.resources {
             parameter_types.push(self.compile_type(&resource.value_type)?.into());
         }
-        parameter_types.extend(self.compile_parameter_types(&function_type.parameter)?);
+        let value_parameters = if function_type
+            .resources
+            .mutations
+            .contains(&CheckedMutation::Whole)
+        {
+            vec![self.context.ptr_type(AddressSpace::default()).into()]
+        } else {
+            let mut parameters = self.compile_parameter_types(&function_type.parameter)?;
+            let mutation_mask = mutation_parameter_mask(
+                parameters.len(),
+                &function_type.resources.mutations,
+            );
+            for (index, parameter) in parameters.iter_mut().enumerate() {
+                if mutation_mask[index] {
+                    *parameter = self.context.ptr_type(AddressSpace::default()).into();
+                }
+            }
+            parameters
+        };
+        parameter_types.extend(value_parameters);
         Ok(match return_type {
             inkwell::types::BasicTypeEnum::ArrayType(value) => {
                 value.fn_type(&parameter_types, false)
@@ -7544,4 +7821,50 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
 fn compiler_diagnostic(error: inkwell::builder::BuilderError) -> Diagnostic {
     Diagnostic::new(Span::Compiler, error.to_string())
+}
+
+fn mutation_parameter_mask(count: usize, mutations: &[CheckedMutation]) -> Vec<bool> {
+    let whole = mutations.contains(&CheckedMutation::Whole);
+    (0..count)
+        .map(|index| whole || mutations.contains(&CheckedMutation::Element(index)))
+        .collect()
+}
+
+fn flattened_parameter_types(parameter: &CheckedType) -> Vec<&CheckedType> {
+    match parameter {
+        CheckedType::Product(product) => product
+            .elements
+            .iter()
+            .map(|element| &element.value_type)
+            .collect(),
+        other => vec![other],
+    }
+}
+
+fn top_level_pattern_symbols(module: &ResolvedModule, pattern: &Pattern) -> Vec<Option<SymbolId>> {
+    fn symbol(module: &ResolvedModule, pattern: &Pattern) -> Option<SymbolId> {
+        match pattern {
+            Pattern::Binding(binding) => module.symbol_for(binding.syntax.id),
+            Pattern::At(at) => module.symbol_for(at.binding.syntax.id),
+            _ => None,
+        }
+    }
+    match pattern {
+        Pattern::Product(product) => product
+            .elements
+            .iter()
+            .map(|element| symbol(module, element))
+            .collect(),
+        other => vec![symbol(module, other)],
+    }
+}
+
+fn expression_has_place_root(module: &ResolvedModule, expression: &Expression) -> bool {
+    if module.symbol_for(expression.syntax().id).is_some() {
+        return true;
+    }
+    match expression {
+        Expression::Access(access) => expression_has_place_root(module, &access.value),
+        _ => false,
+    }
 }

@@ -557,12 +557,9 @@ fn type_checks_the_two_binding_mutability_forms() {
     // `let mut`: both reassignable and mutable.
     type_check("let mut a = (x: 1, y: 2)\na = (x: 3, y: 4)\na.x = 5\n");
 
-    // Function parameters and match binders follow the same rules — except
-    // that a parameter's `mut` write must also cross a `Ref`: unlike an
-    // ordinary binding, a by-value parameter write is never visible to the
-    // caller, so it is rejected outright regardless of any declared effect.
-    // A parameter itself can never be `mut`; a function that needs to
-    // reassign its own copy shadows it with a `let mut` local instead.
+    // Function parameters are writable when their inferred or declared
+    // effect covers the corresponding position. Match binders still use an
+    // explicit `mut` pattern.
     type_check(concat!(
         "type Box = I32\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
@@ -570,14 +567,7 @@ fn type_checks_the_two_binding_mutability_forms() {
         "def matched = (value: Box) => match value { Box (mut inner) => { inner = 2; inner } }\n",
     ));
 
-    let diagnostics = TypeChecker::new()
-        .check(resolve(
-            "def by_value: (x: I32, y: I32) ->{mut} () = value => { value.x = 1 }\n",
-        ))
-        .expect_err("a by-value parameter write never crosses a `Ref`");
-    assert!(diagnostics.iter().any(|d| d
-        .message
-        .contains("the path does not cross a `Ref`")));
+    type_check("def by_value: (x: I32, y: I32) ->{mut} () = value => { value.x = 1 }\n");
 
     // A `pub` global follows the same rules from another module as it does locally.
     let diagnostics = TypeChecker::new()
@@ -640,9 +630,9 @@ fn function_mutations(module: &stapler::TypedModule, name: &str) -> Vec<CheckedM
 }
 
 #[test]
-fn infers_a_positional_mutation_from_a_projected_write() {
+fn a_parameter_marker_declares_a_positional_mutation() {
     let module = type_check(concat!(
-        "def f = (p: Ref (I32, I32)) => { p.0 = 1 }\n",
+        "def f = (mut p: Ref (I32, I32)) => { p.0 = 1 }\n",
         "def g = () => { let mut pair: Ref (I32, I32) = Ref (1, 2); f pair }\n",
     ));
     assert_eq!(
@@ -658,9 +648,7 @@ fn rejects_a_declared_empty_effect_set_when_the_body_mutates_a_parameter() {
             "def f: Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
         ))
         .expect_err("an empty declared effect set forbids mutation");
-    assert!(diagnostics.iter().any(|d| d
-        .message
-        .contains("not contained in its declared effect set")));
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
 }
 
 #[test]
@@ -670,9 +658,7 @@ fn rejects_a_declared_mutation_target_the_body_does_not_write() {
             "def f: (a: Ref (I32, I32), b: Ref (I32, I32)) ->{mut a} () = (a, b) => { b.0 = 1 }\n",
         )))
         .expect_err("writing `b` exceeds the declared `mut a`");
-    assert!(diagnostics.iter().any(|d| d
-        .message
-        .contains("not contained in its declared effect set")));
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
 }
 
 #[test]
@@ -695,10 +681,16 @@ fn a_whole_parameter_declaration_covers_writing_a_single_element() {
 }
 
 #[test]
-fn call_site_mutation_propagates_from_callee_to_an_unannotated_caller() {
-    let module = type_check(concat!(
+fn call_site_mutation_requires_an_explicit_caller_marker() {
+    let diagnostics = TypeChecker::new().check(resolve(concat!(
         "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n",
         "def g = (q: Ref (I32, I32)) => { f q }\n",
+    ))).expect_err("mutation effects must not propagate into callers");
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+
+    let module = type_check(concat!(
+        "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n",
+        "def g = (mut q: Ref (I32, I32)) => { f q }\n",
     ));
     assert_eq!(
         function_mutations(&module, "g"),
@@ -720,9 +712,9 @@ fn rejects_passing_a_non_mut_binding_to_a_mutating_parameter() {
 }
 
 #[test]
-fn a_closure_mutating_a_captured_parameter_attributes_to_the_enclosing_function() {
+fn a_closure_may_mutate_an_explicitly_marked_captured_parameter() {
     let module = type_check(concat!(
-        "def outer = (p: Ref (I32, I32)) => {\n",
+        "def outer = (mut p: Ref (I32, I32)) => {\n",
         "  let update = () => { p.0 = 1 }\n",
         "  update ()\n",
         "}\n",
@@ -741,13 +733,11 @@ fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
             "impl Reset (Ref (I32, I32)) { def reset = p => { p.0 = 0 } }\n",
         )))
         .expect_err("the impl mutates a parameter its trait does not declare");
-    assert!(diagnostics.iter().any(|d| d
-        .message
-        .contains("not contained in the trait method's declared effect set")));
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
 }
 
 #[test]
-fn infers_a_mut_effect_through_a_ref_crossing_local_alias() {
+fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
     let module = type_check(concat!(
         "type MyInt = Ref I32\n",
         "def mutate_my_int: (MyInt, I32) ->{mut 0} () = (my_int, value) => {\n",
@@ -755,7 +745,7 @@ fn infers_a_mut_effect_through_a_ref_crossing_local_alias() {
         "  Ref.replace (inner, value)\n",
         "  ()\n",
         "}\n",
-        "def foo = (my_int: MyInt) => { mutate_my_int (my_int, 42) }\n",
+        "def foo = (mut my_int: MyInt) => { mutate_my_int (my_int, 42) }\n",
     ));
     assert_eq!(
         function_mutations(&module, "foo"),
@@ -825,6 +815,141 @@ fn a_mutated_ref_parameter_lowers_and_the_caller_observes_the_write() {
     CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("a mutated Ref parameter should lower");
+}
+
+#[test]
+fn a_mut_parameter_can_replace_the_callers_value() {
+    let module = type_check(concat!(
+        "def update_data: I32 ->{mut} () = data => { data = 42 }\n",
+        "let mut data: I32 = 1\n",
+        "update_data data\n",
+    ));
+    assert_eq!(
+        function_mutations(&module, "update_data"),
+        vec![CheckedMutation::Whole]
+    );
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a replaced scalar parameter should lower by address");
+    assert!(llvm.contains("define") && llvm.contains("@update_data(ptr"));
+    assert!(llvm.contains("store i32 42"));
+}
+
+#[test]
+fn a_parameter_marker_adds_mutation_without_a_type_annotation() {
+    let module = type_check(concat!(
+        "def update_data = (mut data: I32) => { data = 42 }\n",
+        "let mut data: I32 = 1\n",
+        "update_data data\n",
+    ));
+    assert_eq!(
+        function_mutations(&module, "update_data"),
+        vec![CheckedMutation::Element(0)]
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def invalid = (data: I32) => { data = 42 }\n"))
+        .expect_err("an unmarked parameter must not infer mutation");
+    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+}
+
+#[test]
+fn parameter_markers_must_match_explicit_function_and_trait_effects() {
+    type_check(concat!(
+        "def replace: I32 ->{mut} () = mut value: I32 => { value = 1 }\n",
+        "trait Replace T { replace: T ->{mut} () }\n",
+        "impl Replace I32 { def replace = mut value => { value = 2 } }\n",
+    ));
+
+    for source in [
+        "def mismatch: (I32, I32) ->{mut 1} () = (mut first, second) => ()\n",
+        concat!(
+            "trait Replace T { replace: (T, T) ->{mut 0} () }\n",
+            "impl Replace I32 { def replace = (first, mut second) => () }\n",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err("parameter markers and declared mutation effects must match");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("parameter `mut` markers declare")));
+    }
+}
+
+#[test]
+fn resource_inference_preserves_parameter_declared_mutation() {
+    let module = type_check(concat!(
+        "type Clock = I32\n",
+        "def use_both = (mut value: Clock) => { value = resource Clock }\n",
+    ));
+    let function = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "use_both")
+        .expect("use_both function");
+    let resources = &module.type_of_function(function.id).unwrap().resources;
+    assert_eq!(resources.mutations, vec![CheckedMutation::Element(0)]);
+    assert_eq!(resources.resources.len(), 1);
+}
+
+#[test]
+fn whole_and_positional_product_parameters_can_be_replaced() {
+    let module = type_check(concat!(
+        "def replace_pair: (I32, I32) ->{mut} () = pair => { pair = (3, 4) }\n",
+        "def replace_first: (I32, I32) ->{mut 0} () = (first, _) => { first = 9 }\n",
+        "let mut pair = (1, 2)\n",
+        "replace_pair pair\n",
+        "let mut first = 0\n",
+        "replace_first (first, 8)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("whole and positional product replacements should lower");
+}
+
+#[test]
+fn a_first_class_mutating_function_preserves_writeback() {
+    let module = type_check(concat!(
+        "def replace: I32 ->{mut} () = value => { value = 7 }\n",
+        "let operation: I32 ->{mut} () = replace\n",
+        "let mut value = 1\n",
+        "operation value\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("indirect mutating calls should use the address-passing ABI");
+}
+
+#[test]
+fn a_mut_call_materializes_and_discards_a_temporary_argument() {
+    let module = type_check(concat!(
+        "def update_data: I32 ->{mut} () = data => { data = 42 }\n",
+        "update_data (1 + 2)\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a temporary mut argument should get call-scoped storage");
+    assert!(llvm.contains("mutation.temporary"));
+}
+
+#[test]
+fn a_move_only_mut_temporary_drops_replaced_and_final_values() {
+    let module = type_check(concat!(
+        "use std.cinterop.*\n",
+        "def replace: CString ->{mut} () = value => { value = c_string \"replacement\" }\n",
+        "replace (c_string \"initial\")\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("move-only mutation temporaries should lower with ownership cleanup");
+    assert!(llvm.contains("mutation.temporary.final"));
+    assert!(llvm.contains("assignment.old"));
 }
 
 #[test]
@@ -1023,7 +1148,7 @@ fn updates_and_mutates_move_only_homogeneous_products() {
         "use std.cinterop.CString\n",
         "def update = (values: CString[2], position: USize, replacement: CString) => ",
         "UpdateIndex.update_index (values, position, replacement)\n",
-        "def mutate = (values: Ref CString[2], position: USize, replacement: CString) => { ",
+        "def mutate = (mut values: Ref CString[2], position: USize, replacement: CString) => { ",
         "values[position] = replacement; () }\n",
     );
     let module = type_check(source);

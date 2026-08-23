@@ -1402,11 +1402,24 @@ def f4: (a: A, b: B) ->{mut a, IO} () = (a, b) => { ... }
 
 Bare `mut` names the whole parameter; `mut 0` and `mut a` name one element of
 a product parameter, positionally or by the name written in the parameter
-list. A function with no `mut` effect may still write into its own parameters
-locally — the write is never visible to the caller unless it also crosses a
-`Ref` — but exposing that capability in the signature is what lets a caller
-pass a `mut` binding into the call, and what a caller must grant for the call
-to type-check at all:
+list. A `mut` marker on a parameter binding declares the same effect without
+requiring a function type annotation:
+
+```staple
+def f1 = mut a: A => { ... }                    // A ->{mut} ...
+def f2 = (mut a: A, b: B) => { ... }            // (A, B) ->{mut 0} ...
+def f3 = (a: A, mut b: B) => { ... }            // (A, B) ->{mut 1} ...
+```
+
+Markers are allowed only on a whole parameter binding or a direct binding in
+the top-level parameter product. If a function has both parameter markers and
+an explicit annotation, their mutation targets must match exactly. The marker
+does not introduce an ordinary mutable local; it declares the function
+parameter position that is passed by address.
+
+The effect permits both writing through a parameter and replacing the
+parameter value itself. A mutable argument is passed by address, so either
+kind of change is visible in the caller:
 
 ```staple
 def clear: Ref (I32, I32) ->{mut} () = cell => { cell.0 = 0 }
@@ -1416,19 +1429,29 @@ clear counter
 
 let fixed: Ref (I32, I32) = Ref (1, 2)
 clear fixed // error: `fixed` is not declared `mut`
+
+def replace: I32 ->{mut} () = value => { value = 42 }
+let mut answer = 0
+replace answer // answer is now 42
 ```
 
-Like resources, an unannotated function infers the minimal `mut` effects its
-body requires, and a declared set is a contract: the body may mutate fewer
-parameters than it declares, but never more. Unlike resources, `mut` effects
-carry no runtime value and add no hidden parameter; they are checked purely
-at compile time. They also do not accumulate through a call graph the way a
-resource requirement does merely by being called — a nested function literal
-contributes nothing to its enclosing function just by existing. Mutating a
-value the closure captured from its enclosing function is the one exception:
-because a captured cell is shared eagerly rather than provided dynamically at
-call time, that mutation is attributed to the enclosing function, at the
-point the closure is created.
+A non-place argument is materialized into call-scoped mutable storage. Its
+final value is discarded (and dropped when necessary), which permits useful
+one-shot calls without weakening immutable named bindings:
+
+```staple
+replace (20 + 22) // allowed; the final 42 is discarded
+let fixed_answer = 0
+replace fixed_answer // error: the named binding is not `mut`
+```
+
+Mutation effects are never inferred from a function body and never propagate
+from a callee into its caller. A function that assigns through a parameter,
+captures it for mutation, or forwards it to a mutating callee must declare the
+corresponding parameter marker or explicit effect. Runtime resource effects
+continue to infer and propagate independently. Mutation effects carry no
+runtime value or extra argument, but affected parameter positions use an
+address-passing ABI.
 
 `MutateIndex.mutate_index` declares `mut 0` on its `Target` parameter, so
 `a[i] = v` requires `a`'s root binding to be declared `mut`.

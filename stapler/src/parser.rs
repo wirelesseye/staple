@@ -1402,10 +1402,10 @@ impl Grammar {
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
         let pattern = self.parse_pattern()?;
-        if pattern_has_mutable(&pattern) {
+        if parameter_has_nested_mutable(&pattern) {
             return Err(self.error(
-                "`mut` is not allowed on a parameter; declare it in the function's effect \
-                 set, e.g. `->{mut a}`",
+                "`mut` is only allowed on a whole parameter binding or a direct element of a \
+                 top-level product parameter",
             ));
         }
         self.expect(TokenKind::FatArrow, "expected `=>` before function body")?;
@@ -2919,6 +2919,22 @@ fn pattern_has_mutable(pattern: &Pattern) -> bool {
         Pattern::Product(product) => product.elements.iter().any(pattern_has_mutable),
         Pattern::Nominal(nominal) => pattern_has_mutable(&nominal.argument),
         Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+    }
+}
+
+/// Parameter effects can address only the whole parameter or one direct
+/// element of its top-level product. A marker deeper than that cannot be
+/// represented by `mut`/`mut N`, so reject it during parsing.
+fn parameter_has_nested_mutable(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(_) => false,
+        Pattern::At(at) => pattern_has_mutable(&at.pattern),
+        Pattern::Product(product) => product.elements.iter().any(|element| match element {
+            Pattern::Binding(_) => false,
+            Pattern::At(at) => pattern_has_mutable(&at.pattern),
+            other => pattern_has_mutable(other),
+        }),
+        other => pattern_has_mutable(other),
     }
 }
 

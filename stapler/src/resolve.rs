@@ -2989,6 +2989,12 @@ impl NameResolver {
     fn resolve_compile_time_expression_annotations(&mut self, expression: &Expression) {
         match expression {
             Expression::Function(value) => {
+                if pattern_contains_mutable_marker(&value.pattern) {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.pattern.syntax().span.clone(),
+                        "parameter `mut` effects are only supported by runtime functions",
+                    ));
+                }
                 self.resolve_pattern_types_lenient(&value.pattern);
                 self.resolve_compile_time_expression_annotations(&value.body);
             }
@@ -3333,6 +3339,12 @@ impl NameResolver {
                 self.loop_depth = 0;
                 self.push_scope();
                 self.declare_pattern(&function.pattern, None, &mut HashSet::new());
+                // A `mut` marker in a function parameter declares a mutation
+                // effect on that arrow; it is not an ordinary mutable local
+                // binding in the resolver's sense.
+                for symbol in mutable_pattern_symbols(self, &function.pattern) {
+                    self.mutable_symbols.remove(&symbol);
+                }
                 let expected_result = (|| {
                     let Type::Function(function_type) = expected_type? else {
                         return None;
@@ -4213,6 +4225,51 @@ impl NameResolver {
     }
     fn current_shadowable_mut(&mut self) -> &mut HashMap<String, bool> {
         self.shadowable.last_mut().expect("resolver scope")
+    }
+}
+
+fn mutable_pattern_symbols(resolver: &NameResolver, pattern: &Pattern) -> Vec<SymbolId> {
+    let mut symbols = Vec::new();
+    fn collect(resolver: &NameResolver, pattern: &Pattern, symbols: &mut Vec<SymbolId>) {
+        match pattern {
+            Pattern::Binding(binding) => {
+                if binding.mutable
+                    && let Some(symbol) = resolver.symbols.get(&binding.syntax.id).copied()
+                {
+                    symbols.push(symbol);
+                }
+            }
+            Pattern::At(at) => {
+                if at.binding.mutable
+                    && let Some(symbol) = resolver.symbols.get(&at.binding.syntax.id).copied()
+                {
+                    symbols.push(symbol);
+                }
+                collect(resolver, &at.pattern, symbols);
+            }
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    collect(resolver, element, symbols);
+                }
+            }
+            Pattern::Nominal(nominal) => collect(resolver, &nominal.argument, symbols),
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        }
+    }
+    collect(resolver, pattern, &mut symbols);
+    symbols
+}
+
+fn pattern_contains_mutable_marker(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(binding) => binding.mutable,
+        Pattern::At(at) => at.binding.mutable || pattern_contains_mutable_marker(&at.pattern),
+        Pattern::Product(product) => product
+            .elements
+            .iter()
+            .any(pattern_contains_mutable_marker),
+        Pattern::Nominal(nominal) => pattern_contains_mutable_marker(&nominal.argument),
+        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
     }
 }
 
