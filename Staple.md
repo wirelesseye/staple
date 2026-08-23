@@ -2140,6 +2140,34 @@ reference to a popped element. This is the primitive higher-level growable
 containers such as `List` use to move an initialized prefix into a larger
 allocation.
 
+`List T` is a growable array built on top of `Buffer T`. `List.new` and
+`List.with_capacity` construct an empty list with no or a chosen initial
+capacity, and `List.length`/`List.capacity` report its current element count
+and storage size, exactly like the matching `Buffer` operations. `List.push`
+appends an element and, unlike `Buffer.push`, never traps for lack of space:
+once the current capacity is exhausted it allocates a larger `Buffer`
+(doubling, with a minimum of four elements) and moves every existing element
+across with `Buffer.transfer` before appending. `List.pop` removes and
+returns the last element as an `Option T`, exactly like `Buffer.pop`.
+
+`List.get_ref` and, where `Copy T`, `List.get` return an element by
+reference or by copy respectively, each wrapped in `Option (Ref T)`/
+`Option T` so that an out-of-bounds index produces `None` instead of
+trapping. `List.get_ref_unchecked` and `List.get_unchecked` are the
+trapping counterparts. `list[index]` and `list[index] = value` delegate to
+`Index`/`MutateIndex`, backed by `get_unchecked`/`get_ref_unchecked`, so
+bracket indexing keeps the trapping behavior it has elsewhere in the
+language; `for item in list` delegates to `IntoIterator`/`Iterator` and
+yields owned copies. Both bracket indexing and iteration therefore require
+`Copy T`, the same as `List.get`.
+
+`List` handles are Copy aliases of the underlying `Buffer`, just as `Buffer`
+handles alias their allocation, with one difference: growth replaces that
+`Buffer` outright rather than mutating it in place, and only the specific
+binding passed to the growing `push` call is updated to point at the new
+allocation. A `List` handle copied out beforehand keeps referring to the
+pre-growth allocation and does not observe later pushes.
+
 Managed references use a non-moving, single-threaded, stop-the-world
 mark-and-sweep collector. Collection occurs automatically as the live heap
 crosses a growing allocation threshold. Stack/register values, module globals,
