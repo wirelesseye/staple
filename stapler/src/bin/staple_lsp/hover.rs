@@ -7,6 +7,7 @@ use stapler::*;
 pub struct HoverEntry {
     pub range: Range<usize>,
     pub signature: String,
+    pub documentation: Vec<String>,
 }
 
 pub fn entries(module: &Module, typed: &TypedModule) -> Vec<HoverEntry> {
@@ -36,6 +37,7 @@ struct Collector<'a> {
 struct Declaration {
     prefix: Option<&'static str>,
     name: String,
+    docs: Vec<String>,
 }
 
 impl Collector<'_> {
@@ -54,7 +56,12 @@ impl Collector<'_> {
                         .resolved()
                         .macro_invocation_for(modifier.syntax.id)
                     {
-                        self.named_last(&modifier.syntax, &modifier.name, macro_signature(info));
+                        self.named_last_with_docs(
+                            &modifier.syntax,
+                            &modifier.name,
+                            macro_signature(info),
+                            info.docs.clone(),
+                        );
                     }
                     if let Some(expression) = modifier
                         .argument
@@ -135,11 +142,20 @@ impl Collector<'_> {
 
     fn collect_binding_declaration(&mut self, binding: &Binding) {
         if let Some(symbol) = self.typed.symbol_for(binding.syntax.id) {
+            let docs = if binding.docs.is_empty() {
+                self.declarations
+                    .get(&symbol)
+                    .map(|declaration| declaration.docs.clone())
+                    .unwrap_or_default()
+            } else {
+                binding.docs.clone()
+            };
             self.declarations.insert(
                 symbol,
                 Declaration {
                     prefix: Some(binding.keyword()),
                     name: binding.name.clone(),
+                    docs,
                 },
             );
         }
@@ -242,6 +258,7 @@ impl Collector<'_> {
                         Declaration {
                             prefix,
                             name: binding.name.clone(),
+                            docs: Vec::new(),
                         },
                     );
                 }
@@ -276,6 +293,28 @@ impl Collector<'_> {
             Item::VisibilitySplice(value) => self.item(&value.item),
             Item::RepeatedItemSplice(_) => {}
             Item::Submodule(submodule) => {
+                let docs = self
+                    .typed
+                    .resolved()
+                    .program()
+                    .modules()
+                    .iter()
+                    .flat_map(|module| &module.syntax.items)
+                    .find_map(|item| match item {
+                        Item::Submodule(resolved)
+                            if resolved.syntax.id == submodule.syntax.id =>
+                        {
+                            Some(resolved.docs.clone())
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| submodule.docs.clone());
+                self.named_with_docs(
+                    &submodule.syntax,
+                    &submodule.name,
+                    format!("mod {}", submodule.name),
+                    docs,
+                );
                 for item in &submodule.module.items {
                     self.item(item);
                 }
@@ -291,10 +330,11 @@ impl Collector<'_> {
                     .resolved()
                     .macro_definition_for(declaration.syntax.id)
                 {
-                    self.named(
+                    self.named_with_docs(
                         &declaration.syntax,
                         &declaration.name,
                         macro_signature(info),
+                        info.docs.clone(),
                     );
                 }
                 for parameter in &declaration.type_parameters {
@@ -327,16 +367,37 @@ impl Collector<'_> {
                         .map(|value_type| self.display_type(value_type))
                         .or_else(|| self.implementation_member_type(implementation, member));
                     if let Some(value_type) = value_type {
-                        self.named(
+                        self.named_with_docs(
                             &member.syntax,
                             &member.name,
                             format!("def {}: {value_type}", member.name),
+                            member.docs.clone(),
                         );
                     }
                     self.expression(&member.value);
                 }
             }
             Item::TraitDeclaration(declaration) => {
+                let docs = self
+                    .typed
+                    .resolved()
+                    .traits()
+                    .values()
+                    .find(|resolved| resolved.declaration.syntax.id == declaration.syntax.id)
+                    .map(|resolved| resolved.declaration.docs.clone())
+                    .unwrap_or_else(|| declaration.docs.clone());
+                let (parameters, where_clause) = self.juxtaposed_generic_suffix(
+                    &declaration.type_parameters,
+                    &declaration.prerequisites,
+                    &declaration.subtype_bounds,
+                    &declaration.functional_dependencies,
+                );
+                self.named_with_docs(
+                    &declaration.syntax,
+                    &declaration.name,
+                    format!("trait {}{parameters}{where_clause}", declaration.name),
+                    docs,
+                );
                 for parameter in &declaration.type_parameters {
                     self.type_parameter(parameter);
                 }
@@ -350,7 +411,7 @@ impl Collector<'_> {
                     self.trait_bound(prerequisite);
                 }
                 for member in &declaration.members {
-                    self.named(
+                    self.named_with_docs(
                         &member.syntax,
                         &member.name,
                         format!(
@@ -358,6 +419,7 @@ impl Collector<'_> {
                             member.name,
                             member.annotation.syntax().text().trim()
                         ),
+                        member.docs.clone(),
                     );
                     self.ty(&member.annotation);
                     if let Some(default) = &member.default {
@@ -468,7 +530,19 @@ impl Collector<'_> {
             .find(|(_, candidate)| candidate.syntax.id == declaration.syntax.id)
             && let Some(signature) = self.type_signature(*id, declaration.syntax.id)
         {
-            self.named(&declaration.syntax, &declaration.name, signature);
+            let docs = self
+                .typed
+                .resolved()
+                .type_declarations()
+                .get(id)
+                .map(|resolved| resolved.docs.clone())
+                .unwrap_or_else(|| declaration.docs.clone());
+            self.named_with_docs(
+                &declaration.syntax,
+                &declaration.name,
+                signature,
+                docs,
+            );
         }
         for parameter in &declaration.type_parameters {
             self.type_parameter(parameter);
@@ -701,10 +775,17 @@ impl Collector<'_> {
                 &binding.trait_bounds,
                 &binding.subtype_bounds,
             );
-            self.named(
+            let docs = self
+                .typed
+                .symbol_for(binding.syntax.id)
+                .and_then(|symbol| self.declarations.get(&symbol))
+                .map(|declaration| declaration.docs.clone())
+                .unwrap_or_else(|| binding.docs.clone());
+            self.named_with_docs(
                 &binding.syntax,
                 &binding.name,
                 format!("{prefix} {}: {generics}{value_type}", binding.name),
+                docs,
             );
         }
         for parameter in &binding.type_parameters {
@@ -729,17 +810,28 @@ impl Collector<'_> {
         {
             match expression {
                 Expression::Name(name) => {
-                    self.named(&name.syntax, &name.name, macro_signature(info))
+                    self.named_with_docs(
+                        &name.syntax,
+                        &name.name,
+                        macro_signature(info),
+                        info.docs.clone(),
+                    )
                 }
                 Expression::Access(access) => {
                     if let Accessor::Name(name) = &access.accessor {
-                        self.named_last(&access.syntax, name, macro_signature(info));
+                        self.named_last_with_docs(
+                            &access.syntax,
+                            name,
+                            macro_signature(info),
+                            info.docs.clone(),
+                        );
                     }
                 }
-                Expression::Quote(quote) => self.named_last(
+                Expression::Quote(quote) => self.named_last_with_docs(
                     &quote.syntax,
                     quote.kind.name(),
                     macro_signature(info),
+                    info.docs.clone(),
                 ),
                 _ => {}
             }
@@ -754,21 +846,27 @@ impl Collector<'_> {
         }
         if let Some(value_type) = self.typed.type_of_expression(expression.syntax().id) {
             let value_type = self.display_type(value_type);
-            let signature = self
+            let declaration = self
                 .typed
                 .symbol_for(expression.syntax().id)
-                .and_then(|symbol| self.declarations.get(&symbol))
+                .and_then(|symbol| self.declarations.get(&symbol));
+            let trait_member = self
+                .typed
+                .resolved()
+                .trait_methods_for_expression(expression.syntax().id)
+                .first()
+                .and_then(|method| self.typed.resolved().trait_method(*method));
+            let signature = declaration
                 .map(|declaration| declaration.signature(&value_type))
                 .or_else(|| {
-                    self.typed
-                        .resolved()
-                        .trait_methods_for_expression(expression.syntax().id)
-                        .first()
-                        .and_then(|method| self.typed.resolved().trait_method(*method))
-                        .map(|member| format!("<trait member> {}: {value_type}", member.name))
+                    trait_member.map(|member| format!("<trait member> {}: {value_type}", member.name))
                 })
                 .unwrap_or(value_type);
-            self.syntax(expression.syntax(), signature);
+            let docs = declaration
+                .map(|declaration| declaration.docs.clone())
+                .or_else(|| trait_member.map(|member| member.docs.clone()))
+                .unwrap_or_default();
+            self.syntax_with_docs(expression.syntax(), signature, docs);
         }
         match expression {
             Expression::Function(function) => {
@@ -891,7 +989,14 @@ impl Collector<'_> {
                 if let Some(id) = self.typed.resolved().type_for_pattern(nominal.syntax.id)
                     && let Some(signature) = self.type_signature(id, nominal.syntax.id)
                 {
-                    self.named(&nominal.syntax, &nominal.name, signature);
+                    let docs = self
+                        .typed
+                        .resolved()
+                        .type_declarations()
+                        .get(&id)
+                        .map(|declaration| declaration.docs.clone())
+                        .unwrap_or_default();
+                    self.named_with_docs(&nominal.syntax, &nominal.name, signature, docs);
                 }
                 self.pattern(&nominal.argument);
             }
@@ -918,6 +1023,23 @@ impl Collector<'_> {
     }
 
     fn trait_bound(&mut self, bound: &TraitBound) {
+        if let Some(id) = self.typed.resolved().trait_for(bound.syntax.id)
+            && let Some(resolved) = self.typed.resolved().traits().get(&id)
+        {
+            let declaration = &resolved.declaration;
+            let (parameters, where_clause) = self.juxtaposed_generic_suffix(
+                &declaration.type_parameters,
+                &declaration.prerequisites,
+                &declaration.subtype_bounds,
+                &declaration.functional_dependencies,
+            );
+            self.named_with_docs(
+                &bound.syntax,
+                &bound.trait_name.name,
+                format!("trait {}{parameters}{where_clause}", declaration.name),
+                declaration.docs.clone(),
+            );
+        }
         for argument in &bound.arguments {
             self.ty(argument);
         }
@@ -929,7 +1051,14 @@ impl Collector<'_> {
                 if let Some(id) = self.typed.resolved().type_for(named.syntax.id)
                     && let Some(signature) = self.type_signature(id, named.syntax.id)
                 {
-                    self.named(&named.syntax, &named.name, signature);
+                    let docs = self
+                        .typed
+                        .resolved()
+                        .type_declarations()
+                        .get(&id)
+                        .map(|declaration| declaration.docs.clone())
+                        .unwrap_or_default();
+                    self.named_with_docs(&named.syntax, &named.name, signature, docs);
                 } else if self
                     .typed
                     .resolved()
@@ -970,6 +1099,10 @@ impl Collector<'_> {
     }
 
     fn syntax(&mut self, syntax: &Syntax, signature: String) {
+        self.syntax_with_docs(syntax, signature, Vec::new());
+    }
+
+    fn syntax_with_docs(&mut self, syntax: &Syntax, signature: String, documentation: Vec<String>) {
         if let (Some(first), Some(last)) = (
             syntax.tokens().iter().find(|token| !token.kind.is_trivia()),
             syntax
@@ -981,20 +1114,30 @@ impl Collector<'_> {
             self.entries.push(HoverEntry {
                 range: first.span.start..last.span.end,
                 signature,
+                documentation,
             });
         }
     }
 
     fn named(&mut self, syntax: &Syntax, name: &str, signature: String) {
+        self.named_with_docs(syntax, name, signature, Vec::new());
+    }
+
+    fn named_with_docs(&mut self, syntax: &Syntax, name: &str, signature: String, documentation: Vec<String>) {
         if let Some(token) = syntax.tokens().iter().find(|token| token.text == name) {
             self.entries.push(HoverEntry {
                 range: token.span.clone(),
                 signature,
+                documentation,
             });
         }
     }
 
     fn named_last(&mut self, syntax: &Syntax, name: &str, signature: String) {
+        self.named_last_with_docs(syntax, name, signature, Vec::new());
+    }
+
+    fn named_last_with_docs(&mut self, syntax: &Syntax, name: &str, signature: String, documentation: Vec<String>) {
         if let Some(token) = syntax
             .tokens()
             .iter()
@@ -1004,6 +1147,7 @@ impl Collector<'_> {
             self.entries.push(HoverEntry {
                 range: token.span.clone(),
                 signature,
+                documentation,
             });
         }
     }
@@ -1122,6 +1266,41 @@ mod tests {
                 "missing {name}: {signature} in {entries:?}"
             );
         }
+    }
+
+    #[test]
+    fn includes_explicit_and_triple_slash_docs_on_declarations_and_references() {
+        let source = concat!(
+            "@doc(\"Line 1\")\n",
+            "///Line 2\n",
+            "pub type alias MyType = I32\n",
+            "/// Value docs\n",
+            "def value: MyType = 1\n",
+            "value\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-docs.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let type_entries = entries
+            .iter()
+            .filter(|entry| &source[entry.range.clone()] == "MyType")
+            .collect::<Vec<_>>();
+        assert!(type_entries.len() >= 2, "{type_entries:?}");
+        assert!(type_entries.iter().all(|entry| entry.documentation == ["Line 1", "Line 2"]));
+
+        let value_entries = entries
+            .iter()
+            .filter(|entry| &source[entry.range.clone()] == "value")
+            .collect::<Vec<_>>();
+        assert!(value_entries.len() >= 2, "{value_entries:?}");
+        assert!(value_entries.iter().all(|entry| entry.documentation == [" Value docs"]));
     }
 
     #[test]

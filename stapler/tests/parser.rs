@@ -843,6 +843,43 @@ fn parses_modifier_macro_definitions_and_item_modifiers_losslessly() {
 }
 
 #[test]
+fn parses_triple_slash_docs_on_named_declarations_and_members() {
+    let source = concat!(
+        "/// Type line 1\r\n",
+        "/// Type line 2\r\n",
+        "pub type Documented = I32\r\n",
+        "trait Example T {\r\n",
+        "  /// Member docs\r\n",
+        "  member: T -> T\r\n",
+        "}\r\n",
+        "//// ordinary comment\r\n",
+        "def plain = 0\r\n",
+    );
+    let module = parse(source).expect("doc comments should parse");
+    assert_eq!(module.text(), source);
+    let Item::Modified(documented) = &module.items[0] else {
+        panic!("expected documented type declaration");
+    };
+    assert_eq!(
+        documented
+            .modifiers
+            .iter()
+            .filter_map(|modifier| modifier.doc.as_deref())
+            .collect::<Vec<_>>(),
+        [" Type line 1", " Type line 2"]
+    );
+    assert!(matches!(documented.item.as_ref(), Item::TypeDeclaration(_)));
+    let Item::TraitDeclaration(declaration) = &module.items[1] else {
+        panic!("expected trait declaration");
+    };
+    assert_eq!(declaration.members[0].docs, [" Member docs"]);
+    let Item::Binding(binding) = &module.items[2] else {
+        panic!("expected binding");
+    };
+    assert!(binding.docs.is_empty());
+}
+
+#[test]
 fn parses_visibility_aware_macro_calls_and_splices_losslessly() {
     let source = concat!(
         "macro define = vis: MacroCallVisibility => ty: Type => quote { $vis type Generated = $ty }\n",

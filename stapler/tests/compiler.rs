@@ -3261,6 +3261,28 @@ fn expands_modifier_lists_generated_by_item_macros() {
 }
 
 #[test]
+fn builtin_doc_composes_with_modifier_expansion_in_source_order() {
+    let module = type_check(concat!(
+        "macro @identity: Item -> Item = item => item\n",
+        "@doc(\"outer\")\n",
+        "@identity\n",
+        "///inner\n",
+        "let documented: I32 = 42\n",
+    ));
+    let binding = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "documented" => Some(binding),
+            _ => None,
+        })
+        .expect("documented binding should survive expansion");
+    assert_eq!(binding.docs, ["outer", "inner"]);
+}
+
+#[test]
 fn modifier_macro_produces_multiple_items_as_the_outermost_modifier() {
     let module = type_check(concat!(
         "macro @split: Item -> Sequence Item = _ => parse_quote {\n",
@@ -3940,6 +3962,30 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
         (
             "macro @recursive_constructor: Item -> Item = item => item\n",
             "modifier name `@recursive_constructor` is reserved by the compiler",
+        ),
+        (
+            "macro @doc: Item -> Item = item => item\n",
+            "modifier name `@doc` is reserved by the compiler",
+        ),
+        (
+            "@doc\ntype Documented = I32\n",
+            "`@doc` requires a parenthesized string literal",
+        ),
+        (
+            "@doc(42)\ntype Documented = I32\n",
+            "`@doc` requires a string literal argument",
+        ),
+        (
+            "@doc(\"bad\\q\")\ntype Documented = I32\n",
+            "unknown string escape `\\q`",
+        ),
+        (
+            "@doc(\"not named\")\nuse std.core.*\n",
+            "`@doc` may only modify a named declaration",
+        ),
+        (
+            "/// not named\n42\n",
+            "`@doc` may only modify a named declaration",
         ),
         (
             "@recursive_constructor\ntype Box = I32\n",

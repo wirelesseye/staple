@@ -223,6 +223,7 @@ pub struct ResolvedMacro {
     pub name: String,
     pub modifier: bool,
     pub signature: String,
+    pub docs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1181,10 +1181,13 @@ impl MacroExpander {
                 }
             }
             if definition.key.modifier {
-                if definition.key.name == "recursive_constructor" {
+                if matches!(definition.key.name.as_str(), "recursive_constructor" | "doc") {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
-                        "modifier name `@recursive_constructor` is reserved by the compiler",
+                        format!(
+                            "modifier name `@{}` is reserved by the compiler",
+                            definition.key.name
+                        ),
                     ));
                 }
                 let valid_parameters = match definition.parameters.as_slice() {
@@ -1562,7 +1565,10 @@ impl MacroExpander {
         if let Item::VisibilityMacroInvocation(invocation) = current {
             current = self.expand_visibility_macro_invocation(module, invocation, depth + 1)?;
         }
-        if !modifier_target_supported(&current) {
+        let docs_only = modified.modifiers.iter().all(|modifier| {
+            modifier.namespace.is_none() && modifier.name == "doc"
+        });
+        if !modifier_target_supported(&current) && !docs_only {
             self.diagnostics.push(Diagnostic::new(
                 modified.syntax.span,
                 "modifier macros may only be applied to `let`, `def`, `type`, `extern`, `trait`, or `impl` items",
@@ -1597,6 +1603,42 @@ impl MacroExpander {
                     return None;
                 };
                 declaration.recursive_constructor = true;
+                continue;
+            }
+            if invocation.namespace.is_none() && invocation.name == "doc" {
+                let doc = if let Some(doc) = invocation.doc.clone() {
+                    doc
+                } else {
+                    let Some(argument) = invocation.argument.as_ref() else {
+                        self.diagnostics.push(Diagnostic::new(
+                            invocation.syntax.span,
+                            "`@doc` requires a parenthesized string literal",
+                        ));
+                        return None;
+                    };
+                    let Some(Expression::String(literal)) = argument.expression.as_ref() else {
+                        self.diagnostics.push(Diagnostic::new(
+                            invocation.syntax.span,
+                            "`@doc` requires a string literal argument",
+                        ));
+                        return None;
+                    };
+                    match crate::string_literal::decode(&literal.literal) {
+                        Ok(doc) => doc,
+                        Err(message) => {
+                            self.diagnostics
+                                .push(Diagnostic::new(invocation.syntax.span, message));
+                            return None;
+                        }
+                    }
+                };
+                if !attach_doc(&mut current, doc) {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span,
+                        "`@doc` may only modify a named declaration",
+                    ));
+                    return None;
+                }
                 continue;
             }
             let (definition, argument) = self.select_modifier(module, &invocation)?;
@@ -5740,6 +5782,7 @@ fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
             name: definition.key.name.clone(),
             modifier: false,
             signature: format!("{generic}{annotation}"),
+            docs: definition.declaration.docs.clone(),
         };
     }
     let parameters = format_meta_signature(&definition.parameters);
@@ -5754,6 +5797,7 @@ fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
         name: definition.key.name.clone(),
         modifier: definition.key.modifier,
         signature,
+        docs: definition.declaration.docs.clone(),
     }
 }
 
@@ -6834,6 +6878,20 @@ fn modifier_target_supported(item: &Item) -> bool {
         | Item::Expression(_) => false,
         Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => false,
     }
+}
+
+fn attach_doc(item: &mut Item, doc: String) -> bool {
+    match item {
+        Item::Modified(modified) => return attach_doc(&mut modified.item, doc),
+        Item::VisibilitySplice(splice) => return attach_doc(&mut splice.item, doc),
+        Item::Submodule(value) => value.docs.insert(0, doc),
+        Item::TypeDeclaration(value) => value.docs.insert(0, doc),
+        Item::MacroDeclaration(value) => value.docs.insert(0, doc),
+        Item::TraitDeclaration(value) => value.docs.insert(0, doc),
+        Item::Binding(value) => value.docs.insert(0, doc),
+        _ => return false,
+    }
+    true
 }
 
 fn block_item_supported(item: &Item) -> bool {

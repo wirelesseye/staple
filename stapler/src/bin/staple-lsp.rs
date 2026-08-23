@@ -280,7 +280,15 @@ impl Server {
                 Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
                         kind: MarkupKind::Markdown,
-                        value: format!("```staple\n{}\n```", entry.signature),
+                        value: if entry.documentation.is_empty() {
+                            format!("```staple\n{}\n```", entry.signature)
+                        } else {
+                            format!(
+                                "```staple\n{}\n```\n\n{}",
+                                entry.signature,
+                                entry.documentation.join("\n")
+                            )
+                        },
                     }),
                     range: Some(Range::new(
                         Position::new(start_line, start_character),
@@ -575,6 +583,7 @@ fn remap_hover_entries(source: &str, successful: &SuccessfulAnalysis) -> Vec<Hov
                 HoverEntry {
                     range,
                     signature: entry.signature.clone(),
+                    documentation: entry.documentation.clone(),
                 }
             })
         })
@@ -865,6 +874,7 @@ mod tests {
             hover_entries: vec![HoverEntry {
                 range: reference..reference + 4,
                 signature: "def good: () -> I32".to_owned(),
+                documentation: Vec::new(),
             }],
         };
 

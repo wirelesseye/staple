@@ -84,6 +84,8 @@ pub struct ModifierInvocation {
     pub namespace: Option<String>,
     pub name: String,
     pub argument: Option<ModifierArgument>,
+    /// Decoded documentation text for a synthetic `///` invocation.
+    pub doc: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,6 +99,7 @@ pub struct ModifierArgument {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Submodule {
     pub syntax: Syntax,
+    pub docs: Vec<String>,
     pub visibility: Visibility,
     pub name: String,
     pub module: Module,
@@ -179,6 +182,7 @@ pub enum TypeDeclarationKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDeclaration {
     pub syntax: Syntax,
+    pub docs: Vec<String>,
     pub recursive_constructor: bool,
     pub visibility: Visibility,
     pub representation_visibility: Visibility,
@@ -208,6 +212,7 @@ pub enum PatternBindingKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MacroDeclaration {
     pub syntax: Syntax,
+    pub docs: Vec<String>,
     pub visibility: Visibility,
     pub name: String,
     pub modifier: bool,
@@ -221,6 +226,7 @@ pub struct MacroDeclaration {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitDeclaration {
     pub syntax: Syntax,
+    pub docs: Vec<String>,
     pub visibility: Visibility,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
@@ -241,6 +247,7 @@ pub struct FunctionalDependency {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TraitMember {
     pub syntax: Syntax,
+    pub docs: Vec<String>,
     pub name: String,
     pub annotation: Type,
     pub default: Option<Expression>,
@@ -260,6 +267,7 @@ pub struct TraitImplementation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImplementationMember {
     pub syntax: Syntax,
+    pub docs: Vec<String>,
     pub name: String,
     pub value: Expression,
 }
@@ -273,6 +281,7 @@ pub enum BindingKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Binding {
     pub syntax: Syntax,
+    pub docs: Vec<String>,
     pub visibility: Visibility,
     pub kind: BindingKind,
     pub mutable: bool,

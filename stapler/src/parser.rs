@@ -232,8 +232,8 @@ impl Grammar {
         let previous = self.newline_terminates_expression;
         self.newline_terminates_expression = true;
         let item_start = self.position;
-        if self.at(TokenKind::At) {
-            let mut modifiers = Vec::new();
+        let mut modifiers = self.doc_comment_modifiers(item_start);
+        if !modifiers.is_empty() || self.at(TokenKind::At) {
             while self.at(TokenKind::At) {
                 modifiers.push(self.parse_modifier_invocation()?);
             }
@@ -371,6 +371,7 @@ impl Grammar {
             namespace,
             name,
             argument,
+            doc: None,
         })
     }
 
@@ -399,6 +400,26 @@ impl Grammar {
         })
     }
 
+    fn parse_member_docs(&mut self, start: usize) -> Result<Vec<String>, ParseError> {
+        let mut docs = self.leading_doc_comments(start);
+        while self.at(TokenKind::At) {
+            let modifier = self.parse_modifier_invocation()?;
+            if modifier.namespace.is_some() || modifier.name != "doc" {
+                return Err(self.error("only `@doc` may modify a declaration member"));
+            }
+            let Some(argument) = modifier.argument else {
+                return Err(self.error("`@doc` requires a parenthesized string literal"));
+            };
+            let Some(Expression::String(literal)) = argument.expression else {
+                return Err(self.error("`@doc` requires a string literal argument"));
+            };
+            let doc = crate::string_literal::decode(&literal.literal)
+                .map_err(|message| self.error(message))?;
+            docs.push(doc);
+        }
+        Ok(docs)
+    }
+
     fn parse_submodule(
         &mut self,
         visibility: Visibility,
@@ -423,6 +444,7 @@ impl Grammar {
         self.expect(TokenKind::RBrace, "expected `}` after submodule items")?;
         Ok(Submodule {
             syntax: self.syntax(start),
+            docs: Vec::new(),
             visibility,
             name,
             module,
@@ -485,6 +507,7 @@ impl Grammar {
         self.expect(TokenKind::RBrace, "expected `}` after companion items")?;
         Ok(Submodule {
             syntax: self.syntax(start),
+            docs: Vec::new(),
             visibility: Visibility::Public,
             name,
             module,
@@ -529,6 +552,7 @@ impl Grammar {
         };
         Ok(MacroDeclaration {
             syntax: self.syntax(start),
+            docs: Vec::new(),
             visibility,
             name,
             modifier,
@@ -562,6 +586,7 @@ impl Grammar {
                 return Err(self.error("unterminated trait declaration"));
             }
             let member_start = self.position;
+            let docs = self.parse_member_docs(member_start)?;
             let member_name = self
                 .expect(TokenKind::Identifier, "expected trait member name")?
                 .text;
@@ -578,6 +603,7 @@ impl Grammar {
             };
             members.push(TraitMember {
                 syntax: self.syntax(member_start),
+                docs,
                 name: member_name,
                 annotation,
                 default,
@@ -587,6 +613,7 @@ impl Grammar {
         self.expect(TokenKind::RBrace, "expected `}` after trait members")?;
         Ok(TraitDeclaration {
             syntax: self.syntax(start),
+            docs: Vec::new(),
             visibility,
             name,
             type_parameters,
@@ -803,6 +830,7 @@ impl Grammar {
                 return Err(self.error("unterminated trait implementation"));
             }
             let member_start = self.position;
+            let docs = self.parse_member_docs(member_start)?;
             self.expect(TokenKind::Def, "expected `def` in trait implementation")?;
             let name = self
                 .expect(TokenKind::Identifier, "expected implementation member name")?
@@ -814,6 +842,7 @@ impl Grammar {
             let value = self.parse_expression()?;
             members.push(ImplementationMember {
                 syntax: self.syntax(member_start),
+                docs,
                 name,
                 value,
             });
@@ -837,8 +866,8 @@ impl Grammar {
     /// Parses one of the item forms supported in a block expression.
     fn parse_block_item(&mut self) -> Result<Item, ParseError> {
         let item_start = self.position;
-        if self.at(TokenKind::At) {
-            let mut modifiers = Vec::new();
+        let mut modifiers = self.doc_comment_modifiers(item_start);
+        if !modifiers.is_empty() || self.at(TokenKind::At) {
             while self.at(TokenKind::At) {
                 modifiers.push(self.parse_modifier_invocation()?);
             }
@@ -1094,7 +1123,10 @@ impl Grammar {
             if self.peek().is_none() {
                 return Err(self.error("unterminated extern block"));
             }
-            let binding = self.parse_binding(Visibility::Private, None)?;
+            let binding_start = self.position;
+            let docs = self.parse_member_docs(binding_start)?;
+            let mut binding = self.parse_binding(Visibility::Private, Some(binding_start))?;
+            binding.docs = docs;
             if binding.mutable {
                 return Err(self.error("external bindings cannot be mutable"));
             }
@@ -1164,6 +1196,7 @@ impl Grammar {
         }
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
+            docs: Vec::new(),
             recursive_constructor: false,
             visibility,
             representation_visibility,
@@ -1227,6 +1260,7 @@ impl Grammar {
         };
         Ok(Binding {
             syntax: self.syntax(start),
+            docs: Vec::new(),
             visibility,
             kind,
             mutable,
@@ -2797,6 +2831,52 @@ impl Grammar {
             position += 1;
         }
         position
+    }
+
+    /// Collects outer doc comments in the trivia immediately preceding the
+    /// next token. Each `///` token is equivalent to one `@doc` modifier.
+    fn leading_doc_comments(&self, start: usize) -> Vec<String> {
+        let end = self.next_non_trivia(start);
+        let mut line_start = start == 0
+            || self.tokens[..start]
+                .last()
+                .is_some_and(|token| token.kind == TokenKind::Newline);
+        let mut docs = Vec::new();
+        for token in &self.tokens[start..end] {
+            match token.kind {
+                TokenKind::Newline => line_start = true,
+                TokenKind::Whitespace => {}
+                TokenKind::LineComment => {
+                    if line_start
+                        && !token.text.starts_with("////")
+                        && let Some(doc) = token.text.strip_prefix("///")
+                    {
+                        docs.push(doc.to_owned());
+                    }
+                    line_start = false;
+                }
+                _ => line_start = false,
+            }
+        }
+        docs
+    }
+
+    fn doc_comment_modifiers(&mut self, start: usize) -> Vec<ModifierInvocation> {
+        let docs = self.leading_doc_comments(start);
+        let modifiers: Vec<_> = docs
+            .into_iter()
+            .map(|doc| ModifierInvocation {
+                syntax: self.syntax(start),
+                namespace: None,
+                name: "doc".to_owned(),
+                argument: None,
+                doc: Some(doc),
+            })
+            .collect();
+        if !modifiers.is_empty() {
+            self.position = self.next_non_trivia(start);
+        }
+        modifiers
     }
 
     /// Returns whether skipped trivia before the next token contains a newline.
