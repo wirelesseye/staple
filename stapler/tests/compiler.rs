@@ -2597,7 +2597,7 @@ fn buffer_intrinsics_type_check_and_compile() {
         "let capacity: USize = Buffer.capacity values\n",
         "Buffer.push values 10\n",
         "Buffer.push values 20\n",
-        "let first: Ref I32 = Buffer.get values (0 satisfies USize)\n",
+        "let first: Ref I32 = Buffer.get_ref values (0 satisfies USize)\n",
         "let popped: Option I32 = Buffer.pop values\n",
         "let frozen: Slice I32 = Buffer.freeze values\n",
         "let frozen_length: USize = Slice.length frozen\n",

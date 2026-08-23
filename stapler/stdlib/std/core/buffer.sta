@@ -25,7 +25,7 @@ companion<T> Buffer T {
     pub def pop: Buffer T ->{mut} Option T = buffer => __buffer_pop buffer
 
     // Borrows an initialised element by position, trapping if out of bounds.
-    pub def get: Buffer T -> USize -> Ref T = buffer => position => __buffer_get (buffer, position)
+    pub def get_ref: Buffer T -> USize -> Ref T = buffer => position => __buffer_get (buffer, position)
 
     // Seals the buffer against mutation and returns a zero-copy slice of its contents.
     pub def freeze: Buffer T -> Slice T = buffer => __buffer_freeze buffer

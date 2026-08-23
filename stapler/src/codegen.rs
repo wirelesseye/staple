@@ -7565,13 +7565,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
         let [inkwell::values::BasicMetadataValueEnum::PointerValue(buffer), inkwell::values::BasicMetadataValueEnum::IntValue(position)] = arguments.as_slice() else {
-            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "Buffer.get requires a buffer and USize index"));
+            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "Buffer.get_ref requires a buffer and USize index"));
         };
         let CheckedType::Ref(element) = self
             .concrete_expression_type(&Expression::Call(call.clone()))
             .unwrap_or(CheckedType::Error)
         else {
-            return Err(Diagnostic::new(call.syntax.span.clone(), "invalid Buffer.get result"));
+            return Err(Diagnostic::new(call.syntax.span.clone(), "invalid Buffer.get_ref result"));
         };
         let llvm_element = self.compile_type(&element)?;
         let header = self.buffer_header_type(llvm_element);

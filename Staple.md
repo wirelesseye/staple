@@ -2120,7 +2120,7 @@ current initialized length and fixed capacity.
 `Buffer.push` appends while spare capacity remains, and `Buffer.pop` moves the
 last initialized element into an `Option T`. Both require a mutable buffer
 argument. Pushing to a full buffer traps; growth belongs in higher-level
-containers such as `List`. `Buffer.get` returns a managed reference to an
+containers such as `List`. `Buffer.get_ref` returns a managed reference to an
 initialized element and traps for an out-of-bounds index. Pushing does not
 relocate storage, but popping invalidates references to the removed slot.
 

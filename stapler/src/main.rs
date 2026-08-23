@@ -975,7 +975,7 @@ mod tests {
                 "  let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
                 "  Buffer.push values 41\n",
                 "  Buffer.push values 42\n",
-                "  Buffer.get values (1 satisfies USize)\n",
+                "  Buffer.get_ref values (1 satisfies USize)\n",
                 "}\n",
                 "def make_slice = () => {\n",
                 "  let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
