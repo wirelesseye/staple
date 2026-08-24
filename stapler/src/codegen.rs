@@ -2859,6 +2859,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let parameters = function.get_params();
         let values = &parameters[1..];
         let result = match structural {
+            crate::StructuralTraitMethod::Debug => self.compile_structural_debug_body(
+                values,
+                &arguments[0],
+                span.clone(),
+            )?,
             crate::StructuralTraitMethod::Index => self.compile_structural_index_body(
                 values,
                 &arguments[0],
@@ -2889,6 +2894,117 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.builder.position_at_end(block);
         }
         Ok(function)
+    }
+
+    fn compile_structural_debug_body(
+        &mut self,
+        values: &[BasicValueEnum<'context>],
+        target: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let [value, formatter] = values else {
+            return Err(Diagnostic::new(span, "invalid structural Debug arguments"));
+        };
+        let CheckedType::Product(product) = target else {
+            return Err(Diagnostic::new(span, "structural Debug requires a product"));
+        };
+        let BasicValueEnum::StructValue(value) = value else {
+            return Err(Diagnostic::new(span, "invalid structural Debug product value"));
+        };
+        self.compile_formatter_write_literal(*formatter, "(", span.clone())?;
+        let debug_trait = self
+            .typed_module
+            .resolved()
+            .standard_trait("Debug")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "standard Debug trait is unavailable"))?;
+        let debug_method = self
+            .typed_module
+            .resolved()
+            .traits()
+            .get(&debug_trait)
+            .and_then(|trait_| trait_.methods.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "standard Debug method is unavailable"))?;
+        for (index, element) in product.elements.iter().enumerate() {
+            if index != 0 {
+                self.compile_formatter_write_literal(*formatter, ", ", span.clone())?;
+            }
+            if let Some(name) = &element.name {
+                self.compile_formatter_write_literal(*formatter, name, span.clone())?;
+                self.compile_formatter_write_literal(*formatter, ": ", span.clone())?;
+            }
+            let field = self
+                .builder
+                .build_extract_value(*value, index as u32, "debug.element")
+                .map_err(compiler_diagnostic)?;
+            let arguments = vec![element.value_type.clone()];
+            let function = self.trait_method_code(
+                debug_trait,
+                &arguments,
+                debug_method,
+                span.clone(),
+            )?;
+            self.builder
+                .build_direct_call(
+                    function,
+                    &[
+                        self.context.ptr_type(AddressSpace::default()).const_null().into(),
+                        field.into(),
+                        (*formatter).into(),
+                    ],
+                    "debug.fmt",
+                )
+                .map_err(compiler_diagnostic)?;
+        }
+        self.compile_formatter_write_literal(*formatter, ")", span.clone())?;
+        value_as_basic(self.unit_value()).ok_or_else(|| Diagnostic::new(span, "invalid unit value"))
+    }
+
+    fn compile_formatter_write_literal(
+        &mut self,
+        formatter: BasicValueEnum<'context>,
+        literal: &str,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let function_id = self
+            .typed_module
+            .resolved()
+            .functions()
+            .iter()
+            .find(|function| function.name == "formatter_write")
+            .map(|function| function.id)
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "Formatter.write implementation is unavailable")
+            })?;
+        let function_type = self
+            .typed_module
+            .type_of_function(function_id)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "Formatter.write has no checked type"))?;
+        let function = self.ensure_function_specialization(function_id, &function_type)?;
+        let source = self
+            .builder
+            .build_global_string_ptr(literal, "debug.literal")
+            .map_err(compiler_diagnostic)?
+            .as_pointer_value();
+        let length = self.size_type.const_int(literal.len() as u64, false);
+        let pointer = self.build_gc_allocation(length, "debug.literal.data", span.clone())?;
+        self.builder
+            .build_memcpy(pointer, 1, source, 1, length)
+            .map_err(compiler_diagnostic)?;
+        let string = self.build_string_value(pointer, length, span)?;
+        self.builder
+            .build_direct_call(
+                function,
+                &[
+                    self.context.ptr_type(AddressSpace::default()).const_null().into(),
+                    formatter.into(),
+                    string.into(),
+                ],
+                "formatter.write",
+            )
+            .map_err(compiler_diagnostic)?;
+        Ok(())
     }
 
     fn compile_structural_index_body(

@@ -111,18 +111,31 @@ extern "staple-intrinsic" {
     let __f64_gt: (F64, F64) -> Bool
 }
 
-impl ToString I8 { def to_string = value => __i8_to_string value }
-impl ToString I16 { def to_string = value => __i16_to_string value }
-impl ToString I32 { def to_string = value => __i32_to_string value }
-impl ToString I64 { def to_string = value => __i64_to_string value }
-impl ToString U8 { def to_string = value => __u8_to_string value }
-impl ToString U16 { def to_string = value => __u16_to_string value }
-impl ToString U32 { def to_string = value => __u32_to_string value }
-impl ToString U64 { def to_string = value => __u64_to_string value }
-impl ToString ISize { def to_string = value => __isize_to_string value }
-impl ToString USize { def to_string = value => __usize_to_string value }
-impl ToString F32 { def to_string = value => __f32_to_string value }
-impl ToString F64 { def to_string = value => __f64_to_string value }
+impl Display I8 { def fmt = (value, formatter) => Formatter.write (formatter, __i8_to_string value) }
+impl Display I16 { def fmt = (value, formatter) => Formatter.write (formatter, __i16_to_string value) }
+impl Display I32 { def fmt = (value, formatter) => Formatter.write (formatter, __i32_to_string value) }
+impl Display I64 { def fmt = (value, formatter) => Formatter.write (formatter, __i64_to_string value) }
+impl Display U8 { def fmt = (value, formatter) => Formatter.write (formatter, __u8_to_string value) }
+impl Display U16 { def fmt = (value, formatter) => Formatter.write (formatter, __u16_to_string value) }
+impl Display U32 { def fmt = (value, formatter) => Formatter.write (formatter, __u32_to_string value) }
+impl Display U64 { def fmt = (value, formatter) => Formatter.write (formatter, __u64_to_string value) }
+impl Display ISize { def fmt = (value, formatter) => Formatter.write (formatter, __isize_to_string value) }
+impl Display USize { def fmt = (value, formatter) => Formatter.write (formatter, __usize_to_string value) }
+impl Display F32 { def fmt = (value, formatter) => Formatter.write (formatter, __f32_to_string value) }
+impl Display F64 { def fmt = (value, formatter) => Formatter.write (formatter, __f64_to_string value) }
+
+impl Debug I8 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug I16 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug I32 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug I64 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug U8 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug U16 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug U32 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug U64 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug ISize { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug USize { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug F32 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
+impl Debug F64 { def fmt = (value, formatter) => Display.fmt (value, formatter) }
 
 impl Add I8 {
     def add = left => right => __i8_add (left, right)
@@ -601,4 +614,3 @@ impl PartialOrd F64 {
         },
     }
 }
-

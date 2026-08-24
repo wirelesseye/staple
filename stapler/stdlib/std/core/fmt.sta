@@ -1,0 +1,109 @@
+use std.core.string.(String, ToString)
+
+/// A growable UTF-8 output buffer used by formatting traits.
+pub type Formatter = Buffer U8
+
+/// Formats a value for human-facing output.
+pub trait Display T {
+    fmt: (T, Formatter) ->{mut 1} ()
+}
+
+/// Formats a value for developer-facing output.
+pub trait Debug T {
+    fmt: (T, Formatter) ->{mut 1} ()
+}
+
+def grow_formatter: Formatter ->{mut} () = formatter => {
+    let Formatter(mut source) = formatter
+    let old_capacity = Buffer.capacity source
+    let new_capacity: USize = match old_capacity == 0 {
+        True() => 16,
+        False() => old_capacity * 2,
+    }
+    let mut destination: Buffer U8 = Buffer.with_capacity new_capacity
+    Buffer.transfer (source, destination)
+    formatter = Formatter destination
+}
+
+def write_byte: Formatter ->{mut} U8 -> () = formatter => byte => {
+    let Formatter buffer = formatter
+    match Buffer.length buffer == Buffer.capacity buffer {
+        True() => grow_formatter formatter,
+        False() => (),
+    }
+    let Formatter(mut grown) = formatter
+    Buffer.push grown byte
+}
+
+def formatter_write: (Formatter, String) ->{mut 0} () = (formatter, value) => {
+    let bytes = String.bytes value
+    let mut index: USize = 0
+    while (index < Slice.length bytes) {
+        write_byte formatter bytes[index]
+        index = index + 1
+    }
+}
+
+def formatter_write_debug: (Formatter, String) ->{mut 0} () = (formatter, value) => {
+    formatter_write (formatter, "\"")
+    let bytes = String.bytes value
+    let mut index: USize = 0
+    while (index < Slice.length bytes) {
+        let byte = bytes[index]
+        if {
+            byte == 0 => Formatter.write (formatter, "\\0"),
+            byte == 9 => Formatter.write (formatter, "\\t"),
+            byte == 10 => Formatter.write (formatter, "\\n"),
+            byte == 13 => Formatter.write (formatter, "\\r"),
+            byte == 34 => Formatter.write (formatter, "\\\""),
+            byte == 92 => Formatter.write (formatter, "\\\\"),
+            else => write_byte formatter byte,
+        }
+        index = index + 1
+    }
+    formatter_write (formatter, "\"")
+}
+
+def formatter_finish: Formatter -> String = formatter => {
+    let Formatter buffer = formatter
+    String.from_utf8_unchecked (Buffer.freeze buffer)
+}
+
+def formatter_new: () -> Formatter = () => Formatter (Buffer.with_capacity (16 satisfies USize))
+
+companion Formatter {
+    /// Creates an empty formatter.
+    pub def new: () -> Formatter = () => formatter_new ()
+
+    /// Appends a UTF-8 string to the formatter.
+    pub def write: (Formatter, String) ->{mut 0} () = (formatter, value) => formatter_write (formatter, value)
+
+    /// Finishes formatting and returns the accumulated string.
+    pub def finish: Formatter -> String = formatter => formatter_finish formatter
+
+    /// Formats a value using its Display implementation.
+    pub def display: <T where Display T> T -> String = value => {
+        let mut formatter = Formatter.new ()
+        Display.fmt (value, formatter)
+        Formatter.finish formatter
+    }
+
+    /// Formats a value using its Debug implementation.
+    pub def debug: <T where Debug T> T -> String = value => {
+        let mut formatter = Formatter.new ()
+        Debug.fmt (value, formatter)
+        Formatter.finish formatter
+    }
+}
+
+impl<T where Display T> ToString T {
+    def to_string = value => Formatter.display value
+}
+
+impl Display String {
+    def fmt = (value, formatter) => Formatter.write (formatter, value)
+}
+
+impl Debug String {
+    def fmt = (value, formatter) => formatter_write_debug (formatter, value)
+}

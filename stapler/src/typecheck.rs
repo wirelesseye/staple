@@ -76,6 +76,7 @@ pub struct CheckedTraitDispatch {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StructuralTraitMethod {
+    Debug,
     Index,
     MutateIndex,
     IntoIterator,
@@ -680,6 +681,7 @@ pub struct TypedModule {
     copy_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
+    debug_trait: Option<TraitId>,
     index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
     into_iterator_trait: Option<TraitId>,
@@ -894,9 +896,35 @@ impl TypedModule {
             self.mutate_index_trait,
             self.into_iterator_trait,
             self.iterator_trait,
+            self.debug_trait,
             |value_type| self.is_copy_type(value_type),
+            |value_type| self.is_debug_type(value_type),
         )
         .map(|(_, method)| method)
+    }
+
+    fn is_debug_type(&self, value_type: &CheckedType) -> bool {
+        let Some(debug_trait) = self.debug_trait else {
+            return false;
+        };
+        if let CheckedType::Product(product) = value_type {
+            return !product.variadic
+                && product
+                    .elements
+                    .iter()
+                    .all(|element| self.is_debug_type(&element.value_type));
+        }
+        let Some(method) = self
+            .resolved
+            .traits()
+            .get(&debug_trait)
+            .and_then(|trait_| trait_.methods.first())
+            .copied()
+        else {
+            return false;
+        };
+        self.trait_impl_method(debug_trait, std::slice::from_ref(value_type), method)
+            .is_some()
     }
 
     pub(crate) fn moved_symbols(&self, syntax: SyntaxId) -> impl Iterator<Item = SymbolId> + '_ {
@@ -969,7 +997,9 @@ impl TypedModule {
             self.mutate_index_trait,
             self.into_iterator_trait,
             self.iterator_trait,
+            self.debug_trait,
             |value_type| self.is_copy_type(value_type),
+            |value_type| self.is_debug_type(value_type),
         ) {
             return Some(arguments);
         }
@@ -1082,6 +1112,7 @@ pub struct TypeChecker {
     quote_result_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
+    debug_trait: Option<TraitId>,
     index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
     into_iterator_trait: Option<TraitId>,
@@ -1161,6 +1192,7 @@ impl TypeChecker {
         self.quote_result_trait = module.standard_trait("ParseQuoteResult");
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
+        self.debug_trait = module.standard_trait("Debug");
         self.index_trait = module.standard_trait("Index");
         self.mutate_index_trait = module.standard_trait("MutateIndex");
         self.into_iterator_trait = module.standard_trait("IntoIterator");
@@ -1239,6 +1271,7 @@ impl TypeChecker {
             copy_trait: self.copy_trait,
             drop_trait: self.drop_trait,
             default_trait: self.default_trait,
+            debug_trait: self.debug_trait,
             index_trait: self.index_trait,
             mutate_index_trait: self.mutate_index_trait,
             into_iterator_trait: self.into_iterator_trait,
@@ -1534,13 +1567,14 @@ impl TypeChecker {
                 ));
                 continue;
             }
-            if structural_trait_arguments(
+            if let Some((_, structural)) = structural_trait_arguments(
                 implementation.trait_id,
                 &arguments,
                 self.index_trait,
                 self.mutate_index_trait,
                 self.into_iterator_trait,
                 self.iterator_trait,
+                self.debug_trait,
                 |value_type| {
                     is_copy_type(
                         value_type,
@@ -1551,12 +1585,17 @@ impl TypeChecker {
                         &[],
                     )
                 },
+                |value_type| self.debug_trait.is_some_and(|trait_id| {
+                    self.trait_obligation_available(trait_id, std::slice::from_ref(value_type))
+                }),
             )
-            .is_some()
             {
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "indexing and iteration traits are derived structurally for this product type and cannot be implemented explicitly",
+                    match structural {
+                        StructuralTraitMethod::Debug => "`Debug` is derived structurally for this product type and cannot be implemented explicitly",
+                        _ => "indexing and iteration traits are derived structurally for this product type and cannot be implemented explicitly",
+                    },
                 ));
                 continue;
             }
@@ -6379,6 +6418,7 @@ impl TypeChecker {
             self.mutate_index_trait,
             self.into_iterator_trait,
             self.iterator_trait,
+            self.debug_trait,
             |value_type| {
                 is_copy_type(
                     value_type,
@@ -6389,6 +6429,9 @@ impl TypeChecker {
                     &bounds,
                 )
             },
+            |value_type| self.debug_trait.is_some_and(|trait_id| {
+                self.trait_obligation_available(trait_id, std::slice::from_ref(value_type))
+            }),
         ) {
             return Some(arguments);
         }
@@ -6462,6 +6505,7 @@ impl TypeChecker {
             self.mutate_index_trait,
             self.into_iterator_trait,
             self.iterator_trait,
+            self.debug_trait,
             |value_type| {
                 is_copy_type(
                     value_type,
@@ -6472,6 +6516,9 @@ impl TypeChecker {
                     &bounds,
                 )
             },
+            |value_type| self.debug_trait.is_some_and(|trait_id| {
+                self.trait_obligation_available(trait_id, std::slice::from_ref(value_type))
+            }),
         )
         .is_some()
         {
@@ -8916,8 +8963,23 @@ fn structural_trait_arguments(
     mutate_index_trait: Option<TraitId>,
     into_iterator_trait: Option<TraitId>,
     iterator_trait: Option<TraitId>,
+    debug_trait: Option<TraitId>,
     is_copy: impl Fn(&CheckedType) -> bool,
+    is_debug: impl Fn(&CheckedType) -> bool,
 ) -> Option<(Vec<CheckedType>, StructuralTraitMethod)> {
+    if Some(trait_id) == debug_trait {
+        let [target] = arguments else { return None };
+        let CheckedType::Product(product) = target else { return None };
+        if !product.variadic
+            && product
+                .elements
+                .iter()
+                .all(|element| is_debug(&element.value_type))
+        {
+            return Some((vec![target.clone()], StructuralTraitMethod::Debug));
+        }
+        return None;
+    }
     if Some(trait_id) == into_iterator_trait {
         let [source, iter] = arguments else {
             return None;

@@ -2095,6 +2095,34 @@ integer and floating-point types, `Bool`, and `String`. Integers use decimal
 notation, booleans produce `"True"` or `"False"`, and converting a `String`
 returns it unchanged. Floating-point values use round-trip decimal notation.
 
+`Display` and `Debug` format values into a mutable `Formatter`. Their common
+protocol is `fmt: (T, Formatter) ->{mut 1} ()`: `Display` is intended for
+human-facing text, while `Debug` is intended for developer-facing structure.
+These formatting types and traits are declared in `std.core.fmt` and re-exported
+by `std.core` into the prelude.
+`Formatter.display value` and `Formatter.debug value` create a formatter,
+dispatch the corresponding trait, and return the finished `String`.
+
+Manual implementations append text with `Formatter.write` and may delegate
+nested values directly to either formatting trait:
+
+```staple
+type Point = (x: I32, y: I32)
+
+impl Debug Point {
+    def fmt = (Point (x, y), formatter) => {
+        Formatter.write (formatter, "Point ")
+        Debug.fmt ((x: x, y: y), formatter)
+    }
+}
+```
+
+Products have a compiler-provided structural `Debug` implementation whenever
+all their elements implement `Debug`. Positional elements are comma-separated
+inside parentheses and named elements include their field names. Nominal types
+do not inherit `Debug` from their representation and must implement it
+explicitly. Scalar `ToString` implementations delegate to `Display`.
+
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation
 `Slice U8`. At runtime it contains a managed byte pointer and a byte length; it

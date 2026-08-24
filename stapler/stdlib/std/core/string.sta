@@ -11,8 +11,19 @@ pub trait ToString T {
     to_string: T -> String
 }
 
-impl ToString String {
-    def to_string = value => value
+def string_bytes: String -> Slice U8 = value => {
+    let String bytes = value
+    bytes
+}
+
+def string_from_utf8_unchecked: Slice U8 -> String = bytes => String bytes
+
+companion String {
+    /// Returns the UTF-8 bytes backing a string.
+    pub def bytes: String -> Slice U8 = value => string_bytes value
+
+    /// Constructs a string from bytes known to contain valid UTF-8.
+    pub def from_utf8_unchecked: Slice U8 -> String = bytes => string_from_utf8_unchecked bytes
 }
 
 impl Add String {

@@ -4,11 +4,15 @@ pub typegroup Bool {
 }
 pub use Bool.*
 
-impl ToString Bool {
-    def to_string = value => match value {
+impl Display Bool {
+    def fmt = (value, formatter) => Formatter.write (formatter, match value {
         True() => "True",
         False() => "False",
-    }
+    })
+}
+
+impl Debug Bool {
+    def fmt = (value, formatter) => Display.fmt (value, formatter)
 }
 
 impl Eq Bool {
