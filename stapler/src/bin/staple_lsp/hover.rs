@@ -1098,7 +1098,7 @@ impl Collector<'_> {
             }
             Type::Function(function) => {
                 self.ty(&function.parameter);
-                for resource in &function.resources.resources {
+                for resource in &function.effects.resources {
                     self.ty(resource);
                 }
                 self.ty(&function.result);

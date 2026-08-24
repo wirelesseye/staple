@@ -118,7 +118,7 @@ fn infers_checks_and_lowers_typed_resources() {
     let resources = &module
         .type_of_function(inferred.id)
         .expect("inferred function type")
-        .resources;
+        .effects;
     assert_eq!(resources.resources.len(), 1);
     assert_eq!(resources.resources[0].value_type.to_string(), "Clock");
 
@@ -127,6 +127,149 @@ fn infers_checks_and_lowers_typed_resources() {
         .compile_module(&module)
         .expect("typed resources should lower to hidden parameters");
     assert!(llvm.contains("define i32 @read"));
+}
+
+#[test]
+fn captured_mutable_cells_contribute_state_effects_and_metadata() {
+    use stapler::CheckedStateEffect;
+
+    let module = type_check(concat!(
+        "use std.io.(IO, print)\n",
+        "def make = () => {\n",
+        "  let mut read_cell = 1\n",
+        "  let mut write_cell = 2\n",
+        "  let read = () => read_cell\n",
+        "  let write = () => { write_cell = 3 }\n",
+        "  let call_write = () => write ()\n",
+        "  let both = () => { print \"x\"; write_cell = write_cell + 1 }\n",
+        "  (read, write, call_write, both)\n",
+        "}\n",
+    ));
+
+    let function = |suffix: &str| {
+        module
+            .functions()
+            .iter()
+            .find(|function| function.name.ends_with(suffix))
+            .unwrap_or_else(|| panic!("function `{suffix}`"))
+    };
+    assert_eq!(
+        module.type_of_function(function("read").id).unwrap().effects.state,
+        Some(CheckedStateEffect::Read),
+    );
+    assert_eq!(
+        module.type_of_function(function("write").id).unwrap().effects.state,
+        Some(CheckedStateEffect::Write),
+    );
+    let both = module.type_of_function(function("both").id).unwrap();
+    assert_eq!(both.effects.state, Some(CheckedStateEffect::ReadWrite));
+    assert_eq!(both.effects.to_string(), "{state, IO}");
+
+    let read_accesses = module.state_accesses_of_function(function("read").id).unwrap();
+    assert_eq!(read_accesses.reads.len(), 1);
+    assert!(read_accesses.writes.is_empty());
+    let write_accesses = module.state_accesses_of_function(function("write").id).unwrap();
+    assert!(write_accesses.reads.is_empty());
+    assert_eq!(write_accesses.writes.len(), 1);
+    assert_ne!(read_accesses.reads[0], write_accesses.writes[0]);
+    assert_eq!(
+        module.type_of_function(function("call_write").id).unwrap().effects.state,
+        Some(CheckedStateEffect::Write),
+    );
+    assert_eq!(
+        module.state_accesses_of_function(function("call_write").id).unwrap(),
+        write_accesses,
+    );
+}
+
+#[test]
+fn explicit_state_effects_are_checked_as_upper_bounds() {
+    type_check(concat!(
+        "def make = () => {\n",
+        "  let mut value = 1\n",
+        "  let read: () ->{state} I32 = () => value\n",
+        "  let unused: () ->{state.write} () = () => ()\n",
+        "  (read, unused)\n",
+        "}\n",
+    ));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def make = () => {\n",
+            "  let mut value = 1\n",
+            "  let bad: () ->{state.write} I32 = () => value\n",
+            "  bad\n",
+            "}\n",
+        )))
+        .expect_err("state.write does not cover a captured-state read");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("requires effects {state.read}")
+    }));
+}
+
+#[test]
+fn passing_a_captured_cell_to_a_mutating_parameter_is_a_state_write() {
+    use stapler::CheckedStateEffect;
+
+    let module = type_check(concat!(
+        "def replace: I32 ->{mut} () = value => { value = 2 }\n",
+        "def make = () => {\n",
+        "  let mut value = 1\n",
+        "  let update = () => replace value\n",
+        "  update\n",
+        "}\n",
+    ));
+    let update = module
+        .functions()
+        .iter()
+        .find(|function| function.name.ends_with("update"))
+        .expect("update closure");
+    assert_eq!(
+        module.type_of_function(update.id).unwrap().effects.state,
+        Some(CheckedStateEffect::Write),
+    );
+    let accesses = module.state_accesses_of_function(update.id).unwrap();
+    assert!(accesses.reads.is_empty());
+    assert_eq!(accesses.writes.len(), 1);
+}
+
+#[test]
+fn mutable_module_bindings_contribute_state_effects_and_metadata() {
+    use stapler::CheckedStateEffect;
+
+    let module = type_check(concat!(
+        "let mut global = 1\n",
+        "def read = () => global\n",
+        "def write = () => { global = 2 }\n",
+        "def both = () => { global = global + 1 }\n",
+    ));
+    let function = |name: &str| {
+        module
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap_or_else(|| panic!("function `{name}`"))
+    };
+
+    assert_eq!(
+        module.type_of_function(function("read").id).unwrap().effects.state,
+        Some(CheckedStateEffect::Read),
+    );
+    assert_eq!(
+        module.type_of_function(function("write").id).unwrap().effects.state,
+        Some(CheckedStateEffect::Write),
+    );
+    assert_eq!(
+        module.type_of_function(function("both").id).unwrap().effects.state,
+        Some(CheckedStateEffect::ReadWrite),
+    );
+
+    let read = module.state_accesses_of_function(function("read").id).unwrap();
+    let write = module.state_accesses_of_function(function("write").id).unwrap();
+    let both = module.state_accesses_of_function(function("both").id).unwrap();
+    assert_eq!(read.reads, write.writes);
+    assert_eq!(both.reads, read.reads);
+    assert_eq!(both.writes, write.writes);
 }
 
 #[test]
@@ -177,7 +320,7 @@ fn standard_io_is_a_compiler_provided_resource_and_propagates_to_main() {
         let resources = &module
             .type_of_function(function.id)
             .unwrap()
-            .resources
+            .effects
             .resources;
         assert_eq!(resources.len(), 1);
         assert_eq!(resources[0].value_type.to_string(), "IO");
@@ -234,7 +377,7 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
         module
             .type_of_function(declared.id)
             .expect("declared function type")
-            .resources
+            .effects
             .resources
             .len(),
         2
@@ -249,7 +392,7 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
             module
                 .type_of_function(function.id)
                 .expect("resource function type")
-                .resources
+                .effects
                 .resources
                 .len(),
             1
@@ -712,7 +855,7 @@ fn function_mutations(module: &stapler::TypedModule, name: &str) -> Vec<CheckedM
     module
         .type_of_function(function.id)
         .unwrap_or_else(|| panic!("type of `{name}`"))
-        .resources
+        .effects
         .mutations
         .clone()
 }
@@ -977,7 +1120,7 @@ fn resource_inference_preserves_parameter_declared_mutation() {
         .iter()
         .find(|function| function.name == "use_both")
         .expect("use_both function");
-    let resources = &module.type_of_function(function.id).unwrap().resources;
+    let resources = &module.type_of_function(function.id).unwrap().effects;
     assert_eq!(resources.mutations, vec![CheckedMutation::Element(0)]);
     assert_eq!(resources.resources.len(), 1);
 }
@@ -5868,10 +6011,10 @@ fn type_checks_and_generates_curried_functions() {
             module.type_of_function(function.id).expect("checked type"),
             &stapler::CheckedFunctionType {
                 parameter: Box::new(CheckedType::I32),
-                resources: stapler::CheckedResourceSet::default(),
+                effects: stapler::CheckedEffectSet::default(),
                 result: Box::new(CheckedType::Function(stapler::CheckedFunctionType {
                     parameter: Box::new(CheckedType::I32),
-                    resources: stapler::CheckedResourceSet::default(),
+                    effects: stapler::CheckedEffectSet::default(),
                     result: Box::new(CheckedType::I32),
                 })),
             },

@@ -755,7 +755,7 @@ impl Collector<'_> {
             }
             Type::Function(value) => {
                 self.ty(&value.parameter);
-                for resource in &value.resources.resources {
+                for resource in &value.effects.resources {
                     self.ty(resource);
                 }
                 self.ty(&value.result);

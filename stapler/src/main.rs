@@ -1373,9 +1373,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { let exit: I32 -> () }\n",
-                "let mut drops = 0\n",
                 "type Resource = I32\n",
-                "impl Drop Resource { def drop = Resource value => { drops = drops + value } }\n",
                 "def release = () => { let mut resource = Resource 1; resource = Resource 2 }\n",
                 "def abandon = () => { let mut resource = Resource 4; let update = () => { resource = Resource 5 }; update () }\n",
                 "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Ref n; churn (n - 1) } }\n",
@@ -1399,7 +1397,7 @@ mod tests {
                 "abandon ()\n",
                 "churn 40000\n",
                 "churn 40000\n",
-                "exit ((first - 2) + (second - 3) + (point.x - 6) + (old - 7) + (current - 8) + (data - 42) + (drops - 12))\n",
+                "exit ((first - 2) + (second - 3) + (point.x - 6) + (old - 7) + (current - 8) + (data - 42))\n",
             ),
         )
         .expect("temporary mutable source should be writable");

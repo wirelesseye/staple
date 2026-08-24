@@ -6309,7 +6309,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
         Type::Function(function) => {
             type_contains_syntax(&function.parameter)
                 || function
-                    .resources
+                    .effects
                     .resources
                     .iter()
                     .any(type_contains_syntax)
@@ -6341,7 +6341,7 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
         Type::Function(function) => {
             type_contains_unshadowed_syntax(&function.parameter, declared)
                 || function
-                    .resources
+                    .effects
                     .resources
                     .iter()
                     .any(|ty| type_contains_unshadowed_syntax(ty, declared))
@@ -6410,7 +6410,7 @@ fn type_contains_named(ty: &Type, expected: &str) -> bool {
         Type::Function(function) => {
             type_contains_named(&function.parameter, expected)
                 || function
-                    .resources
+                    .effects
                     .resources
                     .iter()
                     .any(|resource| type_contains_named(resource, expected))
@@ -7590,7 +7590,7 @@ fn substitute_type(
         }
         Type::Function(function) => {
             substitute_type(&mut function.parameter, environment, diagnostics)?;
-            for resource in &mut function.resources.resources {
+            for resource in &mut function.effects.resources {
                 substitute_type(resource, environment, diagnostics)?;
             }
             substitute_type(&mut function.result, environment, diagnostics)?;
@@ -8656,11 +8656,11 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         }
         Type::Function(function) => {
             freshen_type(expander, &mut function.parameter, module, mark);
-            expander.freshen_syntax(&mut function.resources.syntax, module, mark);
-            for resource in &mut function.resources.resources {
+            expander.freshen_syntax(&mut function.effects.syntax, module, mark);
+            for resource in &mut function.effects.resources {
                 freshen_type(expander, resource, module, mark);
             }
-            for mutation in &mut function.resources.mutations {
+            for mutation in &mut function.effects.mutations {
                 expander.freshen_syntax(&mut mutation.syntax, module, mark);
             }
             freshen_type(expander, &mut function.result, module, mark);

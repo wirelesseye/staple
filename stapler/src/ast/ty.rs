@@ -71,15 +71,14 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Self::Function(function) => {
-                if function.resources.resources.is_empty() && function.resources.mutations.is_empty()
-                {
+                if function.effects.is_empty() {
                     write!(formatter, "{} -> {}", function.parameter, function.result)
                 } else {
                     write!(
                         formatter,
                         "{} ->{} {}",
                         function.parameter,
-                        format_resource_set(&function.resources),
+                        format_effect_set(&function.effects),
                         function.result
                     )
                 }
@@ -111,16 +110,19 @@ fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &Type) -> 
     }
 }
 
-fn format_resource_set(resources: &ResourceSet) -> String {
+fn format_effect_set(effects: &EffectSet) -> String {
     let mut entries = Vec::new();
-    for mutation in &resources.mutations {
+    for mutation in &effects.mutations {
         entries.push(match &mutation.target {
             MutationTargetKind::Whole => "mut".to_string(),
             MutationTargetKind::Element(index) => format!("mut {index}"),
             MutationTargetKind::Named(name) => format!("mut {name}"),
         });
     }
-    for resource in &resources.resources {
+    for state in &effects.state {
+        entries.push(state.to_string());
+    }
+    for resource in &effects.resources {
         entries.push(resource.to_string());
     }
     format!("{{{}}}", entries.join(", "))
@@ -235,24 +237,47 @@ pub struct RepeatedType {
 pub struct FunctionType {
     pub syntax: Syntax,
     pub parameter: Box<Type>,
-    pub resources: ResourceSet,
+    pub effects: EffectSet,
     pub result: Box<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ResourceSet {
+pub struct EffectSet {
     pub syntax: Syntax,
     pub resources: Vec<Type>,
     pub mutations: Vec<MutationTarget>,
+    pub state: Vec<StateEffect>,
 }
 
-impl ResourceSet {
+impl EffectSet {
     pub fn empty() -> Self {
         Self {
             syntax: Syntax::compiler(),
             resources: Vec::new(),
             mutations: Vec::new(),
+            state: Vec::new(),
         }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty() && self.mutations.is_empty() && self.state.is_empty()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateEffect {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+impl fmt::Display for StateEffect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Read => "state.read",
+            Self::Write => "state.write",
+            Self::ReadWrite => "state",
+        })
     }
 }
 

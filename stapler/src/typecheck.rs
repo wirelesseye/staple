@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
@@ -246,7 +246,7 @@ pub struct CheckedSumType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedFunctionType {
     pub parameter: Box<CheckedType>,
-    pub resources: CheckedResourceSet,
+    pub effects: CheckedEffectSet,
     pub result: Box<CheckedType>,
 }
 
@@ -264,12 +264,49 @@ pub enum CheckedMutation {
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct CheckedResourceSet {
+pub struct CheckedEffectSet {
     pub resources: Vec<CheckedResource>,
     pub mutations: Vec<CheckedMutation>,
+    pub state: Option<CheckedStateEffect>,
 }
 
-impl CheckedResourceSet {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckedStateEffect {
+    Read,
+    Write,
+    ReadWrite,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StateAccesses {
+    pub reads: Vec<SymbolId>,
+    pub writes: Vec<SymbolId>,
+}
+
+impl StateAccesses {
+    fn record_read(&mut self, symbol: SymbolId) {
+        if !self.reads.contains(&symbol) {
+            self.reads.push(symbol);
+        }
+    }
+
+    fn record_write(&mut self, symbol: SymbolId) {
+        if !self.writes.contains(&symbol) {
+            self.writes.push(symbol);
+        }
+    }
+
+    fn union(&mut self, other: &Self) {
+        for symbol in &other.reads {
+            self.record_read(*symbol);
+        }
+        for symbol in &other.writes {
+            self.record_write(*symbol);
+        }
+    }
+}
+
+impl CheckedEffectSet {
     pub fn canonical(resources: Vec<CheckedResource>) -> Self {
         Self::canonical_with_mutations(resources, Vec::new())
     }
@@ -290,7 +327,17 @@ impl CheckedResourceSet {
         Self {
             resources,
             mutations,
+            state: None,
         }
+    }
+
+    pub fn with_state(mut self, state: Option<CheckedStateEffect>) -> Self {
+        self.state = state;
+        self
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.resources.is_empty() && self.mutations.is_empty() && self.state.is_none()
     }
 
     pub fn union(&self, other: &Self) -> Self {
@@ -306,6 +353,7 @@ impl CheckedResourceSet {
                 .cloned()
                 .collect(),
         )
+        .with_state(union_state(self.state, other.state))
     }
 
     /// Discharges a resource, as `with` does. Mutations are never discharged
@@ -320,6 +368,7 @@ impl CheckedResourceSet {
                 .collect(),
             self.mutations.clone(),
         )
+        .with_state(self.state)
     }
 
     pub fn is_subset_of(&self, other: &Self) -> bool {
@@ -330,6 +379,7 @@ impl CheckedResourceSet {
                 .mutations
                 .iter()
                 .all(|mutation| other.covers_mutation(mutation))
+            && state_is_subset(self.state, other.state)
     }
 
     fn covers_mutation(&self, mutation: &CheckedMutation) -> bool {
@@ -337,7 +387,7 @@ impl CheckedResourceSet {
     }
 }
 
-impl fmt::Display for CheckedResourceSet {
+impl fmt::Display for CheckedEffectSet {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("{")?;
         let mut first = true;
@@ -351,6 +401,17 @@ impl fmt::Display for CheckedResourceSet {
                 CheckedMutation::Element(index) => write!(formatter, "mut {index}")?,
             }
         }
+        if let Some(state) = self.state {
+            if !first {
+                formatter.write_str(", ")?;
+            }
+            first = false;
+            formatter.write_str(match state {
+                CheckedStateEffect::Read => "state.read",
+                CheckedStateEffect::Write => "state.write",
+                CheckedStateEffect::ReadWrite => "state",
+            })?;
+        }
         for resource in &self.resources {
             if !first {
                 formatter.write_str(", ")?;
@@ -362,12 +423,32 @@ impl fmt::Display for CheckedResourceSet {
     }
 }
 
-/// Renders a resource set exactly like `Display for CheckedResourceSet`,
+fn union_state(
+    left: Option<CheckedStateEffect>,
+    right: Option<CheckedStateEffect>,
+) -> Option<CheckedStateEffect> {
+    match (left, right) {
+        (None, value) | (value, None) => value,
+        (Some(left), Some(right)) if left == right => Some(left),
+        _ => Some(CheckedStateEffect::ReadWrite),
+    }
+}
+
+fn state_is_subset(
+    required: Option<CheckedStateEffect>,
+    allowed: Option<CheckedStateEffect>,
+) -> bool {
+    required.is_none()
+        || allowed == Some(CheckedStateEffect::ReadWrite)
+        || required == allowed
+}
+
+/// Renders an effect set exactly like `Display for CheckedEffectSet`,
 /// except that `mut <index>` is rendered as `mut <name>` when `parameter` is
 /// a product with a name at that position — used wherever the parameter
 /// type is in hand (an owning function's signature) to produce the same
 /// spelling a user would write.
-fn format_named_resource_set(resources: &CheckedResourceSet, parameter: &CheckedType) -> String {
+fn format_named_effect_set(resources: &CheckedEffectSet, parameter: &CheckedType) -> String {
     let mut entries = Vec::new();
     for mutation in &resources.mutations {
         entries.push(match mutation {
@@ -385,6 +466,13 @@ fn format_named_resource_set(resources: &CheckedResourceSet, parameter: &Checked
                     None => format!("mut {index}"),
                 }
             }
+        });
+    }
+    if let Some(state) = resources.state {
+        entries.push(match state {
+            CheckedStateEffect::Read => "state.read".to_string(),
+            CheckedStateEffect::Write => "state.write".to_string(),
+            CheckedStateEffect::ReadWrite => "state".to_string(),
         });
     }
     for resource in &resources.resources {
@@ -465,7 +553,7 @@ impl CheckedType {
             Self::Function(function) => {
                 function.parameter.is_fully_known()
                     && function
-                        .resources
+                        .effects
                         .resources
                         .iter()
                         .all(|resource| resource.value_type.is_fully_known())
@@ -617,15 +705,14 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::Function(function) => {
-                if function.resources.resources.is_empty() && function.resources.mutations.is_empty()
-                {
+                if function.effects.is_empty() {
                     write!(formatter, "{} -> {}", function.parameter, function.result)
                 } else {
                     write!(
                         formatter,
                         "{} ->{} {}",
                         function.parameter,
-                        format_named_resource_set(&function.resources, &function.parameter),
+                        format_named_effect_set(&function.effects, &function.parameter),
                         function.result
                     )
                 }
@@ -668,7 +755,9 @@ pub struct TypedModule {
     expression_types: HashMap<SyntaxId, CheckedType>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
-    expression_resources: HashMap<SyntaxId, CheckedResourceSet>,
+    expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
+    expression_state_accesses: HashMap<SyntaxId, StateAccesses>,
+    function_state_accesses: HashMap<FunctionId, StateAccesses>,
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     trait_method_types: HashMap<TraitMethodId, CheckedType>,
@@ -772,8 +861,16 @@ impl TypedModule {
         .and_then(|symbol| self.function_symbols.get(&symbol).copied())
     }
 
-    pub fn resources_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedResourceSet> {
-        self.expression_resources.get(&syntax_id)
+    pub fn effects_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedEffectSet> {
+        self.expression_effects.get(&syntax_id)
+    }
+
+    pub fn state_accesses_of_expression(&self, syntax_id: SyntaxId) -> Option<&StateAccesses> {
+        self.expression_state_accesses.get(&syntax_id)
+    }
+
+    pub fn state_accesses_of_function(&self, function: FunctionId) -> Option<&StateAccesses> {
+        self.function_state_accesses.get(&function)
     }
 
     pub fn resource_for_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedResource> {
@@ -1091,7 +1188,11 @@ pub struct TypeChecker {
     expression_types: HashMap<SyntaxId, CheckedType>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
-    expression_resources: HashMap<SyntaxId, CheckedResourceSet>,
+    expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
+    current_effect_function: Cell<Option<FunctionId>>,
+    current_state_accesses: RefCell<StateAccesses>,
+    expression_state_accesses: HashMap<SyntaxId, StateAccesses>,
+    function_state_accesses: HashMap<FunctionId, StateAccesses>,
     resource_types: HashMap<SyntaxId, CheckedResource>,
     function_bounds: HashMap<FunctionId, Vec<CheckedTraitBound>>,
     function_subtype_bounds: HashMap<FunctionId, Vec<CheckedSubtypeBound>>,
@@ -1247,7 +1348,7 @@ impl TypeChecker {
         for function_id in function_ids {
             self.ensure_function_checked(&module, function_id);
         }
-        self.infer_resources(&module);
+        self.infer_effects(&module);
 
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
@@ -1258,7 +1359,9 @@ impl TypeChecker {
             expression_types: self.expression_types,
             symbol_types: self.symbol_types,
             function_types: self.function_types,
-            expression_resources: self.expression_resources,
+            expression_effects: self.expression_effects,
+            expression_state_accesses: self.expression_state_accesses,
+            function_state_accesses: self.function_state_accesses,
             resource_types: self.resource_types,
             function_bounds: self.function_bounds,
             trait_method_types: self.trait_method_types,
@@ -1727,7 +1830,7 @@ impl TypeChecker {
                         .collect(),
                     variadic: false,
                 })),
-                resources: CheckedResourceSet::canonical_with_mutations(Vec::new(), mutations),
+                effects: CheckedEffectSet::canonical_with_mutations(Vec::new(), mutations),
                 result: Box::new(
                     result_parameter.map_or_else(CheckedType::empty_product, |index| {
                         parameters[index].clone()
@@ -2096,7 +2199,7 @@ impl TypeChecker {
                 *symbol,
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
-                    resources: CheckedResourceSet::default(),
+                    effects: CheckedEffectSet::default(),
                     result: Box::new(result),
                 }),
             );
@@ -2222,7 +2325,7 @@ impl TypeChecker {
                     };
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(parameter),
-                        resources: CheckedResourceSet::default(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
                 }
@@ -2242,7 +2345,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
-                        resources: CheckedResourceSet::default(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(integer),
                     })
                 }
@@ -2270,7 +2373,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
-                        resources: CheckedResourceSet::default(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
                 }
@@ -2284,7 +2387,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
-                        resources: CheckedResourceSet::default(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(float),
                     })
                 }
@@ -2306,21 +2409,21 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
-                        resources: CheckedResourceSet::default(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
                 }
                 crate::IntrinsicFunction::StringFromCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::CString),
-                        resources: CheckedResourceSet::default(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
                 }
                 crate::IntrinsicFunction::StringToCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::String),
-                        resources: CheckedResourceSet::default(),
+                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::CString),
                     })
                 }
@@ -2332,7 +2435,7 @@ impl TypeChecker {
                         ],
                         variadic: false,
                     })),
-                    resources: CheckedResourceSet::default(),
+                    effects: CheckedEffectSet::default(),
                     result: Box::new(CheckedType::String),
                 }),
                 crate::IntrinsicFunction::SliceLength => self
@@ -2389,7 +2492,7 @@ impl TypeChecker {
                             matches!(&reference.value_type, CheckedType::Ref(payload)
                                 if payload.as_ref() == &replacement.value_type
                                     && payload.as_ref() == function.result.as_ref())
-                                && function.resources.mutations == [CheckedMutation::Element(0)]
+                                && function.effects.mutations == [CheckedMutation::Element(0)]
                         }
                         _ => false,
                     })
@@ -2471,26 +2574,26 @@ impl TypeChecker {
 
             if let Some(expected) = self.impl_function_types.get(&function.id).cloned() {
                 if !parameter_mutations.is_empty()
-                    && parameter_mutations != expected.resources.mutations
+                    && parameter_mutations != expected.effects.mutations
                 {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
                         format!(
                             "parameter `mut` markers declare {}, but the trait method declares {}",
-                            format_named_resource_set(
-                                &CheckedResourceSet::canonical_with_mutations(
+                            format_named_effect_set(
+                                &CheckedEffectSet::canonical_with_mutations(
                                     Vec::new(),
                                     parameter_mutations.clone(),
                                 ),
                                 &expected.parameter,
                             ),
-                            format_named_resource_set(&expected.resources, &expected.parameter),
+                            format_named_effect_set(&expected.effects, &expected.parameter),
                         ),
                     ));
                 }
                 for symbol in mutation_parameter_symbols(
                     &parameter_symbols,
-                    &expected.resources.mutations,
+                    &expected.effects.mutations,
                 ) {
                     self.mutable_parameter_symbols.insert(symbol);
                     self.mutated_parameter_symbols.insert(symbol);
@@ -2585,7 +2688,7 @@ impl TypeChecker {
                 .as_ref()
                 .and_then(
                     |annotation| match self.resolve_source_type(module, annotation) {
-                        CheckedType::Function(function) => Some(function.resources),
+                        CheckedType::Function(function) => Some(function.effects),
                         _ => None,
                     },
                 )
@@ -2598,14 +2701,14 @@ impl TypeChecker {
                         function.pattern.syntax().span.clone(),
                         format!(
                             "parameter `mut` markers declare {}, but the function annotation declares {}",
-                            format_named_resource_set(
-                                &CheckedResourceSet::canonical_with_mutations(
+                            format_named_effect_set(
+                                &CheckedEffectSet::canonical_with_mutations(
                                     Vec::new(),
                                     parameter_mutations.clone(),
                                 ),
                                 &parameter,
                             ),
-                            format_named_resource_set(&resources, &parameter),
+                            format_named_effect_set(&resources, &parameter),
                         ),
                     ));
                 } else {
@@ -2618,7 +2721,7 @@ impl TypeChecker {
             }
             let mut function_type = CheckedFunctionType {
                 parameter: Box::new(parameter),
-                resources,
+                effects: resources,
                 result: Box::new(result),
             };
 
@@ -2763,7 +2866,7 @@ impl TypeChecker {
         self.return_reachable = outer_return_reachable;
         let checked_function_type = CheckedFunctionType {
             parameter: function_type.parameter,
-            resources: function_type.resources,
+            effects: function_type.effects,
             result: Box::new(result_type),
         };
         self.function_types
@@ -2806,48 +2909,48 @@ impl TypeChecker {
     /// Computes runtime resource requirements only. `target_parameters` is
     /// threaded through the existing traversal interface, but assignments,
     /// captures, and calls deliberately contribute no mutation effects.
-    fn expression_resources_now(
+    fn expression_effects_now(
         &self,
         module: &ResolvedModule,
         expression: &Expression,
         target_parameters: &HashMap<SymbolId, usize>,
-    ) -> CheckedResourceSet {
-        let union = |values: Vec<CheckedResourceSet>| {
+    ) -> CheckedEffectSet {
+        let union = |values: Vec<CheckedEffectSet>| {
             values
                 .into_iter()
-                .fold(CheckedResourceSet::default(), |resources, value| {
+                .fold(CheckedEffectSet::default(), |resources, value| {
                     resources.union(&value)
                 })
         };
         match expression {
-            Expression::Function(_) => CheckedResourceSet::default(),
+            Expression::Function(_) => CheckedEffectSet::default(),
             Expression::Satisfies(value) => {
-                self.expression_resources_now(module, &value.value, target_parameters)
+                self.expression_effects_now(module, &value.value, target_parameters)
             }
             Expression::Match(value) => union(
-                std::iter::once(self.expression_resources_now(
+                std::iter::once(self.expression_effects_now(
                     module,
                     &value.subject,
                     target_parameters,
                 ))
                 .chain(value.arms.iter().map(|arm| {
-                    self.expression_resources_now(module, &arm.body, target_parameters)
+                    self.expression_effects_now(module, &arm.body, target_parameters)
                 }))
                 .collect(),
             ),
             Expression::Loop(value) => {
-                self.block_resources_now(module, &value.body, target_parameters)
+                self.block_effects_now(module, &value.body, target_parameters)
             }
             Expression::Resource(value) => self
                 .resource_types
                 .get(&value.syntax.id)
                 .cloned()
-                .map(|resource| CheckedResourceSet::canonical(vec![resource]))
+                .map(|resource| CheckedEffectSet::canonical(vec![resource]))
                 .unwrap_or_default(),
             Expression::With(value) => {
                 let provider =
-                    self.expression_resources_now(module, &value.value, target_parameters);
-                let body = self.block_resources_now(module, &value.body, target_parameters);
+                    self.expression_effects_now(module, &value.value, target_parameters);
+                let body = self.block_effects_now(module, &value.body, target_parameters);
                 let body = self
                     .resource_types
                     .get(&value.syntax.id)
@@ -2855,29 +2958,24 @@ impl TypeChecker {
                 provider.union(&body)
             }
             Expression::Block(value) => {
-                self.block_resources_now(module, value, target_parameters)
+                self.block_effects_now(module, value, target_parameters)
             }
             Expression::Product(value) => union(
                 value
                     .elements
                     .iter()
                     .map(|element| {
-                        self.expression_resources_now(module, &element.value, target_parameters)
+                        self.expression_effects_now(module, &element.value, target_parameters)
                     })
                     .collect(),
             ),
             Expression::StringTemplate(template) => union(template.parts.iter().filter_map(|part| {
                 let crate::StringTemplatePart::Interpolation(interpolation) = part else { return None };
-                Some(self.expression_resources_now(module, &interpolation.expression, target_parameters))
+                Some(self.expression_effects_now(module, &interpolation.expression, target_parameters))
             }).collect()),
             Expression::Call(value) => {
-                let mut result = self
-                    .expression_resources_now(module, &value.callee, target_parameters)
-                    .union(&self.expression_resources_now(
-                        module,
-                        &value.argument,
-                        target_parameters,
-                    ));
+                let callee_effects =
+                    self.expression_effects_now(module, &value.callee, target_parameters);
                 // Prefer the callee sub-expression's own checked type over
                 // the root function's full declared signature: for a
                 // curried call `f a b`, `value.callee` is itself the call
@@ -2885,36 +2983,61 @@ impl TypeChecker {
                 // *residual* function type (`f`'s type after applying `a`).
                 // `function_origin` walks through every nesting level back
                 // to `f` itself, so using `function_types.get` first would
-                // reapply `f`'s outermost arrow's mutation/resource set at
+                // reapply `f`'s outermost arrow's effect set at
                 // every curry depth instead of just the matching one —
                 // misattributing an early argument's `mut` effect onto a
                 // later, unrelated argument.
-                let called_type = match self.expression_types.get(&value.callee.syntax().id) {
-                    Some(CheckedType::Function(function)) => Some(function.clone()),
-                    _ => self
-                        .function_origin(module, &value.callee)
-                        .and_then(|function| self.function_types.get(&function).cloned()),
+                let called_type = if !matches!(value.callee.as_ref(), Expression::Call(_)) {
+                    self.function_origin(module, &value.callee)
+                        .and_then(|function| self.function_types.get(&function).cloned())
+                        .or_else(|| match self.expression_types.get(&value.callee.syntax().id) {
+                            Some(CheckedType::Function(function)) => Some(function.clone()),
+                            _ => None,
+                        })
+                } else {
+                    match self.expression_types.get(&value.callee.syntax().id) {
+                        Some(CheckedType::Function(function)) => Some(function.clone()),
+                        _ => None,
+                    }
                 };
+                let argument_effects = called_type.as_ref().map_or_else(
+                    || self.expression_effects_now(module, &value.argument, target_parameters),
+                    |function| {
+                        self.call_argument_resources_now(
+                            module,
+                            &value.argument,
+                            &function.effects.mutations,
+                            target_parameters,
+                        )
+                    },
+                );
+                let mut result = callee_effects.union(&argument_effects);
                 if let Some(function_type) = &called_type {
-                    result = result.union(&CheckedResourceSet::canonical(
-                        function_type.resources.resources.clone(),
-                    ));
+                    result = result.union(
+                        &CheckedEffectSet::canonical(function_type.effects.resources.clone())
+                            .with_state(function_type.effects.state),
+                    );
+                }
+                if let Some(function_id) = self.function_origin(module, &value.callee)
+                    && let Some(accesses) = self.function_state_accesses.get(&function_id)
+                {
+                    self.current_state_accesses.borrow_mut().union(accesses);
                 }
                 result
             }
             Expression::Access(value) => {
-                self.expression_resources_now(module, &value.value, target_parameters)
+                self.expression_effects_now(module, &value.value, target_parameters)
             }
             Expression::Index(value) => self
-                .expression_resources_now(module, &value.value, target_parameters)
-                .union(&self.expression_resources_now(
+                .expression_effects_now(module, &value.value, target_parameters)
+                .union(&self.expression_effects_now(
                     module,
                     &value.index,
                     target_parameters,
                 )),
             Expression::Logical(value) => self
-                .expression_resources_now(module, &value.left, target_parameters)
-                .union(&self.expression_resources_now(
+                .expression_effects_now(module, &value.left, target_parameters)
+                .union(&self.expression_effects_now(
                     module,
                     &value.right,
                     target_parameters,
@@ -2923,11 +3046,92 @@ impl TypeChecker {
             | Expression::VisibilityArgument(_)
             | Expression::Quote(_)
             | Expression::Splice(_)
-            | Expression::Name(_)
             | Expression::String(_)
             | Expression::CString(_)
             | Expression::Integer(_)
-            | Expression::Float(_) => CheckedResourceSet::default(),
+            | Expression::Float(_) => CheckedEffectSet::default(),
+            Expression::Name(name) => {
+                let state_cell = self.state_cell_symbol(module, name.syntax.id);
+                if let Some(symbol) = state_cell {
+                    self.current_state_accesses.borrow_mut().record_read(symbol);
+                }
+                CheckedEffectSet::default().with_state(
+                    state_cell.map(|_| CheckedStateEffect::Read),
+                )
+            }
+        }
+    }
+
+    fn place_resources_now(
+        &self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        target_parameters: &HashMap<SymbolId, usize>,
+    ) -> CheckedEffectSet {
+        match expression {
+            Expression::Name(name) => {
+                let state_cell = self.state_cell_symbol(module, name.syntax.id);
+                if let Some(symbol) = state_cell {
+                    self.current_state_accesses.borrow_mut().record_write(symbol);
+                }
+                CheckedEffectSet::default().with_state(
+                    state_cell.map(|_| CheckedStateEffect::Write),
+                )
+            }
+            Expression::Access(access) => {
+                self.place_resources_now(module, &access.value, target_parameters)
+            }
+            Expression::Index(index) => self
+                .place_resources_now(module, &index.value, target_parameters)
+                .union(&self.expression_effects_now(module, &index.index, target_parameters)),
+            _ => self.expression_effects_now(module, expression, target_parameters),
+        }
+    }
+
+    fn state_cell_symbol(
+        &self,
+        module: &ResolvedModule,
+        syntax: SyntaxId,
+    ) -> Option<SymbolId> {
+        let function_id = self.current_effect_function.get()?;
+        let symbol = module.symbol_for(syntax)?;
+        let external_to_function = module.is_module_symbol(symbol)
+            || module
+            .functions()
+            .iter()
+            .find(|function| function.id == function_id)
+            .is_some_and(|function| function.captures.contains(&symbol));
+        (external_to_function && module.is_mutable_symbol(symbol)).then_some(symbol)
+    }
+
+    fn call_argument_resources_now(
+        &self,
+        module: &ResolvedModule,
+        argument: &Expression,
+        mutations: &[CheckedMutation],
+        target_parameters: &HashMap<SymbolId, usize>,
+    ) -> CheckedEffectSet {
+        if mutations.contains(&CheckedMutation::Whole) {
+            return self.place_resources_now(module, argument, target_parameters);
+        }
+        if let Expression::Product(product) = argument {
+            return product
+                .elements
+                .iter()
+                .enumerate()
+                .fold(CheckedEffectSet::default(), |effects, (index, element)| {
+                    let item = if mutations.contains(&CheckedMutation::Element(index)) {
+                        self.place_resources_now(module, &element.value, target_parameters)
+                    } else {
+                        self.expression_effects_now(module, &element.value, target_parameters)
+                    };
+                    effects.union(&item)
+                });
+        }
+        if mutations.contains(&CheckedMutation::Element(0)) {
+            self.place_resources_now(module, argument, target_parameters)
+        } else {
+            self.expression_effects_now(module, argument, target_parameters)
         }
     }
 
@@ -2941,50 +3145,50 @@ impl TypeChecker {
     /// into nested blocks and closures the same way `target_parameters`
     /// itself already does, since they are handed the (possibly extended)
     /// map current at the point they are reached.
-    fn block_resources_now(
+    fn block_effects_now(
         &self,
         module: &ResolvedModule,
         block: &crate::BlockExpression,
         target_parameters: &HashMap<SymbolId, usize>,
-    ) -> CheckedResourceSet {
-        let mut resources = CheckedResourceSet::default();
+    ) -> CheckedEffectSet {
+        let mut resources = CheckedEffectSet::default();
         for item in &block.items {
             let current = target_parameters;
             let contribution = match item {
                 Item::Binding(value) => value
                     .value
                     .as_ref()
-                    .map(|value| self.expression_resources_now(module, value, current))
+                    .map(|value| self.expression_effects_now(module, value, current))
                     .unwrap_or_default(),
                 Item::PatternBinding(value) => {
-                    self.expression_resources_now(module, &value.value, current)
+                    self.expression_effects_now(module, &value.value, current)
                 }
                 Item::Assignment(value) => self
-                    .expression_resources_now(module, &value.target, current)
-                    .union(&self.expression_resources_now(module, &value.value, current)),
+                    .place_resources_now(module, &value.target, current)
+                    .union(&self.expression_effects_now(module, &value.value, current)),
                 Item::Return(value) => {
-                    self.expression_resources_now(module, &value.value, current)
+                    self.expression_effects_now(module, &value.value, current)
                 }
                 Item::Break(value) => value
                     .value
                     .as_ref()
-                    .map(|value| self.expression_resources_now(module, value, current))
+                    .map(|value| self.expression_effects_now(module, value, current))
                     .unwrap_or_default(),
-                Item::Continue(_) => CheckedResourceSet::default(),
+                Item::Continue(_) => CheckedEffectSet::default(),
                 Item::Expression(value) => {
-                    self.expression_resources_now(module, value, current)
+                    self.expression_effects_now(module, value, current)
                 }
-                Item::Submodule(_) => CheckedResourceSet::default(),
-                Item::TypeDeclaration(_) => CheckedResourceSet::default(),
-                Item::UseDeclaration(_) => CheckedResourceSet::default(),
-                _ => CheckedResourceSet::default(),
+                Item::Submodule(_) => CheckedEffectSet::default(),
+                Item::TypeDeclaration(_) => CheckedEffectSet::default(),
+                Item::UseDeclaration(_) => CheckedEffectSet::default(),
+                _ => CheckedEffectSet::default(),
             };
             resources = resources.union(&contribution);
         }
         resources
     }
 
-    fn infer_resources(&mut self, module: &ResolvedModule) {
+    fn infer_effects(&mut self, module: &ResolvedModule) {
         let declared = module
             .functions()
             .iter()
@@ -2993,7 +3197,7 @@ impl TypeChecker {
                     matches!(annotation, Type::Function(_)).then(|| {
                         (
                             function.id,
-                            self.function_types[&function.id].resources.clone(),
+                            self.function_types[&function.id].effects.clone(),
                         )
                     })
                 })
@@ -3012,13 +3216,18 @@ impl TypeChecker {
                     continue;
                 }
                 let target_parameters = self.parameter_positions(function.id);
+                self.current_effect_function.set(Some(function.id));
+                *self.current_state_accesses.borrow_mut() = StateAccesses::default();
                 let inferred_body =
-                    self.expression_resources_now(module, &function.body, &target_parameters);
-                let inferred = CheckedResourceSet::canonical_with_mutations(
+                    self.expression_effects_now(module, &function.body, &target_parameters);
+                let accesses = self.current_state_accesses.borrow().clone();
+                self.function_state_accesses.insert(function.id, accesses);
+                let inferred = CheckedEffectSet::canonical_with_mutations(
                     inferred_body.resources,
-                    self.function_types[&function.id].resources.mutations.clone(),
-                );
-                if self.function_types[&function.id].resources != inferred {
+                    self.function_types[&function.id].effects.mutations.clone(),
+                )
+                .with_state(inferred_body.state);
+                if self.function_types[&function.id].effects != inferred {
                     updates.push((function.id, function.binding_syntax, inferred));
                 }
             }
@@ -3027,13 +3236,13 @@ impl TypeChecker {
                 self.function_types
                     .get_mut(&function)
                     .expect("function type")
-                    .resources = resources.clone();
+                    .effects = resources.clone();
                 if let Some(syntax) = binding
                     && let Some(symbol) = module.symbol_for(syntax)
                     && let Some(CheckedType::Function(function_type)) =
                         self.symbol_types.get_mut(&symbol)
                 {
-                    function_type.resources = resources;
+                    function_type.effects = resources;
                 }
             }
             let refreshed = self.refresh_function_value_types(module);
@@ -3042,11 +3251,38 @@ impl TypeChecker {
             }
         }
 
+        // Cell identities are metadata rather than part of type equality, so
+        // converge them separately after the public effect types settle. This
+        // preserves exact dependencies through known calls, including calls
+        // to explicitly annotated and recursive functions.
+        for _ in 0..=module.functions().len() {
+            let mut changed = false;
+            for function in module.functions() {
+                self.current_effect_function.set(Some(function.id));
+                *self.current_state_accesses.borrow_mut() = StateAccesses::default();
+                let target_parameters = self.parameter_positions(function.id);
+                self.expression_effects_now(module, &function.body, &target_parameters);
+                let accesses = self.current_state_accesses.borrow().clone();
+                if self.function_state_accesses.get(&function.id) != Some(&accesses) {
+                    self.function_state_accesses.insert(function.id, accesses);
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+
         for function in module.functions() {
             let target_parameters = self.parameter_positions(function.id);
+            self.current_effect_function.set(Some(function.id));
+            *self.current_state_accesses.borrow_mut() = StateAccesses::default();
             let actual_body =
-                self.expression_resources_now(module, &function.body, &target_parameters);
-            let actual = CheckedResourceSet::canonical(actual_body.resources);
+                self.expression_effects_now(module, &function.body, &target_parameters);
+            self.function_state_accesses
+                .insert(function.id, self.current_state_accesses.borrow().clone());
+            let actual = CheckedEffectSet::canonical(actual_body.resources)
+                .with_state(actual_body.state);
             if let Some(allowed) = declared.get(&function.id)
                 && !actual.is_subset_of(allowed)
             {
@@ -3056,12 +3292,12 @@ impl TypeChecker {
                     format!(
                         "function body requires effects {}, which are not contained in its \
                          declared effect set {}",
-                        format_named_resource_set(&actual, &parameter),
-                        format_named_resource_set(allowed, &parameter)
+                        format_named_effect_set(&actual, &parameter),
+                        format_named_effect_set(allowed, &parameter)
                     ),
                 ));
             } else if let Some(trait_type) = self.impl_function_types.get(&function.id)
-                && !actual.is_subset_of(&trait_type.resources)
+                && !actual.is_subset_of(&trait_type.effects)
             {
                 // Impl methods are resolved without an expected type of
                 // their own (`binding_annotation` is always `None`), so
@@ -3070,19 +3306,19 @@ impl TypeChecker {
                 // the one place that keeps an implementation honest against
                 // what its trait method promised callers.
                 let parameter = trait_type.parameter.clone();
-                let allowed = trait_type.resources.clone();
+                let allowed = trait_type.effects.clone();
                 self.diagnostics.push(Diagnostic::new(
                     function.body.syntax().span.clone(),
                     format!(
                         "trait implementation requires effects {}, which are not contained in \
                          the trait method's declared effect set {}",
-                        format_named_resource_set(&actual, &parameter),
-                        format_named_resource_set(&allowed, &parameter)
+                        format_named_effect_set(&actual, &parameter),
+                        format_named_effect_set(&allowed, &parameter)
                     ),
                 ));
             }
             let current_module = self.function_module(module, function);
-            self.record_expression_resources(
+            self.record_expression_effects(
                 module,
                 &function.body,
                 &target_parameters,
@@ -3091,6 +3327,7 @@ impl TypeChecker {
         }
 
         let no_parameters = HashMap::new();
+        self.current_effect_function.set(None);
         let entry_module = module.program().entry();
         for source_module in module.program().modules() {
             let is_entry_module = source_module.id == entry_module;
@@ -3099,17 +3336,17 @@ impl TypeChecker {
                     Item::Binding(binding) => binding.value.as_ref().map(|value| {
                         (
                             value.syntax(),
-                            self.expression_resources_now(module, value, &no_parameters),
+                            self.expression_effects_now(module, value, &no_parameters),
                         )
                     }),
                     Item::PatternBinding(binding) => Some((
                         binding.value.syntax(),
-                        self.expression_resources_now(module, &binding.value, &no_parameters),
+                        self.expression_effects_now(module, &binding.value, &no_parameters),
                     )),
                     Item::Assignment(value) => Some((
                         &value.syntax,
-                        self.expression_resources_now(module, &value.target, &no_parameters)
-                            .union(&self.expression_resources_now(
+                        self.expression_effects_now(module, &value.target, &no_parameters)
+                            .union(&self.expression_effects_now(
                                 module,
                                 &value.value,
                                 &no_parameters,
@@ -3117,27 +3354,27 @@ impl TypeChecker {
                     )),
                     Item::Return(value) => Some((
                         &value.syntax,
-                        self.expression_resources_now(module, &value.value, &no_parameters),
+                        self.expression_effects_now(module, &value.value, &no_parameters),
                     )),
                     Item::Break(value) => value.value.as_ref().map(|expression| {
                         (
                             &value.syntax,
-                            self.expression_resources_now(module, expression, &no_parameters),
+                            self.expression_effects_now(module, expression, &no_parameters),
                         )
                     }),
                     Item::Continue(_) => None,
                     Item::Expression(value) => Some((
                         value.syntax(),
-                        self.expression_resources_now(module, value, &no_parameters),
+                        self.expression_effects_now(module, value, &no_parameters),
                     )),
                     Item::Submodule(_) => None,
                     Item::TypeDeclaration(_) => None,
                     Item::UseDeclaration(_) => None,
                     _ => None,
                 }
-                .unwrap_or((&source_module.syntax.syntax, CheckedResourceSet::default()));
+                .unwrap_or((&source_module.syntax.syntax, CheckedEffectSet::default()));
                 let required = if is_entry_module {
-                    CheckedResourceSet::canonical_with_mutations(
+                    CheckedEffectSet::canonical_with_mutations(
                         resources
                             .resources
                             .iter()
@@ -3151,6 +3388,7 @@ impl TypeChecker {
                             .collect(),
                         resources.mutations.clone(),
                     )
+                    .with_state(resources.state)
                 } else {
                     resources
                 };
@@ -3198,8 +3436,8 @@ impl TypeChecker {
                         let instantiated = CheckedType::Function(instantiated);
                         let mut inference_template = template.clone();
                         let mut inference_actual = instantiated.clone();
-                        clear_function_resources(&mut inference_template);
-                        clear_function_resources(&mut inference_actual);
+                        clear_function_effects(&mut inference_template);
+                        clear_function_effects(&mut inference_actual);
                         let mut substitutions = HashMap::new();
                         if infer_type_parameters(
                             &inference_template,
@@ -3414,7 +3652,7 @@ impl TypeChecker {
         changed
     }
 
-    fn record_expression_resources(
+    fn record_expression_effects(
         &mut self,
         module: &ResolvedModule,
         expression: &Expression,
@@ -3436,34 +3674,39 @@ impl TypeChecker {
             && let Some(resources) = self
                 .function_types
                 .get(&function_id)
-                .map(|function| function.resources.clone())
+                .map(|function| function.effects.clone())
             && let Some(CheckedType::Function(function)) =
                 self.expression_types.get_mut(&expression.syntax().id)
         {
-            function.resources = resources;
+            function.effects = resources;
         }
-        let resources = self.expression_resources_now(module, expression, target_parameters);
-        self.expression_resources
+        *self.current_state_accesses.borrow_mut() = StateAccesses::default();
+        let resources = self.expression_effects_now(module, expression, target_parameters);
+        self.expression_state_accesses.insert(
+            expression.syntax().id,
+            self.current_state_accesses.borrow().clone(),
+        );
+        self.expression_effects
             .insert(expression.syntax().id, resources);
         match expression {
             // A nested function literal's own syntax nodes are recorded
             // separately, on its own pass over `module.functions()`.
             Expression::Function(_) | Expression::Resource(_) => {}
-            Expression::Satisfies(value) => self.record_expression_resources(
+            Expression::Satisfies(value) => self.record_expression_effects(
                 module,
                 &value.value,
                 target_parameters,
                 current_module,
             ),
             Expression::Match(value) => {
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.subject,
                     target_parameters,
                     current_module,
                 );
                 for arm in &value.arms {
-                    self.record_expression_resources(
+                    self.record_expression_effects(
                         module,
                         &arm.body,
                         target_parameters,
@@ -3473,7 +3716,7 @@ impl TypeChecker {
             }
             Expression::Loop(value) => {
                 for item in &value.body.items {
-                    self.record_block_item_resources(
+                    self.record_block_item_effects(
                         module,
                         item,
                         target_parameters,
@@ -3482,14 +3725,14 @@ impl TypeChecker {
                 }
             }
             Expression::With(value) => {
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.value,
                     target_parameters,
                     current_module,
                 );
                 for item in &value.body.items {
-                    self.record_block_item_resources(
+                    self.record_block_item_effects(
                         module,
                         item,
                         target_parameters,
@@ -3499,7 +3742,7 @@ impl TypeChecker {
             }
             Expression::Block(value) => {
                 for item in &value.items {
-                    self.record_block_item_resources(
+                    self.record_block_item_effects(
                         module,
                         item,
                         target_parameters,
@@ -3509,7 +3752,7 @@ impl TypeChecker {
             }
             Expression::Product(value) => {
                 for element in &value.elements {
-                    self.record_expression_resources(
+                    self.record_expression_effects(
                         module,
                         &element.value,
                         target_parameters,
@@ -3518,13 +3761,13 @@ impl TypeChecker {
                 }
             }
             Expression::Call(value) => {
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.callee,
                     target_parameters,
                     current_module,
                 );
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.argument,
                     target_parameters,
@@ -3539,7 +3782,7 @@ impl TypeChecker {
                 // `function_types.get` first would reapply `f`'s outermost
                 // arrow's mutation set at every curry depth instead of just
                 // the matching one (see the identical fix in
-                // `expression_resources_now`'s `Expression::Call` arm).
+                // `expression_effects_now`'s `Expression::Call` arm).
                 let called_type = match self.expression_types.get(&value.callee.syntax().id) {
                     Some(CheckedType::Function(function)) => Some(function.clone()),
                     _ => self
@@ -3547,30 +3790,30 @@ impl TypeChecker {
                         .and_then(|function| self.function_types.get(&function).cloned()),
                 };
                 if let Some(function_type) = called_type
-                    && !function_type.resources.mutations.is_empty()
+                    && !function_type.effects.mutations.is_empty()
                 {
                     self.check_call_mutations(
                         module,
                         &value.argument,
-                        &function_type.resources.mutations,
+                        &function_type.effects.mutations,
                         current_module,
                     );
                 }
             }
-            Expression::Access(value) => self.record_expression_resources(
+            Expression::Access(value) => self.record_expression_effects(
                 module,
                 &value.value,
                 target_parameters,
                 current_module,
             ),
             Expression::Index(value) => {
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.value,
                     target_parameters,
                     current_module,
                 );
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.index,
                     target_parameters,
@@ -3578,13 +3821,13 @@ impl TypeChecker {
                 );
             }
             Expression::Logical(value) => {
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.left,
                     target_parameters,
                     current_module,
                 );
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.right,
                     target_parameters,
@@ -3594,7 +3837,7 @@ impl TypeChecker {
             Expression::StringTemplate(template) => {
                 for part in &template.parts {
                     if let crate::StringTemplatePart::Interpolation(interpolation) = part {
-                        self.record_expression_resources(
+                        self.record_expression_effects(
                             module,
                             &interpolation.expression,
                             target_parameters,
@@ -3615,7 +3858,7 @@ impl TypeChecker {
         }
     }
 
-    fn record_block_item_resources(
+    fn record_block_item_effects(
         &mut self,
         module: &ResolvedModule,
         item: &Item,
@@ -3625,7 +3868,7 @@ impl TypeChecker {
         match item {
             Item::Binding(value) => {
                 if let Some(value) = &value.value {
-                    self.record_expression_resources(
+                    self.record_expression_effects(
                         module,
                         value,
                         target_parameters,
@@ -3633,27 +3876,27 @@ impl TypeChecker {
                     );
                 }
             }
-            Item::PatternBinding(value) => self.record_expression_resources(
+            Item::PatternBinding(value) => self.record_expression_effects(
                 module,
                 &value.value,
                 target_parameters,
                 current_module,
             ),
             Item::Assignment(value) => {
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.target,
                     target_parameters,
                     current_module,
                 );
-                self.record_expression_resources(
+                self.record_expression_effects(
                     module,
                     &value.value,
                     target_parameters,
                     current_module,
                 );
             }
-            Item::Return(value) => self.record_expression_resources(
+            Item::Return(value) => self.record_expression_effects(
                 module,
                 &value.value,
                 target_parameters,
@@ -3661,7 +3904,7 @@ impl TypeChecker {
             ),
             Item::Break(value) => {
                 if let Some(value) = &value.value {
-                    self.record_expression_resources(
+                    self.record_expression_effects(
                         module,
                         value,
                         target_parameters,
@@ -3670,7 +3913,7 @@ impl TypeChecker {
                 }
             }
             Item::Continue(_) => {}
-            Item::Expression(value) => self.record_expression_resources(
+            Item::Expression(value) => self.record_expression_effects(
                 module,
                 value,
                 target_parameters,
@@ -3889,7 +4132,7 @@ impl TypeChecker {
                         }
                         if matches!(
                             &external_type,
-                            Some(CheckedType::Function(CheckedFunctionType { resources, .. }))
+                            Some(CheckedType::Function(CheckedFunctionType { effects: resources, .. }))
                                 if !resources.resources.is_empty()
                         ) {
                             self.diagnostics.push(Diagnostic::new(
@@ -4786,12 +5029,13 @@ impl TypeChecker {
             Expression::Logical(logical) => self.check_logical_expression(module, logical),
             Expression::Loop(loop_) => self.check_loop_expression(module, loop_, expected),
             Expression::Resource(resource) => {
-                let resources = self.resolve_resource_set(
+                let resources = self.resolve_effect_set(
                     module,
-                    &crate::ResourceSet {
+                    &crate::EffectSet {
                         syntax: resource.resource.syntax().clone(),
                         resources: vec![resource.resource.clone()],
                         mutations: Vec::new(),
+                        state: Vec::new(),
                     },
                     None,
                 );
@@ -4803,12 +5047,13 @@ impl TypeChecker {
                 resource_type.value_type
             }
             Expression::With(with) => {
-                let resources = self.resolve_resource_set(
+                let resources = self.resolve_effect_set(
                     module,
-                    &crate::ResourceSet {
+                    &crate::EffectSet {
                         syntax: with.resource.syntax().clone(),
                         resources: vec![with.resource.clone()],
                         mutations: Vec::new(),
+                        state: Vec::new(),
                     },
                     None,
                 );
@@ -5233,9 +5478,9 @@ impl TypeChecker {
                     {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
                             parameter: Box::new(widen_literal_type(argument_type.clone())),
-                            resources: match &raw_callee_type {
-                                CheckedType::Function(function) => function.resources.clone(),
-                                _ => CheckedResourceSet::default(),
+                            effects: match &raw_callee_type {
+                                CheckedType::Function(function) => function.effects.clone(),
+                                _ => CheckedEffectSet::default(),
                             },
                             result: Box::new(expected_result.clone()),
                         });
@@ -7310,9 +7555,9 @@ impl TypeChecker {
             }
             Type::Function(function) => {
                 let parameter = self.resolve_source_type_inner(module, &function.parameter);
-                let resources = self.resolve_resource_set(
+                let resources = self.resolve_effect_set(
                     module,
-                    &function.resources,
+                    &function.effects,
                     Some(&function.parameter),
                 );
                 let result = self.resolve_source_type_inner(module, &function.result);
@@ -7327,7 +7572,7 @@ impl TypeChecker {
                 }
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
-                    resources,
+                    effects: resources,
                     result: Box::new(result),
                 })
             }
@@ -7376,12 +7621,12 @@ impl TypeChecker {
         }
     }
 
-    fn resolve_resource_set(
+    fn resolve_effect_set(
         &mut self,
         module: &ResolvedModule,
-        source: &crate::ResourceSet,
+        source: &crate::EffectSet,
         parameter: Option<&Type>,
-    ) -> CheckedResourceSet {
+    ) -> CheckedEffectSet {
         let mut resources = Vec::new();
         for resource in &source.resources {
             let value_type = self.resolve_source_type_inner(module, resource);
@@ -7418,7 +7663,17 @@ impl TypeChecker {
                 mutations.push(resolved);
             }
         }
-        CheckedResourceSet::canonical_with_mutations(resources, mutations)
+        let state = source.state.iter().copied().fold(None, |current, effect| {
+            union_state(
+                current,
+                Some(match effect {
+                    crate::StateEffect::Read => CheckedStateEffect::Read,
+                    crate::StateEffect::Write => CheckedStateEffect::Write,
+                    crate::StateEffect::ReadWrite => CheckedStateEffect::ReadWrite,
+                }),
+            )
+        });
+        CheckedEffectSet::canonical_with_mutations(resources, mutations).with_state(state)
     }
 
     /// Resolves a `mut`/`mut <index>`/`mut <name>` effect-set entry against
@@ -8263,12 +8518,12 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             Some(normalize_product_type(elements, actual.variadic))
         }
         (CheckedType::Function(actual), CheckedType::Function(expected)) => {
-            if actual.resources != expected.resources {
+            if actual.effects != expected.effects {
                 return None;
             }
             Some(CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(merge_types(*actual.parameter, *expected.parameter)?),
-                resources: actual.resources,
+                effects: actual.effects,
                 result: Box::new(merge_types(*actual.result, *expected.result)?),
             }))
         }
@@ -8473,16 +8728,16 @@ pub(crate) fn substitute_type(
         }),
         CheckedType::Function(function) => CheckedType::Function(CheckedFunctionType {
             parameter: Box::new(substitute_type(*function.parameter, substitutions)),
-            resources: CheckedResourceSet::canonical_with_mutations(
+            effects: CheckedEffectSet::canonical_with_mutations(
                 function
-                    .resources
+                    .effects
                     .resources
                     .into_iter()
                     .map(|resource| CheckedResource {
                         value_type: substitute_type(resource.value_type, substitutions),
                     })
                     .collect(),
-                function.resources.mutations,
+                function.effects.mutations,
             ),
             result: Box::new(substitute_type(*function.result, substitutions)),
         }),
@@ -8632,7 +8887,7 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
         CheckedType::Function(function) => {
             contains_type_parameter(&function.parameter)
                 || function
-                    .resources
+                    .effects
                     .resources
                     .iter()
                     .any(|resource| contains_type_parameter(&resource.value_type))
@@ -8671,7 +8926,7 @@ fn contains_inferred_type(value_type: &CheckedType) -> bool {
         CheckedType::Function(function) => {
             contains_inferred_type(&function.parameter)
                 || function
-                    .resources
+                    .effects
                     .resources
                     .iter()
                     .any(|resource| contains_inferred_type(&resource.value_type))
@@ -8708,7 +8963,7 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
             }
             CheckedType::Function(function) => {
                 collect(&function.parameter, ids);
-                for resource in &function.resources.resources {
+                for resource in &function.effects.resources {
                     collect(&resource.value_type, ids);
                 }
                 collect(&function.result, ids);
@@ -8998,7 +9253,7 @@ pub(crate) fn infer_type_parameters(
             let CheckedType::Function(actual) = actual else {
                 return false;
             };
-            template.resources == actual.resources
+            template.effects == actual.effects
                 && infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
                 && infer_type_parameters(&template.result, &actual.result, substitutions)
         }
@@ -9070,31 +9325,31 @@ fn merge_trait_arguments(left: &[CheckedType], right: &[CheckedType]) -> Option<
         .collect()
 }
 
-fn clear_function_resources(value_type: &mut CheckedType) {
+fn clear_function_effects(value_type: &mut CheckedType) {
     match value_type {
         CheckedType::CPointer { pointee }
         | CheckedType::Ref(pointee)
         | CheckedType::Buffer(pointee)
-        | CheckedType::ErasedProduct(pointee) => clear_function_resources(pointee),
+        | CheckedType::ErasedProduct(pointee) => clear_function_effects(pointee),
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             for argument in arguments {
-                clear_function_resources(argument);
+                clear_function_effects(argument);
             }
         }
         CheckedType::Product(product) => {
             for element in &mut product.elements {
-                clear_function_resources(&mut element.value_type);
+                clear_function_effects(&mut element.value_type);
             }
         }
         CheckedType::Sum(sum) => {
             for alternative in &mut sum.alternatives {
-                clear_function_resources(alternative);
+                clear_function_effects(alternative);
             }
         }
         CheckedType::Function(function) => {
-            function.resources = CheckedResourceSet::default();
-            clear_function_resources(&mut function.parameter);
-            clear_function_resources(&mut function.result);
+            function.effects = CheckedEffectSet::default();
+            clear_function_effects(&mut function.parameter);
+            clear_function_effects(&mut function.result);
         }
         CheckedType::Distinct {
             arguments,
@@ -9102,9 +9357,9 @@ fn clear_function_resources(value_type: &mut CheckedType) {
             ..
         } => {
             for argument in arguments {
-                clear_function_resources(argument);
+                clear_function_effects(argument);
             }
-            clear_function_resources(representation);
+            clear_function_effects(representation);
         }
         _ => {}
     }
@@ -9117,7 +9372,7 @@ fn infer_type_parameters_for_expected(
 ) -> bool {
     if let (CheckedType::Function(template), CheckedType::Function(expected)) = (template, expected)
     {
-        return template.resources == expected.resources
+        return template.effects == expected.effects
             && infer_type_parameters(&template.parameter, &expected.parameter, substitutions)
             && infer_type_parameters_for_expected(
                 &template.result,
@@ -9203,7 +9458,7 @@ fn pattern_parameter_mutations(pattern: &Pattern) -> Vec<CheckedMutation> {
             .collect(),
         _ => Vec::new(),
     };
-    CheckedResourceSet::canonical_with_mutations(Vec::new(), mutations).mutations
+    CheckedEffectSet::canonical_with_mutations(Vec::new(), mutations).mutations
 }
 
 fn mutation_parameter_symbols(
@@ -9559,17 +9814,17 @@ fn valid_buffer_intrinsic_type(
     let CheckedType::Function(function) = value_type else {
         return false;
     };
-    let no_effects = CheckedResourceSet::default();
+    let no_effects = CheckedEffectSet::default();
     match intrinsic {
         crate::IntrinsicFunction::BufferWithCapacity => {
             function.parameter.as_ref() == &CheckedType::USize
                 && matches!(function.result.as_ref(), CheckedType::Buffer(_))
-                && function.resources == no_effects
+                && function.effects == no_effects
         }
         crate::IntrinsicFunction::BufferLength | crate::IntrinsicFunction::BufferCapacity => {
             matches!(function.parameter.as_ref(), CheckedType::Buffer(_))
                 && function.result.as_ref() == &CheckedType::USize
-                && function.resources == no_effects
+                && function.effects == no_effects
         }
         crate::IntrinsicFunction::BufferPush => {
             let CheckedType::Product(product) = function.parameter.as_ref() else {
@@ -9580,8 +9835,9 @@ fn valid_buffer_intrinsic_type(
             };
             matches!(&buffer.value_type, CheckedType::Buffer(payload) if payload.as_ref() == &element.value_type)
                 && function.result.as_ref() == &CheckedType::empty_product()
-                && function.resources.mutations == [CheckedMutation::Element(0)]
-                && function.resources.resources.is_empty()
+                && function.effects.mutations == [CheckedMutation::Element(0)]
+                && function.effects.resources.is_empty()
+                && function.effects.state.is_none()
         }
         crate::IntrinsicFunction::BufferPop => {
             let CheckedType::Buffer(element) = function.parameter.as_ref() else {
@@ -9603,8 +9859,9 @@ fn valid_buffer_intrinsic_type(
             has_none
                 && has_some
                 && option.alternatives.len() == 2
-                && function.resources.mutations == [CheckedMutation::Whole]
-                && function.resources.resources.is_empty()
+                && function.effects.mutations == [CheckedMutation::Whole]
+                && function.effects.resources.is_empty()
+                && function.effects.state.is_none()
         }
         crate::IntrinsicFunction::BufferGet => {
             let CheckedType::Product(product) = function.parameter.as_ref() else {
@@ -9617,13 +9874,13 @@ fn valid_buffer_intrinsic_type(
                 (&buffer.value_type, function.result.as_ref()),
                 (CheckedType::Buffer(element), CheckedType::Ref(result)) if element == result
             ) && position.value_type == CheckedType::USize
-                && function.resources == no_effects
+                && function.effects == no_effects
         }
         crate::IntrinsicFunction::BufferFreeze => matches!(
             (function.parameter.as_ref(), function.result.as_ref()),
             (CheckedType::Buffer(element), CheckedType::Ref(result))
                 if matches!(result.as_ref(), CheckedType::ErasedProduct(result) if result == element)
-        ) && function.resources == no_effects,
+        ) && function.effects == no_effects,
         crate::IntrinsicFunction::BufferTransfer => {
             let CheckedType::Product(product) = function.parameter.as_ref() else {
                 return false;
@@ -9635,9 +9892,10 @@ fn valid_buffer_intrinsic_type(
                 (&source.value_type, &destination.value_type),
                 (CheckedType::Buffer(a), CheckedType::Buffer(b)) if a == b
             ) && function.result.as_ref() == &CheckedType::empty_product()
-                && function.resources.mutations
+                && function.effects.mutations
                     == [CheckedMutation::Element(0), CheckedMutation::Element(1)]
-                && function.resources.resources.is_empty()
+                && function.effects.resources.is_empty()
+                && function.effects.state.is_none()
         }
         _ => false,
     }

@@ -58,7 +58,7 @@ fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
     let Some(Type::Function(function)) = &binding.annotation else {
         panic!("expected function annotation")
     };
-    assert_eq!(function.resources.resources.len(), 1);
+    assert_eq!(function.effects.resources.len(), 1);
     assert!(matches!(module.items[3], Item::Expression(_)));
     assert!(matches!(module.items[4], Item::MacroDeclaration(_)));
     assert!(matches!(module.items[5], Item::MacroDeclaration(_)));
@@ -87,7 +87,7 @@ fn parses_mut_effect_sets_losslessly() {
         let Some(Type::Function(function)) = annotation else {
             panic!("expected function annotation");
         };
-        &function.resources.mutations
+        &function.effects.mutations
     }
 
     let source = concat!(
@@ -139,8 +139,8 @@ fn parses_mut_effect_sets_losslessly() {
     let Some(Type::Function(function)) = &f4.annotation else {
         panic!("expected function annotation");
     };
-    assert_eq!(function.resources.mutations.len(), 1);
-    assert_eq!(function.resources.resources.len(), 1);
+    assert_eq!(function.effects.mutations.len(), 1);
+    assert_eq!(function.effects.resources.len(), 1);
 
     assert!(parse("def bad: A ->{mut mut} () = a => ()\n").is_err());
 }

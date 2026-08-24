@@ -344,6 +344,7 @@ pub struct ResolvedModule {
     checked_initialization_symbols: HashSet<SymbolId>,
     checked_initialization_reads: HashSet<SyntaxId>,
     mutable_symbols: HashSet<SymbolId>,
+    symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
     trait_modules: HashMap<TraitId, ModuleId>,
@@ -679,6 +680,10 @@ impl ResolvedModule {
 
     pub fn is_mutable_symbol(&self, symbol: SymbolId) -> bool {
         self.mutable_symbols.contains(&symbol)
+    }
+
+    pub fn is_module_symbol(&self, symbol: SymbolId) -> bool {
+        self.symbol_owners.get(&symbol) == Some(&None)
     }
 
     pub fn has_mutable_storage(&self, symbol: SymbolId) -> bool {
@@ -1114,6 +1119,7 @@ impl NameResolver {
             checked_initialization_symbols: HashSet::new(),
             checked_initialization_reads: HashSet::new(),
             mutable_symbols: self.mutable_symbols,
+            symbol_owners: self.symbol_owners,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
             import_definitions: self.import_definitions,
@@ -3727,7 +3733,7 @@ impl NameResolver {
             }
             Type::Function(function) => {
                 self.resolve_type_with(&function.parameter, strict);
-                for resource in &function.resources.resources {
+                for resource in &function.effects.resources {
                     self.resolve_type_with(resource, strict);
                 }
                 self.resolve_type_with(&function.result, strict);
@@ -3900,7 +3906,7 @@ impl NameResolver {
             }
             Type::Function(function) => {
                 self.validate_public_representation(&function.parameter);
-                for resource in &function.resources.resources {
+                for resource in &function.effects.resources {
                     self.validate_public_representation(resource);
                 }
                 self.validate_public_representation(&function.result);

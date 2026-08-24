@@ -1720,15 +1720,15 @@ impl Grammar {
         let parameter = self.parse_type_union()?;
         if self.eat(TokenKind::Arrow) {
             let resources = if self.at(TokenKind::LBrace) {
-                self.parse_resource_set()?
+                self.parse_effect_set()?
             } else {
-                ResourceSet::empty()
+                EffectSet::empty()
             };
             let result = self.parse_type()?;
             Ok(Type::Function(FunctionType {
                 syntax: self.syntax(start),
                 parameter: Box::new(parameter),
-                resources,
+                effects: resources,
                 result: Box::new(result),
             }))
         } else {
@@ -1736,15 +1736,36 @@ impl Grammar {
         }
     }
 
-    fn parse_resource_set(&mut self) -> Result<ResourceSet, ParseError> {
+    fn parse_effect_set(&mut self) -> Result<EffectSet, ParseError> {
         let start = self.position;
-        self.expect(TokenKind::LBrace, "expected `{` before resource set")?;
+        self.expect(TokenKind::LBrace, "expected `{` before effect set")?;
         let mut resources = Vec::new();
         let mut mutations = Vec::new();
+        let mut state = Vec::new();
         if !self.at(TokenKind::RBrace) {
             loop {
                 let entry_start = self.position;
-                if self.eat(TokenKind::Mut) {
+                if self.peek() == Some(TokenKind::Identifier)
+                    && self.tokens[self.position].text == "state"
+                {
+                    self.bump_token();
+                    let effect = if self.eat(TokenKind::Dot) {
+                        let name = self
+                            .expect(
+                                TokenKind::Identifier,
+                                "expected `read` or `write` after `state.`",
+                            )?
+                            .text;
+                        match name.as_str() {
+                            "read" => StateEffect::Read,
+                            "write" => StateEffect::Write,
+                            _ => return Err(self.error("expected `read` or `write` after `state.`")),
+                        }
+                    } else {
+                        StateEffect::ReadWrite
+                    };
+                    state.push(effect);
+                } else if self.eat(TokenKind::Mut) {
                     let target = match self.peek() {
                         Some(TokenKind::Integer) => {
                             let text = self.bump_token().expect("peeked integer").text;
@@ -1773,11 +1794,12 @@ impl Grammar {
                 }
             }
         }
-        self.expect(TokenKind::RBrace, "expected `}` after resource set")?;
-        Ok(ResourceSet {
+        self.expect(TokenKind::RBrace, "expected `}` after effect set")?;
+        Ok(EffectSet {
             syntax: self.syntax(start),
             resources,
             mutations,
+            state,
         })
     }
 

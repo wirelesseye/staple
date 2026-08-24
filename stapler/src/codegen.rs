@@ -20,7 +20,7 @@ use crate::typecheck::{
     substitute_type,
 };
 use crate::{
-    CallExpression, CheckedFunctionType, CheckedMutation, CheckedProductType, CheckedResource, CheckedResourceSet,
+    CallExpression, CheckedFunctionType, CheckedMutation, CheckedProductType, CheckedResource, CheckedEffectSet,
     CheckedType, CheckedTypeElement, Diagnostic, Expression, FloatType, FunctionId,
     IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction,
     ModuleId, NumericType, Pattern, PatternBindingKind, ProductExpression, ResolvedFunction, ResolvedModule, Span,
@@ -696,7 +696,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 &self.active_type_substitutions,
             );
             if let CheckedType::Function(template) = resources {
-                function.resources = template.resources;
+                function.effects = template.effects;
             }
         }
         Some(value_type)
@@ -725,9 +725,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 _ => None,
             })
             .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing checked function type"))?;
-        let resource_count = function_type.resources.resources.len();
+        let resource_count = function_type.effects.resources.len();
         for (resource, value) in function_type
-            .resources
+            .effects
             .resources
             .iter()
             .cloned()
@@ -771,13 +771,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
         let raw_parameters = &parameters[1 + resource_count..];
         let whole_mutation = function_type
-            .resources
+            .effects
             .mutations
             .contains(&CheckedMutation::Whole);
         let logical_types = flattened_parameter_types(&function_type.parameter);
         let mutation_mask = mutation_parameter_mask(
             logical_types.len(),
-            &function_type.resources.mutations,
+            &function_type.effects.mutations,
         );
         let mut values = Vec::new();
         let mut mutable_pointers = Vec::new();
@@ -2022,7 +2022,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
         let mut call_arguments = self.compile_resource_arguments(
             environment,
-            &function_type.resources,
+            &function_type.effects,
             assignment.syntax.span.clone(),
         )?;
         call_arguments.insert(
@@ -5252,7 +5252,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         })?;
         let mut call_arguments = self.compile_resource_arguments(
             environment,
-            &function_type.resources,
+            &function_type.effects,
             index.syntax.span.clone(),
         )?;
         call_arguments.insert(
@@ -5504,7 +5504,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             let mut hidden = self.compile_resource_arguments(
                 environment,
-                &function_type.resources,
+                &function_type.effects,
                 call.syntax.span.clone(),
             )?;
             hidden.append(&mut arguments);
@@ -5581,7 +5581,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             };
             let mut hidden = self.compile_resource_arguments(
                 environment,
-                &function_type.resources,
+                &function_type.effects,
                 call.syntax.span.clone(),
             )?;
             hidden.append(&mut arguments);
@@ -5651,10 +5651,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     } else {
                         self.context.ptr_type(AddressSpace::default()).const_null()
                     };
-                let empty_resources = CheckedResourceSet::default();
+                let empty_resources = CheckedEffectSet::default();
                 let resources = function_type
                     .as_ref()
-                    .map(|function| &function.resources)
+                    .map(|function| &function.effects)
                     .unwrap_or(&empty_resources);
                 let mut hidden = self.compile_resource_arguments(
                     environment,
@@ -5723,7 +5723,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .into_pointer_value();
         let mut hidden = self.compile_resource_arguments(
             environment,
-            &function_type.resources,
+            &function_type.effects,
             call.syntax.span.clone(),
         )?;
         hidden.append(&mut arguments);
@@ -5748,7 +5748,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_resource_arguments(
         &self,
         environment: &FunctionEnvironment<'context>,
-        resources: &CheckedResourceSet,
+        resources: &CheckedEffectSet,
         span: Span,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
         resources
@@ -7323,7 +7323,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         argument: &Expression,
         function_type: &CheckedFunctionType,
     ) -> CodeGenerationResult<CompiledCallArguments<'context>> {
-        let mutations = &function_type.resources.mutations;
+        let mutations = &function_type.effects.mutations;
         if mutations.is_empty() {
             let expected = self.compile_parameter_types(&function_type.parameter)?.len();
             return Ok(CompiledCallArguments {
@@ -7555,11 +7555,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<inkwell::types::FunctionType<'context>> {
         let return_type = self.compile_type(&function_type.result)?;
         let mut parameter_types = vec![self.context.ptr_type(AddressSpace::default()).into()];
-        for resource in &function_type.resources.resources {
+        for resource in &function_type.effects.resources {
             parameter_types.push(self.compile_type(&resource.value_type)?.into());
         }
         let value_parameters = if function_type
-            .resources
+            .effects
             .mutations
             .contains(&CheckedMutation::Whole)
         {
@@ -7568,7 +7568,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let mut parameters = self.compile_parameter_types(&function_type.parameter)?;
             let mutation_mask = mutation_parameter_mask(
                 parameters.len(),
-                &function_type.resources.mutations,
+                &function_type.effects.mutations,
             );
             for (index, parameter) in parameters.iter_mut().enumerate() {
                 if mutation_mask[index] {

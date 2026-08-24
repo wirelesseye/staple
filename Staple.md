@@ -1452,7 +1452,7 @@ or move-only nominal type is not eligible. The compiler-represented opaque
 `std.io.IO` type is the sole opaque exception. Consequently resources never add
 a new borrowing or ownership mode: their hidden values can always be copied.
 
-Function arrows list their implicit parameters in braces. Resource sets are
+Function arrows list their effects in braces. Effect sets are
 unordered and duplicate-free, and each arrow in a curried type has its own set:
 
 ```staple
@@ -1466,12 +1466,29 @@ The empty set may be written explicitly as `->{}`. Reordering or repeating
 entries does not change a function type or the canonical hidden-parameter
 order.
 
+Mutable bindings accessed from outside a function—either lexical captures or
+module bindings—contribute state effects. Reading such a cell requires
+`state.read`, writing it requires `state.write`, and a function that does both
+uses the canonical combined spelling `state`. These effects are compile-time
+properties and do not add hidden runtime parameters:
+
+```staple
+let mut count = 0
+let next: () ->{state} I32 = () => {
+    count = count + 1
+    count
+}
+```
+
+The compiler retains the identity of each captured cell read or written for
+analysis, while function type equality uses only the public state effect.
+
 `resource Clock` has type `Clock` and makes the enclosing function require that
 resource. Calls propagate requirements transitively, including through
 recursion, trait methods, and function values. An unannotated function infers
 the minimal required set. An explicit set remains part of its declared
 contract: resources may be unused, but the body cannot require an unlisted
-resource. Function types with different resource sets are distinct and are not
+resource. Function types with different effect sets are distinct and are not
 implicitly widened.
 
 Resources are supplied lexically with `with`:
