@@ -4,11 +4,11 @@ pub type Buffer T = opaque
 pub def __buffer_with_capacity: <T> USize -> Buffer T = capacity => __buffer_with_capacity capacity
 pub def __buffer_length: <T> Buffer T -> USize = buffer => __buffer_length buffer
 pub def __buffer_capacity: <T> Buffer T -> USize = buffer => __buffer_capacity buffer
-pub def __buffer_push: <T> (Buffer T, T) ->{mut 0} () = (buffer, value) => __buffer_push (buffer, value)
-pub def __buffer_pop: <T> Buffer T ->{mut} Option T = buffer => __buffer_pop buffer
+pub def __buffer_push: <T> (mut Buffer T, T) -> () = (buffer, value) => __buffer_push (buffer, value)
+pub def __buffer_pop: <T> mut Buffer T -> Option T = buffer => __buffer_pop buffer
 pub def __buffer_get: <T> (Buffer T, USize) -> Ref T = (buffer, position) => __buffer_get (buffer, position)
 pub def __buffer_freeze: <T> Buffer T -> Slice T = buffer => __buffer_freeze buffer
-pub def __buffer_transfer: <T> (Buffer T, Buffer T) ->{mut 0, mut 1} () = (source, destination) => __buffer_transfer (source, destination)
+pub def __buffer_transfer: <T> (mut Buffer T, mut Buffer T) -> () = (source, destination) => __buffer_transfer (source, destination)
 
 companion<T> Buffer T {
     /// Allocates storage for exactly capacity elements without initialising values.
@@ -21,10 +21,10 @@ companion<T> Buffer T {
     pub def capacity: Buffer T -> USize = buffer => __buffer_capacity buffer
 
     /// Appends an element, trapping if the buffer is full or frozen.
-    pub def push: Buffer T ->{mut} T -> () = buffer => value => __buffer_push (buffer, value)
+    pub def push: mut Buffer T -> T -> () = buffer => value => __buffer_push (buffer, value)
 
     /// Removes and returns the last element, or `None` if empty; traps if frozen.
-    pub def pop: Buffer T ->{mut} Option T = buffer => __buffer_pop buffer
+    pub def pop: mut Buffer T -> Option T = buffer => __buffer_pop buffer
 
     /// Borrows an initialised element by position, trapping if out of bounds.
     pub def get_ref: Buffer T -> USize -> Ref T = buffer => position => __buffer_get (buffer, position)
@@ -34,5 +34,5 @@ companion<T> Buffer T {
 
     /// Moves every initialised source element to destination and empties source.
     /// Traps for frozen, overlapping, or insufficient-capacity buffers.
-    pub def transfer: (Buffer T, Buffer T) ->{mut 0, mut 1} () = (source, destination) => __buffer_transfer (source, destination)
+    pub def transfer: (mut Buffer T, mut Buffer T) -> () = (source, destination) => __buffer_transfer (source, destination)
 }

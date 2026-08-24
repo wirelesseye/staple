@@ -246,6 +246,7 @@ pub struct CheckedSumType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedFunctionType {
     pub parameter: Box<CheckedType>,
+    pub mutations: Vec<CheckedMutation>,
     pub effects: CheckedEffectSet,
     pub result: Box<CheckedType>,
 }
@@ -266,7 +267,6 @@ pub enum CheckedMutation {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CheckedEffectSet {
     pub resources: Vec<CheckedResource>,
-    pub mutations: Vec<CheckedMutation>,
     pub state: Option<CheckedStateEffect>,
 }
 
@@ -307,26 +307,13 @@ impl StateAccesses {
 }
 
 impl CheckedEffectSet {
-    pub fn canonical(resources: Vec<CheckedResource>) -> Self {
-        Self::canonical_with_mutations(resources, Vec::new())
-    }
-
-    pub fn canonical_with_mutations(
-        mut resources: Vec<CheckedResource>,
-        mut mutations: Vec<CheckedMutation>,
-    ) -> Self {
+    pub fn canonical(mut resources: Vec<CheckedResource>) -> Self {
         resources.sort_by(|left, right| {
             format!("{:?}", left.value_type).cmp(&format!("{:?}", right.value_type))
         });
         resources.dedup();
-        mutations.sort_by_key(|mutation| match mutation {
-            CheckedMutation::Whole => (0, 0),
-            CheckedMutation::Element(index) => (1, *index),
-        });
-        mutations.dedup();
         Self {
             resources,
-            mutations,
             state: None,
         }
     }
@@ -337,36 +324,28 @@ impl CheckedEffectSet {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.resources.is_empty() && self.mutations.is_empty() && self.state.is_none()
+        self.resources.is_empty() && self.state.is_none()
     }
 
     pub fn union(&self, other: &Self) -> Self {
-        Self::canonical_with_mutations(
+        Self::canonical(
             self.resources
                 .iter()
                 .chain(&other.resources)
-                .cloned()
-                .collect(),
-            self.mutations
-                .iter()
-                .chain(&other.mutations)
                 .cloned()
                 .collect(),
         )
         .with_state(union_state(self.state, other.state))
     }
 
-    /// Discharges a resource, as `with` does. Mutations are never discharged
-    /// this way: they are a static property of the parameter, not a runtime
-    /// provider.
+    /// Discharges a resource, as `with` does.
     pub fn without(&self, resource: &CheckedResource) -> Self {
-        Self::canonical_with_mutations(
+        Self::canonical(
             self.resources
                 .iter()
                 .filter(|candidate| *candidate != resource)
                 .cloned()
                 .collect(),
-            self.mutations.clone(),
         )
         .with_state(self.state)
     }
@@ -375,15 +354,7 @@ impl CheckedEffectSet {
         self.resources
             .iter()
             .all(|resource| other.resources.contains(resource))
-            && self
-                .mutations
-                .iter()
-                .all(|mutation| other.covers_mutation(mutation))
             && state_is_subset(self.state, other.state)
-    }
-
-    fn covers_mutation(&self, mutation: &CheckedMutation) -> bool {
-        self.mutations.contains(&CheckedMutation::Whole) || self.mutations.contains(mutation)
     }
 }
 
@@ -391,16 +362,6 @@ impl fmt::Display for CheckedEffectSet {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("{")?;
         let mut first = true;
-        for mutation in &self.mutations {
-            if !first {
-                formatter.write_str(", ")?;
-            }
-            first = false;
-            match mutation {
-                CheckedMutation::Whole => formatter.write_str("mut")?,
-                CheckedMutation::Element(index) => write!(formatter, "mut {index}")?,
-            }
-        }
         if let Some(state) = self.state {
             if !first {
                 formatter.write_str(", ")?;
@@ -443,42 +404,38 @@ fn state_is_subset(
         || required == allowed
 }
 
-/// Renders an effect set exactly like `Display for CheckedEffectSet`,
-/// except that `mut <index>` is rendered as `mut <name>` when `parameter` is
-/// a product with a name at that position — used wherever the parameter
-/// type is in hand (an owning function's signature) to produce the same
-/// spelling a user would write.
-fn format_named_effect_set(resources: &CheckedEffectSet, parameter: &CheckedType) -> String {
-    let mut entries = Vec::new();
-    for mutation in &resources.mutations {
-        entries.push(match mutation {
-            CheckedMutation::Whole => "mut".to_string(),
-            CheckedMutation::Element(index) => {
-                let name = match parameter {
-                    CheckedType::Product(product) => product
-                        .elements
-                        .get(*index)
-                        .and_then(|element| element.name.as_deref()),
-                    _ => None,
-                };
-                match name {
-                    Some(name) => format!("mut {name}"),
-                    None => format!("mut {index}"),
-                }
-            }
-        });
+fn format_mutable_checked_parameter(
+    parameter: &CheckedType,
+    mutations: &[CheckedMutation],
+) -> String {
+    if mutations.contains(&CheckedMutation::Whole) {
+        return format!("mut {parameter}");
     }
-    if let Some(state) = resources.state {
-        entries.push(match state {
-            CheckedStateEffect::Read => "state.read".to_string(),
-            CheckedStateEffect::Write => "state.write".to_string(),
-            CheckedStateEffect::ReadWrite => "state".to_string(),
-        });
+    let CheckedType::Product(product) = parameter else {
+        return parameter.to_string();
+    };
+    let mut result = String::from("(");
+    for (index, element) in product.elements.iter().enumerate() {
+        if index > 0 {
+            result.push_str(", ");
+        }
+        if mutations.contains(&CheckedMutation::Element(index)) {
+            result.push_str("mut ");
+        }
+        if let Some(name) = &element.name {
+            result.push_str(name);
+            result.push_str(": ");
+        }
+        result.push_str(&element.value_type.to_string());
     }
-    for resource in &resources.resources {
-        entries.push(resource.value_type.to_string());
+    if product.variadic {
+        if !product.elements.is_empty() {
+            result.push_str(", ");
+        }
+        result.push_str("...");
     }
-    format!("{{{}}}", entries.join(", "))
+    result.push(')');
+    result
 }
 
 impl CheckedType {
@@ -705,14 +662,16 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::Function(function) => {
+                let parameter =
+                    format_mutable_checked_parameter(&function.parameter, &function.mutations);
                 if function.effects.is_empty() {
-                    write!(formatter, "{} -> {}", function.parameter, function.result)
+                    write!(formatter, "{parameter} -> {}", function.result)
                 } else {
                     write!(
                         formatter,
                         "{} ->{} {}",
-                        function.parameter,
-                        format_named_effect_set(&function.effects, &function.parameter),
+                        parameter,
+                        function.effects,
                         function.result
                     )
                 }
@@ -1830,7 +1789,8 @@ impl TypeChecker {
                         .collect(),
                     variadic: false,
                 })),
-                effects: CheckedEffectSet::canonical_with_mutations(Vec::new(), mutations),
+                mutations,
+                effects: CheckedEffectSet::default(),
                 result: Box::new(
                     result_parameter.map_or_else(CheckedType::empty_product, |index| {
                         parameters[index].clone()
@@ -2199,6 +2159,7 @@ impl TypeChecker {
                 *symbol,
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
+                    mutations: Vec::new(),
                     effects: CheckedEffectSet::default(),
                     result: Box::new(result),
                 }),
@@ -2325,6 +2286,7 @@ impl TypeChecker {
                     };
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(parameter),
+                        mutations: Vec::new(),
                         effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
@@ -2345,6 +2307,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        mutations: Vec::new(),
                         effects: CheckedEffectSet::default(),
                         result: Box::new(integer),
                     })
@@ -2373,6 +2336,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        mutations: Vec::new(),
                         effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
@@ -2387,6 +2351,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        mutations: Vec::new(),
                         effects: CheckedEffectSet::default(),
                         result: Box::new(float),
                     })
@@ -2409,6 +2374,7 @@ impl TypeChecker {
                             ],
                             variadic: false,
                         })),
+                        mutations: Vec::new(),
                         effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
@@ -2416,6 +2382,7 @@ impl TypeChecker {
                 crate::IntrinsicFunction::StringFromCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::CString),
+                        mutations: Vec::new(),
                         effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
@@ -2423,6 +2390,7 @@ impl TypeChecker {
                 crate::IntrinsicFunction::StringToCString => {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::String),
+                        mutations: Vec::new(),
                         effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::CString),
                     })
@@ -2435,6 +2403,7 @@ impl TypeChecker {
                         ],
                         variadic: false,
                     })),
+                    mutations: Vec::new(),
                     effects: CheckedEffectSet::default(),
                     result: Box::new(CheckedType::String),
                 }),
@@ -2492,7 +2461,7 @@ impl TypeChecker {
                             matches!(&reference.value_type, CheckedType::Ref(payload)
                                 if payload.as_ref() == &replacement.value_type
                                     && payload.as_ref() == function.result.as_ref())
-                                && function.effects.mutations == [CheckedMutation::Element(0)]
+                                && function.mutations == [CheckedMutation::Element(0)]
                         }
                         _ => false,
                     })
@@ -2574,26 +2543,20 @@ impl TypeChecker {
 
             if let Some(expected) = self.impl_function_types.get(&function.id).cloned() {
                 if !parameter_mutations.is_empty()
-                    && parameter_mutations != expected.effects.mutations
+                    && parameter_mutations != expected.mutations
                 {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
                         format!(
                             "parameter `mut` markers declare {}, but the trait method declares {}",
-                            format_named_effect_set(
-                                &CheckedEffectSet::canonical_with_mutations(
-                                    Vec::new(),
-                                    parameter_mutations.clone(),
-                                ),
-                                &expected.parameter,
-                            ),
-                            format_named_effect_set(&expected.effects, &expected.parameter),
+                            format_mutable_checked_parameter(&expected.parameter, &parameter_mutations),
+                            format_mutable_checked_parameter(&expected.parameter, &expected.mutations),
                         ),
                     ));
                 }
                 for symbol in mutation_parameter_symbols(
                     &parameter_symbols,
-                    &expected.effects.mutations,
+                    &expected.mutations,
                 ) {
                     self.mutable_parameter_symbols.insert(symbol);
                     self.mutated_parameter_symbols.insert(symbol);
@@ -2683,44 +2646,40 @@ impl TypeChecker {
                 ));
                 result = CheckedType::Error;
             }
-            let mut resources = function
+            let annotated_function = function
                 .binding_annotation
                 .as_ref()
                 .and_then(
                     |annotation| match self.resolve_source_type(module, annotation) {
-                        CheckedType::Function(function) => Some(function.effects),
+                        CheckedType::Function(function) => Some(function),
                         _ => None,
                     },
-                )
-                .unwrap_or_default();
+                );
+            let resources = annotated_function.as_ref().map(|function| function.effects.clone()).unwrap_or_default();
+            let mut mutations = annotated_function.as_ref().map(|function| function.mutations.clone()).unwrap_or_default();
             if !parameter_mutations.is_empty() {
                 if function.binding_annotation.is_some()
-                    && parameter_mutations != resources.mutations
+                    && parameter_mutations != mutations
                 {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
                         format!(
                             "parameter `mut` markers declare {}, but the function annotation declares {}",
-                            format_named_effect_set(
-                                &CheckedEffectSet::canonical_with_mutations(
-                                    Vec::new(),
-                                    parameter_mutations.clone(),
-                                ),
-                                &parameter,
-                            ),
-                            format_named_effect_set(&resources, &parameter),
+                            format_mutable_checked_parameter(&parameter, &parameter_mutations),
+                            format_mutable_checked_parameter(&parameter, &mutations),
                         ),
                     ));
                 } else {
-                    resources.mutations = parameter_mutations.clone();
+                    mutations = parameter_mutations.clone();
                 }
             }
-            for symbol in mutation_parameter_symbols(&parameter_symbols, &resources.mutations) {
+            for symbol in mutation_parameter_symbols(&parameter_symbols, &mutations) {
                 self.mutable_parameter_symbols.insert(symbol);
                 self.mutated_parameter_symbols.insert(symbol);
             }
             let mut function_type = CheckedFunctionType {
                 parameter: Box::new(parameter),
+                mutations,
                 effects: resources,
                 result: Box::new(result),
             };
@@ -2866,6 +2825,7 @@ impl TypeChecker {
         self.return_reachable = outer_return_reachable;
         let checked_function_type = CheckedFunctionType {
             parameter: function_type.parameter,
+            mutations: function_type.mutations,
             effects: function_type.effects,
             result: Box::new(result_type),
         };
@@ -2906,9 +2866,8 @@ impl TypeChecker {
         self.normalize_sum_type(values, span)
     }
 
-    /// Computes runtime resource requirements only. `target_parameters` is
-    /// threaded through the existing traversal interface, but assignments,
-    /// captures, and calls deliberately contribute no mutation effects.
+    /// Computes callable effects only. Parameter mutation permissions are
+    /// checked separately and never inferred or propagated by this traversal.
     fn expression_effects_now(
         &self,
         module: &ResolvedModule,
@@ -3006,7 +2965,7 @@ impl TypeChecker {
                         self.call_argument_resources_now(
                             module,
                             &value.argument,
-                            &function.effects.mutations,
+                            &function.mutations,
                             target_parameters,
                         )
                     },
@@ -3222,10 +3181,7 @@ impl TypeChecker {
                     self.expression_effects_now(module, &function.body, &target_parameters);
                 let accesses = self.current_state_accesses.borrow().clone();
                 self.function_state_accesses.insert(function.id, accesses);
-                let inferred = CheckedEffectSet::canonical_with_mutations(
-                    inferred_body.resources,
-                    self.function_types[&function.id].effects.mutations.clone(),
-                )
+                let inferred = CheckedEffectSet::canonical(inferred_body.resources)
                 .with_state(inferred_body.state);
                 if self.function_types[&function.id].effects != inferred {
                     updates.push((function.id, function.binding_syntax, inferred));
@@ -3286,14 +3242,13 @@ impl TypeChecker {
             if let Some(allowed) = declared.get(&function.id)
                 && !actual.is_subset_of(allowed)
             {
-                let parameter = self.function_types[&function.id].parameter.clone();
                 self.diagnostics.push(Diagnostic::new(
                     function.body.syntax().span.clone(),
                     format!(
                         "function body requires effects {}, which are not contained in its \
                          declared effect set {}",
-                        format_named_effect_set(&actual, &parameter),
-                        format_named_effect_set(allowed, &parameter)
+                        actual,
+                        allowed
                     ),
                 ));
             } else if let Some(trait_type) = self.impl_function_types.get(&function.id)
@@ -3305,15 +3260,14 @@ impl TypeChecker {
                 // would otherwise silently overwrite the trait's — this is
                 // the one place that keeps an implementation honest against
                 // what its trait method promised callers.
-                let parameter = trait_type.parameter.clone();
                 let allowed = trait_type.effects.clone();
                 self.diagnostics.push(Diagnostic::new(
                     function.body.syntax().span.clone(),
                     format!(
                         "trait implementation requires effects {}, which are not contained in \
                          the trait method's declared effect set {}",
-                        format_named_effect_set(&actual, &parameter),
-                        format_named_effect_set(&allowed, &parameter)
+                        actual,
+                        allowed
                     ),
                 ));
             }
@@ -3374,7 +3328,7 @@ impl TypeChecker {
                 }
                 .unwrap_or((&source_module.syntax.syntax, CheckedEffectSet::default()));
                 let required = if is_entry_module {
-                    CheckedEffectSet::canonical_with_mutations(
+                    CheckedEffectSet::canonical(
                         resources
                             .resources
                             .iter()
@@ -3386,7 +3340,6 @@ impl TypeChecker {
                             })
                             .cloned()
                             .collect(),
-                        resources.mutations.clone(),
                     )
                     .with_state(resources.state)
                 } else {
@@ -3790,12 +3743,12 @@ impl TypeChecker {
                         .and_then(|function| self.function_types.get(&function).cloned()),
                 };
                 if let Some(function_type) = called_type
-                    && !function_type.effects.mutations.is_empty()
+                    && !function_type.mutations.is_empty()
                 {
                     self.check_call_mutations(
                         module,
                         &value.argument,
-                        &function_type.effects.mutations,
+                        &function_type.mutations,
                         current_module,
                     );
                 }
@@ -4233,8 +4186,8 @@ impl TypeChecker {
                         ));
                     }
                     self.check_expression_expected(module, &assignment.value, Some(&arguments[2]));
-                    // `mutate_index`'s fixed signature declares `mut 0` on
-                    // `Target`; `index.value` occupies that position. This
+                    // `mutate_index`'s fixed signature makes `Target` mutable;
+                    // `index.value` occupies that position. This
                     // does not depend on inference having run: the target
                     // is compiler-fixed, not read from `self.function_types`.
                     let current_module = module.module_for_syntax(assignment.syntax.id);
@@ -5034,10 +4987,8 @@ impl TypeChecker {
                     &crate::EffectSet {
                         syntax: resource.resource.syntax().clone(),
                         resources: vec![resource.resource.clone()],
-                        mutations: Vec::new(),
                         state: Vec::new(),
                     },
-                    None,
                 );
                 let Some(resource_type) = resources.resources.into_iter().next() else {
                     return CheckedType::Error;
@@ -5052,10 +5003,8 @@ impl TypeChecker {
                     &crate::EffectSet {
                         syntax: with.resource.syntax().clone(),
                         resources: vec![with.resource.clone()],
-                        mutations: Vec::new(),
                         state: Vec::new(),
                     },
-                    None,
                 );
                 let Some(resource_type) = resources.resources.into_iter().next() else {
                     return CheckedType::Error;
@@ -5478,6 +5427,7 @@ impl TypeChecker {
                     {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
                             parameter: Box::new(widen_literal_type(argument_type.clone())),
+                            mutations: match &raw_callee_type { CheckedType::Function(function) => function.mutations.clone(), _ => Vec::new() },
                             effects: match &raw_callee_type {
                                 CheckedType::Function(function) => function.effects.clone(),
                                 _ => CheckedEffectSet::default(),
@@ -7555,10 +7505,15 @@ impl TypeChecker {
             }
             Type::Function(function) => {
                 let parameter = self.resolve_source_type_inner(module, &function.parameter);
-                let resources = self.resolve_effect_set(
-                    module,
-                    &function.effects,
-                    Some(&function.parameter),
+                let resources = self.resolve_effect_set(module, &function.effects);
+                let mutations = canonical_mutations(
+                    function
+                        .mutations
+                        .iter()
+                        .filter_map(|mutation| {
+                            self.resolve_mutation_target(Some(&function.parameter), mutation)
+                        })
+                        .collect(),
                 );
                 let result = self.resolve_source_type_inner(module, &function.result);
                 if (!parameter.is_sized() && parameter != CheckedType::Error)
@@ -7572,6 +7527,7 @@ impl TypeChecker {
                 }
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
+                    mutations,
                     effects: resources,
                     result: Box::new(result),
                 })
@@ -7625,7 +7581,6 @@ impl TypeChecker {
         &mut self,
         module: &ResolvedModule,
         source: &crate::EffectSet,
-        parameter: Option<&Type>,
     ) -> CheckedEffectSet {
         let mut resources = Vec::new();
         for resource in &source.resources {
@@ -7657,12 +7612,6 @@ impl TypeChecker {
             }
             resources.push(CheckedResource { value_type });
         }
-        let mut mutations = Vec::new();
-        for mutation in &source.mutations {
-            if let Some(resolved) = self.resolve_mutation_target(parameter, mutation) {
-                mutations.push(resolved);
-            }
-        }
         let state = source.state.iter().copied().fold(None, |current, effect| {
             union_state(
                 current,
@@ -7673,10 +7622,10 @@ impl TypeChecker {
                 }),
             )
         });
-        CheckedEffectSet::canonical_with_mutations(resources, mutations).with_state(state)
+        CheckedEffectSet::canonical(resources).with_state(state)
     }
 
-    /// Resolves a `mut`/`mut <index>`/`mut <name>` effect-set entry against
+    /// Resolves a mutable parameter marker against
     /// the function's *source* parameter type. Named and positional targets
     /// require a product parameter; resolution uses the source type (not the
     /// checked one) because a single-element product collapses to its bare
@@ -7709,32 +7658,6 @@ impl TypeChecker {
                     return None;
                 }
                 Some(CheckedMutation::Element(*index))
-            }
-            crate::MutationTargetKind::Named(name) => {
-                let Some(Type::Product(product)) = parameter else {
-                    self.diagnostics.push(Diagnostic::new(
-                        mutation.syntax.span.clone(),
-                        format!(
-                            "mutation target `{name}` requires a named product parameter; use \
-                             `mut` for the whole parameter"
-                        ),
-                    ));
-                    return None;
-                };
-                match product
-                    .elements
-                    .iter()
-                    .position(|element| element.name.as_deref() == Some(name.as_str()))
-                {
-                    Some(index) => Some(CheckedMutation::Element(index)),
-                    None => {
-                        self.diagnostics.push(Diagnostic::new(
-                            mutation.syntax.span.clone(),
-                            format!("mutation target `{name}` is not a parameter name"),
-                        ));
-                        None
-                    }
-                }
             }
         }
     }
@@ -8518,11 +8441,12 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             Some(normalize_product_type(elements, actual.variadic))
         }
         (CheckedType::Function(actual), CheckedType::Function(expected)) => {
-            if actual.effects != expected.effects {
+            if actual.effects != expected.effects || actual.mutations != expected.mutations {
                 return None;
             }
             Some(CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(merge_types(*actual.parameter, *expected.parameter)?),
+                mutations: actual.mutations,
                 effects: actual.effects,
                 result: Box::new(merge_types(*actual.result, *expected.result)?),
             }))
@@ -8728,7 +8652,8 @@ pub(crate) fn substitute_type(
         }),
         CheckedType::Function(function) => CheckedType::Function(CheckedFunctionType {
             parameter: Box::new(substitute_type(*function.parameter, substitutions)),
-            effects: CheckedEffectSet::canonical_with_mutations(
+            mutations: function.mutations,
+            effects: CheckedEffectSet::canonical(
                 function
                     .effects
                     .resources
@@ -8737,7 +8662,6 @@ pub(crate) fn substitute_type(
                         value_type: substitute_type(resource.value_type, substitutions),
                     })
                     .collect(),
-                function.effects.mutations,
             ),
             result: Box::new(substitute_type(*function.result, substitutions)),
         }),
@@ -9254,6 +9178,7 @@ pub(crate) fn infer_type_parameters(
                 return false;
             };
             template.effects == actual.effects
+                && template.mutations == actual.mutations
                 && infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
                 && infer_type_parameters(&template.result, &actual.result, substitutions)
         }
@@ -9373,6 +9298,7 @@ fn infer_type_parameters_for_expected(
     if let (CheckedType::Function(template), CheckedType::Function(expected)) = (template, expected)
     {
         return template.effects == expected.effects
+            && template.mutations == expected.mutations
             && infer_type_parameters(&template.parameter, &expected.parameter, substitutions)
             && infer_type_parameters_for_expected(
                 &template.result,
@@ -9458,7 +9384,13 @@ fn pattern_parameter_mutations(pattern: &Pattern) -> Vec<CheckedMutation> {
             .collect(),
         _ => Vec::new(),
     };
-    CheckedEffectSet::canonical_with_mutations(Vec::new(), mutations).mutations
+    canonical_mutations(mutations)
+}
+
+fn canonical_mutations(mut mutations: Vec<CheckedMutation>) -> Vec<CheckedMutation> {
+    mutations.sort_by_key(|mutation| match mutation { CheckedMutation::Whole => (0, 0), CheckedMutation::Element(index) => (1, *index) });
+    mutations.dedup();
+    mutations
 }
 
 fn mutation_parameter_symbols(
@@ -9835,7 +9767,7 @@ fn valid_buffer_intrinsic_type(
             };
             matches!(&buffer.value_type, CheckedType::Buffer(payload) if payload.as_ref() == &element.value_type)
                 && function.result.as_ref() == &CheckedType::empty_product()
-                && function.effects.mutations == [CheckedMutation::Element(0)]
+                && function.mutations == [CheckedMutation::Element(0)]
                 && function.effects.resources.is_empty()
                 && function.effects.state.is_none()
         }
@@ -9859,7 +9791,7 @@ fn valid_buffer_intrinsic_type(
             has_none
                 && has_some
                 && option.alternatives.len() == 2
-                && function.effects.mutations == [CheckedMutation::Whole]
+                && function.mutations == [CheckedMutation::Whole]
                 && function.effects.resources.is_empty()
                 && function.effects.state.is_none()
         }
@@ -9892,7 +9824,7 @@ fn valid_buffer_intrinsic_type(
                 (&source.value_type, &destination.value_type),
                 (CheckedType::Buffer(a), CheckedType::Buffer(b)) if a == b
             ) && function.result.as_ref() == &CheckedType::empty_product()
-                && function.effects.mutations
+                && function.mutations
                     == [CheckedMutation::Element(0), CheckedMutation::Element(1)]
                 && function.effects.resources.is_empty()
                 && function.effects.state.is_none()

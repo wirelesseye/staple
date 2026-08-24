@@ -771,13 +771,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
         let raw_parameters = &parameters[1 + resource_count..];
         let whole_mutation = function_type
-            .effects
             .mutations
             .contains(&CheckedMutation::Whole);
         let logical_types = flattened_parameter_types(&function_type.parameter);
         let mutation_mask = mutation_parameter_mask(
             logical_types.len(),
-            &function_type.effects.mutations,
+            &function_type.mutations,
         );
         let mut values = Vec::new();
         let mut mutable_pointers = Vec::new();
@@ -3403,7 +3402,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "invalid structural MutateIndex arguments",
             ));
         };
-        // `Target`'s `mut 0` effect passes it by address either way, but a
+        // The mutable `Target` parameter passes by address either way, but a
         // by-value product's address *is* its storage, while a `Ref` target
         // is itself the value at that address and must be loaded and
         // unwrapped to reach the storage it points to.
@@ -7323,7 +7322,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         argument: &Expression,
         function_type: &CheckedFunctionType,
     ) -> CodeGenerationResult<CompiledCallArguments<'context>> {
-        let mutations = &function_type.effects.mutations;
+        let mutations = &function_type.mutations;
         if mutations.is_empty() {
             let expected = self.compile_parameter_types(&function_type.parameter)?.len();
             return Ok(CompiledCallArguments {
@@ -7559,7 +7558,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             parameter_types.push(self.compile_type(&resource.value_type)?.into());
         }
         let value_parameters = if function_type
-            .effects
             .mutations
             .contains(&CheckedMutation::Whole)
         {
@@ -7568,7 +7566,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let mut parameters = self.compile_parameter_types(&function_type.parameter)?;
             let mutation_mask = mutation_parameter_mask(
                 parameters.len(),
-                &function_type.effects.mutations,
+                &function_type.mutations,
             );
             for (index, parameter) in parameters.iter_mut().enumerate() {
                 if mutation_mask[index] {

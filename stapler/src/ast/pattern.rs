@@ -72,6 +72,7 @@ impl Pattern {
             },
             ty: self.ty(),
             spread: false,
+            mutable: false,
         }
     }
 }

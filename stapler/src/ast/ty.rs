@@ -71,13 +71,14 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Self::Function(function) => {
+                let parameter = format_mutable_parameter(&function.parameter, &function.mutations);
                 if function.effects.is_empty() {
-                    write!(formatter, "{} -> {}", function.parameter, function.result)
+                    write!(formatter, "{parameter} -> {}", function.result)
                 } else {
                     write!(
                         formatter,
                         "{} ->{} {}",
-                        function.parameter,
+                        parameter,
                         format_effect_set(&function.effects),
                         function.result
                     )
@@ -102,6 +103,28 @@ impl fmt::Display for Type {
     }
 }
 
+fn format_mutable_parameter(parameter: &Type, mutations: &[MutationTarget]) -> String {
+    if mutations.iter().any(|mutation| mutation.target == MutationTargetKind::Whole) {
+        return format!("mut {parameter}");
+    }
+    let Type::Product(product) = parameter else { return parameter.to_string() };
+    let mut result = String::from("(");
+    for (index, element) in product.elements.iter().enumerate() {
+        if index > 0 { result.push_str(", "); }
+        if mutations.iter().any(|mutation| mutation.target == MutationTargetKind::Element(index)) {
+            result.push_str("mut ");
+        }
+        if let Some(name) = &element.name { result.push_str(name); result.push_str(": "); }
+        result.push_str(&element.ty.to_string());
+    }
+    if product.variadic {
+        if !product.elements.is_empty() { result.push_str(", "); }
+        result.push_str("...");
+    }
+    result.push(')');
+    result
+}
+
 fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &Type) -> fmt::Result {
     if matches!(argument, Type::Sum(_) | Type::Function(_)) {
         write!(formatter, " ({argument})")
@@ -112,13 +135,6 @@ fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &Type) -> 
 
 fn format_effect_set(effects: &EffectSet) -> String {
     let mut entries = Vec::new();
-    for mutation in &effects.mutations {
-        entries.push(match &mutation.target {
-            MutationTargetKind::Whole => "mut".to_string(),
-            MutationTargetKind::Element(index) => format!("mut {index}"),
-            MutationTargetKind::Named(name) => format!("mut {name}"),
-        });
-    }
     for state in &effects.state {
         entries.push(state.to_string());
     }
@@ -223,6 +239,8 @@ pub struct TypeElement {
     pub name: Option<String>,
     pub ty: Type,
     pub spread: bool,
+    /// Temporary parser marker, normalized into the enclosing function type.
+    pub mutable: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -237,6 +255,7 @@ pub struct RepeatedType {
 pub struct FunctionType {
     pub syntax: Syntax,
     pub parameter: Box<Type>,
+    pub mutations: Vec<MutationTarget>,
     pub effects: EffectSet,
     pub result: Box<Type>,
 }
@@ -245,7 +264,6 @@ pub struct FunctionType {
 pub struct EffectSet {
     pub syntax: Syntax,
     pub resources: Vec<Type>,
-    pub mutations: Vec<MutationTarget>,
     pub state: Vec<StateEffect>,
 }
 
@@ -254,13 +272,12 @@ impl EffectSet {
         Self {
             syntax: Syntax::compiler(),
             resources: Vec::new(),
-            mutations: Vec::new(),
             state: Vec::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.resources.is_empty() && self.mutations.is_empty() && self.state.is_empty()
+        self.resources.is_empty() && self.state.is_empty()
     }
 }
 
@@ -291,10 +308,8 @@ pub struct MutationTarget {
 pub enum MutationTargetKind {
     /// `mut` with no argument: the whole parameter.
     Whole,
-    /// `mut 0`: a positional product element.
+    /// A mutable element of the top-level product parameter.
     Element(usize),
-    /// `mut a`: a named product element.
-    Named(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

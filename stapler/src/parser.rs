@@ -1597,7 +1597,7 @@ impl Grammar {
             self.parse_named_pattern_from(start, mutable)?
         } else if self.eat(TokenKind::Underscore) {
             let ty = if self.eat(TokenKind::Colon) {
-                self.parse_type_union()?
+                self.parse_type()?
             } else {
                 Type::Inferred(InferredType {
                     syntax: self.syntax(start),
@@ -1699,7 +1699,7 @@ impl Grammar {
             }));
         }
         let ty = if self.eat(TokenKind::Colon) {
-            self.parse_type_union()?
+            self.parse_type()?
         } else {
             Type::Inferred(InferredType {
                 syntax: self.syntax(start),
@@ -1717,8 +1717,17 @@ impl Grammar {
     /// Parses a type, treating function arrows as right-associative.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
-        let parameter = self.parse_type_union()?;
+        let whole_mutable = self.eat(TokenKind::Mut);
+        let mut parameter = self.parse_type_union()?;
         if self.eat(TokenKind::Arrow) {
+            let mutations = if whole_mutable {
+                if contains_mutable_type_element(&parameter) {
+                    return Err(self.error("a whole mutable parameter cannot also mark individual product elements `mut`"));
+                }
+                vec![MutationTarget { syntax: self.syntax(start), target: MutationTargetKind::Whole }]
+            } else {
+                self.extract_parameter_mutations(&mut parameter)?
+            };
             let resources = if self.at(TokenKind::LBrace) {
                 self.parse_effect_set()?
             } else {
@@ -1728,10 +1737,14 @@ impl Grammar {
             Ok(Type::Function(FunctionType {
                 syntax: self.syntax(start),
                 parameter: Box::new(parameter),
+                mutations,
                 effects: resources,
                 result: Box::new(result),
             }))
         } else {
+            if whole_mutable || contains_mutable_type_element(&parameter) {
+                return Err(self.error("`mut` is only allowed on a function parameter type"));
+            }
             Ok(parameter)
         }
     }
@@ -1740,11 +1753,9 @@ impl Grammar {
         let start = self.position;
         self.expect(TokenKind::LBrace, "expected `{` before effect set")?;
         let mut resources = Vec::new();
-        let mut mutations = Vec::new();
         let mut state = Vec::new();
         if !self.at(TokenKind::RBrace) {
             loop {
-                let entry_start = self.position;
                 if self.peek() == Some(TokenKind::Identifier)
                     && self.tokens[self.position].text == "state"
                 {
@@ -1765,27 +1776,8 @@ impl Grammar {
                         StateEffect::ReadWrite
                     };
                     state.push(effect);
-                } else if self.eat(TokenKind::Mut) {
-                    let target = match self.peek() {
-                        Some(TokenKind::Integer) => {
-                            let text = self.bump_token().expect("peeked integer").text;
-                            let index = text.parse::<usize>().map_err(|_| {
-                                self.error(
-                                    "mutation target index must be a non-negative integer",
-                                )
-                            })?;
-                            MutationTargetKind::Element(index)
-                        }
-                        Some(TokenKind::Identifier) => {
-                            let name = self.bump_token().expect("peeked identifier").text;
-                            MutationTargetKind::Named(name)
-                        }
-                        _ => MutationTargetKind::Whole,
-                    };
-                    mutations.push(MutationTarget {
-                        syntax: self.syntax(entry_start),
-                        target,
-                    });
+                } else if self.at(TokenKind::Mut) {
+                    return Err(self.error("`mut` is not an effect; place it before the function parameter type or a direct product element type"));
                 } else {
                     resources.push(self.parse_type_union()?);
                 }
@@ -1798,9 +1790,23 @@ impl Grammar {
         Ok(EffectSet {
             syntax: self.syntax(start),
             resources,
-            mutations,
             state,
         })
+    }
+
+    fn extract_parameter_mutations(&mut self, parameter: &mut Type) -> Result<Vec<MutationTarget>, ParseError> {
+        let Type::Product(product) = parameter else { return Ok(Vec::new()) };
+        let mut mutations = Vec::new();
+        for (index, element) in product.elements.iter_mut().enumerate() {
+            if element.mutable {
+                element.mutable = false;
+                mutations.push(MutationTarget { syntax: element.syntax.clone(), target: MutationTargetKind::Element(index) });
+            }
+            if contains_mutable_type_element(&element.ty) {
+                return Err(self.error("`mut` is only allowed on a direct element of a function parameter product"));
+            }
+        }
+        Ok(mutations)
     }
 
     /// Parses an unordered structural sum, tighter than a function arrow.
@@ -1923,6 +1929,7 @@ impl Grammar {
             if !self.at(TokenKind::RParen) {
                 loop {
                     let element_start = self.position;
+                    let mutable = self.eat(TokenKind::Mut);
                     let name = if self.peek() == Some(TokenKind::Identifier)
                         && self.peek_n(1) == Some(TokenKind::Colon)
                     {
@@ -1934,6 +1941,9 @@ impl Grammar {
                     };
 
                     if self.eat(TokenKind::Ellipsis) {
+                        if mutable {
+                            return Err(self.error("`mut` cannot modify a variadic marker or product spread"));
+                        }
                         if self.at(TokenKind::RParen)
                             || (self.at(TokenKind::Comma)
                                 && self.peek_n(1) == Some(TokenKind::RParen))
@@ -1952,6 +1962,7 @@ impl Grammar {
                                 name: None,
                                 ty,
                                 spread: true,
+                                mutable: false,
                             });
                         }
                     } else {
@@ -1961,6 +1972,7 @@ impl Grammar {
                             name,
                             ty,
                             spread: false,
+                            mutable,
                         });
                     }
 
@@ -3195,6 +3207,17 @@ impl Grammar {
             line,
             column: self.source[line_start..offset].chars().count() + 1,
         }
+    }
+}
+
+fn contains_mutable_type_element(ty: &Type) -> bool {
+    match ty {
+        Type::Product(product) => product.elements.iter().any(|element| element.mutable || contains_mutable_type_element(&element.ty)),
+        Type::Sum(sum) => sum.alternatives.iter().any(contains_mutable_type_element),
+        Type::Function(function) => contains_mutable_type_element(&function.parameter) || contains_mutable_type_element(&function.result),
+        Type::Application(application) => contains_mutable_type_element(&application.callee) || contains_mutable_type_element(&application.argument),
+        Type::Repeated(repeated) => contains_mutable_type_element(&repeated.element),
+        _ => false,
     }
 }
 

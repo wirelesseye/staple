@@ -794,25 +794,25 @@ left = right
 A `mut` binding must have an initializer.
 
 Bracket assignment is delegated to `MutateIndex`, whose `Target` parameter
-carries a `mut` effect (see the "Mutation effects" subsection under
-"Functions"); `a[i] = v` therefore also requires `a`'s root binding to be
+carries mutable parameter permission (see the "Mutable parameters" subsection
+under "Functions"); `a[i] = v` therefore also requires `a`'s root binding to be
 declared `mut`. Bindings captured by functions are shared cells whenever they
 are declared `mut`, so the defining scope and all closures observe subsequent
 assignments. A public `mut` module binding remains reassignable and writable
 only from its declaring module.
 
 A `mut` marker on a function parameter is a different thing from `mut` on a
-`let` binding: it declares a mutation effect on that parameter position (see
-the "Mutation effects" subsection under "Functions") rather than an ordinary
+`let` binding: it declares mutation permission on that parameter position (see
+the "Mutable parameters" subsection under "Functions") rather than an ordinary
 mutable local, and it is allowed only on a whole parameter binding or a
 direct element of the top-level parameter product — never on a pattern
 nested any deeper, and never combined with another binding-pattern modifier.
-Without a marker (or a matching explicit `->{mut ...}` effect on the
-function's type), a parameter can neither be written into nor reassigned.
+Without a marker (or a matching `mut` parameter in the function's type), a
+parameter can neither be written into nor reassigned.
 With one, both are available, and because the marked position is passed by
 address, the caller observes the change too. A function that instead wants a
 private local seeded from a parameter's initial value — one whose mutations
-stay invisible to the caller and need no effect declaration at all — should
+stay invisible to the caller and needs no mutable parameter declaration — should
 shadow it with a `let mut` binding in the body:
 
 ```staple
@@ -1199,8 +1199,8 @@ target[index] = replacement
 ```
 
 The compiler derives `MutateIndex` for non-empty homogeneous fixed products, by
-value, and for fixed and erased homogeneous references. `Target`'s `mut 0`
-effect passes it by address either way (see the "Mutation effects" subsection
+value, and for fixed and erased homogeneous references. The mutable `Target`
+parameter passes by address either way (see the "Mutable parameters" subsection
 under "Functions"), so a by-value target's root binding must be declared
 `mut` just as a `Ref` target's must. These structural implementations cannot
 be overridden. Other types may define ordinary explicit implementations of
@@ -1524,27 +1524,28 @@ Macros may quote, splice, generate, and transform resource syntax. Attempting
 to evaluate `resource` or `with` as a compile-time macro operation is rejected;
 providers exist only in runtime lexical scopes.
 
-### Mutation effects
+### Mutable parameters
 
-The same braces also declare which of a function's own parameters its body
-writes into, using `mut`:
+`mut` on the parameter side of a function arrow declares which arguments the
+function may write into. It is separate from callable effects such as `IO` and
+`state`:
 
 ```staple
-def f1: A ->{mut} () = a => { ... }                   // may mutate the whole parameter
-def f2: (A, B) ->{mut 0} () = (a, b) => { ... }        // may mutate parameter 0 only
-def f3: (a: A, b: B) ->{mut a} () = (a, b) => { ... }  // same, named
-def f4: (a: A, b: B) ->{mut a, IO} () = (a, b) => { ... }
+def f1: mut A -> () = a => { ... }                   // may mutate the whole parameter
+def f2: (mut A, B) -> () = (a, b) => { ... }        // may mutate parameter 0 only
+def f3: (mut a: A, b: B) -> () = (a, b) => { ... }  // same, named
+def f4: (mut a: A, b: B) ->{IO} () = (a, b) => { ... }
 ```
 
-Bare `mut` names the whole parameter; `mut 0` and `mut a` name one element of
-a product parameter, positionally or by the name written in the parameter
-list. A `mut` marker on a parameter binding declares the same effect without
-requiring a function type annotation:
+Prefixing the whole parameter type permits mutation of the complete argument.
+For a product parameter, `mut` may instead prefix individual positional or
+named elements. A `mut` marker on a parameter binding declares the same
+permission without requiring a function type annotation:
 
 ```staple
-def f1 = mut a: A => { ... }                    // A ->{mut} ...
-def f2 = (mut a: A, b: B) => { ... }            // (A, B) ->{mut 0} ...
-def f3 = (a: A, mut b: B) => { ... }            // (A, B) ->{mut 1} ...
+def f1 = mut a: A => { ... }                  // mut A -> ...
+def f2 = (mut a: A, b: B) => { ... }          // (mut A, B) -> ...
+def f3 = (a: A, mut b: B) => { ... }          // (A, mut B) -> ...
 ```
 
 Markers are allowed only on a whole parameter binding or a direct binding in
@@ -1558,7 +1559,7 @@ parameter value itself. A mutable argument is passed by address, so either
 kind of change is visible in the caller:
 
 ```staple
-def clear: Ref (I32, I32) ->{mut} () = cell => { cell.0 = 0 }
+def clear: mut Ref (I32, I32) -> () = cell => { cell.0 = 0 }
 
 let mut counter: Ref (I32, I32) = Ref (1, 2)
 clear counter
@@ -1566,7 +1567,7 @@ clear counter
 let fixed: Ref (I32, I32) = Ref (1, 2)
 clear fixed // error: `fixed` is not declared `mut`
 
-def replace: I32 ->{mut} () = value => { value = 42 }
+def replace: mut I32 -> () = value => { value = 42 }
 let mut answer = 0
 replace answer // answer is now 42
 ```
@@ -1581,15 +1582,15 @@ let fixed_answer = 0
 replace fixed_answer // error: the named binding is not `mut`
 ```
 
-Mutation effects are never inferred from a function body and never propagate
-from a callee into its caller. A function that assigns through a parameter,
+Mutable parameter permissions are never inferred from a function body and
+never propagate from a callee into its caller. A function that assigns through a parameter,
 captures it for mutation, or forwards it to a mutating callee must declare the
-corresponding parameter marker or explicit effect. Runtime resource effects
-continue to infer and propagate independently. Mutation effects carry no
+corresponding parameter marker or mutable parameter type. Runtime resource
+effects continue to infer and propagate independently. Mutation permissions carry no
 runtime value or extra argument, but affected parameter positions use an
 address-passing ABI.
 
-`MutateIndex.mutate_index` declares `mut 0` on its `Target` parameter, so
+`MutateIndex.mutate_index` declares its `Target` parameter mutable, so
 `a[i] = v` requires `a`'s root binding to be declared `mut`.
 
 ### Traits and bounded generic functions
@@ -2171,7 +2172,7 @@ notation, booleans produce `"True"` or `"False"`, and converting a `String`
 returns it unchanged. Floating-point values use round-trip decimal notation.
 
 `Display` and `Debug` format values into a mutable `Formatter`. Their common
-protocol is `fmt: (T, Formatter) ->{mut 1} ()`: `Display` is intended for
+protocol is `fmt: (T, mut Formatter) -> ()`: `Display` is intended for
 human-facing text, while `Debug` is intended for developer-facing structure.
 These formatting types and traits are declared in `std.core.fmt` and re-exported
 by `std.core` into the prelude.

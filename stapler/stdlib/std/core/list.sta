@@ -8,7 +8,7 @@ pub type List T = Buffer T
 
 // Doubles capacity (minimum 4 on first growth) and moves every element
 // across in one Buffer.transfer call.
-def grow: <T> List T ->{mut} () = list => {
+def grow: <T> mut List T -> () = list => {
     let List(mut source) = list
     let old_capacity = Buffer.capacity source
     let new_capacity: USize = match old_capacity == 0 {
@@ -28,7 +28,7 @@ companion<T> List T {
     pub def capacity: List T -> USize = list => list.*^capacity
 
     /// Appends a value, growing the list when necessary.
-    pub def push: List T ->{mut} T -> () = list => value => {
+    pub def push: mut List T -> T -> () = list => value => {
         match list.*^length < list.*^capacity {
             True() => list.*^push value,
             False() => {
@@ -39,7 +39,7 @@ companion<T> List T {
     }
 
     /// Removes and returns the final value, or `None` when empty.
-    pub def pop: List T ->{mut} Option T = list => list.*^pop
+    pub def pop: mut List T -> Option T = list => list.*^pop
 
     /// Returns a reference to the value at an index, or `None` when out of bounds.
     pub def get_ref: List T -> USize -> Option (Ref T) = list => index => {
@@ -88,7 +88,7 @@ companion<T> List T {
     // `List.of` threads the list handle through nested calls to this
     // instead.
     /// Appends a value and returns the list handle.
-    pub def push_and_return: List T ->{mut} T -> List T = list => value => {
+    pub def push_and_return: mut List T -> T -> List T = list => value => {
         list^push value
         list
     }

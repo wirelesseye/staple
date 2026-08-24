@@ -6956,6 +6956,7 @@ fn type_parameter_pattern_type(parameter: &crate::TypeParameterPattern) -> Type 
                 name: None,
                 ty: type_parameter_pattern_type(element),
                 spread: false,
+                mutable: false,
             }).collect(),
             variadic: false,
         }),
@@ -7533,6 +7534,7 @@ fn substitute_type(
                                 name: identifier.name,
                             }),
                             spread: false,
+                            mutable: false,
                         })
                     })
                     .collect::<Option<Vec<_>>>();
@@ -8660,7 +8662,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
             for resource in &mut function.effects.resources {
                 freshen_type(expander, resource, module, mark);
             }
-            for mutation in &mut function.effects.mutations {
+            for mutation in &mut function.mutations {
                 expander.freshen_syntax(&mut mutation.syntax, module, mark);
             }
             freshen_type(expander, &mut function.result, module, mark);

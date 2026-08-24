@@ -212,7 +212,7 @@ fn passing_a_captured_cell_to_a_mutating_parameter_is_a_state_write() {
     use stapler::CheckedStateEffect;
 
     let module = type_check(concat!(
-        "def replace: I32 ->{mut} () = value => { value = 2 }\n",
+        "def replace: mut I32 -> () = value => { value = 2 }\n",
         "def make = () => {\n",
         "  let mut value = 1\n",
         "  let update = () => replace value\n",
@@ -794,11 +794,11 @@ fn type_checks_the_two_binding_mutability_forms() {
     type_check(concat!(
         "type Box = I32\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
-        "def field_write: Ref (x: I32, y: I32) ->{mut} () = value => { value.x = 1 }\n",
+        "def field_write: mut Ref (x: I32, y: I32) -> () = value => { value.x = 1 }\n",
         "def matched = (value: Box) => match value { Box (mut inner) => { inner = 2; inner } }\n",
     ));
 
-    type_check("def by_value: (x: I32, y: I32) ->{mut} () = value => { value.x = 1 }\n");
+    type_check("def by_value: mut (x: I32, y: I32) -> () = value => { value.x = 1 }\n");
 
     // A `pub` global follows the same rules from another module as it does locally.
     let diagnostics = TypeChecker::new()
@@ -855,7 +855,6 @@ fn function_mutations(module: &stapler::TypedModule, name: &str) -> Vec<CheckedM
     module
         .type_of_function(function.id)
         .unwrap_or_else(|| panic!("type of `{name}`"))
-        .effects
         .mutations
         .clone()
 }
@@ -886,7 +885,7 @@ fn rejects_a_declared_empty_effect_set_when_the_body_mutates_a_parameter() {
 fn rejects_a_declared_mutation_target_the_body_does_not_write() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def f: (a: Ref (I32, I32), b: Ref (I32, I32)) ->{mut a} () = (a, b) => { b.0 = 1 }\n",
+            "def f: (mut a: Ref (I32, I32), b: Ref (I32, I32)) -> () = (a, b) => { b.0 = 1 }\n",
         )))
         .expect_err("writing `b` exceeds the declared `mut a`");
     assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
@@ -895,10 +894,10 @@ fn rejects_a_declared_mutation_target_the_body_does_not_write() {
 #[test]
 fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
     let by_index = type_check(
-        "def f: (a: Ref (I32, I32), b: I32) ->{mut 0} () = (a, b) => { a.0 = 1 }\n",
+        "def f: (mut a: Ref (I32, I32), b: I32) -> () = (a, b) => { a.0 = 1 }\n",
     );
     let by_name = type_check(
-        "def f: (a: Ref (I32, I32), b: I32) ->{mut a} () = (a, b) => { a.0 = 1 }\n",
+        "def f: (mut a: Ref (I32, I32), b: I32) -> () = (a, b) => { a.0 = 1 }\n",
     );
     assert_eq!(
         function_mutations(&by_index, "f"),
@@ -908,19 +907,19 @@ fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
 
 #[test]
 fn a_whole_parameter_declaration_covers_writing_a_single_element() {
-    type_check("def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n");
+    type_check("def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n");
 }
 
 #[test]
 fn call_site_mutation_requires_an_explicit_caller_marker() {
     let diagnostics = TypeChecker::new().check(resolve(concat!(
-        "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n",
+        "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
         "def g = (q: Ref (I32, I32)) => { f q }\n",
-    ))).expect_err("mutation effects must not propagate into callers");
+    ))).expect_err("mutation permissions must not propagate into callers");
     assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
 
     let module = type_check(concat!(
-        "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n",
+        "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
         "def g = (mut q: Ref (I32, I32)) => { f q }\n",
     ));
     assert_eq!(
@@ -933,7 +932,7 @@ fn call_site_mutation_requires_an_explicit_caller_marker() {
 fn rejects_passing_a_non_mut_binding_to_a_mutating_parameter() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n",
+            "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
             "def g = () => { let pair: Ref (I32, I32) = Ref (1, 2); f pair }\n",
         )))
         .expect_err("the caller's binding must be declared `mut`");
@@ -971,7 +970,7 @@ fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
 fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
     let module = type_check(concat!(
         "type MyInt = Ref I32\n",
-        "def mutate_my_int: (MyInt, I32) ->{mut 0} () = (my_int, value) => {\n",
+        "def mutate_my_int: (mut MyInt, I32) -> () = (my_int, value) => {\n",
         "  let MyInt mut inner = my_int\n",
         "  Ref.replace (inner, value)\n",
         "  ()\n",
@@ -986,7 +985,7 @@ fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type MyInt = Ref I32\n",
-            "def mutate_my_int: (MyInt, I32) ->{mut 0} () = (my_int, value) => {\n",
+            "def mutate_my_int: (mut MyInt, I32) -> () = (my_int, value) => {\n",
             "  let MyInt mut inner = my_int\n",
             "  Ref.replace (inner, value)\n",
             "  ()\n",
@@ -1021,8 +1020,8 @@ fn llvm_parameter_count(llvm: &str, function: &str) -> usize {
 fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
     let module = type_check(concat!(
         "type Clock = I32\n",
-        "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = 1 }\n",
-        "def g: Ref (I32, I32) ->{mut, Clock} () = p => { p.0 = 1 }\n",
+        "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
+        "def g: mut Ref (I32, I32) ->{Clock} () = p => { p.0 = 1 }\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -1039,7 +1038,7 @@ fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
 #[test]
 fn a_mutated_ref_parameter_lowers_and_the_caller_observes_the_write() {
     let module = type_check(concat!(
-        "def f: Ref (I32, I32) ->{mut} () = p => { p.0 = p.0 + 1 }\n",
+        "def f: mut Ref (I32, I32) -> () = p => { p.0 = p.0 + 1 }\n",
         "def use_it = () => { let mut pair: Ref (I32, I32) = Ref (1, 2); f pair; pair.0 }\n",
     ));
     let context = Context::create();
@@ -1051,7 +1050,7 @@ fn a_mutated_ref_parameter_lowers_and_the_caller_observes_the_write() {
 #[test]
 fn a_mut_parameter_can_replace_the_callers_value() {
     let module = type_check(concat!(
-        "def update_data: I32 ->{mut} () = data => { data = 42 }\n",
+        "def update_data: mut I32 -> () = data => { data = 42 }\n",
         "let mut data: I32 = 1\n",
         "update_data data\n",
     ));
@@ -1088,21 +1087,21 @@ fn a_parameter_marker_adds_mutation_without_a_type_annotation() {
 #[test]
 fn parameter_markers_must_match_explicit_function_and_trait_effects() {
     type_check(concat!(
-        "def replace: I32 ->{mut} () = mut value: I32 => { value = 1 }\n",
-        "trait Replace T { replace: T ->{mut} () }\n",
+        "def replace: mut I32 -> () = mut value: I32 => { value = 1 }\n",
+        "trait Replace T { replace: mut T -> () }\n",
         "impl Replace I32 { def replace = mut value => { value = 2 } }\n",
     ));
 
     for source in [
-        "def mismatch: (I32, I32) ->{mut 1} () = (mut first, second) => ()\n",
+        "def mismatch: (I32, mut I32) -> () = (mut first, second) => ()\n",
         concat!(
-            "trait Replace T { replace: (T, T) ->{mut 0} () }\n",
+            "trait Replace T { replace: (mut T, T) -> () }\n",
             "impl Replace I32 { def replace = (first, mut second) => () }\n",
         ),
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err("parameter markers and declared mutation effects must match");
+            .expect_err("parameter markers and declared mutation permissions must match");
         assert!(diagnostics.iter().any(|diagnostic| diagnostic
             .message
             .contains("parameter `mut` markers declare")));
@@ -1120,16 +1119,16 @@ fn resource_inference_preserves_parameter_declared_mutation() {
         .iter()
         .find(|function| function.name == "use_both")
         .expect("use_both function");
-    let resources = &module.type_of_function(function.id).unwrap().effects;
-    assert_eq!(resources.mutations, vec![CheckedMutation::Element(0)]);
-    assert_eq!(resources.resources.len(), 1);
+    let function_type = module.type_of_function(function.id).unwrap();
+    assert_eq!(function_type.mutations, vec![CheckedMutation::Element(0)]);
+    assert_eq!(function_type.effects.resources.len(), 1);
 }
 
 #[test]
 fn whole_and_positional_product_parameters_can_be_replaced() {
     let module = type_check(concat!(
-        "def replace_pair: (I32, I32) ->{mut} () = pair => { pair = (3, 4) }\n",
-        "def replace_first: (I32, I32) ->{mut 0} () = (first, _) => { first = 9 }\n",
+        "def replace_pair: mut (I32, I32) -> () = pair => { pair = (3, 4) }\n",
+        "def replace_first: (mut I32, I32) -> () = (first, _) => { first = 9 }\n",
         "let mut pair = (1, 2)\n",
         "replace_pair pair\n",
         "let mut first = 0\n",
@@ -1144,8 +1143,8 @@ fn whole_and_positional_product_parameters_can_be_replaced() {
 #[test]
 fn a_first_class_mutating_function_preserves_writeback() {
     let module = type_check(concat!(
-        "def replace: I32 ->{mut} () = value => { value = 7 }\n",
-        "let operation: I32 ->{mut} () = replace\n",
+        "def replace: mut I32 -> () = value => { value = 7 }\n",
+        "let operation: mut I32 -> () = replace\n",
         "let mut value = 1\n",
         "operation value\n",
     ));
@@ -1158,7 +1157,7 @@ fn a_first_class_mutating_function_preserves_writeback() {
 #[test]
 fn a_mut_call_materializes_and_discards_a_temporary_argument() {
     let module = type_check(concat!(
-        "def update_data: I32 ->{mut} () = data => { data = 42 }\n",
+        "def update_data: mut I32 -> () = data => { data = 42 }\n",
         "update_data (1 + 2)\n",
     ));
     let context = Context::create();
@@ -1172,7 +1171,7 @@ fn a_mut_call_materializes_and_discards_a_temporary_argument() {
 fn a_move_only_mut_temporary_drops_replaced_and_final_values() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
-        "def replace: CString ->{mut} () = value => { value = c_string \"replacement\" }\n",
+        "def replace: mut CString -> () = value => { value = c_string \"replacement\" }\n",
         "replace (c_string \"initial\")\n",
     ));
     let context = Context::create();
@@ -1314,10 +1313,10 @@ fn derives_trait_delegated_product_indexing() {
         "let selected_again: I32 | String = operation (pair, position)\n",
         "let mut updated: I32[3] = (1, 2, 3)\n",
         "updated[position] = 9\n",
-        "let mutate_by_value: (I32[3], USize, I32) ->{mut 0} () = MutateIndex.mutate_index\n",
+        "let mutate_by_value: (mut I32[3], USize, I32) -> () = MutateIndex.mutate_index\n",
         "mutate_by_value (updated, position, 10)\n",
         "let mut fixed: Ref I32[3] = Ref updated\n",
-        "let mutate_operation: (Ref I32[3], USize, I32) ->{mut 0} () = MutateIndex.mutate_index\n",
+        "let mutate_operation: (mut Ref I32[3], USize, I32) -> () = MutateIndex.mutate_index\n",
         "mutate_operation (fixed, position, 6)\n",
         "fixed[position] = 7\n",
         "let mut erased: Slice I32 = fixed\n",
@@ -3031,14 +3030,14 @@ fn list_of_macro_builds_a_list_from_values() {
 #[test]
 fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
     // Regression test: a user-defined function wrapping a curried, 2-argument
-    // `mut`-effect callee (like `Buffer.push: Buffer T ->{mut} T -> ()`) used
+    // `mut`-effect callee (like `Buffer.push: mut Buffer T -> T -> ()`) used
     // to require *both* of its own arguments to be `mut`, because the
     // resource/mutation inference resolved every curry depth of the call
     // chain back to the callee's full, outermost-arrow signature instead of
     // the residual type at that specific depth. Only the argument in the
     // buffer's own position should ever need to be `mut`.
     let module = type_check(concat!(
-        "def push_value: (Buffer I32, I32) ->{mut 0} () = (buffer, value) => {\n",
+        "def push_value: (mut Buffer I32, I32) -> () = (buffer, value) => {\n",
         "  Buffer.push buffer value\n",
         "}\n",
         "let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
@@ -6011,9 +6010,11 @@ fn type_checks_and_generates_curried_functions() {
             module.type_of_function(function.id).expect("checked type"),
             &stapler::CheckedFunctionType {
                 parameter: Box::new(CheckedType::I32),
+                mutations: Vec::new(),
                 effects: stapler::CheckedEffectSet::default(),
                 result: Box::new(CheckedType::Function(stapler::CheckedFunctionType {
                     parameter: Box::new(CheckedType::I32),
+                    mutations: Vec::new(),
                     effects: stapler::CheckedEffectSet::default(),
                     result: Box::new(CheckedType::I32),
                 })),

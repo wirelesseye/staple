@@ -80,23 +80,24 @@ fn parses_fully_qualified_quote_expressions_losslessly() {
 }
 
 #[test]
-fn parses_mut_effect_sets_losslessly() {
+fn parses_mutable_parameter_types_losslessly() {
     use stapler::{MutationTarget, MutationTargetKind};
 
     fn mutations(annotation: &Option<Type>) -> &[MutationTarget] {
         let Some(Type::Function(function)) = annotation else {
             panic!("expected function annotation");
         };
-        &function.effects.mutations
+        &function.mutations
     }
 
     let source = concat!(
-        "def f1: A ->{mut} () = a => ()\n",
-        "def f2: (A, B) ->{mut 0} () = (a, b) => ()\n",
-        "def f3: (a: A, b: B) ->{mut a} () = (a, b) => ()\n",
-        "def f4: (a: A, b: B) ->{mut a, IO} () = (a, b) => ()\n",
+        "def f1: mut A -> () = a => ()\n",
+        "def f2: (mut A, B) -> () = (a, b) => ()\n",
+        "def f3: (mut a: A, b: B) -> () = (a, b) => ()\n",
+        "def f4: (mut a: A, b: B) ->{IO} () = (a, b) => ()\n",
+        "let operation: mut A -> () = f1\n",
     );
-    let module = parse(source).expect("mut effect sets should parse");
+    let module = parse(source).expect("mutable parameter types should parse");
     assert_eq!(module.text(), source);
 
     let Item::Binding(f1) = unmodified_item(&module.items[0]) else {
@@ -124,14 +125,9 @@ fn parses_mut_effect_sets_losslessly() {
     let Item::Binding(f3) = unmodified_item(&module.items[2]) else {
         panic!("expected binding");
     };
-    let [MutationTarget {
-        target: MutationTargetKind::Named(name),
-        ..
-    }] = mutations(&f3.annotation)
-    else {
-        panic!("expected a named mutation target");
-    };
-    assert_eq!(name, "a");
+    assert!(matches!(mutations(&f3.annotation), [MutationTarget {
+        target: MutationTargetKind::Element(0), ..
+    }]));
 
     let Item::Binding(f4) = unmodified_item(&module.items[3]) else {
         panic!("expected binding");
@@ -139,10 +135,14 @@ fn parses_mut_effect_sets_losslessly() {
     let Some(Type::Function(function)) = &f4.annotation else {
         panic!("expected function annotation");
     };
-    assert_eq!(function.effects.mutations.len(), 1);
+    assert_eq!(function.mutations.len(), 1);
     assert_eq!(function.effects.resources.len(), 1);
 
-    assert!(parse("def bad: A ->{mut mut} () = a => ()\n").is_err());
+    let error = parse("def bad: A ->{mut} () = a => ()\n").expect_err("legacy syntax must fail");
+    assert!(error.message.contains("`mut` is not an effect"));
+    assert!(parse("def bad: (a: mut A, b: B) -> () = (a, b) => ()\n").is_err());
+    assert!(parse("def bad: ((mut A, B), C) -> () = (a, b) => ()\n").is_err());
+    assert!(parse("def bad: mut (mut A, B) -> () = (a, b) => ()\n").is_err());
 }
 
 fn unmodified_item(item: &Item) -> &Item {
@@ -1937,7 +1937,7 @@ fn parses_mutable_patterns_and_assignment_items_losslessly() {
     ));
     assert!(parse("extern \"c\" { let mut value: I32 }\n").is_err());
     let parameter = parse("def update = (mut parameter: I32) => { parameter = 4 }\n")
-        .expect("a direct parameter binding may declare a mutation effect");
+        .expect("a direct parameter binding may declare mutation permission");
     let Item::Binding(update) = unmodified_item(&parameter.items[0]) else {
         panic!("expected function binding");
     };

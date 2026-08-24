@@ -7,5 +7,5 @@ pub trait Index Target Position Output where {Target, Position} ~> Output {
 /// Provides mutable indexing for a target and position.
 pub trait MutateIndex Target Position Value where {Target, Position} ~> Value {
     /// Replaces the indexed value.
-    mutate_index: (Target, Position, Value) ->{mut 0} ()
+    mutate_index: (mut Target, Position, Value) -> ()
 }
