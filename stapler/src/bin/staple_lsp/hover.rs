@@ -974,6 +974,23 @@ impl Collector<'_> {
                     && let Some(value_type) = self.typed.type_of_expression(access.syntax.id)
                 {
                     self.named_last(&access.syntax, name, self.display_type(value_type));
+                } else if !self
+                    .typed
+                    .resolved()
+                    .trait_methods_for_expression(access.syntax.id)
+                    .is_empty()
+                {
+                    // A qualified trait member access, e.g.
+                    // `ToString.to_string`: the receiver never gets a
+                    // checked type of its own, so hover it as the trait
+                    // itself instead of falling through to nothing.
+                    if let Expression::Name(trait_name) = access.value.as_ref()
+                        && let Some(trait_id) = self.typed.resolved().trait_for(trait_name.syntax.id)
+                    {
+                        self.trait_name_hover(&trait_name.syntax, &trait_name.name, trait_id);
+                    } else {
+                        self.expression(&access.value);
+                    }
                 } else if self.typed.resolved().symbol_for(access.syntax.id).is_some() {
                     // A resolved qualified path (namespace member or type
                     // companion member): the receiver never gets a checked
@@ -1091,9 +1108,16 @@ impl Collector<'_> {
     }
 
     fn trait_bound(&mut self, bound: &TraitBound) {
-        if let Some(id) = self.typed.resolved().trait_for(bound.syntax.id)
-            && let Some(resolved) = self.typed.resolved().traits().get(&id)
-        {
+        if let Some(id) = self.typed.resolved().trait_for(bound.syntax.id) {
+            self.trait_name_hover(&bound.syntax, &bound.trait_name.name, id);
+        }
+        for argument in &bound.arguments {
+            self.ty(argument);
+        }
+    }
+
+    fn trait_name_hover(&mut self, syntax: &Syntax, name: &str, trait_id: TraitId) {
+        if let Some(resolved) = self.typed.resolved().traits().get(&trait_id) {
             let declaration = &resolved.declaration;
             let (parameters, where_clause) = self.juxtaposed_generic_suffix(
                 &declaration.type_parameters,
@@ -1102,14 +1126,11 @@ impl Collector<'_> {
                 &declaration.functional_dependencies,
             );
             self.named_with_docs(
-                &bound.syntax,
-                &bound.trait_name.name,
+                syntax,
+                name,
                 format!("trait {}{parameters}{where_clause}", declaration.name),
                 declaration.docs.clone(),
             );
-        }
-        for argument in &bound.arguments {
-            self.ty(argument);
         }
     }
 
@@ -1351,6 +1372,40 @@ mod tests {
             });
         assert_eq!(entry.signature, "type Box = I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
+    }
+
+    #[test]
+    fn qualified_trait_access_hovers_the_trait() {
+        let source = concat!(
+            "///Converts a value to its string representation.\n",
+            "trait ToString T { to_string: T -> String }\n",
+            "impl ToString I32 { def to_string = value => \"\" }\n",
+            "def f: I32 -> String = ToString.to_string\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-trait-access.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let use_site = source.rfind("ToString.to_string").unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry.range.start == use_site && &source[entry.range.clone()] == "ToString"
+            })
+            .unwrap_or_else(|| {
+                panic!("no hover entry for the qualified `ToString` reference: {entries:?}")
+            });
+        assert_eq!(entry.signature, "trait ToString T");
+        assert_eq!(
+            entry.documentation,
+            vec!["Converts a value to its string representation.".to_owned()]
+        );
     }
 
     #[test]

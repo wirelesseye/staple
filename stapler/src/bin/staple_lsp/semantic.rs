@@ -659,6 +659,23 @@ impl<'a> Classifier<'a> {
                 }
                 if let Accessor::Method(name) = &value.accessor {
                     self.mark_last(&value.syntax, name, FUNCTION, READONLY, 1);
+                } else if resolved.is_some_and(|module| {
+                    !module
+                        .trait_methods_for_expression(value.syntax.id)
+                        .is_empty()
+                }) {
+                    // A qualified trait member access, e.g.
+                    // `ToString.to_string`: the receiver is a trait
+                    // (INTERFACE), not a namespace/type/variable, and the
+                    // member is always a function.
+                    if let Expression::Name(trait_name) = value.value.as_ref() {
+                        self.mark_last(&trait_name.syntax, &trait_name.name, INTERFACE, READONLY, 2);
+                    } else {
+                        self.expression_with_mod(&value.value, resolved, modifiers);
+                    }
+                    if let Accessor::Name(name) = &value.accessor {
+                        self.mark_last(&value.syntax, name, FUNCTION, READONLY, 2);
+                    }
                 } else if let Some(symbol) =
                     resolved.and_then(|module| module.symbol_for(value.syntax.id))
                 {
@@ -1656,6 +1673,44 @@ mod tests {
         assert!(
             labels.contains(&("doubled", VARIABLE)),
             "labels: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn classifies_trait_qualified_access() {
+        let source = concat!(
+            "trait ToString T { to_string: T -> String }\n",
+            "impl ToString I32 { def to_string = value => \"\" }\n",
+            "def f: I32 -> String = ToString.to_string\n",
+        );
+        let path = std::env::temp_dir().join("staple-semantic-trait-access.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let classified = entries(source, Some(&module), Some(typed.resolved()), Some(&typed));
+
+        let use_site = source.rfind("ToString.to_string").unwrap();
+        let trait_start = use_site;
+        let member_start = use_site + "ToString.".len();
+        assert_eq!(
+            classified
+                .iter()
+                .find(|entry| entry.start == trait_start)
+                .map(|entry| entry.token_type),
+            Some(INTERFACE),
+            "entries: {classified:?}"
+        );
+        assert_eq!(
+            classified
+                .iter()
+                .find(|entry| entry.start == member_start)
+                .map(|entry| entry.token_type),
+            Some(FUNCTION),
+            "entries: {classified:?}"
         );
     }
 

@@ -969,6 +969,43 @@ mod tests {
     }
 
     #[test]
+    fn qualified_trait_access_targets_the_trait_declaration() {
+        let source = concat!(
+            "trait ToString T { to_string: T -> String }\n",
+            "impl ToString I32 { def to_string = value => \"\" }\n",
+            "def f: I32 -> String = ToString.to_string\n",
+        );
+        let path = std::env::temp_dir().join("staple-definition-trait-access-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, typed.resolved(), Some(&typed));
+
+        let declaration_offset = source.find("trait ToString").unwrap() + "trait ".len();
+
+        let use_site = source.rfind("ToString.to_string").unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry.range.start == use_site && &source[entry.range.clone()] == "ToString"
+            })
+            .unwrap_or_else(|| {
+                panic!("no definition entry for the qualified `ToString`: {entries:?}")
+            });
+        assert!(
+            entry
+                .targets
+                .iter()
+                .any(|target| target.selection_range.start == declaration_offset),
+            "expected ToString.to_string's `ToString` to resolve to the trait declaration: {entry:?}"
+        );
+    }
+
+    #[test]
     fn indexes_generic_trait_implementation_type_parameters() {
         let source = concat!(
             "trait Bound T { check: T -> Bool }\n",

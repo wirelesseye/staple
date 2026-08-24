@@ -3795,6 +3795,9 @@ impl NameResolver {
                     {
                         self.trait_method_references
                             .insert(access.syntax.id, vec![method]);
+                        if let Expression::Name(trait_name) = access.value.as_ref() {
+                            self.trait_references.insert(trait_name.syntax.id, trait_id);
+                        }
                     } else {
                         self.diagnostics.push(Diagnostic::new(
                             access.syntax.span.clone(),
