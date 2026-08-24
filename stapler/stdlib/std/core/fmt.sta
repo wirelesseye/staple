@@ -26,13 +26,11 @@ def grow_formatter: Formatter ->{mut} () = formatter => {
 }
 
 def write_byte: Formatter ->{mut} U8 -> () = formatter => byte => {
-    let Formatter buffer = formatter
-    match Buffer.length buffer == Buffer.capacity buffer {
+    match formatter.*^length == formatter.*^capacity {
         True() => grow_formatter formatter,
         False() => (),
     }
-    let Formatter(mut grown) = formatter
-    Buffer.push grown byte
+    formatter.*^push byte
 }
 
 def formatter_write: (Formatter, String) ->{mut 0} () = (formatter, value) => {
@@ -64,10 +62,7 @@ def formatter_write_debug: (Formatter, String) ->{mut 0} () = (formatter, value)
     formatter_write (formatter, "\"")
 }
 
-def formatter_finish: Formatter -> String = formatter => {
-    let Formatter buffer = formatter
-    String.from_utf8_unchecked (Buffer.freeze buffer)
-}
+def formatter_finish: Formatter -> String = formatter => String.from_utf8_unchecked (formatter.*^freeze)
 
 def formatter_new: () -> Formatter = () => Formatter (Buffer.with_capacity (16 satisfies USize))
 
