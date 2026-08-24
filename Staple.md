@@ -1103,9 +1103,10 @@ args.1    // the second element, accessed by index
 ```
 
 Name and index access refer to the same underlying elements; names do not
-change the order or size of a product. Accessing an absent name or an index outside
-the product's fixed bounds is an error. Whether that error is always detected at
-compile time remains unspecified.
+change the order or size of a product. A product's shape is always known at
+compile time, so accessing an absent name or an index outside the product's
+fixed bounds is always rejected at compile time, never deferred to a runtime
+check.
 
 Fixed homogeneous products may be written with repetition syntax. `T[N]` is
 exactly equivalent to a product containing `N` copies of `T`, rather than a
