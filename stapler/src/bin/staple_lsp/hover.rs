@@ -1027,6 +1027,7 @@ impl Collector<'_> {
                 &binding.name,
                 format!("<type parameter> {}", binding.name),
             ),
+            TypeParameterPattern::Effect(binding) => self.named(&binding.syntax, &binding.name, format!("<effect parameter> {}", binding.name)),
             TypeParameterPattern::Product(product) => {
                 for element in &product.elements {
                     self.type_parameter(element);

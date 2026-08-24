@@ -289,6 +289,7 @@ impl DeclarationCollector<'_> {
     fn type_parameter(&mut self, parameter: &TypeParameterPattern) {
         match parameter {
             TypeParameterPattern::Binding(value) => self.declaration(&value.syntax, &value.name),
+            TypeParameterPattern::Effect(value) => self.declaration(&value.syntax, &value.name),
             TypeParameterPattern::Product(value) => {
                 for element in &value.elements {
                     self.type_parameter(element);
@@ -724,6 +725,7 @@ impl Collector<'_> {
             TypeParameterPattern::Binding(value) => {
                 self.add_resolved(&value.syntax, &value.name, false)
             }
+            TypeParameterPattern::Effect(value) => self.add_resolved(&value.syntax, &value.name, false),
             TypeParameterPattern::Product(value) => {
                 for element in &value.elements {
                     self.type_parameter(element);

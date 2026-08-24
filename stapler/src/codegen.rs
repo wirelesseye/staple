@@ -695,7 +695,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 CheckedType::Function(template.clone()),
                 &self.active_type_substitutions,
             );
-            if let CheckedType::Function(template) = resources {
+            if let CheckedType::Function(template) = resources
+                && !contains_type_parameter(&CheckedType::Function(template.clone())) {
                 function.effects = template.effects;
             }
         }

@@ -811,6 +811,7 @@ impl<'a> Classifier<'a> {
                 DECLARATION | DEFINITION | READONLY,
                 1,
             ),
+            TypeParameterPattern::Effect(value) => self.mark_last(&value.syntax, &value.name, TYPE_PARAMETER, DECLARATION | DEFINITION | READONLY, 1),
             TypeParameterPattern::Product(value) => {
                 for element in &value.elements {
                     self.type_parameter(element, resolved);

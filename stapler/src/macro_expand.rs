@@ -6949,6 +6949,9 @@ fn type_parameter_pattern_type(parameter: &crate::TypeParameterPattern) -> Type 
             namespace: None,
             name: binding.name.clone(),
         }),
+        crate::TypeParameterPattern::Effect(binding) => Type::Named(crate::NamedType {
+            syntax: binding.syntax.clone(), namespace: None, name: binding.name.clone(),
+        }),
         crate::TypeParameterPattern::Product(product) => Type::Product(crate::ProductType {
             syntax: product.syntax.clone(),
             elements: product.elements.iter().map(|element| crate::TypeElement {
@@ -8461,6 +8464,7 @@ fn freshen_type_parameter(
         crate::TypeParameterPattern::Binding(binding) => {
             expander.freshen_syntax(&mut binding.syntax, module, mark)
         }
+        crate::TypeParameterPattern::Effect(binding) => expander.freshen_syntax(&mut binding.syntax, module, mark),
         crate::TypeParameterPattern::Product(product) => {
             expander.freshen_syntax(&mut product.syntax, module, mark);
             for element in &mut product.elements {

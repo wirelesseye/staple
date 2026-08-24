@@ -93,6 +93,33 @@ fn type_check(source: &str) -> stapler::TypedModule {
 }
 
 #[test]
+fn specializes_generic_effect_parameters() {
+    let module = type_check(concat!(
+        "use std.io.(IO, println)\n",
+        "def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }\n",
+        "def pure: () -> () = () => ()\n",
+        "def output: () ->{IO} () = () => println \"hello\"\n",
+        "let mut count = 0\n",
+        "def update: () ->{state} () = () => { count = count + 1 }\n",
+        "twice pure\ntwice output\ntwice update\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context).compile_module(&module).expect("effect-polymorphic calls should monomorphize");
+}
+
+#[test]
+fn infers_open_effect_rows_and_checks_fixed_effects() {
+    type_check(concat!(
+        "use std.io.(IO, println)\n",
+        "def run_and_log: <effect E> (() ->{E} ()) ->{E, IO} () = f => { f (); println \"done\" }\n",
+        "def pure: () -> () = () => ()\n",
+        "let mut count = 0\n",
+        "def update: () ->{state} () = () => { count = count + 1 }\n",
+        "run_and_log pure\nrun_and_log update\n",
+    ));
+}
+
+#[test]
 fn infers_checks_and_lowers_typed_resources() {
     let module = type_check(concat!(
         "type Clock = (now: () -> I32)\n",

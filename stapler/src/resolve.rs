@@ -316,6 +316,7 @@ pub struct ResolvedModule {
     nominal_patterns: HashMap<SyntaxId, TypeId>,
     type_parameters: HashMap<SyntaxId, TypeParameterId>,
     type_parameter_sized: HashMap<TypeParameterId, bool>,
+    effect_parameters: HashSet<TypeParameterId>,
     type_parameter_declarations: HashMap<TypeParameterId, SyntaxId>,
     type_parameter_modules: HashMap<TypeParameterId, ModuleId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
@@ -586,6 +587,7 @@ impl ResolvedModule {
     pub fn type_parameter_is_sized(&self, id: TypeParameterId) -> bool {
         self.type_parameter_sized.get(&id).copied().unwrap_or(true)
     }
+    pub fn is_effect_parameter(&self, id: TypeParameterId) -> bool { self.effect_parameters.contains(&id) }
 
     pub fn type_declarations(&self) -> &HashMap<TypeId, TypeDeclaration> {
         &self.type_declarations
@@ -835,6 +837,7 @@ pub struct NameResolver {
     named_types: HashMap<SyntaxId, TypeId>,
     type_parameters: HashMap<SyntaxId, TypeParameterId>,
     type_parameter_sized: HashMap<TypeParameterId, bool>,
+    effect_parameters: HashSet<TypeParameterId>,
     type_parameter_declarations: HashMap<TypeParameterId, SyntaxId>,
     type_parameter_modules: HashMap<TypeParameterId, ModuleId>,
     type_declarations: HashMap<TypeId, TypeDeclaration>,
@@ -1090,6 +1093,7 @@ impl NameResolver {
             nominal_patterns: self.nominal_patterns,
             type_parameters: self.type_parameters,
             type_parameter_sized: self.type_parameter_sized,
+            effect_parameters: self.effect_parameters,
             type_parameter_declarations: self.type_parameter_declarations,
             type_parameter_modules: self.type_parameter_modules,
             type_declarations: self.type_declarations,
@@ -3276,6 +3280,7 @@ impl NameResolver {
             TypeParameterPattern::Binding(binding) => {
                 parameters.push(self.type_parameters[&binding.syntax.id]);
             }
+            TypeParameterPattern::Effect(binding) => parameters.push(self.type_parameters[&binding.syntax.id]),
             TypeParameterPattern::Product(product) => {
                 for element in &product.elements {
                     self.collect_declared_type_parameter_pattern(element, parameters);
@@ -3308,6 +3313,14 @@ impl NameResolver {
                     .insert(id, binding.syntax.id);
                 self.type_parameter_modules.insert(id, self.current_module);
             }
+            TypeParameterPattern::Effect(binding) => {
+                let id = TypeParameterId(self.next_type_parameter_id); self.next_type_parameter_id += 1;
+                let scope = self.type_parameter_scopes.last_mut().expect("type parameter scope");
+                if scope.insert(binding.name.clone(), id).is_some() { self.diagnostics.push(Diagnostic::new(binding.syntax.span.clone(), format!("duplicate compile-time parameter `{}`", binding.name))); }
+                self.type_parameters.insert(binding.syntax.id, id); self.type_parameter_sized.insert(id, false);
+                self.effect_parameters.insert(id); self.type_parameter_declarations.insert(id, binding.syntax.id);
+                self.type_parameter_modules.insert(id, self.current_module);
+            }
             TypeParameterPattern::Product(product) => {
                 for element in &product.elements {
                     self.declare_type_parameter_pattern(element);
@@ -3335,6 +3348,12 @@ impl NameResolver {
                 self.type_parameter_modules.insert(id, self.current_module);
                 parameters.push(id);
             }
+            TypeParameterPattern::Effect(binding) => {
+                let id = TypeParameterId(self.next_type_parameter_id); self.next_type_parameter_id += 1;
+                self.type_parameters.insert(binding.syntax.id, id); self.type_parameter_sized.insert(id, false);
+                self.effect_parameters.insert(id); self.type_parameter_declarations.insert(id, binding.syntax.id);
+                self.type_parameter_modules.insert(id, self.current_module); parameters.push(id);
+            }
             TypeParameterPattern::Product(product) => {
                 for element in &product.elements {
                     self.allocate_type_parameter_pattern(element, parameters);
@@ -3360,6 +3379,11 @@ impl NameResolver {
                         format!("duplicate compile-time parameter `{}`", binding.name),
                     ));
                 }
+            }
+            TypeParameterPattern::Effect(binding) => {
+                let id = self.type_parameters[&binding.syntax.id];
+                let scope = self.type_parameter_scopes.last_mut().expect("type parameter scope");
+                if scope.insert(binding.name.clone(), id).is_some() { self.diagnostics.push(Diagnostic::new(binding.syntax.span.clone(), format!("duplicate compile-time parameter `{}`", binding.name))); }
             }
             TypeParameterPattern::Product(product) => {
                 for element in &product.elements {

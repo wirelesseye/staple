@@ -69,6 +69,15 @@ fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
 }
 
 #[test]
+fn parses_effect_parameters_and_open_effect_rows() {
+    let source = "def twice: <T, effect E> (T, () ->{E} ()) ->{E, IO} T = (value, f) => value\n";
+    let module = parse(source).expect("effect parameters should parse");
+    assert_eq!(module.syntax.text(), source);
+    let Item::Binding(binding) = &module.items[0] else { panic!("expected binding") };
+    assert!(matches!(binding.type_parameters.as_slice(), [stapler::TypeParameterPattern::Binding(_), stapler::TypeParameterPattern::Effect(value)] if value.name == "E"));
+}
+
+#[test]
 fn parses_fully_qualified_quote_expressions_losslessly() {
     let source = concat!(
         "macro capture = value => std.syntax.quote { $value }\n",

@@ -1462,6 +1462,19 @@ def timestamp: () ->{Clock} I32 = () => {
 }
 ```
 
+Generic functions may quantify over an effect set with an `effect` parameter:
+
+```staple
+def twice: <effect E> (() ->{E} ()) ->{E} () = f => { f (); f () }
+```
+
+An effect variable may represent the empty set, resources, state effects, or a
+combination of them. It can form an open row with fixed effects, as in
+`{E, IO}`; inference chooses the minimal substitution satisfying every
+occurrence. Each set may contain at most one variable. Effect parameters exist
+only on generic function bindings, may appear only in effect sets, have no
+runtime representation, and are concrete before code generation.
+
 The empty set may be written explicitly as `->{}`. Reordering or repeating
 entries does not change a function type or the canonical hidden-parameter
 order.

@@ -538,6 +538,7 @@ impl Collector<'_> {
                     ..CompletionItem::default()
                 },
             }),
+            TypeParameterPattern::Effect(_) => {}
             TypeParameterPattern::Product(value) => {
                 for element in &value.elements {
                     self.type_parameter_candidates(element, candidates);

@@ -539,6 +539,7 @@ impl Grammar {
         self.expect(TokenKind::Companion, "expected `companion`")?;
         let generics_start = self.position;
         let (type_parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
+        self.reject_effect_parameters(&type_parameters, "companion declarations")?;
         let target = self.parse_type()?;
         let name = companion_target_name(&target)
             .ok_or_else(|| self.error("companion target must be a named type or type alias"))?;
@@ -615,6 +616,7 @@ impl Grammar {
             let previous = self.newline_terminates_type;
             self.newline_terminates_type = true;
             let (parameters, bounds, subtypes) = self.parse_bracketed_generics()?;
+            self.reject_effect_parameters(&parameters, "macro declarations")?;
             type_parameters = parameters;
             trait_bounds = bounds;
             subtype_bounds = subtypes;
@@ -887,6 +889,7 @@ impl Grammar {
     ) -> Result<TraitImplementation, ParseError> {
         self.expect(TokenKind::Impl, "expected `impl`")?;
         let (type_parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
+        self.reject_effect_parameters(&type_parameters, "trait implementations")?;
         let trait_start = self.position;
         let first = self
             .expect(TokenKind::Identifier, "expected trait name")?
@@ -1413,6 +1416,13 @@ impl Grammar {
         Ok((parameters, trait_bounds, subtype_bounds))
     }
 
+    fn reject_effect_parameters(&self, parameters: &[TypeParameterPattern], declaration: &str) -> Result<(), ParseError> {
+        if parameters.iter().any(|parameter| matches!(parameter, TypeParameterPattern::Effect(_))) {
+            return Err(self.error(format!("effect parameters are only allowed on function bindings, not {declaration}")));
+        }
+        Ok(())
+    }
+
     /// Parses the juxtaposed generic-parameter form used by `type` and
     /// `trait` declarations: bare parameters written directly after the
     /// declared name, Haskell-style, with no enclosing brackets — `Box T`,
@@ -1479,6 +1489,12 @@ impl Grammar {
 
     fn parse_type_parameter_pattern(&mut self) -> Result<TypeParameterPattern, ParseError> {
         let start = self.position;
+        if self.peek() == Some(TokenKind::Identifier)
+            && self.tokens[self.next_non_trivia(self.position)].text == "effect" {
+            self.bump_token();
+            let name = self.expect(TokenKind::Identifier, "expected effect parameter after `effect`")?.text;
+            return Ok(TypeParameterPattern::Effect(EffectParameterBinding { syntax: self.syntax(start), name }));
+        }
         if self.quote_depth > 0 && self.eat(TokenKind::Dollar) {
             let name = self
                 .expect(TokenKind::Identifier, "expected a splice name after `$`")?
@@ -1789,6 +1805,7 @@ impl Grammar {
         self.expect(TokenKind::RBrace, "expected `}` after effect set")?;
         Ok(EffectSet {
             syntax: self.syntax(start),
+            variable: None,
             resources,
             state,
         })
@@ -3257,6 +3274,7 @@ fn find_type_parameter_binding_mut<'a>(
                 }
             }
             TypeParameterPattern::Binding(_) => {}
+            TypeParameterPattern::Effect(_) => {}
             TypeParameterPattern::Splice(_) => {}
         }
     }

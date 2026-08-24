@@ -135,6 +135,7 @@ fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &Type) -> 
 
 fn format_effect_set(effects: &EffectSet) -> String {
     let mut entries = Vec::new();
+    if let Some(variable) = &effects.variable { entries.push(variable.name.clone()); }
     for state in &effects.state {
         entries.push(state.to_string());
     }
@@ -160,6 +161,7 @@ pub struct SumType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeParameterPattern {
     Binding(TypeParameterBinding),
+    Effect(EffectParameterBinding),
     Product(TypeParameterProduct),
     Splice(SpliceExpression),
 }
@@ -168,6 +170,7 @@ impl TypeParameterPattern {
     pub fn syntax(&self) -> &Syntax {
         match self {
             Self::Binding(binding) => &binding.syntax,
+            Self::Effect(binding) => &binding.syntax,
             Self::Product(product) => &product.syntax,
             Self::Splice(splice) => &splice.syntax,
         }
@@ -176,6 +179,7 @@ impl TypeParameterPattern {
     pub fn names(&self) -> Vec<&str> {
         match self {
             Self::Binding(binding) => vec![binding.name.as_str()],
+            Self::Effect(binding) => vec![binding.name.as_str()],
             Self::Product(product) => product
                 .elements
                 .iter()
@@ -185,6 +189,9 @@ impl TypeParameterPattern {
         }
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectParameterBinding { pub syntax: Syntax, pub name: String }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeParameterBinding {
@@ -263,6 +270,7 @@ pub struct FunctionType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectSet {
     pub syntax: Syntax,
+    pub variable: Option<EffectVariable>,
     pub resources: Vec<Type>,
     pub state: Vec<StateEffect>,
 }
@@ -271,15 +279,19 @@ impl EffectSet {
     pub fn empty() -> Self {
         Self {
             syntax: Syntax::compiler(),
+            variable: None,
             resources: Vec::new(),
             state: Vec::new(),
         }
     }
 
     pub fn is_empty(&self) -> bool {
-        self.resources.is_empty() && self.state.is_empty()
+        self.variable.is_none() && self.resources.is_empty() && self.state.is_empty()
     }
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectVariable { pub syntax: Syntax, pub name: String }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateEffect {

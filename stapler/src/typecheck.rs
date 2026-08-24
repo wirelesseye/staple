@@ -266,9 +266,12 @@ pub enum CheckedMutation {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CheckedEffectSet {
+    pub variable: Option<CheckedEffectVariable>,
     pub resources: Vec<CheckedResource>,
     pub state: Option<CheckedStateEffect>,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedEffectVariable { pub id: TypeParameterId, pub name: String }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CheckedStateEffect {
@@ -313,6 +316,7 @@ impl CheckedEffectSet {
         });
         resources.dedup();
         Self {
+            variable: None,
             resources,
             state: None,
         }
@@ -324,33 +328,39 @@ impl CheckedEffectSet {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.resources.is_empty() && self.state.is_none()
+        self.variable.is_none() && self.resources.is_empty() && self.state.is_none()
     }
 
     pub fn union(&self, other: &Self) -> Self {
-        Self::canonical(
+        let mut result = Self::canonical(
             self.resources
                 .iter()
                 .chain(&other.resources)
                 .cloned()
                 .collect(),
         )
-        .with_state(union_state(self.state, other.state))
+        .with_state(union_state(self.state, other.state));
+        result.variable = match (&self.variable, &other.variable) {
+            (None, value) | (value, None) => value.clone(),
+            (Some(left), Some(right)) if left.id == right.id => Some(left.clone()),
+            _ => None,
+        }; result
     }
 
     /// Discharges a resource, as `with` does.
     pub fn without(&self, resource: &CheckedResource) -> Self {
-        Self::canonical(
+        let mut result = Self::canonical(
             self.resources
                 .iter()
                 .filter(|candidate| *candidate != resource)
                 .cloned()
                 .collect(),
         )
-        .with_state(self.state)
+        .with_state(self.state); result.variable = self.variable.clone(); result
     }
 
     pub fn is_subset_of(&self, other: &Self) -> bool {
+        if self.variable.is_some() && self.variable.as_ref().map(|v| v.id) != other.variable.as_ref().map(|v| v.id) { return false; }
         self.resources
             .iter()
             .all(|resource| other.resources.contains(resource))
@@ -362,6 +372,7 @@ impl fmt::Display for CheckedEffectSet {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("{")?;
         let mut first = true;
+        if let Some(variable) = &self.variable { write!(formatter, "{}", variable.name)?; first = false; }
         if let Some(state) = self.state {
             if !first {
                 formatter.write_str(", ")?;
@@ -2193,6 +2204,7 @@ impl TypeChecker {
         pattern: &TypeParameterPattern,
     ) -> CheckedType {
         match pattern {
+            TypeParameterPattern::Effect(_) => CheckedType::Error,
             TypeParameterPattern::Binding(binding) => CheckedType::Parameter {
                 id: module
                     .type_parameter_for(binding.syntax.id)
@@ -3181,8 +3193,8 @@ impl TypeChecker {
                     self.expression_effects_now(module, &function.body, &target_parameters);
                 let accesses = self.current_state_accesses.borrow().clone();
                 self.function_state_accesses.insert(function.id, accesses);
-                let inferred = CheckedEffectSet::canonical(inferred_body.resources)
-                .with_state(inferred_body.state);
+                let mut inferred = CheckedEffectSet::canonical(inferred_body.resources).with_state(inferred_body.state);
+                inferred.variable = inferred_body.variable;
                 if self.function_types[&function.id].effects != inferred {
                     updates.push((function.id, function.binding_syntax, inferred));
                 }
@@ -3237,8 +3249,8 @@ impl TypeChecker {
                 self.expression_effects_now(module, &function.body, &target_parameters);
             self.function_state_accesses
                 .insert(function.id, self.current_state_accesses.borrow().clone());
-            let actual = CheckedEffectSet::canonical(actual_body.resources)
-                .with_state(actual_body.state);
+            let mut actual = CheckedEffectSet::canonical(actual_body.resources).with_state(actual_body.state);
+            actual.variable = actual_body.variable;
             if let Some(allowed) = declared.get(&function.id)
                 && !actual.is_subset_of(allowed)
             {
@@ -3387,6 +3399,7 @@ impl TypeChecker {
                     ) => {
                         let template = CheckedType::Function(template);
                         let instantiated = CheckedType::Function(instantiated);
+                        if contains_effect_parameter(&template) { return Some(instantiated); }
                         let mut inference_template = template.clone();
                         let mut inference_actual = instantiated.clone();
                         clear_function_effects(&mut inference_template);
@@ -4986,6 +4999,7 @@ impl TypeChecker {
                     module,
                     &crate::EffectSet {
                         syntax: resource.resource.syntax().clone(),
+                        variable: None,
                         resources: vec![resource.resource.clone()],
                         state: Vec::new(),
                     },
@@ -5002,6 +5016,7 @@ impl TypeChecker {
                     module,
                     &crate::EffectSet {
                         syntax: with.resource.syntax().clone(),
+                        variable: None,
                         resources: vec![with.resource.clone()],
                         state: Vec::new(),
                     },
@@ -7470,6 +7485,10 @@ impl TypeChecker {
             },
             Type::Named(named) => {
                 if let Some(id) = module.type_parameter_for(named.syntax.id) {
+                    if module.is_effect_parameter(id) {
+                        self.diagnostics.push(Diagnostic::new(named.syntax.span.clone(), format!("effect parameter `{}` may only appear in an effect set", named.name)));
+                        return CheckedType::Error;
+                    }
                     CheckedType::Parameter {
                         id,
                         name: named.name.clone(),
@@ -7583,7 +7602,15 @@ impl TypeChecker {
         source: &crate::EffectSet,
     ) -> CheckedEffectSet {
         let mut resources = Vec::new();
+        let mut variable = None;
         for resource in &source.resources {
+            if let Type::Named(named) = resource
+                && let Some(id) = module.type_parameter_for(named.syntax.id)
+                && module.is_effect_parameter(id) {
+                if variable.is_some() { self.diagnostics.push(Diagnostic::new(named.syntax.span.clone(), "an effect set may contain at most one effect variable")); }
+                else { variable = Some(CheckedEffectVariable { id, name: named.name.clone() }); }
+                continue;
+            }
             let value_type = self.resolve_source_type_inner(module, resource);
             let valid_nominal = matches!(&value_type, CheckedType::Distinct { .. })
                 || matches!(&value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.io_type);
@@ -7622,7 +7649,9 @@ impl TypeChecker {
                 }),
             )
         });
-        CheckedEffectSet::canonical(resources).with_state(state)
+        let mut effects = CheckedEffectSet::canonical(resources).with_state(state);
+        effects.variable = variable;
+        effects
     }
 
     /// Resolves a mutable parameter marker against
@@ -8034,11 +8063,16 @@ impl TypeChecker {
                         self.bind_type_argument(module, element, argument, substitutions);
                     }
                 }
+                TypeParameterPattern::Effect(_) => {}
                 TypeParameterPattern::Splice(_) => {}
             }
             return true;
         }
         match pattern {
+            TypeParameterPattern::Effect(binding) => {
+                self.diagnostics.push(Diagnostic::new(binding.syntax.span.clone(), "effect parameters do not accept type arguments"));
+                false
+            }
             TypeParameterPattern::Binding(binding) => {
                 let Some(id) = module.type_parameter_for(binding.syntax.id) else {
                     return false;
@@ -8441,13 +8475,20 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             Some(normalize_product_type(elements, actual.variadic))
         }
         (CheckedType::Function(actual), CheckedType::Function(expected)) => {
-            if actual.effects != expected.effects || actual.mutations != expected.mutations {
+            if actual.mutations != expected.mutations {
                 return None;
             }
+            let effects = match (&actual.effects.variable, &expected.effects.variable) {
+                (None, None) if actual.effects == expected.effects => actual.effects.clone(),
+                (Some(left), Some(right)) if left.id == right.id && actual.effects == expected.effects => actual.effects.clone(),
+                (None, Some(_)) => actual.effects.clone(),
+                (Some(_), None) => expected.effects.clone(),
+                _ => return None,
+            };
             Some(CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(merge_types(*actual.parameter, *expected.parameter)?),
                 mutations: actual.mutations,
-                effects: actual.effects,
+                effects,
                 result: Box::new(merge_types(*actual.result, *expected.result)?),
             }))
         }
@@ -8606,6 +8647,32 @@ pub(crate) fn select_sum_alternative(
     }
 }
 
+fn effect_substitution_type(effects: CheckedEffectSet) -> CheckedType {
+    CheckedType::Function(CheckedFunctionType { parameter: Box::new(CheckedType::Error), mutations: Vec::new(), effects, result: Box::new(CheckedType::Error) })
+}
+fn effect_substitution_value(value: &CheckedType) -> Option<&CheckedEffectSet> {
+    let CheckedType::Function(function) = value else { return None };
+    (function.parameter.as_ref() == &CheckedType::Error && function.result.as_ref() == &CheckedType::Error).then_some(&function.effects)
+}
+fn subtract_state(actual: Option<CheckedStateEffect>, fixed: Option<CheckedStateEffect>) -> Option<CheckedStateEffect> {
+    match (actual, fixed) {
+        (value, None) => value, (None, _) => None,
+        (Some(actual), Some(fixed)) if actual == fixed => None,
+        (Some(CheckedStateEffect::ReadWrite), Some(CheckedStateEffect::Read)) => Some(CheckedStateEffect::Write),
+        (Some(CheckedStateEffect::ReadWrite), Some(CheckedStateEffect::Write)) => Some(CheckedStateEffect::Read),
+        _ => None,
+    }
+}
+fn infer_effect_parameter(template: &CheckedEffectSet, actual: &CheckedEffectSet, substitutions: &mut HashMap<TypeParameterId, CheckedType>) -> bool {
+    let Some(variable) = &template.variable else { return template == actual };
+    if actual.variable.as_ref().is_some_and(|actual| actual.id == variable.id) { return template == actual; }
+    if actual.variable.is_some() || !template.resources.iter().all(|r| actual.resources.contains(r)) || !state_is_subset(template.state, actual.state) { return false; }
+    let candidate = CheckedEffectSet::canonical(actual.resources.iter().filter(|r| !template.resources.contains(r)).cloned().collect()).with_state(subtract_state(actual.state, template.state));
+    let replacement = substitutions.get(&variable.id).and_then(effect_substitution_value).map_or(candidate.clone(), |existing| existing.union(&candidate));
+    if !replacement.is_subset_of(actual) { return false; }
+    substitutions.insert(variable.id, effect_substitution_type(replacement)); true
+}
+
 pub(crate) fn substitute_type(
     value_type: CheckedType,
     substitutions: &HashMap<TypeParameterId, CheckedType>,
@@ -8650,21 +8717,21 @@ pub(crate) fn substitute_type(
                 .collect(),
             variadic: product.variadic,
         }),
-        CheckedType::Function(function) => CheckedType::Function(CheckedFunctionType {
-            parameter: Box::new(substitute_type(*function.parameter, substitutions)),
-            mutations: function.mutations,
-            effects: CheckedEffectSet::canonical(
-                function
-                    .effects
-                    .resources
-                    .into_iter()
-                    .map(|resource| CheckedResource {
-                        value_type: substitute_type(resource.value_type, substitutions),
-                    })
-                    .collect(),
-            ),
-            result: Box::new(substitute_type(*function.result, substitutions)),
-        }),
+        CheckedType::Function(function) => {
+            let state = function.effects.state;
+            let variable = function.effects.variable;
+            let mut effects = CheckedEffectSet::canonical(function.effects.resources.into_iter().map(|resource| CheckedResource {
+                value_type: substitute_type(resource.value_type, substitutions),
+            }).collect()).with_state(state);
+            if let Some(variable) = variable {
+                if let Some(replacement) = substitutions.get(&variable.id).and_then(effect_substitution_value) { effects = effects.union(replacement); }
+                else { effects.variable = Some(variable); }
+            }
+            CheckedType::Function(CheckedFunctionType {
+                parameter: Box::new(substitute_type(*function.parameter, substitutions)), mutations: function.mutations, effects,
+                result: Box::new(substitute_type(*function.result, substitutions)),
+            })
+        }
         CheckedType::Sum(sum) => normalize_substituted_sum(
             sum.alternatives
                 .into_iter()
@@ -8810,6 +8877,7 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
             .any(|element| contains_type_parameter(&element.value_type)),
         CheckedType::Function(function) => {
             contains_type_parameter(&function.parameter)
+                || function.effects.variable.is_some()
                 || function
                     .effects
                     .resources
@@ -8828,6 +8896,18 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
         CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(contains_type_parameter)
         }
+        _ => false,
+    }
+}
+
+fn contains_effect_parameter(value_type: &CheckedType) -> bool {
+    match value_type {
+        CheckedType::Function(function) => function.effects.variable.is_some() || contains_effect_parameter(&function.parameter) || contains_effect_parameter(&function.result),
+        CheckedType::CPointer { pointee } | CheckedType::Ref(pointee) | CheckedType::Buffer(pointee) | CheckedType::ErasedProduct(pointee) => contains_effect_parameter(pointee),
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => arguments.iter().any(contains_effect_parameter),
+        CheckedType::Product(product) => product.elements.iter().any(|element| contains_effect_parameter(&element.value_type)),
+        CheckedType::Sum(sum) => sum.alternatives.iter().any(contains_effect_parameter),
+        CheckedType::Distinct { arguments, representation, .. } => arguments.iter().any(contains_effect_parameter) || contains_effect_parameter(representation),
         _ => false,
     }
 }
@@ -8887,6 +8967,7 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
             }
             CheckedType::Function(function) => {
                 collect(&function.parameter, ids);
+                if let Some(variable) = &function.effects.variable { ids.insert(variable.id); }
                 for resource in &function.effects.resources {
                     collect(&resource.value_type, ids);
                 }
@@ -9177,7 +9258,7 @@ pub(crate) fn infer_type_parameters(
             let CheckedType::Function(actual) = actual else {
                 return false;
             };
-            template.effects == actual.effects
+            infer_effect_parameter(&template.effects, &actual.effects, substitutions)
                 && template.mutations == actual.mutations
                 && infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
                 && infer_type_parameters(&template.result, &actual.result, substitutions)
@@ -9297,7 +9378,7 @@ fn infer_type_parameters_for_expected(
 ) -> bool {
     if let (CheckedType::Function(template), CheckedType::Function(expected)) = (template, expected)
     {
-        return template.effects == expected.effects
+        return infer_effect_parameter(&template.effects, &expected.effects, substitutions)
             && template.mutations == expected.mutations
             && infer_type_parameters(&template.parameter, &expected.parameter, substitutions)
             && infer_type_parameters_for_expected(
