@@ -3097,10 +3097,37 @@ impl TypeChecker {
                 };
                 let mut result = callee_effects.union(&argument_effects);
                 if let Some(function_type) = &called_type {
-                    result = result.union(
-                        &CheckedEffectSet::canonical(function_type.effects.resources.clone())
-                            .with_state(function_type.effects.state),
-                    );
+                    // The callee's effect row may still carry a generic
+                    // effect variable (e.g. `reaction`'s `<effect E>`) that
+                    // was never resolved back onto `function_types` for the
+                    // generic declaration itself. Instantiate it here from
+                    // the actual argument's function type so the variable's
+                    // effects (not just the callee's own fixed resources)
+                    // are attributed to this call.
+                    let mut substitutions = HashMap::new();
+                    if function_type.effects.variable.is_some() {
+                        let argument_type = self
+                            .implicit_thunks
+                            .get(&value.argument.syntax().id)
+                            .and_then(|thunk| self.function_types.get(&thunk.id).cloned())
+                            .or_else(
+                                || match self.expression_types.get(&value.argument.syntax().id) {
+                                    Some(CheckedType::Function(argument)) => Some(argument.clone()),
+                                    _ => None,
+                                },
+                            );
+                        if let Some(argument_type) = argument_type {
+                            infer_type_parameters(
+                                &function_type.parameter,
+                                &CheckedType::Function(argument_type),
+                                &mut substitutions,
+                            );
+                        }
+                    }
+                    result = result.union(&substitute_effect_set(
+                        function_type.effects.clone(),
+                        &substitutions,
+                    ));
                 }
                 if let Some(function_id) = self.function_origin(module, &value.callee)
                     && let Some(accesses) = self.function_state_accesses.get(&function_id)
@@ -3908,6 +3935,13 @@ impl TypeChecker {
                 .function_types
                 .get(&function_id)
                 .map(|function| function.effects.clone())
+            // A declaration with its own free effect variable (e.g. `reaction`'s
+            // `<effect E>`) never settles through the fixpoint above — its
+            // `function_types` entry stays the generic, uninstantiated
+            // template forever. Backfilling from it here would overwrite the
+            // per-call-site instantiation that `refresh_implicit_thunk_call`
+            // already resolved for this reference with that unresolved `E`.
+            && resources.variable.is_none()
             && let Some(CheckedType::Function(function)) =
                 self.expression_types.get_mut(&expression.syntax().id)
         {
@@ -9159,6 +9193,33 @@ fn infer_effect_parameter(
     true
 }
 
+fn substitute_effect_set(
+    effects: CheckedEffectSet,
+    substitutions: &HashMap<TypeParameterId, CheckedType>,
+) -> CheckedEffectSet {
+    let mut result = CheckedEffectSet::canonical(
+        effects
+            .resources
+            .into_iter()
+            .map(|resource| CheckedResource {
+                value_type: substitute_type(resource.value_type, substitutions),
+            })
+            .collect(),
+    )
+    .with_state(effects.state);
+    if let Some(variable) = effects.variable {
+        if let Some(replacement) = substitutions
+            .get(&variable.id)
+            .and_then(effect_substitution_value)
+        {
+            result = result.union(replacement);
+        } else {
+            result.variable = Some(variable);
+        }
+    }
+    result
+}
+
 pub(crate) fn substitute_type(
     value_type: CheckedType,
     substitutions: &HashMap<TypeParameterId, CheckedType>,
@@ -9204,29 +9265,7 @@ pub(crate) fn substitute_type(
             variadic: product.variadic,
         }),
         CheckedType::Function(function) => {
-            let state = function.effects.state;
-            let variable = function.effects.variable;
-            let mut effects = CheckedEffectSet::canonical(
-                function
-                    .effects
-                    .resources
-                    .into_iter()
-                    .map(|resource| CheckedResource {
-                        value_type: substitute_type(resource.value_type, substitutions),
-                    })
-                    .collect(),
-            )
-            .with_state(state);
-            if let Some(variable) = variable {
-                if let Some(replacement) = substitutions
-                    .get(&variable.id)
-                    .and_then(effect_substitution_value)
-                {
-                    effects = effects.union(replacement);
-                } else {
-                    effects.variable = Some(variable);
-                }
-            }
+            let effects = substitute_effect_set(function.effects, substitutions);
             CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(substitute_type(*function.parameter, substitutions)),
                 mutations: function.mutations,

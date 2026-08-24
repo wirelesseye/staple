@@ -1287,6 +1287,50 @@ mod tests {
     }
 
     #[test]
+    fn reaction_effects_propagate_through_a_wrapping_function() {
+        let source = concat!(
+            "use std.io.println\n",
+            "let signal count = 0\n",
+            "let doubled = count * 2\n",
+            "with Reactive = reactive_scope () {\n",
+            "    def test = () => {\n",
+            "        reaction {\n",
+            "            println \"count: $count, doubled: $doubled\"\n",
+            "        }\n",
+            "    }\n",
+            "    test()\n",
+            "    count = 1\n",
+            "    count = 2\n",
+            "}\n",
+        );
+        let path =
+            std::env::temp_dir().join("staple-hover-reaction-in-wrapping-function.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        for (name, signature) in [
+            ("test", "def test: () ->{state.read, IO, Reactive} ()"),
+            (
+                "reaction",
+                "def reaction: () ->{state.read, IO} () ->{state.read, IO, Reactive} ()",
+            ),
+        ] {
+            assert!(
+                entries.iter().any(|entry| {
+                    &source[entry.range.clone()] == name && entry.signature == signature
+                }),
+                "missing {name}: {signature} in {entries:?}"
+            );
+        }
+    }
+
+    #[test]
     fn indexes_at_pattern_aliases_and_nested_bindings() {
         let source =
             "def sum = pair@(left: I32, right: I32) => pair.0 + left + right\nsum (20, 22)\n";
