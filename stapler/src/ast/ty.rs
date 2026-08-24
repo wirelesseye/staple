@@ -104,21 +104,36 @@ impl fmt::Display for Type {
 }
 
 fn format_mutable_parameter(parameter: &Type, mutations: &[MutationTarget]) -> String {
-    if mutations.iter().any(|mutation| mutation.target == MutationTargetKind::Whole) {
+    if mutations
+        .iter()
+        .any(|mutation| mutation.target == MutationTargetKind::Whole)
+    {
         return format!("mut {parameter}");
     }
-    let Type::Product(product) = parameter else { return parameter.to_string() };
+    let Type::Product(product) = parameter else {
+        return parameter.to_string();
+    };
     let mut result = String::from("(");
     for (index, element) in product.elements.iter().enumerate() {
-        if index > 0 { result.push_str(", "); }
-        if mutations.iter().any(|mutation| mutation.target == MutationTargetKind::Element(index)) {
+        if index > 0 {
+            result.push_str(", ");
+        }
+        if mutations
+            .iter()
+            .any(|mutation| mutation.target == MutationTargetKind::Element(index))
+        {
             result.push_str("mut ");
         }
-        if let Some(name) = &element.name { result.push_str(name); result.push_str(": "); }
+        if let Some(name) = &element.name {
+            result.push_str(name);
+            result.push_str(": ");
+        }
         result.push_str(&element.ty.to_string());
     }
     if product.variadic {
-        if !product.elements.is_empty() { result.push_str(", "); }
+        if !product.elements.is_empty() {
+            result.push_str(", ");
+        }
         result.push_str("...");
     }
     result.push(')');
@@ -135,7 +150,9 @@ fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &Type) -> 
 
 fn format_effect_set(effects: &EffectSet) -> String {
     let mut entries = Vec::new();
-    if let Some(variable) = &effects.variable { entries.push(variable.name.clone()); }
+    if let Some(variable) = &effects.variable {
+        entries.push(variable.name.clone());
+    }
     for state in &effects.state {
         entries.push(state.to_string());
     }
@@ -191,7 +208,10 @@ impl TypeParameterPattern {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EffectParameterBinding { pub syntax: Syntax, pub name: String }
+pub struct EffectParameterBinding {
+    pub syntax: Syntax,
+    pub name: String,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeParameterBinding {
@@ -291,7 +311,10 @@ impl EffectSet {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EffectVariable { pub syntax: Syntax, pub name: String }
+pub struct EffectVariable {
+    pub syntax: Syntax,
+    pub name: String,
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StateEffect {

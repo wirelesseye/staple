@@ -135,7 +135,10 @@ pub enum UseKind {
     Namespace,
     Glob,
     Selected(Vec<String>),
-    Renamed { item: String, alias: String },
+    Renamed {
+        item: String,
+        alias: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

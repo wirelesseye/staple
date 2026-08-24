@@ -1,9 +1,9 @@
 use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
 
 use crate::{
-    Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
-    LogicalOperator, MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern,
-    Program, ResolvedMacro, Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
+    Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, LogicalOperator,
+    MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program,
+    ResolvedMacro, Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
     VisibilityKind, VisibilitySyntax,
 };
 
@@ -1210,7 +1210,10 @@ impl MacroExpander {
                 }
             }
             if definition.key.modifier {
-                if matches!(definition.key.name.as_str(), "recursive_constructor" | "doc") {
+                if matches!(
+                    definition.key.name.as_str(),
+                    "recursive_constructor" | "doc"
+                ) {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
                         format!(
@@ -1594,9 +1597,10 @@ impl MacroExpander {
         if let Item::VisibilityMacroInvocation(invocation) = current {
             current = self.expand_visibility_macro_invocation(module, invocation, depth + 1)?;
         }
-        let docs_only = modified.modifiers.iter().all(|modifier| {
-            modifier.namespace.is_none() && modifier.name == "doc"
-        });
+        let docs_only = modified
+            .modifiers
+            .iter()
+            .all(|modifier| modifier.namespace.is_none() && modifier.name == "doc");
         if !modifier_target_supported(&current) && !docs_only {
             self.diagnostics.push(Diagnostic::new(
                 modified.syntax.span,
@@ -1710,8 +1714,7 @@ impl MacroExpander {
                     };
                     let nested_result = self.apply_modifier_chain(module, nested, depth + 1);
                     self.expansion_stack.pop();
-                    let (nested_first, nested_extra) =
-                        split_modifier_chain_result(nested_result?);
+                    let (nested_first, nested_extra) = split_modifier_chain_result(nested_result?);
                     extra.extend(nested_extra);
                     nested_first
                 }
@@ -1961,15 +1964,20 @@ impl MacroExpander {
         match value {
             Value::Syntax(SyntaxValue::Item(item)) => Some(vec![*item]),
             Value::Syntax(SyntaxValue::Items(items)) => Some(items),
-            Value::Sequence(values) if matches!(&definition.result, MetaType::Sequence(element) if **element == MetaType::Item) => values
-                .into_iter()
-                .map(|value| match value {
-                    Value::Syntax(SyntaxValue::Item(item)) => Some(*item),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>(),
+            Value::Sequence(values) if matches!(&definition.result, MetaType::Sequence(element) if **element == MetaType::Item) => {
+                values
+                    .into_iter()
+                    .map(|value| match value {
+                        Value::Syntax(SyntaxValue::Item(item)) => Some(*item),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+            }
             Value::Syntax(SyntaxValue::Raw(raw)) => {
-                let mut items = match crate::parser::parse_item_list_fragment(&raw, &mut self.next_syntax_id) {
+                let mut items = match crate::parser::parse_item_list_fragment(
+                    &raw,
+                    &mut self.next_syntax_id,
+                ) {
                     Ok(items) => items,
                     Err(error) => {
                         self.diagnostics.push(Diagnostic::new(
@@ -2010,7 +2018,6 @@ impl MacroExpander {
             }
         }
     }
-
 
     fn expand_top_level_macro(
         &mut self,
@@ -2351,7 +2358,10 @@ impl MacroExpander {
             if let Some(helper) = imported_scope.helpers.get(item)
                 && (include_private || helper.binding.visibility == Visibility::Public)
             {
-                scope.helpers.entry(alias.to_owned()).or_insert_with(|| helper.clone());
+                scope
+                    .helpers
+                    .entry(alias.to_owned())
+                    .or_insert_with(|| helper.clone());
             }
         };
         let use_kind = self.use_kind(use_);
@@ -2364,7 +2374,11 @@ impl MacroExpander {
                 }
             }
             UseKind::Glob => {
-                for name in imported_scope.macros.keys().chain(imported_scope.modifiers.keys()) {
+                for name in imported_scope
+                    .macros
+                    .keys()
+                    .chain(imported_scope.modifiers.keys())
+                {
                     install(&name, &name, scope);
                 }
                 for name in imported_scope.helpers.keys() {
@@ -3130,7 +3144,11 @@ impl MacroExpander {
                             return Some(Value::Helper(helper.module, helper.binding));
                         }
                         let value = helper.binding.value?;
-                        return self.eval_helper_value(helper.module, &value, name.syntax.span.clone());
+                        return self.eval_helper_value(
+                            helper.module,
+                            &value,
+                            name.syntax.span.clone(),
+                        );
                     }
                     if !self.companion_modules[cursor.0] {
                         break;
@@ -3415,7 +3433,10 @@ impl MacroExpander {
                     if let Item::TypeDeclaration(declaration) = item.as_ref() {
                         value = type_declaration_item_value(declaration);
                     } else {
-                        self.diagnostics.push(Diagnostic::new(access.syntax.span.clone(), "unstructured item syntax has no inspectable fields"));
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            "unstructured item syntax has no inspectable fields",
+                        ));
                         return None;
                     }
                 }
@@ -3730,20 +3751,24 @@ impl MacroExpander {
             }
             "StringExpr" => {
                 let Value::String(value) = argument else {
-                    self.diagnostics.push(Diagnostic::new(span, "`StringExpr` requires a string"));
+                    self.diagnostics
+                        .push(Diagnostic::new(span, "`StringExpr` requires a string"));
                     return None;
                 };
                 let syntax = self.generated_syntax(module, span);
-                Some(Value::Syntax(SyntaxValue::Unstructured(Expression::String(
-                    crate::StringExpression {
+                Some(Value::Syntax(SyntaxValue::Unstructured(
+                    Expression::String(crate::StringExpression {
                         syntax,
                         literal: crate::string_literal::encode(&value),
-                    },
-                ))))
+                    }),
+                )))
             }
             "BindingPattern" => {
                 let Value::Syntax(SyntaxValue::Ident(identifier)) = argument else {
-                    self.diagnostics.push(Diagnostic::new(span, "`BindingPattern` requires an identifier"));
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`BindingPattern` requires an identifier",
+                    ));
                     return None;
                 };
                 Some(Value::Syntax(SyntaxValue::Pattern(Pattern::Binding(
@@ -3758,11 +3783,19 @@ impl MacroExpander {
             }
             "NominalPattern" => {
                 let Value::Product(fields) = argument else {
-                    self.diagnostics.push(Diagnostic::new(span, "`NominalPattern` requires `(name: Ident String, argument: Pattern)`"));
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`NominalPattern` requires `(name: Ident String, argument: Pattern)`",
+                    ));
                     return None;
                 };
-                let [(_, Value::Syntax(SyntaxValue::Ident(name))), (_, Value::Syntax(SyntaxValue::Pattern(argument)))] = fields.as_slice() else {
-                    self.diagnostics.push(Diagnostic::new(span, "invalid `NominalPattern` fields"));
+                let [
+                    (_, Value::Syntax(SyntaxValue::Ident(name))),
+                    (_, Value::Syntax(SyntaxValue::Pattern(argument))),
+                ] = fields.as_slice()
+                else {
+                    self.diagnostics
+                        .push(Diagnostic::new(span, "invalid `NominalPattern` fields"));
                     return None;
                 };
                 Some(Value::Syntax(SyntaxValue::Pattern(Pattern::Nominal(
@@ -4357,9 +4390,7 @@ impl MacroExpander {
         };
         let operator = BUILTIN_OPERATOR_METHODS
             .iter()
-            .find(|(trait_name, method_name, _)| {
-                *trait_name == name.name && *method_name == method
-            })
+            .find(|(trait_name, method_name, _)| *trait_name == name.name && *method_name == method)
             .map(|(_, _, operator)| *operator)?;
         let Some(left) = self.eval_expression(module, arguments[0], environment) else {
             return Some(None);
@@ -4493,16 +4524,24 @@ impl MacroExpander {
             };
             target.and_then(|target| self.scopes[target.0].macros.get(quote.path.last().unwrap()))
         };
-        let matching = definitions.into_iter().flatten().filter(|key| {
-            self.definitions.get(*key).is_some_and(|definition| {
-                definition.declaration.visibility == Visibility::Public || quote.path.len() == 1
+        let matching = definitions
+            .into_iter()
+            .flatten()
+            .filter(|key| {
+                self.definitions.get(*key).is_some_and(|definition| {
+                    definition.declaration.visibility == Visibility::Public || quote.path.len() == 1
+                })
             })
-        }).collect::<Vec<_>>();
-        if matching.len() != 1 || !self.definitions.get(matching[0]).is_some_and(|definition| {
-            matches!((&definition.kind, quote.kind),
-                (MacroKind::Quote, crate::QuoteKind::Quote)
-                    | (MacroKind::ParseQuote, crate::QuoteKind::ParseQuote))
-        }) {
+            .collect::<Vec<_>>();
+        if matching.len() != 1
+            || !self.definitions.get(matching[0]).is_some_and(|definition| {
+                matches!(
+                    (&definition.kind, quote.kind),
+                    (MacroKind::Quote, crate::QuoteKind::Quote)
+                        | (MacroKind::ParseQuote, crate::QuoteKind::ParseQuote)
+                )
+            })
+        {
             self.diagnostics.push(Diagnostic::new(
                 quote.syntax.span.clone(),
                 if quote.path.len() == 1 && matching.is_empty() {
@@ -4511,7 +4550,10 @@ impl MacroExpander {
                         quote.kind.name()
                     )
                 } else {
-                    format!("could not resolve quotation macro `{}`", quote.path.join("."))
+                    format!(
+                        "could not resolve quotation macro `{}`",
+                        quote.path.join(".")
+                    )
                 },
             ));
             return None;
@@ -5236,8 +5278,10 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             let mut next_syntax_id = 0;
             parse_pattern_argument(argument, &mut next_syntax_id).is_some_and(|pattern| {
                 matches!(expected, MetaType::Pattern)
-                    || matches!(expected, MetaType::BindingPattern) && matches!(pattern, Pattern::Binding(_))
-                    || matches!(expected, MetaType::NominalPattern) && matches!(pattern, Pattern::Nominal(_))
+                    || matches!(expected, MetaType::BindingPattern)
+                        && matches!(pattern, Pattern::Binding(_))
+                    || matches!(expected, MetaType::NominalPattern)
+                        && matches!(pattern, Pattern::Nominal(_))
             })
         }
         MetaType::Visibility => matches!(argument, Expression::VisibilityArgument(_)),
@@ -5260,10 +5304,12 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             expression_argument,
             Expression::Name(_) | Expression::Call(_) | Expression::VisibilityArgument(_)
         ),
-        MetaType::Item | MetaType::TypeDeclarationItem | MetaType::UnstructuredItem
-        | MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
-            false
-        }
+        MetaType::Item
+        | MetaType::TypeDeclarationItem
+        | MetaType::UnstructuredItem
+        | MetaType::Product(_)
+        | MetaType::Optional(_)
+        | MetaType::Sequence(_) => false,
         MetaType::Comma => matches_single_token(argument.syntax(), crate::TokenKind::Comma),
         MetaType::Equals => matches_single_token(argument.syntax(), crate::TokenKind::Equals),
         MetaType::FatArrow => matches_single_token(argument.syntax(), crate::TokenKind::FatArrow),
@@ -5569,15 +5615,26 @@ fn match_syntax_fragment(
             crate::parser::parse_type_fragment(syntax, false, next_syntax_id).ok()?,
         ),
         MetaType::Pattern | MetaType::BindingPattern | MetaType::NominalPattern => {
-            let pattern = crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id).ok()?;
-            if matches!(expected, MetaType::BindingPattern) && !matches!(pattern, Pattern::Binding(_))
-                || matches!(expected, MetaType::NominalPattern) && !matches!(pattern, Pattern::Nominal(_)) { return None; }
+            let pattern =
+                crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id).ok()?;
+            if matches!(expected, MetaType::BindingPattern)
+                && !matches!(pattern, Pattern::Binding(_))
+                || matches!(expected, MetaType::NominalPattern)
+                    && !matches!(pattern, Pattern::Nominal(_))
+            {
+                return None;
+            }
             SyntaxValue::Pattern(pattern)
         }
         MetaType::Item | MetaType::TypeDeclarationItem | MetaType::UnstructuredItem => {
             let item = crate::parser::parse_item_fragment(syntax, next_syntax_id).ok()?;
-            if matches!(expected, MetaType::TypeDeclarationItem) && !matches!(item, Item::TypeDeclaration(_))
-                || matches!(expected, MetaType::UnstructuredItem) && matches!(item, Item::TypeDeclaration(_)) { return None; }
+            if matches!(expected, MetaType::TypeDeclarationItem)
+                && !matches!(item, Item::TypeDeclaration(_))
+                || matches!(expected, MetaType::UnstructuredItem)
+                    && matches!(item, Item::TypeDeclaration(_))
+            {
+                return None;
+            }
             SyntaxValue::Item(Box::new(item))
         }
         MetaType::Visibility | MetaType::MacroCallVisibility => {
@@ -6308,11 +6365,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
         ),
         Type::Function(function) => {
             type_contains_syntax(&function.parameter)
-                || function
-                    .effects
-                    .resources
-                    .iter()
-                    .any(type_contains_syntax)
+                || function.effects.resources.iter().any(type_contains_syntax)
                 || type_contains_syntax(&function.result)
         }
         Type::Product(product) => product
@@ -6485,24 +6538,19 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         Expression::StringTemplate(_) => true,
         Expression::Loop(_) => true,
         Expression::Resource(_) | Expression::With(_) => true,
-        Expression::Block(block) => {
-            block
-                .items
-                .last()
-                .is_none_or(|item| match item {
-                    Item::Expression(expression) => obviously_not_syntax(expression, 0),
-                    Item::Return(return_) => obviously_not_syntax(&return_.value, 0),
-                    Item::Binding(_)
-                    | Item::PatternBinding(_)
-                    | Item::Assignment(_)
-                    | Item::Break(_)
-                    | Item::Continue(_)
-                    | Item::Submodule(_)
-                    | Item::TypeDeclaration(_)
-                    | Item::UseDeclaration(_) => true,
-                    _ => true,
-                })
-        }
+        Expression::Block(block) => block.items.last().is_none_or(|item| match item {
+            Item::Expression(expression) => obviously_not_syntax(expression, 0),
+            Item::Return(return_) => obviously_not_syntax(&return_.value, 0),
+            Item::Binding(_)
+            | Item::PatternBinding(_)
+            | Item::Assignment(_)
+            | Item::Break(_)
+            | Item::Continue(_)
+            | Item::Submodule(_)
+            | Item::TypeDeclaration(_)
+            | Item::UseDeclaration(_) => true,
+            _ => true,
+        }),
         Expression::Function(_)
         | Expression::Product(_)
         | Expression::String(_)
@@ -6527,18 +6575,12 @@ fn quote_at_tail(expression: &Expression, arity: usize) -> bool {
     match expression {
         Expression::Quote(quote) => quote.kind == crate::QuoteKind::Quote,
         Expression::Satisfies(satisfies) => quote_at_tail(&satisfies.value, 0),
-        Expression::Match(match_) => match_
-            .arms
-            .iter()
-            .any(|arm| quote_at_tail(&arm.body, 0)),
-        Expression::Block(block) => block
-            .items
-            .last()
-            .is_some_and(|item| match item {
-                Item::Expression(expression) => quote_at_tail(expression, 0),
-                Item::Return(return_) => quote_at_tail(&return_.value, 0),
-                _ => false,
-            }),
+        Expression::Match(match_) => match_.arms.iter().any(|arm| quote_at_tail(&arm.body, 0)),
+        Expression::Block(block) => block.items.last().is_some_and(|item| match item {
+            Item::Expression(expression) => quote_at_tail(expression, 0),
+            Item::Return(return_) => quote_at_tail(&return_.value, 0),
+            _ => false,
+        }),
         _ => false,
     }
 }
@@ -6764,13 +6806,19 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     environment,
                 );
             }
-            if pattern.namespace.is_none() && pattern.name == "TypeDeclarationItem"
+            if pattern.namespace.is_none()
+                && pattern.name == "TypeDeclarationItem"
                 && let Value::Syntax(SyntaxValue::Item(item)) = &value
                 && let Item::TypeDeclaration(declaration) = item.as_ref()
             {
-                return bind_pattern(&pattern.argument, type_declaration_item_value(declaration), environment);
+                return bind_pattern(
+                    &pattern.argument,
+                    type_declaration_item_value(declaration),
+                    environment,
+                );
             }
-            if pattern.namespace.is_none() && pattern.name == "UnstructuredItem"
+            if pattern.namespace.is_none()
+                && pattern.name == "UnstructuredItem"
                 && let Value::Syntax(SyntaxValue::Item(item)) = &value
                 && !matches!(item.as_ref(), Item::TypeDeclaration(_))
             {
@@ -6903,9 +6951,11 @@ fn type_declaration_item_value(declaration: &crate::TypeDeclaration) -> Value {
         } else {
             declaration.syntax.clone()
         };
-        if let Some(index) = syntax.tokens().iter().position(|token| {
-            token.kind == crate::TokenKind::Identifier && token.text == name
-        }) {
+        if let Some(index) = syntax
+            .tokens()
+            .iter()
+            .position(|token| token.kind == crate::TokenKind::Identifier && token.text == name)
+        {
             let start = syntax.token_range.start + index;
             syntax.token_range = start..start + 1;
         }
@@ -6914,7 +6964,12 @@ fn type_declaration_item_value(declaration: &crate::TypeDeclaration) -> Value {
             name: name.to_owned(),
         }))
     };
-    let parameters = declaration.type_parameters.iter().flat_map(crate::TypeParameterPattern::names).map(identifier).collect();
+    let parameters = declaration
+        .type_parameters
+        .iter()
+        .flat_map(crate::TypeParameterPattern::names)
+        .map(identifier)
+        .collect();
     let mut declared_type = Type::Named(crate::NamedType {
         syntax: declaration.name_syntax.clone(),
         namespace: None,
@@ -6929,15 +6984,30 @@ fn type_declaration_item_value(declaration: &crate::TypeDeclaration) -> Value {
         });
     }
     let underlying = match &declaration.underlying {
-        Some(ty) => Value::Nominal("Some".to_owned(), Box::new(Value::Syntax(SyntaxValue::Type(ty.clone())))),
+        Some(ty) => Value::Nominal(
+            "Some".to_owned(),
+            Box::new(Value::Syntax(SyntaxValue::Type(ty.clone()))),
+        ),
         None => Value::Nominal("None".to_owned(), Box::new(Value::Product(Vec::new()))),
     };
     Value::Product(vec![
-        (Some("kind".to_owned()), Value::Nominal(kind.to_owned(), Box::new(Value::Product(Vec::new())))),
+        (
+            Some("kind".to_owned()),
+            Value::Nominal(kind.to_owned(), Box::new(Value::Product(Vec::new()))),
+        ),
         (Some("name".to_owned()), identifier(&declaration.name)),
-        (Some("name_spelling".to_owned()), Value::String(declaration.name.clone())),
-        (Some("declared_type".to_owned()), Value::Syntax(SyntaxValue::Type(declared_type))),
-        (Some("type_parameters".to_owned()), Value::Sequence(parameters)),
+        (
+            Some("name_spelling".to_owned()),
+            Value::String(declaration.name.clone()),
+        ),
+        (
+            Some("declared_type".to_owned()),
+            Value::Syntax(SyntaxValue::Type(declared_type)),
+        ),
+        (
+            Some("type_parameters".to_owned()),
+            Value::Sequence(parameters),
+        ),
         (Some("underlying".to_owned()), underlying),
     ])
 }
@@ -6950,17 +7020,23 @@ fn type_parameter_pattern_type(parameter: &crate::TypeParameterPattern) -> Type 
             name: binding.name.clone(),
         }),
         crate::TypeParameterPattern::Effect(binding) => Type::Named(crate::NamedType {
-            syntax: binding.syntax.clone(), namespace: None, name: binding.name.clone(),
+            syntax: binding.syntax.clone(),
+            namespace: None,
+            name: binding.name.clone(),
         }),
         crate::TypeParameterPattern::Product(product) => Type::Product(crate::ProductType {
             syntax: product.syntax.clone(),
-            elements: product.elements.iter().map(|element| crate::TypeElement {
-                syntax: element.syntax().clone(),
-                name: None,
-                ty: type_parameter_pattern_type(element),
-                spread: false,
-                mutable: false,
-            }).collect(),
+            elements: product
+                .elements
+                .iter()
+                .map(|element| crate::TypeElement {
+                    syntax: element.syntax().clone(),
+                    name: None,
+                    ty: type_parameter_pattern_type(element),
+                    spread: false,
+                    mutable: false,
+                })
+                .collect(),
             variadic: false,
         }),
         crate::TypeParameterPattern::Splice(splice) => Type::Splice(splice.clone()),
@@ -6992,15 +7068,25 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
             .as_ref()
             .is_none_or(|expected| expected == &name.name),
         (MetaType::CallExpr, Value::Syntax(SyntaxValue::Call(_))) => true,
-        (MetaType::StringExpr, Value::Syntax(SyntaxValue::Unstructured(Expression::String(_)))) => true,
+        (MetaType::StringExpr, Value::Syntax(SyntaxValue::Unstructured(Expression::String(_)))) => {
+            true
+        }
         (MetaType::UnstructuredExpr, Value::Syntax(SyntaxValue::Unstructured(_))) => true,
         (MetaType::Type, Value::Syntax(SyntaxValue::Type(_))) => true,
         (MetaType::Pattern, Value::Syntax(SyntaxValue::Pattern(_))) => true,
-        (MetaType::BindingPattern, Value::Syntax(SyntaxValue::Pattern(Pattern::Binding(_)))) => true,
-        (MetaType::NominalPattern, Value::Syntax(SyntaxValue::Pattern(Pattern::Nominal(_)))) => true,
+        (MetaType::BindingPattern, Value::Syntax(SyntaxValue::Pattern(Pattern::Binding(_)))) => {
+            true
+        }
+        (MetaType::NominalPattern, Value::Syntax(SyntaxValue::Pattern(Pattern::Nominal(_)))) => {
+            true
+        }
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
-        (MetaType::TypeDeclarationItem, Value::Syntax(SyntaxValue::Item(item))) => matches!(item.as_ref(), Item::TypeDeclaration(_)),
-        (MetaType::UnstructuredItem, Value::Syntax(SyntaxValue::Item(item))) => !matches!(item.as_ref(), Item::TypeDeclaration(_)),
+        (MetaType::TypeDeclarationItem, Value::Syntax(SyntaxValue::Item(item))) => {
+            matches!(item.as_ref(), Item::TypeDeclaration(_))
+        }
+        (MetaType::UnstructuredItem, Value::Syntax(SyntaxValue::Item(item))) => {
+            !matches!(item.as_ref(), Item::TypeDeclaration(_))
+        }
         (MetaType::Comma, Value::Syntax(SyntaxValue::Comma(_))) => true,
         (MetaType::Equals, Value::Syntax(SyntaxValue::Equals(_))) => true,
         (MetaType::FatArrow, Value::Syntax(SyntaxValue::FatArrow(_))) => true,
@@ -7183,11 +7269,8 @@ fn substitute_splices(
         Expression::StringTemplate(template) => {
             for part in &mut template.parts {
                 if let crate::StringTemplatePart::Interpolation(interpolation) = part {
-                    *interpolation.expression = substitute_splices(
-                        &interpolation.expression,
-                        environment,
-                        diagnostics,
-                    )?;
+                    *interpolation.expression =
+                        substitute_splices(&interpolation.expression, environment, diagnostics)?;
                 }
             }
         }
@@ -7611,12 +7694,7 @@ fn substitute_type(
             if let Some(namespace) = &mut named.namespace {
                 substitute_identifier(namespace, &mut named.syntax, environment, diagnostics)?;
             }
-            substitute_identifier(
-                &mut named.name,
-                &mut named.syntax,
-                environment,
-                diagnostics,
-            )?;
+            substitute_identifier(&mut named.name, &mut named.syntax, environment, diagnostics)?;
         }
         Type::Inferred(_) | Type::StringLiteral(_) => {}
         Type::Splice(_) => unreachable!(),
@@ -8105,18 +8183,14 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
                 alpha_rename_expression(&mut assignment.target, mark, &mut scopes);
                 alpha_rename_expression(&mut assignment.value, mark, &mut scopes);
             }
-            Item::Return(return_) => {
-                alpha_rename_expression(&mut return_.value, mark, &mut scopes)
-            }
+            Item::Return(return_) => alpha_rename_expression(&mut return_.value, mark, &mut scopes),
             Item::Break(break_) => {
                 if let Some(value) = &mut break_.value {
                     alpha_rename_expression(value, mark, &mut scopes);
                 }
             }
             Item::Continue(_) => {}
-            Item::Expression(expression) => {
-                alpha_rename_expression(expression, mark, &mut scopes)
-            }
+            Item::Expression(expression) => alpha_rename_expression(expression, mark, &mut scopes),
             Item::Submodule(submodule) => {
                 for item in &mut submodule.module.items {
                     alpha_rename_item(item, mark);
@@ -8366,12 +8440,7 @@ fn freshen_pattern(
     }
 }
 
-fn freshen_block_item(
-    expander: &mut MacroExpander,
-    item: &mut Item,
-    module: ModuleId,
-    mark: u64,
-) {
+fn freshen_block_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId, mark: u64) {
     match item {
         Item::Binding(binding) => freshen_binding(expander, binding, module, mark),
         Item::PatternBinding(binding) => {
@@ -8464,7 +8533,9 @@ fn freshen_type_parameter(
         crate::TypeParameterPattern::Binding(binding) => {
             expander.freshen_syntax(&mut binding.syntax, module, mark)
         }
-        crate::TypeParameterPattern::Effect(binding) => expander.freshen_syntax(&mut binding.syntax, module, mark),
+        crate::TypeParameterPattern::Effect(binding) => {
+            expander.freshen_syntax(&mut binding.syntax, module, mark)
+        }
         crate::TypeParameterPattern::Product(product) => {
             expander.freshen_syntax(&mut product.syntax, module, mark);
             for element in &mut product.elements {

@@ -131,9 +131,7 @@ impl Collector<'_> {
             }
             Item::Continue(_) => {}
             Item::Expression(expression) => self.collect_expression_declarations(expression),
-            Item::Submodule(submodule) => {
-                self.collect_module_declarations(&submodule.module)
-            }
+            Item::Submodule(submodule) => self.collect_module_declarations(&submodule.module),
             Item::TypeDeclaration(_) => {}
             Item::UseDeclaration(_) => {}
             _ => {}
@@ -253,13 +251,8 @@ impl Collector<'_> {
             }
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.typed.symbol_for(binding.syntax.id) {
-                    let prefix = is_let_context.then(|| {
-                        if binding.mutable {
-                            "mut"
-                        } else {
-                            "let"
-                        }
-                    });
+                    let prefix =
+                        is_let_context.then(|| if binding.mutable { "mut" } else { "let" });
                     self.declarations.insert(
                         symbol,
                         Declaration {
@@ -308,9 +301,7 @@ impl Collector<'_> {
                     .iter()
                     .flat_map(|module| &module.syntax.items)
                     .find_map(|item| match item {
-                        Item::Submodule(resolved)
-                            if resolved.syntax.id == submodule.syntax.id =>
-                        {
+                        Item::Submodule(resolved) if resolved.syntax.id == submodule.syntax.id => {
                             Some(resolved.docs.clone())
                         }
                         _ => None,
@@ -544,12 +535,7 @@ impl Collector<'_> {
                 .get(id)
                 .map(|resolved| resolved.docs.clone())
                 .unwrap_or_else(|| declaration.docs.clone());
-            self.named_with_docs(
-                &declaration.syntax,
-                &declaration.name,
-                signature,
-                docs,
-            );
+            self.named_with_docs(&declaration.syntax, &declaration.name, signature, docs);
         }
         for parameter in &declaration.type_parameters {
             self.type_parameter(parameter);
@@ -636,8 +622,7 @@ impl Collector<'_> {
         } else {
             format!(" {parameters}")
         };
-        let where_clause =
-            self.where_clause(trait_bounds, subtype_bounds, functional_dependencies);
+        let where_clause = self.where_clause(trait_bounds, subtype_bounds, functional_dependencies);
         (parameters, where_clause)
     }
 
@@ -758,11 +743,7 @@ impl Collector<'_> {
             .resolved()
             .compile_time_binding_for(binding.syntax.id)
         {
-            self.named(
-                &binding.syntax,
-                &binding.name,
-                compile_time_signature(info),
-            );
+            self.named(&binding.syntax, &binding.name, compile_time_signature(info));
         }
         let value_type = self
             .typed
@@ -816,14 +797,12 @@ impl Collector<'_> {
             .macro_invocation_for(expression.syntax().id)
         {
             match expression {
-                Expression::Name(name) => {
-                    self.named_with_docs(
-                        &name.syntax,
-                        &name.name,
-                        macro_signature(info),
-                        info.docs.clone(),
-                    )
-                }
+                Expression::Name(name) => self.named_with_docs(
+                    &name.syntax,
+                    &name.name,
+                    macro_signature(info),
+                    info.docs.clone(),
+                ),
                 Expression::Access(access) => {
                     if let Accessor::Name(name) = &access.accessor {
                         self.named_last_with_docs(
@@ -843,7 +822,11 @@ impl Collector<'_> {
                 _ => {}
             }
         }
-        if let Some(info) = self.typed.resolved().compile_time_binding_for(expression.syntax().id) {
+        if let Some(info) = self
+            .typed
+            .resolved()
+            .compile_time_binding_for(expression.syntax().id)
+        {
             let signature = compile_time_signature(info);
             match expression {
                 Expression::Name(name) => self.named(&name.syntax, &name.name, signature),
@@ -866,7 +849,8 @@ impl Collector<'_> {
             let signature = declaration
                 .map(|declaration| declaration.signature(&value_type))
                 .or_else(|| {
-                    trait_member.map(|member| format!("<trait member> {}: {value_type}", member.name))
+                    trait_member
+                        .map(|member| format!("<trait member> {}: {value_type}", member.name))
                 })
                 .unwrap_or(value_type);
             let docs = declaration
@@ -950,14 +934,12 @@ impl Collector<'_> {
                 self.ty(&logical.bool_type);
             }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
-            Expression::Quote(quote) => {
-                match &quote.template {
-                    QuoteTemplate::Expression(expression) => self.expression(expression),
-                    QuoteTemplate::Item(item) => self.item(item),
-                    QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
-                    QuoteTemplate::Raw => {}
-                }
-            }
+            Expression::Quote(quote) => match &quote.template {
+                QuoteTemplate::Expression(expression) => self.expression(expression),
+                QuoteTemplate::Item(item) => self.item(item),
+                QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
+                QuoteTemplate::Raw => {}
+            },
             Expression::Splice(_)
             | Expression::Name(_)
             | Expression::String(_)
@@ -968,7 +950,11 @@ impl Collector<'_> {
     }
 
     fn pattern(&mut self, pattern: &Pattern) {
-        if let Some(info) = self.typed.resolved().compile_time_binding_for(pattern.syntax().id) {
+        if let Some(info) = self
+            .typed
+            .resolved()
+            .compile_time_binding_for(pattern.syntax().id)
+        {
             let signature = compile_time_signature(info);
             match pattern {
                 Pattern::Binding(binding) => self.named(&binding.syntax, &binding.name, signature),
@@ -1027,7 +1013,11 @@ impl Collector<'_> {
                 &binding.name,
                 format!("<type parameter> {}", binding.name),
             ),
-            TypeParameterPattern::Effect(binding) => self.named(&binding.syntax, &binding.name, format!("<effect parameter> {}", binding.name)),
+            TypeParameterPattern::Effect(binding) => self.named(
+                &binding.syntax,
+                &binding.name,
+                format!("<effect parameter> {}", binding.name),
+            ),
             TypeParameterPattern::Product(product) => {
                 for element in &product.elements {
                     self.type_parameter(element);
@@ -1138,7 +1128,13 @@ impl Collector<'_> {
         self.named_with_docs(syntax, name, signature, Vec::new());
     }
 
-    fn named_with_docs(&mut self, syntax: &Syntax, name: &str, signature: String, documentation: Vec<String>) {
+    fn named_with_docs(
+        &mut self,
+        syntax: &Syntax,
+        name: &str,
+        signature: String,
+        documentation: Vec<String>,
+    ) {
         if let Some(token) = syntax.tokens().iter().find(|token| token.text == name) {
             self.entries.push(HoverEntry {
                 range: token.span.clone(),
@@ -1152,7 +1148,13 @@ impl Collector<'_> {
         self.named_last_with_docs(syntax, name, signature, Vec::new());
     }
 
-    fn named_last_with_docs(&mut self, syntax: &Syntax, name: &str, signature: String, documentation: Vec<String>) {
+    fn named_last_with_docs(
+        &mut self,
+        syntax: &Syntax,
+        name: &str,
+        signature: String,
+        documentation: Vec<String>,
+    ) {
         if let Some(token) = syntax
             .tokens()
             .iter()
@@ -1170,7 +1172,10 @@ impl Collector<'_> {
 
 fn compile_time_signature(info: &CompileTimeBindingInfo) -> String {
     if info.kind == CompileTimeBindingKind::Builtin {
-        return info.type_display.clone().unwrap_or_else(|| info.name.clone());
+        return info
+            .type_display
+            .clone()
+            .unwrap_or_else(|| info.name.clone());
     }
     let name = info.declaration_prefix.as_ref().map_or_else(
         || info.name.clone(),
@@ -1231,7 +1236,8 @@ mod tests {
 
     #[test]
     fn generic_def_and_type_signatures_use_the_new_syntax() {
-        let source = "pub(repr) type Box T = (value: T)\ndef unbox: <T> Box T -> T = Box value => value\n";
+        let source =
+            "pub(repr) type Box T = (value: T)\ndef unbox: <T> Box T -> T = Box value => value\n";
         let path = std::env::temp_dir().join("staple-hover-generic-signatures.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
@@ -1308,14 +1314,22 @@ mod tests {
             .filter(|entry| &source[entry.range.clone()] == "MyType")
             .collect::<Vec<_>>();
         assert!(type_entries.len() >= 2, "{type_entries:?}");
-        assert!(type_entries.iter().all(|entry| entry.documentation == ["Line 1", "Line 2"]));
+        assert!(
+            type_entries
+                .iter()
+                .all(|entry| entry.documentation == ["Line 1", "Line 2"])
+        );
 
         let value_entries = entries
             .iter()
             .filter(|entry| &source[entry.range.clone()] == "value")
             .collect::<Vec<_>>();
         assert!(value_entries.len() >= 2, "{value_entries:?}");
-        assert!(value_entries.iter().all(|entry| entry.documentation == [" Value docs"]));
+        assert!(
+            value_entries
+                .iter()
+                .all(|entry| entry.documentation == [" Value docs"])
+        );
     }
 
     #[test]
@@ -1378,10 +1392,9 @@ mod tests {
         assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
         assert!(signatures.contains(&("inferred", "macro inferred: SyntaxNode -> Expr")));
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
-        assert!(signatures.contains(&(
-            "parse_quote",
-            "macro parse_quote: Braced Syntax -> Syntax"
-        )));
+        assert!(
+            signatures.contains(&("parse_quote", "macro parse_quote: Braced Syntax -> Syntax"))
+        );
         assert!(
             signatures
                 .iter()
@@ -1760,16 +1773,37 @@ mod tests {
         let typed = TypeChecker::new().check(resolved).unwrap();
         let module = parse(&source).unwrap();
         let entries = entries(&module, &typed);
-        let signatures = entries.iter().map(|entry| (&source[entry.range.clone()], entry.signature.as_str())).collect::<Vec<_>>();
+        let signatures = entries
+            .iter()
+            .map(|entry| (&source[entry.range.clone()], entry.signature.as_str()))
+            .collect::<Vec<_>>();
 
-        assert!(signatures.iter().any(|entry| entry.0 == "otherwise" && entry.1.starts_with("let otherwise:")), "{signatures:?}");
-        assert!(signatures.iter().any(|entry| entry.0 == "body" && entry.1.starts_with("body: Braced")), "{signatures:?}");
-        assert!(signatures.iter().any(|entry| entry.0 == "if_clauses" && entry.1.starts_with("def if_clauses:")), "{signatures:?}");
-        assert!(entries.iter().any(|entry| {
-            entry.range.start < 801
-                && &source[entry.range.clone()] == "Expr"
-                && entry.signature.starts_with("type alias Expr")
-        }), "{signatures:?}");
+        assert!(
+            signatures
+                .iter()
+                .any(|entry| entry.0 == "otherwise" && entry.1.starts_with("let otherwise:")),
+            "{signatures:?}"
+        );
+        assert!(
+            signatures
+                .iter()
+                .any(|entry| entry.0 == "body" && entry.1.starts_with("body: Braced")),
+            "{signatures:?}"
+        );
+        assert!(
+            signatures
+                .iter()
+                .any(|entry| entry.0 == "if_clauses" && entry.1.starts_with("def if_clauses:")),
+            "{signatures:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| {
+                entry.range.start < 801
+                    && &source[entry.range.clone()] == "Expr"
+                    && entry.signature.starts_with("type alias Expr")
+            }),
+            "{signatures:?}"
+        );
     }
 
     #[test]
@@ -1785,11 +1819,29 @@ mod tests {
         let typed = TypeChecker::new().check(resolved).unwrap();
         let module = parse(&source).unwrap();
         let entries = entries(&module, &typed);
-        let signatures = entries.iter().map(|entry| (&source[entry.range.clone()], entry.signature.as_str())).collect::<Vec<_>>();
+        let signatures = entries
+            .iter()
+            .map(|entry| (&source[entry.range.clone()], entry.signature.as_str()))
+            .collect::<Vec<_>>();
 
-        assert!(signatures.contains(&("original", "let original: CallExpr")), "{signatures:?}");
-        assert!(signatures.contains(&("changed", "let mut changed: CallExpr")), "{signatures:?}");
-        assert!(signatures.contains(&("CallExpr", "(callee: Expr, argument: Expr) -> CallExpr")), "{signatures:?}");
-        assert!(!signatures.iter().any(|entry| entry.1.contains("<compile-time") || entry.1.contains("<macro parameter>") || entry.1.contains("<syntax category>")));
+        assert!(
+            signatures.contains(&("original", "let original: CallExpr")),
+            "{signatures:?}"
+        );
+        assert!(
+            signatures.contains(&("changed", "let mut changed: CallExpr")),
+            "{signatures:?}"
+        );
+        assert!(
+            signatures.contains(&("CallExpr", "(callee: Expr, argument: Expr) -> CallExpr")),
+            "{signatures:?}"
+        );
+        assert!(
+            !signatures
+                .iter()
+                .any(|entry| entry.1.contains("<compile-time")
+                    || entry.1.contains("<macro parameter>")
+                    || entry.1.contains("<syntax category>"))
+        );
     }
 }

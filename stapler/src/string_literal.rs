@@ -9,8 +9,7 @@ pub(crate) fn decode(literal: &str) -> Result<String, String> {
         if character != '\\' {
             if character == '$' {
                 return Err(
-                    "unescaped `$` in string literal; write `\\$` for a literal dollar"
-                        .to_owned(),
+                    "unescaped `$` in string literal; write `\\$` for a literal dollar".to_owned(),
                 );
             }
             output.push(character);

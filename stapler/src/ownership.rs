@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    Diagnostic, Expression, FunctionId, Item, Pattern, ResolvedFunction, SymbolId,
-    Syntax, SyntaxId, TypedModule,
+    Diagnostic, Expression, FunctionId, Item, Pattern, ResolvedFunction, SymbolId, Syntax,
+    SyntaxId, TypedModule,
 };
 
 #[derive(Debug, Clone, Default)]

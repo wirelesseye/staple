@@ -252,13 +252,11 @@ impl DeclarationCollector<'_> {
                 self.expression(&value.right);
             }
             Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
-            Expression::Quote(value) => {
-                match &value.template {
-                    QuoteTemplate::Expression(expression) => self.expression(expression),
-                    QuoteTemplate::Item(item) => self.item(item),
-                    QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
-                    QuoteTemplate::Raw => {}
-                }
+            Expression::Quote(value) => match &value.template {
+                QuoteTemplate::Expression(expression) => self.expression(expression),
+                QuoteTemplate::Item(item) => self.item(item),
+                QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
+                QuoteTemplate::Raw => {}
             },
             Expression::Splice(_)
             | Expression::Name(_)
@@ -685,7 +683,7 @@ impl Collector<'_> {
                     QuoteTemplate::Items(items) => items.iter().for_each(|item| self.item(item)),
                     QuoteTemplate::Raw => {}
                 }
-            },
+            }
             Expression::Name(value) => self.add_resolved(&value.syntax, &value.name, true),
             Expression::Splice(value) => self.add_resolved(&value.syntax, &value.name, true),
             Expression::String(_)
@@ -725,7 +723,9 @@ impl Collector<'_> {
             TypeParameterPattern::Binding(value) => {
                 self.add_resolved(&value.syntax, &value.name, false)
             }
-            TypeParameterPattern::Effect(value) => self.add_resolved(&value.syntax, &value.name, false),
+            TypeParameterPattern::Effect(value) => {
+                self.add_resolved(&value.syntax, &value.name, false)
+            }
             TypeParameterPattern::Product(value) => {
                 for element in &value.elements {
                     self.type_parameter(element);
@@ -1132,14 +1132,26 @@ mod tests {
         assert_target(&source, &entries, "otherwise", "otherwise");
         assert_target(&source, &entries, "if_clauses", "if_clauses");
         assert_target(&source, &entries, "body", "body");
-        assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "IntoIterator"
-                && entry.targets.iter().any(|target| target.path.ends_with("iterator.sta"))
-        }), "{entries:?}");
-        assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Expr"
-                && entry.targets.iter().any(|target| target.path.ends_with("syntax.sta"))
-        }), "{entries:?}");
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "IntoIterator"
+                    && entry
+                        .targets
+                        .iter()
+                        .any(|target| target.path.ends_with("iterator.sta"))
+            }),
+            "{entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "Expr"
+                    && entry
+                        .targets
+                        .iter()
+                        .any(|target| target.path.ends_with("syntax.sta"))
+            }),
+            "{entries:?}"
+        );
     }
 
     #[test]
@@ -1160,10 +1172,16 @@ mod tests {
         let entries = entries(&module, typed.resolved(), Some(&typed));
 
         for keyword in ["quote", "parse_quote"] {
-            assert!(entries.iter().any(|entry| {
-                &source[entry.range.clone()] == keyword
-                    && entry.targets.iter().any(|target| target.path.ends_with("syntax.sta"))
-            }), "missing definition for {keyword}: {entries:?}");
+            assert!(
+                entries.iter().any(|entry| {
+                    &source[entry.range.clone()] == keyword
+                        && entry
+                            .targets
+                            .iter()
+                            .any(|target| target.path.ends_with("syntax.sta"))
+                }),
+                "missing definition for {keyword}: {entries:?}"
+            );
         }
     }
 

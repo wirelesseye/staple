@@ -29,7 +29,10 @@ fn push_template_literal(
     let decoded = crate::string_literal::decode(&literal).map_err(|message| ParseError {
         offset: syntax.span.to_range().start,
         location: match &syntax.span {
-            Span::User { location: Some(location), .. } => *location,
+            Span::User {
+                location: Some(location),
+                ..
+            } => *location,
             _ => SourceLocation { line: 1, column: 1 },
         },
         message,
@@ -420,11 +423,7 @@ impl Grammar {
                 .parse_trait_implementation(item_start)
                 .map(Item::TraitImplementation),
             Some(TokenKind::Impl) => Err(self.error("trait implementations cannot be public")),
-            _ => self.parse_item_with_visibility(
-                visibility,
-                representation_visibility,
-                item_start,
-            ),
+            _ => self.parse_item_with_visibility(visibility, representation_visibility, item_start),
         };
         self.newline_terminates_expression = previous;
         item
@@ -583,7 +582,10 @@ impl Grammar {
                 binding.subtype_bounds = bounds;
             }
         }
-        let module = Module { syntax: self.syntax(module_start), items };
+        let module = Module {
+            syntax: self.syntax(module_start),
+            items,
+        };
         self.expect(TokenKind::RBrace, "expected `}` after companion items")?;
         Ok(Submodule {
             syntax: self.syntax(start),
@@ -717,7 +719,14 @@ impl Grammar {
         &mut self,
         parameters: &mut [TypeParameterPattern],
         allow_functional_dependencies: bool,
-    ) -> Result<(Vec<TraitBound>, Vec<SubtypeBound>, Vec<FunctionalDependency>), ParseError> {
+    ) -> Result<
+        (
+            Vec<TraitBound>,
+            Vec<SubtypeBound>,
+            Vec<FunctionalDependency>,
+        ),
+        ParseError,
+    > {
         let mut trait_bounds = Vec::new();
         let mut subtype_bounds = Vec::new();
         let mut functional_dependencies = Vec::new();
@@ -753,7 +762,9 @@ impl Grammar {
                 }
                 parameter.sized = false;
             } else {
-                let first = self.expect(TokenKind::Identifier, "expected constraint")?.text;
+                let first = self
+                    .expect(TokenKind::Identifier, "expected constraint")?
+                    .text;
                 if allow_functional_dependencies && self.at_operator("~>") {
                     functional_dependencies
                         .push(self.parse_functional_dependency_single(start, first)?);
@@ -977,12 +988,7 @@ impl Grammar {
         }
         if matches!(
             self.peek(),
-            Some(
-                TokenKind::Extern
-                    | TokenKind::Macro
-                    | TokenKind::Trait
-                    | TokenKind::Impl
-            )
+            Some(TokenKind::Extern | TokenKind::Macro | TokenKind::Trait | TokenKind::Impl)
         ) {
             return Err(self.error("unsupported item in block expression"));
         }
@@ -1013,12 +1019,10 @@ impl Grammar {
             Some(TokenKind::Const) => self
                 .parse_binding(visibility, Some(start))
                 .map(Item::Binding),
-            Some(TokenKind::Mod) => self
-                .parse_submodule(visibility, start)
-                .map(Item::Submodule),
-            Some(TokenKind::Companion) if visibility == Visibility::Private => self
-                .parse_companion(start)
-                .map(Item::Submodule),
+            Some(TokenKind::Mod) => self.parse_submodule(visibility, start).map(Item::Submodule),
+            Some(TokenKind::Companion) if visibility == Visibility::Private => {
+                self.parse_companion(start).map(Item::Submodule)
+            }
             Some(TokenKind::Companion) => Err(self.error("companion blocks cannot be public")),
             Some(TokenKind::Type) => self
                 .parse_type_declaration(visibility, representation_visibility, start)
@@ -1137,8 +1141,7 @@ impl Grammar {
             return Err(self.error("`?` requires a destructuring pattern"));
         }
         self.position = checkpoint;
-        self.parse_binding(visibility, start)
-            .map(Item::Binding)
+        self.parse_binding(visibility, start).map(Item::Binding)
     }
 
     /// Parses a namespace, glob, selected, or renamed `use` declaration.
@@ -1390,7 +1393,14 @@ impl Grammar {
     /// the comma separator. Returns empty lists when no `<` is present.
     fn parse_bracketed_generics(
         &mut self,
-    ) -> Result<(Vec<TypeParameterPattern>, Vec<TraitBound>, Vec<SubtypeBound>), ParseError> {
+    ) -> Result<
+        (
+            Vec<TypeParameterPattern>,
+            Vec<TraitBound>,
+            Vec<SubtypeBound>,
+        ),
+        ParseError,
+    > {
         if !self.eat_operator("<") {
             return Ok((Vec::new(), Vec::new(), Vec::new()));
         }
@@ -1416,9 +1426,18 @@ impl Grammar {
         Ok((parameters, trait_bounds, subtype_bounds))
     }
 
-    fn reject_effect_parameters(&self, parameters: &[TypeParameterPattern], declaration: &str) -> Result<(), ParseError> {
-        if parameters.iter().any(|parameter| matches!(parameter, TypeParameterPattern::Effect(_))) {
-            return Err(self.error(format!("effect parameters are only allowed on function bindings, not {declaration}")));
+    fn reject_effect_parameters(
+        &self,
+        parameters: &[TypeParameterPattern],
+        declaration: &str,
+    ) -> Result<(), ParseError> {
+        if parameters
+            .iter()
+            .any(|parameter| matches!(parameter, TypeParameterPattern::Effect(_)))
+        {
+            return Err(self.error(format!(
+                "effect parameters are only allowed on function bindings, not {declaration}"
+            )));
         }
         Ok(())
     }
@@ -1464,7 +1483,10 @@ impl Grammar {
             let name = self
                 .expect(TokenKind::Identifier, "expected compile-time parameter")?
                 .text;
-            self.expect(TokenKind::Equals, "expected `=` after compile-time parameter")?;
+            self.expect(
+                TokenKind::Equals,
+                "expected `=` after compile-time parameter",
+            )?;
             let default = self.parse_type_union()?;
             self.expect(TokenKind::RParen, "expected `)` after default type")?;
             let syntax = self.syntax(start);
@@ -1490,10 +1512,19 @@ impl Grammar {
     fn parse_type_parameter_pattern(&mut self) -> Result<TypeParameterPattern, ParseError> {
         let start = self.position;
         if self.peek() == Some(TokenKind::Identifier)
-            && self.tokens[self.next_non_trivia(self.position)].text == "effect" {
+            && self.tokens[self.next_non_trivia(self.position)].text == "effect"
+        {
             self.bump_token();
-            let name = self.expect(TokenKind::Identifier, "expected effect parameter after `effect`")?.text;
-            return Ok(TypeParameterPattern::Effect(EffectParameterBinding { syntax: self.syntax(start), name }));
+            let name = self
+                .expect(
+                    TokenKind::Identifier,
+                    "expected effect parameter after `effect`",
+                )?
+                .text;
+            return Ok(TypeParameterPattern::Effect(EffectParameterBinding {
+                syntax: self.syntax(start),
+                name,
+            }));
         }
         if self.quote_depth > 0 && self.eat(TokenKind::Dollar) {
             let name = self
@@ -1740,7 +1771,10 @@ impl Grammar {
                 if contains_mutable_type_element(&parameter) {
                     return Err(self.error("a whole mutable parameter cannot also mark individual product elements `mut`"));
                 }
-                vec![MutationTarget { syntax: self.syntax(start), target: MutationTargetKind::Whole }]
+                vec![MutationTarget {
+                    syntax: self.syntax(start),
+                    target: MutationTargetKind::Whole,
+                }]
             } else {
                 self.extract_parameter_mutations(&mut parameter)?
             };
@@ -1786,7 +1820,9 @@ impl Grammar {
                         match name.as_str() {
                             "read" => StateEffect::Read,
                             "write" => StateEffect::Write,
-                            _ => return Err(self.error("expected `read` or `write` after `state.`")),
+                            _ => {
+                                return Err(self.error("expected `read` or `write` after `state.`"));
+                            }
                         }
                     } else {
                         StateEffect::ReadWrite
@@ -1811,16 +1847,26 @@ impl Grammar {
         })
     }
 
-    fn extract_parameter_mutations(&mut self, parameter: &mut Type) -> Result<Vec<MutationTarget>, ParseError> {
-        let Type::Product(product) = parameter else { return Ok(Vec::new()) };
+    fn extract_parameter_mutations(
+        &mut self,
+        parameter: &mut Type,
+    ) -> Result<Vec<MutationTarget>, ParseError> {
+        let Type::Product(product) = parameter else {
+            return Ok(Vec::new());
+        };
         let mut mutations = Vec::new();
         for (index, element) in product.elements.iter_mut().enumerate() {
             if element.mutable {
                 element.mutable = false;
-                mutations.push(MutationTarget { syntax: element.syntax.clone(), target: MutationTargetKind::Element(index) });
+                mutations.push(MutationTarget {
+                    syntax: element.syntax.clone(),
+                    target: MutationTargetKind::Element(index),
+                });
             }
             if contains_mutable_type_element(&element.ty) {
-                return Err(self.error("`mut` is only allowed on a direct element of a function parameter product"));
+                return Err(self.error(
+                    "`mut` is only allowed on a direct element of a function parameter product",
+                ));
             }
         }
         Ok(mutations)
@@ -1959,7 +2005,8 @@ impl Grammar {
 
                     if self.eat(TokenKind::Ellipsis) {
                         if mutable {
-                            return Err(self.error("`mut` cannot modify a variadic marker or product spread"));
+                            return Err(self
+                                .error("`mut` cannot modify a variadic marker or product spread"));
                         }
                         if self.at(TokenKind::RParen)
                             || (self.at(TokenKind::Comma)
@@ -2121,9 +2168,9 @@ impl Grammar {
         if !(self.newline_terminates_expression && self.has_newline_before_next_token())
             && (self.at_operator("..=") || self.at_operator(".."))
         {
-            return Err(self.error(
-                "range operators cannot be chained; parenthesize to disambiguate",
-            ));
+            return Err(
+                self.error("range operators cannot be chained; parenthesize to disambiguate")
+            );
         }
         Ok(expression)
     }
@@ -2151,9 +2198,9 @@ impl Grammar {
         if !(self.newline_terminates_expression && self.has_newline_before_next_token())
             && self.at_comparison_operator()
         {
-            return Err(self.error(
-                "comparison operators cannot be chained; parenthesize to disambiguate",
-            ));
+            return Err(
+                self.error("comparison operators cannot be chained; parenthesize to disambiguate")
+            );
         }
         Ok(expression)
     }
@@ -2408,7 +2455,10 @@ impl Grammar {
                 });
             } else if self.eat_operator("^") {
                 let method = self
-                    .expect(TokenKind::Identifier, "expected companion method name after `^`")?
+                    .expect(
+                        TokenKind::Identifier,
+                        "expected companion method name after `^`",
+                    )?
                     .text;
                 let receiver = expression;
                 let selector = Expression::Access(AccessExpression {
@@ -2439,9 +2489,7 @@ impl Grammar {
     /// Parses a primary expression without call, access, or binary operators.
     fn parse_atom(&mut self) -> Result<Expression, ParseError> {
         if let Some(path) = self.quote_expression_start() {
-            return self
-                .parse_quote_expression(path)
-                .map(Expression::Quote);
+            return self.parse_quote_expression(path).map(Expression::Quote);
         }
         if self.peek_text("resource") && self.is_resource_expression_start() {
             return self
@@ -2592,9 +2640,10 @@ impl Grammar {
                 cursor = expression_end + 1;
             } else {
                 let identifier_start = cursor;
-                let first = content[cursor..].chars().next().ok_or_else(|| {
-                    self.error("expected an identifier or `{` after `$`")
-                })?;
+                let first = content[cursor..]
+                    .chars()
+                    .next()
+                    .ok_or_else(|| self.error("expected an identifier or `{` after `$`"))?;
                 if first != '_' && !first.is_alphabetic() {
                     return Err(self.error("expected an identifier or `{` after `$`"));
                 }
@@ -2618,7 +2667,10 @@ impl Grammar {
             segment_start = cursor;
         }
         push_template_literal(&mut parts, &content[segment_start..], &syntax)?;
-        Ok(Expression::StringTemplate(StringTemplateExpression { syntax, parts }))
+        Ok(Expression::StringTemplate(StringTemplateExpression {
+            syntax,
+            parts,
+        }))
     }
 
     fn parse_embedded_template_expression(
@@ -2647,9 +2699,13 @@ impl Grammar {
 
     fn quote_expression_start(&self) -> Option<Vec<String>> {
         let mut position = self.next_non_trivia(self.position);
-        let mut path = vec![self.tokens.get(position)?
-            .kind.eq(&TokenKind::Identifier)
-            .then(|| self.tokens[position].text.clone())?];
+        let mut path = vec![
+            self.tokens
+                .get(position)?
+                .kind
+                .eq(&TokenKind::Identifier)
+                .then(|| self.tokens[position].text.clone())?,
+        ];
         position += 1;
         loop {
             position = self.next_non_trivia(position);
@@ -2890,8 +2946,14 @@ impl Grammar {
                     && self.peek_n(2) == Some(TokenKind::Colon);
                 let name = if designated {
                     self.bump_token();
-                    let name = self.bump_token().expect("peeked designated element name").text;
-                    self.expect(TokenKind::Colon, "expected `:` after designated element name")?;
+                    let name = self
+                        .bump_token()
+                        .expect("peeked designated element name")
+                        .text;
+                    self.expect(
+                        TokenKind::Colon,
+                        "expected `:` after designated element name",
+                    )?;
                     Some(name)
                 } else if self.peek() == Some(TokenKind::Identifier)
                     && self.peek_n(1) == Some(TokenKind::Colon)
@@ -3229,10 +3291,19 @@ impl Grammar {
 
 fn contains_mutable_type_element(ty: &Type) -> bool {
     match ty {
-        Type::Product(product) => product.elements.iter().any(|element| element.mutable || contains_mutable_type_element(&element.ty)),
+        Type::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| element.mutable || contains_mutable_type_element(&element.ty)),
         Type::Sum(sum) => sum.alternatives.iter().any(contains_mutable_type_element),
-        Type::Function(function) => contains_mutable_type_element(&function.parameter) || contains_mutable_type_element(&function.result),
-        Type::Application(application) => contains_mutable_type_element(&application.callee) || contains_mutable_type_element(&application.argument),
+        Type::Function(function) => {
+            contains_mutable_type_element(&function.parameter)
+                || contains_mutable_type_element(&function.result)
+        }
+        Type::Application(application) => {
+            contains_mutable_type_element(&application.callee)
+                || contains_mutable_type_element(&application.argument)
+        }
         Type::Repeated(repeated) => contains_mutable_type_element(&repeated.element),
         _ => false,
     }

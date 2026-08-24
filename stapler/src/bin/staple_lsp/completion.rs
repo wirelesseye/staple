@@ -211,16 +211,9 @@ impl Collector<'_> {
         }
     }
 
-    fn item_declarations(
-        &self,
-        item: &Item,
-        candidates: &mut Vec<Candidate>,
-        scope_start: usize,
-    ) {
+    fn item_declarations(&self, item: &Item, candidates: &mut Vec<Candidate>, scope_start: usize) {
         match item {
-            Item::Modified(value) => {
-                self.item_declarations(&value.item, candidates, scope_start)
-            }
+            Item::Modified(value) => self.item_declarations(&value.item, candidates, scope_start),
             Item::Binding(binding) => {
                 let available = if matches!(binding.kind, BindingKind::Def | BindingKind::Const) {
                     scope_start

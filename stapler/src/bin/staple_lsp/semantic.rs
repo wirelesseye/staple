@@ -512,23 +512,23 @@ impl<'a> Classifier<'a> {
     }
 
     fn binding(&mut self, binding: &Binding, resolved: Option<&ResolvedModule>) {
-        let compile_time = resolved.and_then(|module| module.compile_time_binding_for(binding.syntax.id));
-        let kind = compile_time.map(|info| match info.kind {
-            CompileTimeBindingKind::Helper => FUNCTION,
-            CompileTimeBindingKind::MacroParameter | CompileTimeBindingKind::HelperParameter => PARAMETER,
+        let compile_time =
+            resolved.and_then(|module| module.compile_time_binding_for(binding.syntax.id));
+        let kind = compile_time
+            .map(|info| match info.kind {
+                CompileTimeBindingKind::Helper => FUNCTION,
+                CompileTimeBindingKind::MacroParameter
+                | CompileTimeBindingKind::HelperParameter => PARAMETER,
                 CompileTimeBindingKind::Local => VARIABLE,
                 CompileTimeBindingKind::Builtin => TYPE,
-        }).or_else(|| resolved
-            .and_then(|module| module.symbol_for(binding.syntax.id))
-            .map(|symbol| self.value_symbol_kind(symbol)))
+            })
+            .or_else(|| {
+                resolved
+                    .and_then(|module| module.symbol_for(binding.syntax.id))
+                    .map(|symbol| self.value_symbol_kind(symbol))
+            })
             .unwrap_or(VARIABLE);
-        let modifiers = DECLARATION
-            | DEFINITION
-            | if binding.mutable {
-                0
-            } else {
-                READONLY
-            };
+        let modifiers = DECLARATION | DEFINITION | if binding.mutable { 0 } else { READONLY };
         self.mark_declaration(
             &binding.syntax,
             &binding.name,
@@ -681,12 +681,16 @@ impl<'a> Classifier<'a> {
                 }
             }
             Expression::Splice(value) => {
-                let kind = resolved.and_then(|module| module.compile_time_binding_for(value.syntax.id)).map(|info| match info.kind {
-                    CompileTimeBindingKind::MacroParameter | CompileTimeBindingKind::HelperParameter => PARAMETER,
-                    CompileTimeBindingKind::Helper => FUNCTION,
-                    CompileTimeBindingKind::Local => VARIABLE,
-                    CompileTimeBindingKind::Builtin => TYPE,
-                }).unwrap_or(VARIABLE);
+                let kind = resolved
+                    .and_then(|module| module.compile_time_binding_for(value.syntax.id))
+                    .map(|info| match info.kind {
+                        CompileTimeBindingKind::MacroParameter
+                        | CompileTimeBindingKind::HelperParameter => PARAMETER,
+                        CompileTimeBindingKind::Helper => FUNCTION,
+                        CompileTimeBindingKind::Local => VARIABLE,
+                        CompileTimeBindingKind::Builtin => TYPE,
+                    })
+                    .unwrap_or(VARIABLE);
                 self.mark_last(&value.syntax, &value.name, kind, READONLY, 1);
             }
             Expression::Name(value) => {
@@ -697,14 +701,23 @@ impl<'a> Classifier<'a> {
                     self.mark_last(&value.syntax, &value.name, MACRO, READONLY, 2);
                     return;
                 }
-                if let Some(info) = resolved.and_then(|module| module.compile_time_binding_for(value.syntax.id)) {
+                if let Some(info) =
+                    resolved.and_then(|module| module.compile_time_binding_for(value.syntax.id))
+                {
                     let kind = match info.kind {
-                        CompileTimeBindingKind::MacroParameter | CompileTimeBindingKind::HelperParameter => PARAMETER,
+                        CompileTimeBindingKind::MacroParameter
+                        | CompileTimeBindingKind::HelperParameter => PARAMETER,
                         CompileTimeBindingKind::Helper => FUNCTION,
                         CompileTimeBindingKind::Local => VARIABLE,
                         CompileTimeBindingKind::Builtin => TYPE,
                     };
-                    self.mark_last(&value.syntax, &value.name, kind, modifiers | if info.mutable { 0 } else { READONLY }, 2);
+                    self.mark_last(
+                        &value.syntax,
+                        &value.name,
+                        kind,
+                        modifiers | if info.mutable { 0 } else { READONLY },
+                        2,
+                    );
                     return;
                 }
                 let kind = resolved
@@ -759,23 +772,21 @@ impl<'a> Classifier<'a> {
                     self.mark_last(&value.syntax, &value.name, TYPE, READONLY, 1);
                     return;
                 }
-                let kind = resolved.and_then(|module| module.compile_time_binding_for(value.syntax.id)).map(|info| match info.kind {
-                    CompileTimeBindingKind::MacroParameter | CompileTimeBindingKind::HelperParameter => PARAMETER,
-                    CompileTimeBindingKind::Helper => FUNCTION,
+                let kind = resolved
+                    .and_then(|module| module.compile_time_binding_for(value.syntax.id))
+                    .map(|info| match info.kind {
+                        CompileTimeBindingKind::MacroParameter
+                        | CompileTimeBindingKind::HelperParameter => PARAMETER,
+                        CompileTimeBindingKind::Helper => FUNCTION,
                         CompileTimeBindingKind::Local => VARIABLE,
                         CompileTimeBindingKind::Builtin => TYPE,
-                }).unwrap_or(kind);
+                    })
+                    .unwrap_or(kind);
                 self.mark_last(
                     &value.syntax,
                     &value.name,
                     kind,
-                    DECLARATION
-                        | DEFINITION
-                        | if value.mutable {
-                            0
-                        } else {
-                            READONLY
-                        },
+                    DECLARATION | DEFINITION | if value.mutable { 0 } else { READONLY },
                     1,
                 );
                 if let Some(symbol) = resolved.and_then(|module| module.symbol_for(value.syntax.id))
@@ -811,7 +822,13 @@ impl<'a> Classifier<'a> {
                 DECLARATION | DEFINITION | READONLY,
                 1,
             ),
-            TypeParameterPattern::Effect(value) => self.mark_last(&value.syntax, &value.name, TYPE_PARAMETER, DECLARATION | DEFINITION | READONLY, 1),
+            TypeParameterPattern::Effect(value) => self.mark_last(
+                &value.syntax,
+                &value.name,
+                TYPE_PARAMETER,
+                DECLARATION | DEFINITION | READONLY,
+                1,
+            ),
             TypeParameterPattern::Product(value) => {
                 for element in &value.elements {
                     self.type_parameter(element, resolved);
@@ -1099,10 +1116,7 @@ mod tests {
             legend.token_types[COMMENT as usize],
             SemanticTokenType::COMMENT
         );
-        assert_eq!(
-            legend.token_types[MACRO as usize],
-            SemanticTokenType::MACRO
-        );
+        assert_eq!(legend.token_types[MACRO as usize], SemanticTokenType::MACRO);
         assert_eq!(
             legend.token_modifiers[0],
             SemanticTokenModifier::DECLARATION
@@ -1316,7 +1330,10 @@ mod tests {
             &tokens(&source, Some(&module), Some(typed.resolved()), Some(&typed)),
         );
 
-        assert!(labels.contains(&("parse_quote", MACRO)), "labels: {labels:?}");
+        assert!(
+            labels.contains(&("parse_quote", MACRO)),
+            "labels: {labels:?}"
+        );
         assert!(labels.contains(&("quote", MACRO)), "labels: {labels:?}");
     }
 
@@ -1479,9 +1496,28 @@ mod tests {
             &tokens(&source, Some(&module), Some(typed.resolved()), Some(&typed)),
         );
 
-        assert!(labels.iter().filter(|token| **token == ("body", PARAMETER)).count() >= 2, "{labels:?}");
-        assert!(labels.iter().filter(|token| **token == ("otherwise", VARIABLE)).count() >= 2, "{labels:?}");
-        assert!(labels.iter().any(|token| *token == ("if_clauses", FUNCTION)), "{labels:?}");
+        assert!(
+            labels
+                .iter()
+                .filter(|token| **token == ("body", PARAMETER))
+                .count()
+                >= 2,
+            "{labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .filter(|token| **token == ("otherwise", VARIABLE))
+                .count()
+                >= 2,
+            "{labels:?}"
+        );
+        assert!(
+            labels
+                .iter()
+                .any(|token| *token == ("if_clauses", FUNCTION)),
+            "{labels:?}"
+        );
     }
 
     fn labels<'a>(source: &'a str, tokens: &[SemanticToken]) -> Vec<(&'a str, u32)> {

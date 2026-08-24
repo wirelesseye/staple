@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use crate::parser::parse_with_syntax_ids;
 use crate::{
-    BlockExpression, Expression, Item, Module, SourceLocation, Span, Submodule,
-    Syntax, SyntaxId, TokenKind, UseDeclaration, UseKind, Visibility,
+    BlockExpression, Expression, Item, Module, SourceLocation, Span, Submodule, Syntax, SyntaxId,
+    TokenKind, UseDeclaration, UseKind, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -192,7 +192,10 @@ impl Program {
         }
 
         let mut block_declarations = Vec::new();
-        find_block_submodules(&self.modules[parent.0].syntax.items, &mut block_declarations);
+        find_block_submodules(
+            &self.modules[parent.0].syntax.items,
+            &mut block_declarations,
+        );
         for declaration in block_declarations {
             let id = ModuleId(self.modules.len());
             let qualified_name = format!(
@@ -247,8 +250,10 @@ impl Program {
             }
             let namespace = self.resolve_single_inline_path(source, &declaration.path);
             if declaration.kind == UseKind::Dotted {
-                let item_module = self
-                    .resolve_single_inline_path(source, &declaration.path[..declaration.path.len() - 1]);
+                let item_module = self.resolve_single_inline_path(
+                    source,
+                    &declaration.path[..declaration.path.len() - 1],
+                );
                 self.dotted_imports.insert(
                     declaration.syntax.id,
                     DottedImport {
@@ -258,10 +263,12 @@ impl Program {
                     },
                 );
                 if let Some(imported) = namespace.or(item_module) {
-                    self.imported_modules.insert(declaration.syntax.id, imported);
+                    self.imported_modules
+                        .insert(declaration.syntax.id, imported);
                 }
             } else if let Some(imported) = namespace {
-                self.imported_modules.insert(declaration.syntax.id, imported);
+                self.imported_modules
+                    .insert(declaration.syntax.id, imported);
             }
         }
     }
@@ -306,16 +313,11 @@ impl Program {
                 })
                 .collect::<Vec<_>>();
             let mut block_declarations = Vec::new();
-            find_block_submodules(
-                &self.modules[parent].syntax.items,
-                &mut block_declarations,
-            );
+            find_block_submodules(&self.modules[parent].syntax.items, &mut block_declarations);
             declarations.extend(
                 block_declarations
                     .into_iter()
-                    .filter(|declaration| {
-                        !self.child_modules.contains_key(&declaration.syntax.id)
-                    })
+                    .filter(|declaration| !self.child_modules.contains_key(&declaration.syntax.id))
                     .map(|declaration| (declaration, false)),
             );
             for (declaration, top_level) in declarations {
@@ -405,14 +407,10 @@ impl Program {
             .modules
             .iter()
             .flat_map(|module| {
-                module
-                    .syntax
-                    .items
-                    .iter()
-                    .filter_map(|item| match item {
-                        Item::UseDeclaration(declaration) => Some(declaration.clone()),
-                        _ => None,
-                    })
+                module.syntax.items.iter().filter_map(|item| match item {
+                    Item::UseDeclaration(declaration) => Some(declaration.clone()),
+                    _ => None,
+                })
             })
             .chain(self.modules.iter().flat_map(|module| {
                 let mut declarations = Vec::new();
@@ -446,26 +444,24 @@ impl Program {
                         .insert(declaration.syntax.id, item_module);
                     self.additional_imported_namespaces
                         .insert(declaration.syntax.id, namespace);
-                    self.resolved_use_kinds.insert(
-                        declaration.syntax.id,
-                        UseKind::Selected(vec![item.clone()]),
-                    );
+                    self.resolved_use_kinds
+                        .insert(declaration.syntax.id, UseKind::Selected(vec![item.clone()]));
                 }
                 (Some(namespace), _, false, _) => {
-                    self.imported_modules.insert(declaration.syntax.id, namespace);
+                    self.imported_modules
+                        .insert(declaration.syntax.id, namespace);
                     self.resolved_use_kinds
                         .insert(declaration.syntax.id, UseKind::Namespace);
                 }
                 (None, Some(item_module), _, _) => {
                     self.imported_modules
                         .insert(declaration.syntax.id, item_module);
-                    self.resolved_use_kinds.insert(
-                        declaration.syntax.id,
-                        UseKind::Selected(vec![item.clone()]),
-                    );
+                    self.resolved_use_kinds
+                        .insert(declaration.syntax.id, UseKind::Selected(vec![item.clone()]));
                 }
                 (Some(namespace), None, _, _) => {
-                    self.imported_modules.insert(declaration.syntax.id, namespace);
+                    self.imported_modules
+                        .insert(declaration.syntax.id, namespace);
                     self.resolved_use_kinds
                         .insert(declaration.syntax.id, UseKind::Namespace);
                 }
@@ -579,8 +575,8 @@ impl ProgramLoader {
         // legacy implicit-root mode, `main.sta` likewise denotes a package;
         // arbitrary standalone files must not cause their entire containing
         // directory (notably the system temp directory) to be indexed.
-        let discover_companions = self.module_root.is_some()
-            || entry.file_name().is_some_and(|name| name == "main.sta");
+        let discover_companions =
+            self.module_root.is_some() || entry.file_name().is_some_and(|name| name == "main.sta");
         let root = match &self.module_root {
             Some(root) => {
                 canonical_directory(root, "module root").map_err(LoadDiagnostic::compiler)?
@@ -699,7 +695,11 @@ impl ProgramLoader {
                     continue;
                 }
                 let source = std::fs::read_to_string(&canonical).map_err(|error| {
-                    LoadDiagnostic::source(&canonical, None, format!("could not read `{}`: {error}", canonical.display()))
+                    LoadDiagnostic::source(
+                        &canonical,
+                        None,
+                        format!("could not read `{}`: {error}", canonical.display()),
+                    )
                 })?;
                 let syntax = parse_with_syntax_ids(
                     &source,
@@ -712,10 +712,14 @@ impl ProgramLoader {
                     location: Some(error.location),
                     message: error.message,
                 })?;
-                let companions = syntax.items.into_iter().filter_map(|item| match item {
-                    Item::Submodule(module) if module.companion => Some(module),
-                    _ => None,
-                }).collect::<Vec<_>>();
+                let companions = syntax
+                    .items
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        Item::Submodule(module) if module.companion => Some(module),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
                 for companion in companions {
                     let owner = self.modules.iter().find(|module| {
                         !module.companion
@@ -726,7 +730,10 @@ impl ProgramLoader {
                             ))
                     }).map(|module| module.id);
                     let Some(owner) = owner else { continue };
-                    self.modules[owner.0].syntax.items.push(Item::Submodule(companion.clone()));
+                    self.modules[owner.0]
+                        .syntax
+                        .items
+                        .push(Item::Submodule(companion.clone()));
                     self.insert_discovered_companion(owner, canonical.clone(), companion)?;
                 }
             }
@@ -744,15 +751,24 @@ impl ProgramLoader {
             if !self.modules[existing.0].companion {
                 return Err(load_diagnostic_at(
                     &declaration.syntax.span,
-                    format!("companion `{}` conflicts with an ordinary module", declaration.name),
+                    format!(
+                        "companion `{}` conflicts with an ordinary module",
+                        declaration.name
+                    ),
                 ));
             }
-            self.modules[existing.0].syntax.items.extend(declaration.module.items);
+            self.modules[existing.0]
+                .syntax
+                .items
+                .extend(declaration.module.items);
             self.child_modules.insert(declaration.syntax.id, existing);
             return Ok(());
         }
         let id = ModuleId(self.modules.len());
-        let qualified_name = format!("{}.{}", self.modules[parent.0].qualified_name, declaration.name);
+        let qualified_name = format!(
+            "{}.{}",
+            self.modules[parent.0].qualified_name, declaration.name
+        );
         self.modules.push(SourceModule {
             id,
             path: path.clone(),
@@ -841,7 +857,11 @@ impl ProgramLoader {
                     .items
                     .extend(declaration.module.items);
                 self.child_modules.insert(declaration.syntax.id, existing);
-                self.insert_submodules(existing, path.clone(), format!("{parent_name}.{}", declaration.name))?;
+                self.insert_submodules(
+                    existing,
+                    path.clone(),
+                    format!("{parent_name}.{}", declaration.name),
+                )?;
                 continue;
             }
             if self.children[parent.0].contains_key(&declaration.name) {
@@ -869,7 +889,10 @@ impl ProgramLoader {
         }
 
         let mut block_declarations = Vec::new();
-        find_block_submodules(&self.modules[parent.0].syntax.items, &mut block_declarations);
+        find_block_submodules(
+            &self.modules[parent.0].syntax.items,
+            &mut block_declarations,
+        );
         for declaration in block_declarations {
             let id = ModuleId(self.modules.len());
             let qualified_name = format!("{parent_name}.{}", declaration.name);
@@ -1439,9 +1462,7 @@ fn find_block_submodules_in_block_item(item: &Item, out: &mut Vec<Submodule>) {
                 find_block_submodules_in_expression(value, out);
             }
         }
-        Item::PatternBinding(binding) => {
-            find_block_submodules_in_expression(&binding.value, out)
-        }
+        Item::PatternBinding(binding) => find_block_submodules_in_expression(&binding.value, out),
         Item::Assignment(assignment) => {
             find_block_submodules_in_expression(&assignment.target, out);
             find_block_submodules_in_expression(&assignment.value, out);
@@ -1463,9 +1484,7 @@ fn find_block_submodules_in_block_item(item: &Item, out: &mut Vec<Submodule>) {
 
 fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Submodule>) {
     match expression {
-        Expression::Function(function) => {
-            find_block_submodules_in_expression(&function.body, out)
-        }
+        Expression::Function(function) => find_block_submodules_in_expression(&function.body, out),
         Expression::Satisfies(satisfies) => {
             find_block_submodules_in_expression(&satisfies.value, out)
         }
@@ -1594,18 +1613,14 @@ fn find_block_use_declarations_in_block_item(item: &Item, out: &mut Vec<UseDecla
             find_block_use_declarations_in_expression(&assignment.target, out);
             find_block_use_declarations_in_expression(&assignment.value, out);
         }
-        Item::Return(item) => {
-            find_block_use_declarations_in_expression(&item.value, out)
-        }
+        Item::Return(item) => find_block_use_declarations_in_expression(&item.value, out),
         Item::Break(item) => {
             if let Some(value) = &item.value {
                 find_block_use_declarations_in_expression(value, out);
             }
         }
         Item::Continue(_) => {}
-        Item::Expression(expression) => {
-            find_block_use_declarations_in_expression(expression, out)
-        }
+        Item::Expression(expression) => find_block_use_declarations_in_expression(expression, out),
         Item::Submodule(_) => {}
         Item::TypeDeclaration(_) => {}
         Item::UseDeclaration(declaration) => out.push(declaration.clone()),
@@ -1613,7 +1628,10 @@ fn find_block_use_declarations_in_block_item(item: &Item, out: &mut Vec<UseDecla
     }
 }
 
-fn find_block_use_declarations_in_expression(expression: &Expression, out: &mut Vec<UseDeclaration>) {
+fn find_block_use_declarations_in_expression(
+    expression: &Expression,
+    out: &mut Vec<UseDeclaration>,
+) {
     match expression {
         Expression::Function(function) => {
             find_block_use_declarations_in_expression(&function.body, out)
@@ -1643,9 +1661,7 @@ fn find_block_use_declarations_in_expression(expression: &Expression, out: &mut 
             find_block_use_declarations_in_expression(&call.callee, out);
             find_block_use_declarations_in_expression(&call.argument, out);
         }
-        Expression::Access(access) => {
-            find_block_use_declarations_in_expression(&access.value, out)
-        }
+        Expression::Access(access) => find_block_use_declarations_in_expression(&access.value, out),
         Expression::Index(index) => {
             find_block_use_declarations_in_expression(&index.value, out);
             find_block_use_declarations_in_expression(&index.index, out);

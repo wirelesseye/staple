@@ -803,7 +803,12 @@ fn block_scoped_use_glob_is_usable_within_its_block() {
     fixture.write("library.sta", "pub let value: I32 = 42\n");
     fixture.write(
         "main.sta",
-        concat!("let result: I32 = {\n", "    use library.*\n", "    value\n", "}\n"),
+        concat!(
+            "let result: I32 = {\n",
+            "    use library.*\n",
+            "    value\n",
+            "}\n"
+        ),
     );
 
     fixture
@@ -1014,9 +1019,7 @@ fn block_scoped_use_initializes_its_target_exactly_once() {
         ),
     );
 
-    let llvm = fixture
-        .compile()
-        .expect("block-scoped use should compile");
+    let llvm = fixture.compile().expect("block-scoped use should compile");
     let init_symbols = llvm
         .lines()
         .filter(|line| line.trim_start().starts_with("define"))
@@ -1481,10 +1484,7 @@ fn enforces_representation_visibility_for_explicit_and_shortcut_access() {
     );
 
     let public = Fixture::new();
-    public.write(
-        "users.sta",
-        "pub(repr) type User = (name: String)\n",
-    );
+    public.write("users.sta", "pub(repr) type User = (name: String)\n");
     public.write(
         "main.sta",
         concat!(

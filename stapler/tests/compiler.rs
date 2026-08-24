@@ -104,7 +104,9 @@ fn specializes_generic_effect_parameters() {
         "twice pure\ntwice output\ntwice update\n",
     ));
     let context = Context::create();
-    CodeGenerator::new(&context).compile_module(&module).expect("effect-polymorphic calls should monomorphize");
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("effect-polymorphic calls should monomorphize");
 }
 
 #[test]
@@ -181,30 +183,48 @@ fn captured_mutable_cells_contribute_state_effects_and_metadata() {
             .unwrap_or_else(|| panic!("function `{suffix}`"))
     };
     assert_eq!(
-        module.type_of_function(function("read").id).unwrap().effects.state,
+        module
+            .type_of_function(function("read").id)
+            .unwrap()
+            .effects
+            .state,
         Some(CheckedStateEffect::Read),
     );
     assert_eq!(
-        module.type_of_function(function("write").id).unwrap().effects.state,
+        module
+            .type_of_function(function("write").id)
+            .unwrap()
+            .effects
+            .state,
         Some(CheckedStateEffect::Write),
     );
     let both = module.type_of_function(function("both").id).unwrap();
     assert_eq!(both.effects.state, Some(CheckedStateEffect::ReadWrite));
     assert_eq!(both.effects.to_string(), "{state, IO}");
 
-    let read_accesses = module.state_accesses_of_function(function("read").id).unwrap();
+    let read_accesses = module
+        .state_accesses_of_function(function("read").id)
+        .unwrap();
     assert_eq!(read_accesses.reads.len(), 1);
     assert!(read_accesses.writes.is_empty());
-    let write_accesses = module.state_accesses_of_function(function("write").id).unwrap();
+    let write_accesses = module
+        .state_accesses_of_function(function("write").id)
+        .unwrap();
     assert!(write_accesses.reads.is_empty());
     assert_eq!(write_accesses.writes.len(), 1);
     assert_ne!(read_accesses.reads[0], write_accesses.writes[0]);
     assert_eq!(
-        module.type_of_function(function("call_write").id).unwrap().effects.state,
+        module
+            .type_of_function(function("call_write").id)
+            .unwrap()
+            .effects
+            .state,
         Some(CheckedStateEffect::Write),
     );
     assert_eq!(
-        module.state_accesses_of_function(function("call_write").id).unwrap(),
+        module
+            .state_accesses_of_function(function("call_write").id)
+            .unwrap(),
         write_accesses,
     );
 }
@@ -229,9 +249,11 @@ fn explicit_state_effects_are_checked_as_upper_bounds() {
             "}\n",
         )))
         .expect_err("state.write does not cover a captured-state read");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("requires effects {state.read}")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("requires effects {state.read}") })
+    );
 }
 
 #[test]
@@ -279,21 +301,39 @@ fn mutable_module_bindings_contribute_state_effects_and_metadata() {
     };
 
     assert_eq!(
-        module.type_of_function(function("read").id).unwrap().effects.state,
+        module
+            .type_of_function(function("read").id)
+            .unwrap()
+            .effects
+            .state,
         Some(CheckedStateEffect::Read),
     );
     assert_eq!(
-        module.type_of_function(function("write").id).unwrap().effects.state,
+        module
+            .type_of_function(function("write").id)
+            .unwrap()
+            .effects
+            .state,
         Some(CheckedStateEffect::Write),
     );
     assert_eq!(
-        module.type_of_function(function("both").id).unwrap().effects.state,
+        module
+            .type_of_function(function("both").id)
+            .unwrap()
+            .effects
+            .state,
         Some(CheckedStateEffect::ReadWrite),
     );
 
-    let read = module.state_accesses_of_function(function("read").id).unwrap();
-    let write = module.state_accesses_of_function(function("write").id).unwrap();
-    let both = module.state_accesses_of_function(function("both").id).unwrap();
+    let read = module
+        .state_accesses_of_function(function("read").id)
+        .unwrap();
+    let write = module
+        .state_accesses_of_function(function("write").id)
+        .unwrap();
+    let both = module
+        .state_accesses_of_function(function("both").id)
+        .unwrap();
     assert_eq!(read.reads, write.writes);
     assert_eq!(both.reads, read.reads);
     assert_eq!(both.writes, write.writes);
@@ -540,7 +580,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
         temporary.join("std/core/string.sta"),
         format!("{declaration}\n{production_body}"),
     )
-        .expect("test String declaration should be written");
+    .expect("test String declaration should be written");
 
     let messages = match ProgramLoader::new()
         .with_standard_library_root(&temporary)
@@ -641,9 +681,11 @@ fn rejects_invalid_named_product_spreads() {
             "let config = (...=dimensions, title: \"Staple\")\n",
         )))
         .expect_err("a named spread requires a known expected product type");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("requires a fully-named expected product type")));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("requires a fully-named expected product type")
+    }));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
@@ -675,9 +717,11 @@ fn rejects_invalid_named_product_spreads() {
             "let config: (width: I32, height: I32) = (...=unnamed)\n",
         )))
         .expect_err("an operand with unnamed elements cannot be named-spread");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("must have every element named")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("must have every element named"))
+    );
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
@@ -685,9 +729,11 @@ fn rejects_invalid_named_product_spreads() {
             "let config: (width: I32, height: I32) = (...dimensions, ...=dimensions)\n",
         )))
         .expect_err("a positional spread cannot combine with a named spread");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("cannot combine a positional spread with a named spread")));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot combine a positional spread with a named spread")
+    }));
 }
 
 #[test]
@@ -756,7 +802,9 @@ fn rejects_invalid_contextual_named_initializers_and_labels() {
             .check(resolve(source))
             .expect_err("invalid product should be rejected");
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.message.contains(expected)),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
             "expected diagnostic containing `{expected}`, got {diagnostics:?}"
         );
     }
@@ -806,11 +854,19 @@ fn type_checks_the_two_binding_mutability_forms() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let a = (x: 1, y: 2)\na = (x: 3, y: 4)\n"))
         .expect_err("`let` cannot be reassigned");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared `mut`"))
+    );
     let diagnostics = TypeChecker::new()
         .check(resolve("let a = (x: 1, y: 2)\na.x = 3\n"))
         .expect_err("`let` cannot be written through");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared `mut`"))
+    );
 
     // `let mut`: both reassignable and mutable.
     type_check("let mut a = (x: 1, y: 2)\na = (x: 3, y: 4)\na.x = 5\n");
@@ -835,7 +891,11 @@ fn type_checks_the_two_binding_mutability_forms() {
             "a.x = 3\n",
         )))
         .expect_err("`pub let` cannot be written through even in its own module");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared `mut`"))
+    );
 }
 
 #[test]
@@ -848,7 +908,11 @@ fn writes_through_a_ref_require_mut_on_a_named_root() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let cell: Ref I32[2] = Ref (1, 2)\ncell.0 = 3\n"))
         .expect_err("writing through a `Ref` requires `mut` on the binding");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared `mut`"))
+    );
 
     // A rootless `Ref` temporary remains writable regardless.
     type_check(concat!(
@@ -901,11 +965,13 @@ fn a_parameter_marker_declares_a_positional_mutation() {
 #[test]
 fn rejects_a_declared_empty_effect_set_when_the_body_mutates_a_parameter() {
     let diagnostics = TypeChecker::new()
-        .check(resolve(
-            "def f: Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
-        ))
+        .check(resolve("def f: Ref (I32, I32) -> () = p => { p.0 = 1 }\n"))
         .expect_err("an empty declared effect set forbids mutation");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared `mut`"))
+    );
 }
 
 #[test]
@@ -915,17 +981,19 @@ fn rejects_a_declared_mutation_target_the_body_does_not_write() {
             "def f: (mut a: Ref (I32, I32), b: Ref (I32, I32)) -> () = (a, b) => { b.0 = 1 }\n",
         )))
         .expect_err("writing `b` exceeds the declared `mut a`");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared `mut`"))
+    );
 }
 
 #[test]
 fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
-    let by_index = type_check(
-        "def f: (mut a: Ref (I32, I32), b: I32) -> () = (a, b) => { a.0 = 1 }\n",
-    );
-    let by_name = type_check(
-        "def f: (mut a: Ref (I32, I32), b: I32) -> () = (a, b) => { a.0 = 1 }\n",
-    );
+    let by_index =
+        type_check("def f: (mut a: Ref (I32, I32), b: I32) -> () = (a, b) => { a.0 = 1 }\n");
+    let by_name =
+        type_check("def f: (mut a: Ref (I32, I32), b: I32) -> () = (a, b) => { a.0 = 1 }\n");
     assert_eq!(
         function_mutations(&by_index, "f"),
         function_mutations(&by_name, "f"),
@@ -939,11 +1007,17 @@ fn a_whole_parameter_declaration_covers_writing_a_single_element() {
 
 #[test]
 fn call_site_mutation_requires_an_explicit_caller_marker() {
-    let diagnostics = TypeChecker::new().check(resolve(concat!(
-        "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
-        "def g = (q: Ref (I32, I32)) => { f q }\n",
-    ))).expect_err("mutation permissions must not propagate into callers");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
+            "def g = (q: Ref (I32, I32)) => { f q }\n",
+        )))
+        .expect_err("mutation permissions must not propagate into callers");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared `mut`"))
+    );
 
     let module = type_check(concat!(
         "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
@@ -963,9 +1037,10 @@ fn rejects_passing_a_non_mut_binding_to_a_mutating_parameter() {
             "def g = () => { let pair: Ref (I32, I32) = Ref (1, 2); f pair }\n",
         )))
         .expect_err("the caller's binding must be declared `mut`");
-    assert!(diagnostics.iter().any(|d| d
-        .message
-        .contains("cannot write through `pair`; its binding is not declared `mut`")));
+    assert!(diagnostics.iter().any(|d| {
+        d.message
+            .contains("cannot write through `pair`; its binding is not declared `mut`")
+    }));
 }
 
 #[test]
@@ -990,7 +1065,11 @@ fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
             "impl Reset (Ref (I32, I32)) { def reset = p => { p.0 = 0 } }\n",
         )))
         .expect_err("the impl mutates a parameter its trait does not declare");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared `mut`"))
+    );
 }
 
 #[test]
@@ -1023,9 +1102,10 @@ fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
             "}\n",
         )))
         .expect_err("the caller's `my_int` must be declared `mut` too");
-    assert!(diagnostics.iter().any(|d| d
-        .message
-        .contains("cannot write through `my_int`; its binding is not declared `mut`")));
+    assert!(diagnostics.iter().any(|d| {
+        d.message
+            .contains("cannot write through `my_int`; its binding is not declared `mut`")
+    }));
 }
 
 /// The number of `%`-named values in a function's LLVM `define` line: one
@@ -1108,7 +1188,11 @@ fn a_parameter_marker_adds_mutation_without_a_type_annotation() {
     let diagnostics = TypeChecker::new()
         .check(resolve("def invalid = (data: I32) => { data = 42 }\n"))
         .expect_err("an unmarked parameter must not infer mutation");
-    assert!(diagnostics.iter().any(|d| d.message.contains("not declared `mut`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|d| d.message.contains("not declared `mut`"))
+    );
 }
 
 #[test]
@@ -1129,9 +1213,11 @@ fn parameter_markers_must_match_explicit_function_and_trait_effects() {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
             .expect_err("parameter markers and declared mutation permissions must match");
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("parameter `mut` markers declare")));
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("parameter `mut` markers declare")
+        }));
     }
 }
 
@@ -1223,9 +1309,11 @@ fn rejects_invalid_assignment_targets_and_uninitialized_mutable_lets() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let value = 1\nvalue = 2\n"))
         .expect_err("immutable names cannot be reassigned");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("not declared `mut`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("not declared `mut`"))
+    );
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
@@ -1391,9 +1479,11 @@ fn rejects_by_value_indexed_assignment_without_mut_binding() {
             "let values: I32[2] = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n",
         ))
         .expect_err("by-value product assignment requires a `mut` binding");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("not declared `mut`")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("not declared `mut`") })
+    );
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
@@ -1583,14 +1673,16 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
             "let values: Ref MySlice = fixed\n",
         )))
         .expect_err("aliasing an unsized array does not let it bypass `Slice`");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("use `Slice T` instead")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("use `Slice T` instead") })
+    );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("type alias MySlice = I32[]\nlet invalid: MySlice\n"))
+        .check(resolve(
+            "type alias MySlice = I32[]\nlet invalid: MySlice\n",
+        ))
         .expect_err("unsized aliases cannot be used by value");
     assert!(
         diagnostics
@@ -1601,9 +1693,11 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
     let diagnostics = TypeChecker::new()
         .check(resolve("extern \"c\" { let invalid: Ref I32[] -> I32 }\n"))
         .expect_err("`Ref I32[]` is rejected before an FFI-specific check even runs");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("use `Slice T` instead")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("use `Slice T` instead") })
+    );
 
     let diagnostics = TypeChecker::new()
         .check(resolve("extern \"c\" { let invalid: Slice I32 -> I32 }\n"))
@@ -2876,7 +2970,6 @@ fn buffer_intrinsics_type_check_and_compile() {
         .compile_module(&module)
         .expect("Buffer should own non-Default, non-Copy elements");
     assert!(llvm.contains("__staple_gc_finalize_buffer_"));
-
 }
 
 #[test]
@@ -3081,10 +3174,10 @@ fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
 #[test]
 fn validates_the_standard_library_string_representation() {
     let valid_diagnostics = string_contract_diagnostics(concat!(
-            "pub type String = Slice U8\n",
+        "pub type String = Slice U8\n",
         "def exposed_bytes: String -> Slice U8 = String value => value\n",
-            "def matched_bytes: String -> Slice U8 = value => match value { String bytes => bytes, }\n",
-        ));
+        "def matched_bytes: String -> Slice U8 = value => match value { String bytes => bytes, }\n",
+    ));
     assert!(
         valid_diagnostics.is_empty(),
         "valid String contract diagnostics: {valid_diagnostics:?}"
@@ -3268,11 +3361,9 @@ fn bare_ident_and_explicit_ident_string_are_the_same_type() {
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err("narrow syntax nodes are not supported parse_quote contexts");
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "Ident String is not a supported `parse_quote` context"
-        })
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "Ident String is not a supported `parse_quote` context"
+    }));
 }
 
 #[test]
@@ -3688,12 +3779,10 @@ fn non_outermost_modifier_applies_the_next_modifier_to_its_first_item() {
                 if binding.name == "first"))
     }));
     let context = Context::create();
-    CodeGenerator::new(&context)
-        .compile_module(&module)
-        .expect(
-            "the outermost modifier should apply to the inner modifier's first item, with the \
+    CodeGenerator::new(&context).compile_module(&module).expect(
+        "the outermost modifier should apply to the inner modifier's first item, with the \
              rest passed through unmodified",
-        );
+    );
 }
 
 #[test]
@@ -3713,12 +3802,10 @@ fn outermost_modifier_combines_its_own_items_with_earlier_trailing_items() {
         "let result: I32 = replaced_first + from_outer + second\n",
     ));
     let context = Context::create();
-    CodeGenerator::new(&context)
-        .compile_module(&module)
-        .expect(
-            "items trailing from an inner modifier should combine with the outermost \
+    CodeGenerator::new(&context).compile_module(&module).expect(
+        "items trailing from an inner modifier should combine with the outermost \
              modifier's own multi-item result",
-        );
+    );
 }
 
 #[test]
@@ -4397,9 +4484,11 @@ fn quote_never_validates_or_reinterprets_its_result_unlike_parse_quote() {
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err("an item template is not a valid `Expr`");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message == "quotation cannot be interpreted as Expr"
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message == "quotation cannot be interpreted as Expr" })
+    );
 
     resolve(concat!(
         "macro always_syntax: Expr -> Expr = _: Expr => {\n",
@@ -4435,9 +4524,8 @@ fn quote_result_excludes_syntax_which_remains_quotes_alone() {
             .resolve_program(program)
             .expect_err("`Syntax` is `quote`'s result, not a `parse_quote` target");
         assert!(
-            diagnostics
-                .iter()
-                .any(|diagnostic| diagnostic.message == "Syntax is not a supported `parse_quote` context"),
+            diagnostics.iter().any(|diagnostic| diagnostic.message
+                == "Syntax is not a supported `parse_quote` context"),
             "{diagnostics:#?}",
         );
     }
@@ -4598,11 +4686,9 @@ fn generic_user_macros_and_unsupported_parse_quote_contexts_are_rejected() {
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err("narrow syntax nodes are not supported parse_quote contexts");
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "Ident String is not a supported `parse_quote` context"
-        })
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "Ident String is not a supported `parse_quote` context"
+    }));
 }
 
 #[test]
@@ -5058,9 +5144,11 @@ fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguou
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err("incomparable repeated categories should be ambiguous");
-    assert!(diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.message == "ambiguous invocation of macro `clash`"));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "ambiguous invocation of macro `clash`")
+    );
 }
 
 #[test]
@@ -5096,7 +5184,9 @@ fn rejects_invalid_top_level_macro_sequence_signatures() {
             .resolve_program(program)
             .expect_err("invalid top-level sequence should be rejected");
         assert!(
-            diagnostics.iter().any(|diagnostic| diagnostic.message == expected),
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message == expected),
             "expected {expected:?}, found {diagnostics:#?}",
         );
     }
@@ -5849,9 +5939,11 @@ fn rejects_a_name_bound_more_than_once_in_the_same_pattern() {
         .resolve(&syntax)
         .expect_err("a pattern must not bind the same name twice");
 
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("`a` is bound more than once in the same pattern")));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`a` is bound more than once in the same pattern")
+    }));
 }
 
 #[test]
@@ -5871,8 +5963,7 @@ fn rejects_a_def_colliding_with_a_let_of_the_same_name_regardless_of_order() {
 
 #[test]
 fn rejects_two_pub_bindings_of_the_same_name_but_allows_pub_and_private_to_shadow() {
-    let syntax =
-        parse("pub let value = 1\npub let value = 2\n").expect("source should parse");
+    let syntax = parse("pub let value = 1\npub let value = 2\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
         .expect_err("two `pub` bindings of the same name must stay an error");
@@ -6247,7 +6338,9 @@ fn provides_structural_debug_for_sum_types() {
         "let string_debug: String = Formatter.debug string\n",
     ));
     let context = Context::create();
-    let llvm = CodeGenerator::new(&context).compile_module(&module).expect("sum Debug should generate LLVM");
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("sum Debug should generate LLVM");
     assert!(llvm.contains("__staple_structural_Debug"));
     assert!(llvm.contains("debug.sum.fmt"));
 }
@@ -6263,7 +6356,9 @@ fn derives_debug_for_nominal_representations() {
         "let box_debug: String = Formatter.debug (Box 7)\n",
     ));
     let context = Context::create();
-    let llvm = CodeGenerator::new(&context).compile_module(&module).expect("derived Debug implementations should generate LLVM");
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("derived Debug implementations should generate LLVM");
     assert!(llvm.contains("formatter.write"));
     assert!(llvm.contains("__staple_structural_Debug"));
 }
@@ -6279,7 +6374,9 @@ fn exposes_type_declarations_as_structured_items() {
         "let pair = Pair (1, 2)\nlet result = answer ()\n",
     ));
     let context = Context::create();
-    CodeGenerator::new(&context).compile_module(&module).expect("structured and fallback item views should round-trip");
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("structured and fallback item views should round-trip");
 }
 
 #[test]
@@ -6315,9 +6412,11 @@ fn string_templates_require_the_selected_formatting_trait() {
             "let message = \"$secret\"\n",
         )))
         .expect_err("Display is required for ordinary interpolation");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("trait bound is not satisfied")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("trait bound is not satisfied") })
+    );
 }
 
 #[test]
@@ -6330,9 +6429,11 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
             "let text = Formatter.debug product\n",
         )))
         .expect_err("a product element without Debug must be rejected");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("trait bound is not satisfied")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("trait bound is not satisfied") })
+    );
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
@@ -6341,9 +6442,11 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
             "let text = Formatter.debug secret\n",
         )))
         .expect_err("a nominal type must not inherit its representation's Debug implementation");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("trait bound is not satisfied")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("trait bound is not satisfied") })
+    );
 }
 
 #[test]
@@ -7042,7 +7145,9 @@ fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer
         )))
         .expect_err("invalid representation projections should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("cannot access an element of `Inner`")
+        diagnostic
+            .message
+            .contains("cannot access an element of `Inner`")
     }));
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic

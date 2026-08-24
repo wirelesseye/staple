@@ -732,11 +732,8 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let source = std::env::temp_dir().join(format!("stapler-run-{nonce}.sta"));
-        std::fs::write(
-            &source,
-            "extern \"c\" { let exit: I32 -> () }\nexit 7\n",
-        )
-        .expect("temporary run source should be writable");
+        std::fs::write(&source, "extern \"c\" { let exit: I32 -> () }\nexit 7\n")
+            .expect("temporary run source should be writable");
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
         let outcome = run([
             "run".into(),
@@ -801,8 +798,7 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let source = std::env::temp_dir().join(format!("stapler-run-error-{nonce}.sta"));
-        std::fs::write(&source, "missing\n")
-            .expect("temporary invalid source should be writable");
+        std::fs::write(&source, "missing\n").expect("temporary invalid source should be writable");
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
         let error = run([
             "run".into(),
@@ -823,8 +819,7 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let source = std::env::temp_dir().join(format!("stapler-run-linker-{nonce}.sta"));
-        std::fs::write(&source, "()\n")
-            .expect("temporary source should be writable");
+        std::fs::write(&source, "()\n").expect("temporary source should be writable");
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
         let error = run([
             "run".into(),
@@ -1249,7 +1244,10 @@ mod tests {
             .expect("List index executable should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
-        assert!(status.success(), "List index executable exited with {status}");
+        assert!(
+            status.success(),
+            "List index executable exited with {status}"
+        );
     }
 
     #[test]
@@ -1509,8 +1507,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source =
-            std::env::temp_dir().join(format!("stapler-named-product-spread-{nonce}.sta"));
+        let source = std::env::temp_dir().join(format!("stapler-named-product-spread-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("stapler-named-product-spread-{nonce}"));
         std::fs::write(
             &source,
@@ -1555,8 +1552,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source =
-            std::env::temp_dir().join(format!("stapler-designated-product-{nonce}.sta"));
+        let source = std::env::temp_dir().join(format!("stapler-designated-product-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("stapler-designated-product-{nonce}"));
         std::fs::write(
             &source,
@@ -1930,7 +1926,10 @@ mod tests {
             .expect("string-template executable should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
-        assert!(status.success(), "string-template executable returned {status}");
+        assert!(
+            status.success(),
+            "string-template executable returned {status}"
+        );
     }
 
     #[test]

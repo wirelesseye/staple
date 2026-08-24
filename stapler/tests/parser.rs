@@ -1,7 +1,6 @@
 use stapler::{
     Accessor, BindingKind, Expression, Item, LogicalOperator, Pattern, StringInterpolationFormat,
-    StringTemplatePart, TokenKind, Type,
-    TypeDeclarationKind, UseKind, Visibility, parse,
+    StringTemplatePart, TokenKind, Type, TypeDeclarationKind, UseKind, Visibility, parse,
 };
 
 #[test]
@@ -73,8 +72,12 @@ fn parses_effect_parameters_and_open_effect_rows() {
     let source = "def twice: <T, effect E> (T, () ->{E} ()) ->{E, IO} T = (value, f) => value\n";
     let module = parse(source).expect("effect parameters should parse");
     assert_eq!(module.syntax.text(), source);
-    let Item::Binding(binding) = &module.items[0] else { panic!("expected binding") };
-    assert!(matches!(binding.type_parameters.as_slice(), [stapler::TypeParameterPattern::Binding(_), stapler::TypeParameterPattern::Effect(value)] if value.name == "E"));
+    let Item::Binding(binding) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    assert!(
+        matches!(binding.type_parameters.as_slice(), [stapler::TypeParameterPattern::Binding(_), stapler::TypeParameterPattern::Effect(value)] if value.name == "E")
+    );
 }
 
 #[test]
@@ -134,9 +137,13 @@ fn parses_mutable_parameter_types_losslessly() {
     let Item::Binding(f3) = unmodified_item(&module.items[2]) else {
         panic!("expected binding");
     };
-    assert!(matches!(mutations(&f3.annotation), [MutationTarget {
-        target: MutationTargetKind::Element(0), ..
-    }]));
+    assert!(matches!(
+        mutations(&f3.annotation),
+        [MutationTarget {
+            target: MutationTargetKind::Element(0),
+            ..
+        }]
+    ));
 
     let Item::Binding(f4) = unmodified_item(&module.items[3]) else {
         panic!("expected binding");
@@ -1071,8 +1078,12 @@ fn parses_type_companion_blocks_losslessly() {
     );
     let root = parse(source).expect("companion blocks should parse");
     assert_eq!(root.text(), source);
-    assert!(matches!(&root.items[0], Item::Submodule(module) if module.companion && module.name == "Animal"));
-    assert!(matches!(&root.items[1], Item::Submodule(module) if module.companion && module.name == "Box"));
+    assert!(
+        matches!(&root.items[0], Item::Submodule(module) if module.companion && module.name == "Animal")
+    );
+    assert!(
+        matches!(&root.items[1], Item::Submodule(module) if module.companion && module.name == "Box")
+    );
     assert!(parse("pub companion Animal {}\n").is_err());
     assert!(parse("companion (I32, I32) {}\n").is_err());
 }
@@ -1507,7 +1518,11 @@ fn parses_contextual_named_product_initializers_losslessly() {
 fn rejects_positional_elements_after_a_designated_initializer() {
     let error = parse("let value: (a: I32, I32) = (.a: 1, 2)\n")
         .expect_err("positional suffix should be rejected");
-    assert!(error.message.contains("must precede designated initializers"));
+    assert!(
+        error
+            .message
+            .contains("must precede designated initializers")
+    );
 }
 
 #[test]
@@ -1749,7 +1764,10 @@ fn rejects_unsupported_items_in_blocks() {
         "{ trait Generated {} }\n",
         "{ impl Generated I32 {} }\n",
     ] {
-        assert!(parse(source).is_err(), "unsupported block item parsed: {source}");
+        assert!(
+            parse(source).is_err(),
+            "unsupported block item parsed: {source}"
+        );
     }
 }
 
