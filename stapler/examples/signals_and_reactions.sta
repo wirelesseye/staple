@@ -8,15 +8,12 @@ let initial = snapshot count
 
 // Reactions run immediately, then synchronously after a dependency changes.
 // The Reactive resource owns the reaction for the lifetime of this block.
-with Reactive = reactive_scope () {
-    reaction {
-        println "count: $count, doubled: $doubled"
-    }
-
-    count = 1
-    count = 2
+reaction {
+    println "count: $count, doubled: $doubled"
 }
 
-// The reaction has been disposed, so this update produces no reaction output.
+count = 1
+count = 2
 count = 3
+
 println "initial snapshot: $initial, current count: $count"

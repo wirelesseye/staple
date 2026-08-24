@@ -1442,6 +1442,28 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     self.context.struct_type(&[], false).const_zero().into(),
                 ));
             }
+            let mut entry_reactive_scope_pushed = false;
+            if module_id == entry_module
+                && self.typed_module.entry_reactive_required()
+                && let Some(reactive_resource) = self.typed_module.reactive_resource()
+            {
+                let scope = self
+                    .build_reactive_runtime_call(
+                        "__staple_reactive_scope_create",
+                        &[],
+                        Some(self.context.ptr_type(AddressSpace::default()).into()),
+                        "reactive.scope",
+                        Span::Compiler,
+                    )?
+                    .expect("reactive_scope_create returns a pointer");
+                environment
+                    .resources
+                    .push((reactive_resource, scope.as_any_value_enum()));
+                environment
+                    .reactive_scopes
+                    .push(scope.into_pointer_value());
+                entry_reactive_scope_pushed = true;
+            }
             for item in &items {
                 if matches!(
                     item,
@@ -1455,6 +1477,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 ) {
                     self.compile_top_level_item(&mut environment, item)?;
                 }
+            }
+            if entry_reactive_scope_pushed && !environment.did_return {
+                self.dispose_reactive_scopes(&environment, 0, Span::Compiler)?;
             }
             self.builder
                 .build_return(None)

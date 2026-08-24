@@ -517,11 +517,28 @@ use std.io.println
 println "Hello, world!"
 ```
 
-This implicit `IO` is scoped to the entry module alone; a non-entry module's
-top-level statements still cannot require any resource. `main` carries no
-special meaning — a `def main`, `let main`, or imported `main` is an ordinary
-binding like any other, in every module. The native entry point initializes
-every reachable module, in dependency order, and then returns status zero.
+`std.core.Reactive` is available the same way, but only when the top level
+actually needs it: if any top-level statement requires `Reactive` — directly,
+or transitively through a called function — the entry point implicitly opens
+one `reactive_scope`, disposing it once the top-level statements finish, so
+`reaction`, `signal`, and `snapshot` (see [Signals and
+reactions](#signals-and-reactions)) may be used without a `with` block:
+
+```staple
+let signal count = 0
+reaction { println "count: $count" }
+count = 1
+```
+
+An entry module that never touches reactivity pays no cost for this: no
+scope is created, and no `Reactive` value exists to be looked up.
+
+Both implicit resources are scoped to the entry module alone; a non-entry
+module's top-level statements still cannot require any resource. `main`
+carries no special meaning — a `def main`, `let main`, or imported `main` is
+an ordinary binding like any other, in every module. The native entry point
+initializes every reachable module, in dependency order, and then returns
+status zero.
 
 ### Modules and `use`
 
@@ -1494,6 +1511,10 @@ with Reactive = reactive_scope () {
     count = 1
 }
 ```
+
+At the entry module's top level, a `Reactive` scope is opened implicitly
+whenever it's needed, so the `with` block above may be omitted there (see
+[Top-level statements](#top-level-statements)).
 
 An immutable `let` whose initializer depends on a signal is a persistent
 derived binding. Its visible type is unchanged. The initializer is evaluated

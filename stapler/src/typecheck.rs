@@ -763,6 +763,7 @@ pub struct TypedModule {
     iterator_trait: Option<TraitId>,
     io_type: Option<TypeId>,
     reactive_type: Option<TypeId>,
+    entry_reactive_required: bool,
     mutated_parameter_symbols: HashSet<SymbolId>,
     method_symbols: HashMap<SyntaxId, SymbolId>,
     symbol_companion_types: HashMap<SymbolId, TypeId>,
@@ -972,6 +973,20 @@ impl TypedModule {
                 arguments: Vec::new(),
             },
         })
+    }
+
+    pub(crate) fn reactive_resource(&self) -> Option<CheckedResource> {
+        self.reactive_type.map(|id| CheckedResource {
+            value_type: CheckedType::Opaque {
+                id,
+                name: "Reactive".to_owned(),
+                arguments: Vec::new(),
+            },
+        })
+    }
+
+    pub(crate) fn entry_reactive_required(&self) -> bool {
+        self.entry_reactive_required
     }
 
     pub(crate) fn is_drop_method(&self, function: FunctionId) -> bool {
@@ -1278,6 +1293,9 @@ pub struct TypeChecker {
     diagnostics: Vec<Diagnostic>,
     io_type: Option<TypeId>,
     reactive_type: Option<TypeId>,
+    /// Whether the entry module's top-level code requires the `Reactive`
+    /// resource, so codegen knows whether to implicitly provide one.
+    entry_reactive_required: bool,
     /// Parameter symbols covered by an explicit function effect, parameter
     /// marker, or trait contract. Only these are writable in function bodies.
     mutable_parameter_symbols: HashSet<SymbolId>,
@@ -1422,6 +1440,7 @@ impl TypeChecker {
             iterator_trait: self.iterator_trait,
             io_type: self.io_type,
             reactive_type: self.reactive_type,
+            entry_reactive_required: self.entry_reactive_required,
             mutated_parameter_symbols: self.mutated_parameter_symbols,
             method_symbols: self.method_symbols,
             symbol_companion_types: self.symbol_companion_types,
@@ -3596,6 +3615,14 @@ impl TypeChecker {
                 }
                 .unwrap_or((&source_module.syntax.syntax, CheckedEffectSet::default()));
                 let required = if is_entry_module {
+                    if resources.resources.iter().any(|resource| {
+                        matches!(
+                            &resource.value_type,
+                            CheckedType::Opaque { id, .. } if Some(*id) == self.reactive_type
+                        )
+                    }) {
+                        self.entry_reactive_required = true;
+                    }
                     CheckedEffectSet::canonical(
                         resources
                             .resources
@@ -3603,7 +3630,8 @@ impl TypeChecker {
                             .filter(|resource| {
                                 !matches!(
                                     &resource.value_type,
-                                    CheckedType::Opaque { id, .. } if Some(*id) == self.io_type
+                                    CheckedType::Opaque { id, .. }
+                                        if Some(*id) == self.io_type || Some(*id) == self.reactive_type
                                 )
                             })
                             .cloned()

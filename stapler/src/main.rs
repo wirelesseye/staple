@@ -848,6 +848,60 @@ mod tests {
         assert!(llvm.contains("target triple"));
     }
 
+    /// Module initializers (`__staple_init_m*`) are the only place the
+    /// entry-module top level could call into the reactive runtime; the
+    /// stdlib's own `reactive_scope`/`__reactive_scope` functions are always
+    /// compiled in regardless of usage, so a whole-file substring check
+    /// would false-positive. Isolate just the initializer bodies instead.
+    fn extract_module_initializer_bodies(llvm: &str) -> String {
+        let mut bodies = String::new();
+        let mut inside = false;
+        for line in llvm.lines() {
+            if !inside && line.starts_with("define") && line.contains("@__staple_init_m") {
+                inside = true;
+            }
+            if inside {
+                bodies.push_str(line);
+                bodies.push('\n');
+                if line == "}" {
+                    inside = false;
+                }
+            }
+        }
+        bodies
+    }
+
+    #[test]
+    fn entry_module_without_reactive_omits_scope_creation() {
+        let module =
+            compile(include_str!("../examples/hello_world.sta")).expect("example should compile");
+        let context = inkwell::context::Context::create();
+        let llvm = stapler::CodeGenerator::new(&context)
+            .compile_module(&module)
+            .expect("LLVM generation should succeed");
+
+        let initializers = extract_module_initializer_bodies(&llvm);
+        assert!(!initializers.contains("__staple_reactive_scope_create"));
+    }
+
+    #[test]
+    fn entry_module_with_top_level_reactive_creates_scope() {
+        let module = compile(concat!(
+            "let signal count = 0\n",
+            "let mut observed = 0\n",
+            "reaction { observed = count; () }\n",
+        ))
+        .expect("top-level reactive source should compile");
+        let context = inkwell::context::Context::create();
+        let llvm = stapler::CodeGenerator::new(&context)
+            .compile_module(&module)
+            .expect("LLVM generation should succeed");
+
+        let initializers = extract_module_initializer_bodies(&llvm);
+        assert!(initializers.contains("__staple_reactive_scope_create"));
+        assert!(initializers.contains("__staple_reactive_scope_dispose"));
+    }
+
     #[test]
     #[cfg(unix)]
     fn runs_top_level_io_in_the_entry_module() {
@@ -1500,6 +1554,46 @@ mod tests {
         let status = Command::new(&output)
             .status()
             .expect("reactive executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runs_top_level_signals_and_reactions_in_the_entry_module() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-main-reactive-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-main-reactive-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let signal count = 0\n",
+                "let mut observed = 0\n",
+                "reaction { observed = count; () }\n",
+                "count = 7\n",
+                "exit (observed - 7)\n",
+            ),
+        )
+        .expect("temporary top-level reactive source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("top-level reactive executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("top-level reactive executable should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
         assert!(status.success());
