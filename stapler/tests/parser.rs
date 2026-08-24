@@ -1,7 +1,43 @@
 use stapler::{
-    Accessor, BindingKind, Expression, Item, LogicalOperator, Pattern, TokenKind, Type,
+    Accessor, BindingKind, Expression, Item, LogicalOperator, Pattern, StringInterpolationFormat,
+    StringTemplatePart, TokenKind, Type,
     TypeDeclarationKind, UseKind, Visibility, parse,
 };
+
+#[test]
+fn parses_string_templates_and_preserves_source() {
+    let source = "let name = \"world\"\nlet message = \"hello $name: ${1 + 2}; ${name:?}; \\$5; ${\"nested\"}\"\n";
+    let module = parse(source).expect("string templates should parse");
+    assert_eq!(module.syntax.text(), source);
+    let Item::Binding(binding) = &module.items[1] else {
+        panic!("expected template binding")
+    };
+    let Some(Expression::StringTemplate(template)) = &binding.value else {
+        panic!("expected string template")
+    };
+    assert_eq!(template.parts.len(), 8);
+    assert!(matches!(
+        &template.parts[1],
+        StringTemplatePart::Interpolation(value)
+            if value.format == StringInterpolationFormat::Display
+                && matches!(value.expression.as_ref(), Expression::Name(name) if name.name == "name")
+    ));
+    assert!(matches!(
+        &template.parts[5],
+        StringTemplatePart::Interpolation(value)
+            if value.format == StringInterpolationFormat::Debug
+    ));
+    assert!(matches!(&template.parts[6], StringTemplatePart::Literal(value) if value == "; $5; "));
+    assert!(matches!(
+        &template.parts[7],
+        StringTemplatePart::Interpolation(value)
+            if matches!(value.expression.as_ref(), Expression::String(_))
+    ));
+
+    assert!(parse("let invalid = \"$\"\n").is_err());
+    assert!(parse("let invalid = \"${}\"\n").is_err());
+    assert!(parse("let invalid = \"${1\"\n").is_err());
+}
 
 #[test]
 fn parses_typed_resource_sets_accesses_and_providers_losslessly() {

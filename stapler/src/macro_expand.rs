@@ -3034,6 +3034,13 @@ impl MacroExpander {
             return None;
         }
         match expression {
+            Expression::StringTemplate(_) => {
+                self.diagnostics.push(Diagnostic::new(
+                    expression.syntax().span.clone(),
+                    "string templates are not available during compile-time macro evaluation",
+                ));
+                None
+            }
             Expression::Resource(_) | Expression::With(_) => {
                 self.diagnostics.push(Diagnostic::new(
                     expression.syntax().span.clone(),
@@ -4799,6 +4806,13 @@ impl MacroExpander {
                 self.freshen_expression(&mut logical.right, module, mark);
                 freshen_type(self, &mut logical.bool_type, module, mark);
             }
+            Expression::StringTemplate(template) => {
+                for part in &mut template.parts {
+                    if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                        self.freshen_expression(&mut interpolation.expression, module, mark);
+                    }
+                }
+            }
             Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
             | Expression::Quote(_) => {}
@@ -6342,6 +6356,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         Expression::Logical(logical) => {
             obviously_not_syntax(&logical.left, 0) || obviously_not_syntax(&logical.right, 0)
         }
+        Expression::StringTemplate(_) => true,
         Expression::Loop(_) => true,
         Expression::Resource(_) | Expression::With(_) => true,
         Expression::Block(block) => {
@@ -6943,6 +6958,17 @@ fn substitute_splices(
             *logical.left = substitute_splices(&logical.left, environment, diagnostics)?;
             *logical.right = substitute_splices(&logical.right, environment, diagnostics)?;
             substitute_type(&mut logical.bool_type, environment, diagnostics)?;
+        }
+        Expression::StringTemplate(template) => {
+            for part in &mut template.parts {
+                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                    *interpolation.expression = substitute_splices(
+                        &interpolation.expression,
+                        environment,
+                        diagnostics,
+                    )?;
+                }
+            }
         }
         Expression::Quote(_) => {}
         Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) => {}
@@ -7984,6 +8010,13 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut logical.left, mark, scopes);
             alpha_rename_expression(&mut logical.right, mark, scopes);
         }
+        Expression::StringTemplate(template) => {
+            for part in &mut template.parts {
+                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                    alpha_rename_expression(&mut interpolation.expression, mark, scopes);
+                }
+            }
+        }
         Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)
         | Expression::Quote(_)
@@ -8066,6 +8099,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Splice(value) => &mut value.syntax,
         Expression::Name(value) => &mut value.syntax,
         Expression::String(value) => &mut value.syntax,
+        Expression::StringTemplate(value) => &mut value.syntax,
         Expression::CString(value) => &mut value.syntax,
         Expression::Integer(value) => &mut value.syntax,
         Expression::Float(value) => &mut value.syntax,

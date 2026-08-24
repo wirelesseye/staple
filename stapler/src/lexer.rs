@@ -199,15 +199,47 @@ fn lex_string(source: &str, offset: usize) -> Option<usize> {
     if source.as_bytes().get(offset) != Some(&b'"') {
         return None;
     }
+    let mut cursor = offset + 1;
     let mut escaped = false;
-    for (relative, character) in source[offset + 1..].char_indices() {
-        if character == '"' && !escaped {
-            return Some(offset + 1 + relative + 1);
+    let mut interpolation_depth = 0usize;
+    while cursor < source.len() {
+        let character = source[cursor..].chars().next()?;
+        if interpolation_depth == 0 {
+            if character == '"' && !escaped {
+                return Some(cursor + 1);
+            }
+            if character == '$'
+                && !escaped
+                && source[cursor + character.len_utf8()..].starts_with('{')
+            {
+                interpolation_depth = 1;
+                cursor += character.len_utf8() + 1;
+                escaped = false;
+                continue;
+            }
+            escaped = character == '\\' && !escaped;
+            if character != '\\' {
+                escaped = false;
+            }
+            cursor += character.len_utf8();
+            continue;
         }
-        escaped = character == '\\' && !escaped;
-        if character != '\\' {
-            escaped = false;
+        if character == '"' {
+            cursor = lex_string(source, cursor)?;
+            continue;
         }
+        if source[cursor..].starts_with("//") {
+            cursor = source[cursor..]
+                .find(['\r', '\n'])
+                .map_or(source.len(), |relative| cursor + relative);
+            continue;
+        }
+        match character {
+            '{' => interpolation_depth += 1,
+            '}' => interpolation_depth -= 1,
+            _ => {}
+        }
+        cursor += character.len_utf8();
     }
     Some(source.len())
 }

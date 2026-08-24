@@ -3145,7 +3145,7 @@ impl NameResolver {
             }
             Expression::Index(value) => { self.resolve_quoted_expression(&value.value, scopes); self.resolve_quoted_expression(&value.index, scopes); }
             Expression::Logical(value) => { self.resolve_quoted_expression(&value.left, scopes); self.resolve_quoted_expression(&value.right, scopes); }
-            Expression::Quote(_) | Expression::Splice(_) | Expression::Resource(_) | Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) | Expression::String(_) | Expression::CString(_) | Expression::Integer(_) | Expression::Float(_) => {}
+            Expression::Quote(_) | Expression::Splice(_) | Expression::Resource(_) | Expression::SyntaxArgument(_) | Expression::VisibilityArgument(_) | Expression::String(_) | Expression::StringTemplate(_) | Expression::CString(_) | Expression::Integer(_) | Expression::Float(_) => {}
         }
     }
 
@@ -3589,6 +3589,13 @@ impl NameResolver {
                         .push(Diagnostic::new(name.syntax.span.clone(), message));
                 }
             },
+            Expression::StringTemplate(template) => {
+                for part in &template.parts {
+                    if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                        self.resolve_expression(&interpolation.expression, None, None);
+                    }
+                }
+            }
             Expression::Quote(quote) => self.diagnostics.push(Diagnostic::new(
                 quote.syntax.span.clone(),
                 format!("`{}` is only available during macro expansion", quote.kind.name()),
@@ -4815,6 +4822,7 @@ impl<'a> InitializationAnalyzer<'a> {
             | Expression::Quote(_)
             | Expression::Splice(_)
             | Expression::String(_)
+            | Expression::StringTemplate(_)
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
@@ -5015,6 +5023,7 @@ fn find_block_type_declarations_in_expression<'a>(
         | Expression::Splice(_)
         | Expression::Name(_)
         | Expression::String(_)
+        | Expression::StringTemplate(_)
         | Expression::CString(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}

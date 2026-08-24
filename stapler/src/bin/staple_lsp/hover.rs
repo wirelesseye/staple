@@ -202,6 +202,13 @@ impl Collector<'_> {
                     self.collect_expression_declarations(&element.value);
                 }
             }
+            Expression::StringTemplate(value) => {
+                for part in &value.parts {
+                    if let StringTemplatePart::Interpolation(value) = part {
+                        self.collect_expression_declarations(&value.expression);
+                    }
+                }
+            }
             Expression::Call(call) => {
                 self.collect_expression_declarations(&call.callee);
                 self.collect_expression_declarations(&call.argument);
@@ -910,6 +917,13 @@ impl Collector<'_> {
                             self.typed.type_of_expression(element.value.syntax().id)
                     {
                         self.named(&element.syntax, name, self.display_type(value_type));
+                    }
+                }
+            }
+            Expression::StringTemplate(value) => {
+                for part in &value.parts {
+                    if let StringTemplatePart::Interpolation(value) = part {
+                        self.expression(&value.expression);
                     }
                 }
             }

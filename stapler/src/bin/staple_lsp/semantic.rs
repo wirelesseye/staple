@@ -626,6 +626,13 @@ impl<'a> Classifier<'a> {
                     self.expression(&element.value, resolved);
                 }
             }
+            Expression::StringTemplate(value) => {
+                for part in &value.parts {
+                    if let StringTemplatePart::Interpolation(value) = part {
+                        self.expression(&value.expression, resolved);
+                    }
+                }
+            }
             Expression::Call(value) => {
                 self.expression(&value.callee, resolved);
                 self.expression(&value.argument, resolved);

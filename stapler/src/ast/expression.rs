@@ -20,6 +20,7 @@ pub enum Expression {
     Splice(SpliceExpression),
     Name(NameExpression),
     String(StringExpression),
+    StringTemplate(StringTemplateExpression),
     CString(CStringExpression),
     Integer(IntegerExpression),
     Float(FloatExpression),
@@ -46,6 +47,7 @@ impl Expression {
             Self::Splice(expression) => &expression.syntax,
             Self::Name(expression) => &expression.syntax,
             Self::String(expression) => &expression.syntax,
+            Self::StringTemplate(expression) => &expression.syntax,
             Self::CString(expression) => &expression.syntax,
             Self::Integer(expression) => &expression.syntax,
             Self::Float(expression) => &expression.syntax,
@@ -243,6 +245,30 @@ pub struct StringExpression {
     pub syntax: Syntax,
     /// The literal exactly as written, including its quotes.
     pub literal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringTemplateExpression {
+    pub syntax: Syntax,
+    pub parts: Vec<StringTemplatePart>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StringTemplatePart {
+    Literal(String),
+    Interpolation(StringInterpolation),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StringInterpolation {
+    pub expression: Box<Expression>,
+    pub format: StringInterpolationFormat,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringInterpolationFormat {
+    Display,
+    Debug,
 }
 
 /// A C string literal emitted by the compiler-provided `c_string` macro.

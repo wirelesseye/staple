@@ -2,6 +2,81 @@ use crate::ast::*;
 use crate::lexer::lex;
 use std::sync::Arc;
 
+fn has_unescaped_dollar(content: &str) -> bool {
+    let mut escaped = false;
+    for character in content.chars() {
+        if character == '$' && !escaped {
+            return true;
+        }
+        if character == '\\' {
+            escaped = !escaped;
+        } else {
+            escaped = false;
+        }
+    }
+    false
+}
+
+fn push_template_literal(
+    parts: &mut Vec<StringTemplatePart>,
+    raw: &str,
+    syntax: &Syntax,
+) -> Result<(), ParseError> {
+    if raw.is_empty() {
+        return Ok(());
+    }
+    let literal = format!("\"{raw}\"");
+    let decoded = crate::string_literal::decode(&literal).map_err(|message| ParseError {
+        offset: syntax.span.to_range().start,
+        location: match &syntax.span {
+            Span::User { location: Some(location), .. } => *location,
+            _ => SourceLocation { line: 1, column: 1 },
+        },
+        message,
+    })?;
+    parts.push(StringTemplatePart::Literal(decoded));
+    Ok(())
+}
+
+fn matching_template_brace(content: &str, opening: usize) -> Option<usize> {
+    let mut depth = 1usize;
+    let mut cursor = opening + 1;
+    let mut string = false;
+    let mut escaped = false;
+    while cursor < content.len() {
+        let character = content[cursor..].chars().next()?;
+        if string {
+            if character == '"' && !escaped {
+                string = false;
+            }
+            escaped = character == '\\' && !escaped;
+            if character != '\\' {
+                escaped = false;
+            }
+        } else {
+            if content[cursor..].starts_with("//") {
+                cursor = content[cursor..]
+                    .find(['\r', '\n'])
+                    .map_or(content.len(), |relative| cursor + relative);
+                continue;
+            }
+            match character {
+                '"' => string = true,
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(cursor);
+                    }
+                }
+                _ => {}
+            }
+        }
+        cursor += character.len_utf8();
+    }
+    None
+}
+
 /// Parses a complete Staple source file into a lossless syntax tree.
 pub fn parse(source: &str) -> Result<Module, ParseError> {
     let tokens = Arc::from(lex(source));
@@ -2357,11 +2432,9 @@ impl Grammar {
             }
             Some(TokenKind::String) => {
                 let start = self.position;
-                let literal = self.bump_token().expect("peeked string").text;
-                Ok(Expression::String(StringExpression {
-                    syntax: self.syntax(start),
-                    literal,
-                }))
+                let token = self.bump_token().expect("peeked string").clone();
+                let syntax = self.syntax(start);
+                self.parse_string_or_template(token, syntax)
             }
             Some(TokenKind::Integer) => {
                 let start = self.position;
@@ -2402,6 +2475,116 @@ impl Grammar {
             }
             _ => Err(self.error("expected expression")),
         }
+    }
+
+    fn parse_string_or_template(
+        &mut self,
+        token: SyntaxToken,
+        syntax: Syntax,
+    ) -> Result<Expression, ParseError> {
+        let literal = token.text;
+        let content = literal
+            .strip_prefix('"')
+            .and_then(|value| value.strip_suffix('"'))
+            .ok_or_else(|| self.error("unterminated string literal"))?;
+        if !has_unescaped_dollar(content) {
+            return Ok(Expression::String(StringExpression { syntax, literal }));
+        }
+        let content_offset = token.span.start + 1;
+        let mut parts = Vec::new();
+        let mut segment_start = 0;
+        let mut cursor = 0;
+        while cursor < content.len() {
+            let character = content[cursor..].chars().next().expect("cursor boundary");
+            if character == '\\' {
+                cursor += character.len_utf8();
+                if cursor < content.len() {
+                    cursor += content[cursor..].chars().next().expect("escape").len_utf8();
+                }
+                continue;
+            }
+            if character != '$' {
+                cursor += character.len_utf8();
+                continue;
+            }
+            push_template_literal(&mut parts, &content[segment_start..cursor], &syntax)?;
+            cursor += 1;
+            if content[cursor..].starts_with('{') {
+                let expression_start = cursor + 1;
+                let expression_end = matching_template_brace(content, cursor)
+                    .ok_or_else(|| self.error("unterminated string interpolation"))?;
+                let mut expression_source = &content[expression_start..expression_end];
+                let format = if let Some(source) = expression_source.strip_suffix(":?") {
+                    expression_source = source;
+                    StringInterpolationFormat::Debug
+                } else {
+                    StringInterpolationFormat::Display
+                };
+                if expression_source.trim().is_empty() {
+                    return Err(self.error("string interpolation requires an expression"));
+                }
+                let expression = self.parse_embedded_template_expression(
+                    expression_source,
+                    content_offset + expression_start,
+                )?;
+                parts.push(StringTemplatePart::Interpolation(StringInterpolation {
+                    expression: Box::new(expression),
+                    format,
+                }));
+                cursor = expression_end + 1;
+            } else {
+                let identifier_start = cursor;
+                let first = content[cursor..].chars().next().ok_or_else(|| {
+                    self.error("expected an identifier or `{` after `$`")
+                })?;
+                if first != '_' && !first.is_alphabetic() {
+                    return Err(self.error("expected an identifier or `{` after `$`"));
+                }
+                cursor += first.len_utf8();
+                while cursor < content.len() {
+                    let next = content[cursor..].chars().next().expect("cursor boundary");
+                    if next != '_' && !next.is_alphanumeric() {
+                        break;
+                    }
+                    cursor += next.len_utf8();
+                }
+                let expression = self.parse_embedded_template_expression(
+                    &content[identifier_start..cursor],
+                    content_offset + identifier_start,
+                )?;
+                parts.push(StringTemplatePart::Interpolation(StringInterpolation {
+                    expression: Box::new(expression),
+                    format: StringInterpolationFormat::Display,
+                }));
+            }
+            segment_start = cursor;
+        }
+        push_template_literal(&mut parts, &content[segment_start..], &syntax)?;
+        Ok(Expression::StringTemplate(StringTemplateExpression { syntax, parts }))
+    }
+
+    fn parse_embedded_template_expression(
+        &mut self,
+        source: &str,
+        offset: usize,
+    ) -> Result<Expression, ParseError> {
+        let mut tokens = lex(source);
+        for token in &mut tokens {
+            token.span.start += offset;
+            token.span.end += offset;
+        }
+        let mut grammar = Grammar::new(
+            Arc::from(tokens),
+            Arc::clone(&self.source),
+            self.next_syntax_id,
+            self.source_name.clone(),
+        );
+        let expression = grammar.parse_expression()?;
+        if grammar.peek().is_some() {
+            return Err(grammar.error("expected one complete interpolation expression"));
+        }
+        self.next_syntax_id = grammar.next_syntax_id;
+        Ok(expression)
     }
 
     fn quote_expression_start(&self) -> Option<Vec<String>> {

@@ -1113,6 +1113,7 @@ pub struct TypeChecker {
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
     debug_trait: Option<TraitId>,
+    display_trait: Option<TraitId>,
     index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
     into_iterator_trait: Option<TraitId>,
@@ -1193,6 +1194,7 @@ impl TypeChecker {
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
         self.debug_trait = module.standard_trait("Debug");
+        self.display_trait = module.standard_trait("Display");
         self.index_trait = module.standard_trait("Index");
         self.mutate_index_trait = module.standard_trait("MutateIndex");
         self.into_iterator_trait = module.standard_trait("IntoIterator");
@@ -2881,6 +2883,10 @@ impl TypeChecker {
                     })
                     .collect(),
             ),
+            Expression::StringTemplate(template) => union(template.parts.iter().filter_map(|part| {
+                let crate::StringTemplatePart::Interpolation(interpolation) = part else { return None };
+                Some(self.expression_resources_now(module, &interpolation.expression, target_parameters))
+            }).collect()),
             Expression::Call(value) => {
                 let mut result = self
                     .expression_resources_now(module, &value.callee, target_parameters)
@@ -3406,6 +3412,7 @@ impl TypeChecker {
             | Expression::Splice(_)
             | Expression::Name(_)
             | Expression::String(_)
+            | Expression::StringTemplate(_)
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => false,
@@ -3600,6 +3607,18 @@ impl TypeChecker {
                     target_parameters,
                     current_module,
                 );
+            }
+            Expression::StringTemplate(template) => {
+                for part in &template.parts {
+                    if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                        self.record_expression_resources(
+                            module,
+                            &interpolation.expression,
+                            target_parameters,
+                            current_module,
+                        );
+                    }
+                }
             }
             Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
@@ -5344,6 +5363,34 @@ impl TypeChecker {
                 } else {
                     CheckedType::String
                 }
+            }
+            Expression::StringTemplate(template) => {
+                for part in &template.parts {
+                    let crate::StringTemplatePart::Interpolation(interpolation) = part else {
+                        continue;
+                    };
+                    let value_type = self.check_expression(module, &interpolation.expression);
+                    let trait_id = match interpolation.format {
+                        crate::StringInterpolationFormat::Display => self.display_trait,
+                        crate::StringInterpolationFormat::Debug => self.debug_trait,
+                    };
+                    let Some(trait_id) = trait_id else {
+                        self.diagnostics.push(Diagnostic::new(
+                            interpolation.expression.syntax().span.clone(),
+                            "standard formatting trait is unavailable",
+                        ));
+                        continue;
+                    };
+                    let arguments = vec![value_type];
+                    if self.resolve_trait_obligation(trait_id, &arguments).is_none() {
+                        self.diagnostics.push(Diagnostic::new(
+                            interpolation.expression.syntax().span.clone(),
+                            format!("trait bound is not satisfied for `{}`", arguments[0]),
+                        ));
+                        continue;
+                    }
+                }
+                CheckedType::String
             }
             Expression::CString(_) => CheckedType::CString,
             Expression::Integer(integer) => {

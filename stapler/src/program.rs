@@ -1500,6 +1500,13 @@ fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Su
             find_block_submodules_in_expression(&logical.left, out);
             find_block_submodules_in_expression(&logical.right, out);
         }
+        Expression::StringTemplate(template) => {
+            for part in &template.parts {
+                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                    find_block_submodules_in_expression(&interpolation.expression, out);
+                }
+            }
+        }
         Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)
         | Expression::Quote(_)
@@ -1646,6 +1653,13 @@ fn find_block_use_declarations_in_expression(expression: &Expression, out: &mut 
         Expression::Logical(logical) => {
             find_block_use_declarations_in_expression(&logical.left, out);
             find_block_use_declarations_in_expression(&logical.right, out);
+        }
+        Expression::StringTemplate(template) => {
+            for part in &template.parts {
+                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                    find_block_use_declarations_in_expression(&interpolation.expression, out);
+                }
+            }
         }
         Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)

@@ -417,6 +417,13 @@ impl Collector<'_> {
                     self.expression(&element.value, module_index);
                 }
             }
+            Expression::StringTemplate(value) => {
+                for part in &value.parts {
+                    if let StringTemplatePart::Interpolation(value) = part {
+                        self.expression(&value.expression, module_index);
+                    }
+                }
+            }
             Expression::Call(value) => {
                 self.expression(&value.callee, module_index);
                 self.expression(&value.argument, module_index);

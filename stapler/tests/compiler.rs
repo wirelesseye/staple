@@ -5992,6 +5992,44 @@ fn provides_formatter_display_debug_and_structural_product_debug() {
 }
 
 #[test]
+fn type_checks_and_generates_string_templates() {
+    let module = type_check(concat!(
+        "type Label = String\n",
+        "impl Display Label {\n",
+        "  def fmt = (Label value, formatter) => Formatter.write (formatter, value)\n",
+        "}\n",
+        "def render: <T where Display T> T -> String = value => \"value=$value\"\n",
+        "let name: String = \"world\"\n",
+        "let answer: I32 = 42\n",
+        "let product = (answer, name)\n",
+        "let message: String = \"hello $name: ${answer}; ${product:?}; \\$5\"\n",
+        "let generic: String = render answer\n",
+        "let nominal: String = \"label=${Label \"tag\"}\"\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("string templates should generate LLVM");
+    assert!(llvm.contains("template.formatter"));
+    assert!(llvm.contains("template.fmt"));
+    assert!(llvm.contains("template.finish"));
+}
+
+#[test]
+fn string_templates_require_the_selected_formatting_trait() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Secret = I32\n",
+            "let secret = Secret 1\n",
+            "let message = \"$secret\"\n",
+        )))
+        .expect_err("Display is required for ordinary interpolation");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("trait bound is not satisfied")
+    }));
+}
+
+#[test]
 fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_representations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(

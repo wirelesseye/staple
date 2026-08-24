@@ -941,7 +941,23 @@ remain integer values; Staple does not implicitly convert between numeric types.
 
 String literals use double quotes and produce owned UTF-8 `String` values. A
 backslash protects the following quote from ending the string. Supported
-escapes are `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, and `\\"`.
+escapes are `\\n`, `\\r`, `\\t`, `\\0`, `\\\\`, `\\"`, and `\\$`.
+
+An unescaped dollar sign introduces interpolation. `$name` displays a single
+identifier, while `${expression}` displays any expression. Appending `:?`
+before the closing brace selects developer-facing `Debug` formatting instead:
+
+```staple
+let name = "Ada"
+let point = (x: 3, y: 4)
+let message = "hello $name; point = ${point:?}; total = ${1 + 2}; \$5"
+```
+
+Interpolations are evaluated exactly once, from left to right. Ordinary
+interpolation requires the value's type to implement `Display`; `:?` requires
+`Debug`. A literal dollar sign must be written `\$`. Interpolation is an
+expression feature and is rejected where the grammar requires a literal
+string, such as string-literal types and patterns.
 
 The primitive `c_string` macro from `std.cinterop` accepts only a string literal
 and produces an owned `CString` backed by allocated NUL-terminated storage:

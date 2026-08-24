@@ -283,6 +283,14 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 true
             }
+            Expression::StringTemplate(template) => {
+                for part in &template.parts {
+                    if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                        self.check_expression(&interpolation.expression, true);
+                    }
+                }
+                true
+            }
             Expression::SyntaxArgument(_)
             | Expression::VisibilityArgument(_)
             | Expression::Quote(_)

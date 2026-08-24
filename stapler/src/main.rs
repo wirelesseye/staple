@@ -1853,6 +1853,50 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_string_templates_end_to_end() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-string-template-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-string-template-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let name: String = \"wörld\"\n",
+                "let answer: I32 = 42\n",
+                "let pair = (answer, name)\n",
+                "let rendered = \"hello $name: ${answer}; ${pair:?}; \\$5\"\n",
+                "let status = match rendered {\n",
+                "  \"hello wörld: 42; (42, \\\"wörld\\\"); \\$5\" => 0,\n",
+                "  _ => 1,\n",
+                "}\n",
+                "exit status\n",
+            ),
+        )
+        .expect("temporary string-template source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("string-template executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("string-template executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "string-template executable returned {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn concatenates_strings_with_add() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

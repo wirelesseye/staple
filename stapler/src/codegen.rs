@@ -2734,6 +2734,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.build_string_value(pointer, length, string.syntax.span.clone())
                     .map(|value| value.as_any_value_enum())
             }
+            Expression::StringTemplate(template) => {
+                self.compile_string_template(environment, template)
+            }
             Expression::CString(string) => self.compile_c_string_literal(string),
             Expression::SyntaxArgument(argument) => Err(Diagnostic::new(
                 argument.syntax.span.clone(),
@@ -3005,6 +3008,148 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )
             .map_err(compiler_diagnostic)?;
         Ok(())
+    }
+
+    fn compile_string_template(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        template: &crate::StringTemplateExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let new_id = self.standard_function_named("formatter_new", template.syntax.span.clone())?;
+        let new_type = self.typed_module.type_of_function(new_id).cloned().ok_or_else(|| {
+            Diagnostic::new(template.syntax.span.clone(), "Formatter.new has no checked type")
+        })?;
+        let new = self.ensure_function_specialization(new_id, &new_type)?;
+        let formatter = self
+            .builder
+            .build_direct_call(
+                new,
+                &[self.context.ptr_type(AddressSpace::default()).const_null().into()],
+                "template.formatter",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic();
+        let storage = self
+            .builder
+            .build_alloca(formatter.get_type(), "template.formatter.storage")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(storage, formatter)
+            .map_err(compiler_diagnostic)?;
+        for part in &template.parts {
+            match part {
+                crate::StringTemplatePart::Literal(literal) => {
+                    self.compile_formatter_write_literal(
+                        storage.into(),
+                        literal,
+                        template.syntax.span.clone(),
+                    )?;
+                }
+                crate::StringTemplatePart::Interpolation(interpolation) => {
+                    let value = self.compile_expression(environment, &interpolation.expression)?;
+                    if environment.did_return {
+                        return Ok(self.unit_value());
+                    }
+                    let value_type = self
+                        .concrete_expression_type(&interpolation.expression)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                interpolation.expression.syntax().span.clone(),
+                                "interpolation has no concrete type",
+                            )
+                        })?;
+                    let trait_name = match interpolation.format {
+                        crate::StringInterpolationFormat::Display => "Display",
+                        crate::StringInterpolationFormat::Debug => "Debug",
+                    };
+                    let trait_id = self
+                        .typed_module
+                        .resolved()
+                        .standard_trait(trait_name)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                template.syntax.span.clone(),
+                                "formatting trait is unavailable",
+                            )
+                        })?;
+                    let method = self.typed_module.resolved().traits()[&trait_id].methods[0];
+                    let function = self.trait_method_code(
+                        trait_id,
+                        std::slice::from_ref(&value_type),
+                        method,
+                        interpolation.expression.syntax().span.clone(),
+                    )?;
+                    let value = value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(
+                            interpolation.expression.syntax().span.clone(),
+                            "interpolation value has no runtime representation",
+                        )
+                    })?;
+                    self.builder
+                        .build_direct_call(
+                            function,
+                            &[
+                                self.context
+                                    .ptr_type(AddressSpace::default())
+                                    .const_null()
+                                    .into(),
+                                value.into(),
+                                storage.into(),
+                            ],
+                            "template.fmt",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                }
+            }
+        }
+        let finish_id =
+            self.standard_function_named("formatter_finish", template.syntax.span.clone())?;
+        let finish_type = self.typed_module.type_of_function(finish_id).cloned().ok_or_else(|| {
+            Diagnostic::new(template.syntax.span.clone(), "Formatter.finish has no checked type")
+        })?;
+        let finish = self.ensure_function_specialization(finish_id, &finish_type)?;
+        let formatter = self
+            .builder
+            .build_load(
+                formatter.get_type(),
+                storage,
+                "template.finished.formatter",
+            )
+            .map_err(compiler_diagnostic)?;
+        Ok(self
+            .builder
+            .build_direct_call(
+                finish,
+                &[
+                    self.context
+                        .ptr_type(AddressSpace::default())
+                        .const_null()
+                        .into(),
+                    formatter.into(),
+                ],
+                "template.finish",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .as_any_value_enum())
+    }
+
+    fn standard_function_named(
+        &self,
+        name: &str,
+        span: Span,
+    ) -> CodeGenerationResult<crate::FunctionId> {
+        self.typed_module
+            .resolved()
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .map(|function| function.id)
+            .ok_or_else(|| {
+                Diagnostic::new(span, format!("standard function `{name}` is unavailable"))
+            })
     }
 
     fn compile_structural_index_body(

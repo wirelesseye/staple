@@ -231,6 +231,13 @@ impl DeclarationCollector<'_> {
                     self.expression(&element.value);
                 }
             }
+            Expression::StringTemplate(value) => {
+                for part in &value.parts {
+                    if let StringTemplatePart::Interpolation(value) = part {
+                        self.expression(&value.expression);
+                    }
+                }
+            }
             Expression::Call(value) => {
                 self.expression(&value.callee);
                 self.expression(&value.argument);
@@ -625,6 +632,13 @@ impl Collector<'_> {
             Expression::Product(value) => {
                 for element in &value.elements {
                     self.expression(&element.value);
+                }
+            }
+            Expression::StringTemplate(value) => {
+                for part in &value.parts {
+                    if let StringTemplatePart::Interpolation(value) = part {
+                        self.expression(&value.expression);
+                    }
                 }
             }
             Expression::Call(value) => {
