@@ -666,6 +666,60 @@ impl Collector<'_> {
         ))
     }
 
+    /// Hovers over the namespace/type segments of a resolved qualified
+    /// access chain's receiver, e.g. `std` and `io` in `std.io.println`, or
+    /// `List` in `List.push` (a companion access: hovers as the owning
+    /// type, not the companion submodule).
+    fn qualified_receiver(&mut self, expression: &Expression) {
+        let resolved = self.typed.resolved();
+        match expression {
+            Expression::Name(name) => {
+                if let Some(module) = resolved.namespace_for(name.syntax.id) {
+                    self.namespace_segment(&name.syntax, &name.name, module);
+                }
+            }
+            Expression::Access(access) => {
+                self.qualified_receiver(&access.value);
+                if let Accessor::Name(member) = &access.accessor
+                    && let Some(module) = resolved.namespace_for(access.syntax.id)
+                {
+                    self.namespace_segment(&access.syntax, member, module);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn namespace_segment(&mut self, syntax: &Syntax, name: &str, module: ModuleId) {
+        let resolved = self.typed.resolved();
+        if let Some(ty) = resolved.companion_type_for_module(module) {
+            if let Some(signature) = self.type_signature(ty, syntax.id) {
+                let docs = resolved
+                    .type_declarations()
+                    .get(&ty)
+                    .map(|declaration| declaration.docs.clone())
+                    .unwrap_or_default();
+                self.named_last_with_docs(syntax, name, signature, docs);
+            }
+            return;
+        }
+        let docs = resolved
+            .program()
+            .modules()
+            .iter()
+            .flat_map(|source| &source.syntax.items)
+            .find_map(|item| match item {
+                Item::Submodule(submodule)
+                    if resolved.program().child_module(submodule.syntax.id) == Some(module) =>
+                {
+                    Some(submodule.docs.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default();
+        self.named_last_with_docs(syntax, name, format!("mod {name}"), docs);
+    }
+
     fn block_item(&mut self, item: &Item) {
         match item {
             Item::Binding(binding) => self.binding(binding),
@@ -920,6 +974,15 @@ impl Collector<'_> {
                     && let Some(value_type) = self.typed.type_of_expression(access.syntax.id)
                 {
                     self.named_last(&access.syntax, name, self.display_type(value_type));
+                } else if self.typed.resolved().symbol_for(access.syntax.id).is_some() {
+                    // A resolved qualified path (namespace member or type
+                    // companion member): the receiver never gets a checked
+                    // type of its own (typechecking returns early once the
+                    // whole chain resolves), so give it a dedicated hover
+                    // entry instead of falling through to the generic
+                    // type-of-expression path above, which only covers the
+                    // outermost node.
+                    self.qualified_receiver(&access.value);
                 } else {
                     self.expression(&access.value);
                 }
@@ -1257,6 +1320,37 @@ mod tests {
                 .all(|entry| entry.signature == "let signal count: I32"),
             "entries: {references:?}"
         );
+    }
+
+    #[test]
+    fn qualified_companion_access_hovers_the_owning_type() {
+        let source = concat!(
+            "///A boxed integer.\n",
+            "type Box = I32\n",
+            "companion Box {\n",
+            "    pub def create = () => 1\n",
+            "}\n",
+            "let value = Box.create\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-companion-access.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let use_site = source.rfind("Box.create").unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.range.start == use_site && &source[entry.range.clone()] == "Box")
+            .unwrap_or_else(|| {
+                panic!("no hover entry for the qualified `Box` reference: {entries:?}")
+            });
+        assert_eq!(entry.signature, "type Box = I32");
+        assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
     }
 
     #[test]

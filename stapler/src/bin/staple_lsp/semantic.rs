@@ -659,6 +659,23 @@ impl<'a> Classifier<'a> {
                 }
                 if let Accessor::Method(name) = &value.accessor {
                     self.mark_last(&value.syntax, name, FUNCTION, READONLY, 1);
+                } else if let Some(symbol) =
+                    resolved.and_then(|module| module.symbol_for(value.syntax.id))
+                {
+                    // A qualified path (namespace member or type companion
+                    // member) rather than ordinary product/field access:
+                    // classify the receiver chain (namespace/type segments)
+                    // and the accessed member by what it actually resolved
+                    // to, instead of painting everything as PROPERTY.
+                    self.qualified_receiver(&value.value, resolved);
+                    if let Accessor::Name(name) = &value.accessor {
+                        let kind = self
+                            .symbols
+                            .get(&symbol)
+                            .copied()
+                            .unwrap_or_else(|| self.value_symbol_kind(symbol));
+                        self.mark_last(&value.syntax, name, kind, READONLY, 2);
+                    }
                 } else {
                     self.expression_with_mod(&value.value, resolved, modifiers);
                     if let Accessor::Name(name) = &value.accessor {
@@ -913,6 +930,47 @@ impl<'a> Classifier<'a> {
         // References are classified during the recursive pass after declaration
         // symbols have been collected from source order. Forward global symbols
         // retain the syntax-aware fallback category in this first implementation.
+    }
+
+    /// Classifies the namespace/type segments of a resolved qualified
+    /// access chain's receiver, e.g. `std` and `io` in `std.io.println`, or
+    /// `List` in `List.push` (a companion access, classified as TYPE rather
+    /// than NAMESPACE). Not every segment of a chain is backed by its own
+    /// module (e.g. `std` is a virtual root with no module of its own), so
+    /// segments without resolution info fall back to the ordinary
+    /// expression walk instead of being left unclassified.
+    fn qualified_receiver(&mut self, expression: &Expression, resolved: Option<&ResolvedModule>) {
+        let Some(resolved) = resolved else { return };
+        match expression {
+            Expression::Name(name) => match resolved.namespace_for(name.syntax.id) {
+                Some(module) => {
+                    let kind = if resolved.companion_type_for_module(module).is_some() {
+                        TYPE
+                    } else {
+                        NAMESPACE
+                    };
+                    self.mark_last(&name.syntax, &name.name, kind, READONLY, 2);
+                }
+                None => self.expression(expression, Some(resolved)),
+            },
+            Expression::Access(access) => {
+                self.qualified_receiver(&access.value, Some(resolved));
+                if let Accessor::Name(name) = &access.accessor {
+                    match resolved.namespace_for(access.syntax.id) {
+                        Some(module) => {
+                            let kind = if resolved.companion_type_for_module(module).is_some() {
+                                TYPE
+                            } else {
+                                NAMESPACE
+                            };
+                            self.mark_last(&access.syntax, name, kind, READONLY, 2);
+                        }
+                        None => self.mark_last(&access.syntax, name, PROPERTY, 0, 1),
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn mark_first(&mut self, syntax: &Syntax, name: &str, kind: u32, modifiers: u32, priority: u8) {
@@ -1599,6 +1657,78 @@ mod tests {
             labels.contains(&("doubled", VARIABLE)),
             "labels: {labels:?}"
         );
+    }
+
+    #[test]
+    fn classifies_companion_qualified_access() {
+        let source = concat!(
+            "type Box = I32\n",
+            "companion Box {\n",
+            "    pub def create = () => 1\n",
+            "}\n",
+            "let value = Box.create\n",
+        );
+        let path = std::env::temp_dir().join("staple-semantic-companion-access.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let classified = entries(source, Some(&module), Some(typed.resolved()), Some(&typed));
+
+        let box_start = source.rfind("Box.create").unwrap();
+        let create_start = box_start + "Box.".len();
+        assert_eq!(
+            classified
+                .iter()
+                .find(|entry| entry.start == box_start)
+                .map(|entry| entry.token_type),
+            Some(TYPE),
+            "entries: {classified:?}"
+        );
+        assert_eq!(
+            classified
+                .iter()
+                .find(|entry| entry.start == create_start)
+                .map(|entry| entry.token_type),
+            Some(FUNCTION),
+            "entries: {classified:?}"
+        );
+    }
+
+    #[test]
+    fn classifies_namespace_qualified_access() {
+        // `println`, the final segment, is resolved directly; `io`, the
+        // module it lives in, is the deepest namespace segment and always
+        // gets resolution info. `std` itself is a virtual root with no
+        // backing module of its own, so it isn't (and can't be) reclassified
+        // — it keeps falling back to ordinary name classification.
+        let source = "let f = std.io.println\n";
+        let path = std::env::temp_dir().join("staple-semantic-namespace-access.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let classified = entries(source, Some(&module), Some(typed.resolved()), Some(&typed));
+
+        let io_start = source.find(".io").unwrap() + 1;
+        let println_start = source.find("println").unwrap();
+
+        for (start, expected) in [(io_start, NAMESPACE), (println_start, FUNCTION)] {
+            assert_eq!(
+                classified
+                    .iter()
+                    .find(|entry| entry.start == start)
+                    .map(|entry| entry.token_type),
+                Some(expected),
+                "entries: {classified:?}"
+            );
+        }
     }
 
     fn labels<'a>(source: &'a str, tokens: &[SemanticToken]) -> Vec<(&'a str, u32)> {

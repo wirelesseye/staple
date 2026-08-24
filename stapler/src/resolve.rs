@@ -315,6 +315,7 @@ pub struct ResolvedModule {
     program: Program,
     functions: Vec<ResolvedFunction>,
     symbols: HashMap<SyntaxId, SymbolId>,
+    namespace_references: HashMap<SyntaxId, ModuleId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     named_types: HashMap<SyntaxId, TypeId>,
     nominal_patterns: HashMap<SyntaxId, TypeId>,
@@ -358,6 +359,7 @@ pub struct ResolvedModule {
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
     compile_time_bindings: HashMap<SyntaxId, CompileTimeBindingInfo>,
     companion_members: HashMap<TypeId, HashMap<String, ResolvedCompanionMember>>,
+    companion_type_for_module: HashMap<ModuleId, TypeId>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -382,6 +384,20 @@ impl ResolvedModule {
 
     pub fn symbol_for(&self, syntax_id: SyntaxId) -> Option<SymbolId> {
         self.symbols.get(&syntax_id).copied()
+    }
+
+    /// The module a segment of a qualified access chain refers to, e.g. the
+    /// `std`/`io` segments of `std.io.println` or the `List` segment of
+    /// `List.push` (where `List`'s companion block is registered as a
+    /// module). Populated only for segments that are part of a chain that
+    /// resolved as a qualified path, not for ordinary field access.
+    pub fn namespace_for(&self, syntax_id: SyntaxId) -> Option<ModuleId> {
+        self.namespace_references.get(&syntax_id).copied()
+    }
+
+    /// The type whose `companion { ... }` block a given module is, if any.
+    pub fn companion_type_for_module(&self, module: ModuleId) -> Option<TypeId> {
+        self.companion_type_for_module.get(&module).copied()
     }
 
     pub fn macro_definition_for(&self, syntax_id: SyntaxId) -> Option<&ResolvedMacro> {
@@ -859,6 +875,7 @@ pub struct NameResolver {
     prelude_traits: HashMap<String, TraitId>,
     prelude_namespaces: HashMap<String, ModuleId>,
     symbols: HashMap<SyntaxId, SymbolId>,
+    namespace_references: HashMap<SyntaxId, ModuleId>,
     function_expressions: HashMap<SyntaxId, FunctionId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     function_parents: HashMap<FunctionId, Option<FunctionId>>,
@@ -1109,6 +1126,7 @@ impl NameResolver {
                     .map(DefinitionId::Type);
             }
         }
+        let mut companion_type_for_module = HashMap::new();
         let companion_members = self
             .type_modules
             .iter()
@@ -1116,6 +1134,7 @@ impl NameResolver {
                 let name = &self.type_declarations[ty].name;
                 let child = program.child_named(*owner, name)?;
                 program.module(child).companion.then(|| {
+                    companion_type_for_module.insert(child, *ty);
                     let members = self.module_values[child.0]
                         .iter()
                         .map(|(name, symbol)| {
@@ -1137,6 +1156,7 @@ impl NameResolver {
             program,
             functions: self.functions,
             symbols: self.symbols,
+            namespace_references: self.namespace_references,
             function_expressions: self.function_expressions,
             named_types: self.named_types,
             nominal_patterns: self.nominal_patterns,
@@ -1180,6 +1200,7 @@ impl NameResolver {
             visible_module_definitions: self.visible_module_definitions,
             compile_time_bindings,
             companion_members,
+            companion_type_for_module,
         };
         let analysis = InitializationAnalyzer::new(&resolved).analyze();
         if !analysis.diagnostics.is_empty() {
@@ -3347,7 +3368,7 @@ impl NameResolver {
                     if let Expression::Name(trait_name) = value.value.as_ref() {
                         self.trait_references.insert(trait_name.syntax.id, trait_id);
                     }
-                } else if let Some((namespace, item, definition_module)) =
+                } else if let Some((namespace, item, definition_module, _)) =
                     qualified_access_path(value)
                     && let Some(module) = definition_module
                         .map(ModuleId)
@@ -3780,7 +3801,7 @@ impl NameResolver {
                             format!("trait has no member named `{member_name}`"),
                         ));
                     }
-                } else if let Some((namespace, item, definition_module)) =
+                } else if let Some((namespace, item, definition_module, segments)) =
                     qualified_access_path(access)
                     && let Some(module) = definition_module
                         .and_then(|context| {
@@ -3791,6 +3812,22 @@ impl NameResolver {
                         })
                         .or_else(|| self.lookup_namespace(&namespace))
                 {
+                    // `module` is the namespace the full chain resolved to
+                    // (e.g. the `io` module for `std.io`). Walk each shorter
+                    // prefix's node (`std`) back up the module tree via its
+                    // parent, rather than re-resolving the dotted string:
+                    // not every intermediate prefix is registered as its
+                    // own lookup-able namespace (only the longest bare
+                    // `std.foo.bar`-style reference typically is), but the
+                    // module tree itself always has the right ancestor.
+                    let mut segment_module = Some(module);
+                    for syntax_id in segments.iter().rev() {
+                        let Some(current) = segment_module else {
+                            break;
+                        };
+                        self.namespace_references.insert(*syntax_id, current);
+                        segment_module = self.module_parents.get(&current).copied();
+                    }
                     if let Some(symbol) = self.interfaces[module.0].values.get(&item).copied() {
                         self.symbols.insert(access.syntax.id, symbol);
                     } else if self.interfaces[module.0].macros.contains_key(&item) {
@@ -4060,7 +4097,7 @@ impl NameResolver {
                 })
                 .or_else(|| self.prelude_traits.get(&name.name).copied()),
             Expression::Access(access) => {
-                let (namespace, name, _) = qualified_access_path(access)?;
+                let (namespace, name, _, _) = qualified_access_path(access)?;
                 self.lookup_namespace(&namespace)
                     .as_ref()
                     .and_then(|module| self.interfaces[module.0].traits.get(&name))
@@ -4538,7 +4575,7 @@ impl NameResolver {
         let ids = match callee {
             Expression::Name(name) => self.lookup_macro(&name.name),
             Expression::Access(access) => {
-                let (namespace, item, definition_module) = qualified_access_path(access)?;
+                let (namespace, item, definition_module, _) = qualified_access_path(access)?;
                 definition_module
                     .and_then(|context| {
                         self.definition_context_namespaces
@@ -5581,21 +5618,33 @@ fn find_block_type_declarations_in_block<'a>(
     }
 }
 
+/// Syntax ids of the `Name`/`Access` nodes making up the namespace portion
+/// of a qualified access chain, in outermost-first order (e.g. for
+/// `std.io.println`, the id of the `std` name node then the id of the
+/// `std.io` access node).
+type QualifiedAccessSegments = Vec<SyntaxId>;
+
 fn qualified_access_path(
     access: &crate::AccessExpression,
-) -> Option<(String, String, Option<usize>)> {
-    fn collect(expression: &Expression, parts: &mut Vec<String>) -> Option<Option<usize>> {
+) -> Option<(String, String, Option<usize>, QualifiedAccessSegments)> {
+    fn collect(
+        expression: &Expression,
+        parts: &mut Vec<String>,
+        segments: &mut QualifiedAccessSegments,
+    ) -> Option<Option<usize>> {
         match expression {
             Expression::Name(name) => {
                 parts.push(name.name.clone());
+                segments.push(name.syntax.id);
                 Some(name.syntax.definition_module())
             }
             Expression::Access(access) => {
-                let definition_module = collect(&access.value, parts)?;
+                let definition_module = collect(&access.value, parts, segments)?;
                 let Accessor::Name(name) = &access.accessor else {
                     return None;
                 };
                 parts.push(name.clone());
+                segments.push(access.syntax.id);
                 Some(definition_module)
             }
             _ => None,
@@ -5603,13 +5652,14 @@ fn qualified_access_path(
     }
 
     let mut parts = Vec::new();
-    let definition_module = collect(&access.value, &mut parts)?;
+    let mut segments = Vec::new();
+    let definition_module = collect(&access.value, &mut parts, &mut segments)?;
     let Accessor::Name(item) = &access.accessor else {
         return None;
     };
     parts.push(item.clone());
     let item = parts.pop()?;
-    (!parts.is_empty()).then(|| (parts.join("."), item, definition_module))
+    (!parts.is_empty()).then(|| (parts.join("."), item, definition_module, segments))
 }
 
 fn mangle_function_name(name: &str) -> String {

@@ -648,19 +648,7 @@ impl Collector<'_> {
                 if let Accessor::Name(name) | Accessor::Method(name) = &value.accessor {
                     let definitions = self.definitions_for(value.syntax.id);
                     self.add(&value.syntax, name, &definitions, true);
-                    if matches!(value.accessor, Accessor::Name(_))
-                        && let Expression::Name(namespace) = value.value.as_ref()
-                        && let Some(module) = definitions
-                            .iter()
-                            .find_map(|definition| self.resolved.definition_module(*definition))
-                    {
-                        self.add(
-                            &namespace.syntax,
-                            &namespace.name,
-                            &[DefinitionId::Module(module)],
-                            false,
-                        );
-                    }
+                    self.qualified_receiver(&value.value);
                 } else {
                     self.expression(&value.value);
                 }
@@ -788,6 +776,45 @@ impl Collector<'_> {
         }
     }
 
+    /// Adds go-to-definition entries for the namespace/type segments of a
+    /// resolved qualified access chain's receiver, e.g. `std` and `io` in
+    /// `std.io.println`, or `List` in `List.push` (which points at the type
+    /// declaration rather than the companion submodule). Segments that
+    /// aren't part of a resolved qualified path (e.g. ordinary field
+    /// access) fall back to the regular expression walk so nested content
+    /// is still visited.
+    fn qualified_receiver(&mut self, expression: &Expression) {
+        match expression {
+            Expression::Name(name) => {
+                if let Some(module) = self.resolved.namespace_for(name.syntax.id) {
+                    let definitions = self.namespace_definitions(module);
+                    self.add(&name.syntax, &name.name, &definitions, false);
+                } else {
+                    self.expression(expression);
+                }
+            }
+            Expression::Access(access) => {
+                if let Accessor::Name(member) = &access.accessor
+                    && let Some(module) = self.resolved.namespace_for(access.syntax.id)
+                {
+                    self.qualified_receiver(&access.value);
+                    let definitions = self.namespace_definitions(module);
+                    self.add(&access.syntax, member, &definitions, false);
+                } else {
+                    self.expression(expression);
+                }
+            }
+            _ => self.expression(expression),
+        }
+    }
+
+    fn namespace_definitions(&self, module: ModuleId) -> Vec<DefinitionId> {
+        match self.resolved.companion_type_for_module(module) {
+            Some(ty) => vec![DefinitionId::Type(ty)],
+            None => vec![DefinitionId::Module(module)],
+        }
+    }
+
     fn add_resolved(&mut self, syntax: &Syntax, name: &str, last: bool) {
         let definitions = self.definitions_for(syntax.id);
         self.add(syntax, name, &definitions, last);
@@ -894,6 +921,51 @@ mod tests {
         assert_target(source, &entries, "identity", "identity");
         assert_target(source, &entries, "value", "value");
         assert_target(source, &entries, "first", "first");
+    }
+
+    #[test]
+    fn qualified_companion_access_targets_the_type_declaration() {
+        let source = concat!(
+            "type Box = I32\n",
+            "companion Box {\n",
+            "    pub def create = () => 1\n",
+            "}\n",
+            "let value = Box.create\n",
+        );
+        let path = std::env::temp_dir().join("staple-definition-companion-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, typed.resolved(), Some(&typed));
+
+        let type_declaration_offset = source.find("type Box").unwrap() + "type ".len();
+        let companion_header_offset = source.find("companion Box").unwrap() + "companion ".len();
+        assert_ne!(type_declaration_offset, companion_header_offset);
+
+        let use_site = source.rfind("Box.create").unwrap();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.range.start == use_site && &source[entry.range.clone()] == "Box")
+            .unwrap_or_else(|| panic!("no definition entry for the qualified `Box`: {entries:?}"));
+
+        assert!(
+            entry
+                .targets
+                .iter()
+                .any(|target| target.selection_range.start == type_declaration_offset),
+            "expected Box.create's `Box` to resolve to the type declaration: {entry:?}"
+        );
+        assert!(
+            entry
+                .targets
+                .iter()
+                .all(|target| target.selection_range.start != companion_header_offset),
+            "Box.create's `Box` should not resolve to the companion block header: {entry:?}"
+        );
     }
 
     #[test]
