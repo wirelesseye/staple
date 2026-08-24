@@ -1,0 +1,22 @@
+// Signals are writable reactive sources. Immutable bindings derived from
+// signals stay reactive automatically and cache their value between reads.
+use std.io.println
+
+let signal count = 0
+let doubled = count * 2
+let initial = snapshot count
+
+// Reactions run immediately, then synchronously after a dependency changes.
+// The Reactive resource owns the reaction for the lifetime of this block.
+with Reactive = reactive_scope () {
+    reaction {
+        println "count: $count, doubled: $doubled"
+    }
+
+    count = 1
+    count = 2
+}
+
+// The reaction has been disposed, so this update produces no reaction output.
+count = 3
+println "initial snapshot: $initial, current count: $count"
