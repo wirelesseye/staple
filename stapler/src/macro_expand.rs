@@ -3065,7 +3065,7 @@ impl MacroExpander {
                         self.diagnostics.push(Diagnostic::new(
                             satisfies.ty.syntax().span.clone(),
                             format!(
-                                "{} does not satisfy `ParseQuoteResult`",
+                                "{} is not a supported `parse_quote` context",
                                 format_meta_type(&expected)
                             ),
                         ));
@@ -3518,7 +3518,7 @@ impl MacroExpander {
                                     self.diagnostics.push(Diagnostic::new(
                                         binding.syntax.span.clone(),
                                         format!(
-                                            "{} does not satisfy `ParseQuoteResult`",
+                                            "{} is not a supported `parse_quote` context",
                                             format_meta_type(&expected)
                                         ),
                                     ));
@@ -6490,9 +6490,10 @@ fn invalid_raw_syntax_shape(meta: &MetaType) -> bool {
     }
 }
 
-/// Types a `parse_quote` result may satisfy `ParseQuoteResult` as. Excludes
-/// `Syntax`: an opaque, unparsed fragment is `quote`'s result, not a
-/// syntax node `parse_quote` can produce.
+/// Contextual syntax types that `parse_quote` can use to interpret its input.
+/// This is independent of the intrinsic macro's declared `Syntax` output.
+/// Excludes `Syntax`: an opaque, unparsed fragment is `quote`'s result, not a
+/// syntax node `parse_quote` can construct contextually.
 fn quote_result_type(meta: &MetaType) -> bool {
     match meta {
         MetaType::SyntaxNode

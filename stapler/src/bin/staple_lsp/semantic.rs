@@ -1299,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_macro_declaration_generics() {
+    fn classifies_quotation_macro_declarations() {
         let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
         let path = stdlib_root.join("std").join("syntax.sta");
         let source = std::fs::read_to_string(&path).unwrap();
@@ -1317,22 +1317,6 @@ mod tests {
 
         assert!(labels.contains(&("parse_quote", MACRO)), "labels: {labels:?}");
         assert!(labels.contains(&("quote", MACRO)), "labels: {labels:?}");
-        assert!(
-            labels
-                .iter()
-                .filter(|token| **token == ("T", TYPE_PARAMETER))
-                .count()
-                >= 3,
-            "labels: {labels:?}"
-        );
-        assert!(
-            labels
-                .iter()
-                .filter(|token| **token == ("ParseQuoteResult", INTERFACE))
-                .count()
-                >= 2,
-            "labels: {labels:?}"
-        );
     }
 
     #[test]

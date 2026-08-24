@@ -1115,7 +1115,6 @@ pub struct TypeChecker {
     string_representation: Option<CheckedType>,
     copy_trait: Option<TraitId>,
     sized_trait: Option<TraitId>,
-    quote_result_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
     debug_trait: Option<TraitId>,
@@ -1196,7 +1195,6 @@ impl TypeChecker {
             .copied();
         self.copy_trait = module.standard_trait("Copy");
         self.sized_trait = module.standard_trait("Sized");
-        self.quote_result_trait = module.standard_trait("ParseQuoteResult");
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
         self.debug_trait = module.standard_trait("Debug");
@@ -1350,20 +1348,6 @@ impl TypeChecker {
             _ => self.diagnostics.push(Diagnostic::new(
                 Span::Compiler,
                 "standard library must declare public empty trait `Copy`",
-            )),
-        }
-        match self
-            .quote_result_trait
-            .and_then(|id| module.traits().get(&id))
-        {
-            Some(quote_result)
-                if quote_result.declaration.visibility == crate::Visibility::Public
-                    && quote_result.declaration.type_parameters.len() == 1
-                    && quote_result.parameters.len() == 1
-                    && quote_result.declaration.members.is_empty() => {}
-            _ => self.diagnostics.push(Diagnostic::new(
-                Span::Compiler,
-                "standard library must declare public empty trait `ParseQuoteResult`",
             )),
         }
         match self.drop_trait.and_then(|id| module.traits().get(&id)) {
@@ -1546,13 +1530,6 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     "`Copy` is implemented structurally and cannot be implemented explicitly",
-                ));
-                continue;
-            }
-            if Some(implementation.trait_id) == self.quote_result_trait {
-                self.diagnostics.push(Diagnostic::new(
-                    span,
-                    "`ParseQuoteResult` is compiler-defined and cannot be implemented explicitly",
                 ));
                 continue;
             }

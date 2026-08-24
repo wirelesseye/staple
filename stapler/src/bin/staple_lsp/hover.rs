@@ -1379,7 +1379,7 @@ mod tests {
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
         assert!(signatures.contains(&(
             "parse_quote",
-            "macro parse_quote: <T where ParseQuoteResult T> Braced Syntax -> T"
+            "macro parse_quote: Braced Syntax -> Syntax"
         )));
         assert!(
             signatures
@@ -1394,7 +1394,7 @@ mod tests {
     }
 
     #[test]
-    fn indexes_macro_declaration_generics() {
+    fn indexes_quotation_macro_declarations() {
         let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
         let path = stdlib_root.join("std").join("syntax.sta");
         let source = std::fs::read_to_string(&path).unwrap();
@@ -1411,14 +1411,6 @@ mod tests {
             .map(|entry| (&source[entry.range.clone()], entry.signature.as_str()))
             .collect::<Vec<_>>();
 
-        assert!(
-            signatures
-                .iter()
-                .filter(|signature| **signature == ("T", "<type parameter> T"))
-                .count()
-                >= 3,
-            "signatures: {signatures:?}"
-        );
         assert!(
             signatures
                 .iter()

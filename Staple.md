@@ -206,21 +206,25 @@ contracts are:
 
 ```staple
 pub macro quote: Braced Syntax -> Syntax
-pub macro parse_quote: <T where ParseQuoteResult T> Braced Syntax -> T
+pub macro parse_quote: Braced Syntax -> Syntax
 ```
 
-`ParseQuoteResult` is a sealed compiler capability implemented only for
-`SyntaxNode`, `Expr`, `Type`, `Pattern`, `Item`, `Sequence Item`, `Comma`,
-`Equals`, `FatArrow`, `Visibility`, and the three delimited syntax types
-(`Parenthesized`, `Bracketed`, `Braced`) with any of their supported content
-shapes — never for `Syntax`, which is `quote`'s own always-opaque result, not
-a syntax node `parse_quote` can produce.
+These signatures describe the syntax emitted by the intrinsic macros, not the
+type of the compile-time syntax value that the emitted expression constructs.
+
+`parse_quote` uses its contextual type to choose the kind of syntax value its
+emitted expression constructs. Supported contexts are `SyntaxNode`, `Expr`,
+`Type`, `Pattern`, `Item`, `Sequence Item`, `Comma`, `Equals`, `FatArrow`,
+`Visibility`, and the three delimited syntax types (`Parenthesized`,
+`Bracketed`, `Braced`) with any of their supported content shapes — never
+`Syntax`, which is `quote`'s own always-opaque value, not a structured syntax
+node `parse_quote` can construct contextually.
 `SyntaxNode` requires exactly one shortest
 structural node. The grammatical categories parse the complete fragment in
 their respective contexts, while `Sequence Item` parses zero or more complete
 items in source order. Annotations, `satisfies`, declared helper or macro
 result types, and other typed compile-time boundaries provide `parse_quote`'s
-contextual result type; requesting `Syntax` through any of them is rejected. A
+contextual construction type; requesting `Syntax` through any of them is rejected. A
 `parse_quote` reached with no contextual type at all — for example inside an
 untyped compile-time helper — is rejected the same way. This contextual
 selection is specific to `parse_quote`: wrapping a `quote` fragment in
@@ -477,7 +481,7 @@ expression forms remain future work.
 
 Compiler-provided macros use typed bodyless contracts. `std.syntax` declares
 `pub macro quote: Braced Syntax -> Syntax` and
-`pub macro parse_quote: <T where ParseQuoteResult T> Braced Syntax -> T`, and
+`pub macro parse_quote: Braced Syntax -> Syntax`, and
 `std.cinterop` declares `pub macro c_string: Expr -> Expr`. Neither module is
 re-exported by `std.core`; their APIs require explicit imports.
 

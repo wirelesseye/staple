@@ -74,7 +74,6 @@ fn with_syntax_imports(source: &str) -> String {
             "Visibility",
             source.contains(": Visibility") || source.contains("-> Visibility"),
         ),
-        ("ParseQuoteResult", source.contains("ParseQuoteResult")),
     ] {
         if used && !names.contains(&name) {
             names.push(name);
@@ -3098,10 +3097,10 @@ fn bare_ident_and_explicit_ident_string_are_the_same_type() {
         .expect("unsupported contextual quote source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("narrow syntax nodes are not direct ParseQuoteResult targets");
+        .expect_err("narrow syntax nodes are not supported parse_quote contexts");
     assert!(
         diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "Ident String does not satisfy `ParseQuoteResult`"
+            diagnostic.message == "Ident String is not a supported `parse_quote` context"
         })
     );
 }
@@ -4268,7 +4267,7 @@ fn quote_result_excludes_syntax_which_remains_quotes_alone() {
         assert!(
             diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message == "Syntax does not satisfy `ParseQuoteResult`"),
+                .any(|diagnostic| diagnostic.message == "Syntax is not a supported `parse_quote` context"),
             "{diagnostics:#?}",
         );
     }
@@ -4400,17 +4399,8 @@ fn contextual_item_sequence_quotes_flatten_empty_single_and_multiple_results() {
 }
 
 #[test]
-fn quote_result_is_sealed_and_generic_user_macros_are_rejected() {
+fn generic_user_macros_and_unsupported_parse_quote_contexts_are_rejected() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let module = resolve("impl ParseQuoteResult I32 {}\n");
-    let diagnostics = TypeChecker::new()
-        .check(module)
-        .expect_err("ParseQuoteResult must remain sealed");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message
-            == "`ParseQuoteResult` is compiler-defined and cannot be implemented explicitly"
-    }));
-
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("macro generic: <T> Expr -> T = value => value\n", root)
@@ -4437,10 +4427,10 @@ fn quote_result_is_sealed_and_generic_user_macros_are_rejected() {
         .expect("unsupported contextual quote source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("narrow syntax nodes are not direct ParseQuoteResult targets");
+        .expect_err("narrow syntax nodes are not supported parse_quote contexts");
     assert!(
         diagnostics.iter().any(|diagnostic| {
-            diagnostic.message == "Ident String does not satisfy `ParseQuoteResult`"
+            diagnostic.message == "Ident String is not a supported `parse_quote` context"
         })
     );
 }
