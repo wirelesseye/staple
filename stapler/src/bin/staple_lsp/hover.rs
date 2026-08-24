@@ -35,7 +35,7 @@ struct Collector<'a> {
 
 #[derive(Clone)]
 struct Declaration {
-    prefix: Option<&'static str>,
+    prefix: Option<String>,
     name: String,
     docs: Vec<String>,
 }
@@ -151,11 +151,7 @@ impl Collector<'_> {
             self.declarations.insert(
                 symbol,
                 Declaration {
-                    prefix: Some(if binding.signal {
-                        "signal"
-                    } else {
-                        binding.keyword()
-                    }),
+                    prefix: Some(binding.declaration_prefix()),
                     name: binding.name.clone(),
                     docs,
                 },
@@ -255,8 +251,8 @@ impl Collector<'_> {
             }
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.typed.symbol_for(binding.syntax.id) {
-                    let prefix =
-                        is_let_context.then(|| if binding.mutable { "mut" } else { "let" });
+                    let prefix = is_let_context
+                        .then(|| if binding.mutable { "mut" } else { "let" }.to_owned());
                     self.declarations.insert(
                         symbol,
                         Declaration {
@@ -761,7 +757,7 @@ impl Collector<'_> {
             })
             .map(|value_type| self.display_type(value_type));
         if let Some(value_type) = value_type {
-            let prefix = binding.keyword();
+            let prefix = binding.declaration_prefix();
             let generics = self.bracketed_generic_prefix(
                 &binding.type_parameters,
                 &binding.trait_bounds,
@@ -1202,7 +1198,7 @@ fn macro_signature(info: &ResolvedMacro) -> String {
 
 impl Declaration {
     fn signature(&self, value_type: &str) -> String {
-        match self.prefix {
+        match &self.prefix {
             Some(prefix) => format!("{prefix} {}: {value_type}", self.name),
             None => format!("{}: {value_type}", self.name),
         }
@@ -1235,6 +1231,31 @@ mod tests {
             references
                 .iter()
                 .all(|entry| entry.signature == "let answer: I32")
+        );
+    }
+
+    #[test]
+    fn signal_bindings_show_let_signal_prefix_at_declaration_and_references() {
+        let source = "let signal count = 0\ncount = 1\n";
+        let path = std::env::temp_dir().join("staple-hover-signal-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        let references = entries
+            .iter()
+            .filter(|entry| &source[entry.range.clone()] == "count")
+            .collect::<Vec<_>>();
+        assert_eq!(references.len(), 2, "entries: {entries:?}");
+        assert!(
+            references
+                .iter()
+                .all(|entry| entry.signature == "let signal count: I32"),
+            "entries: {references:?}"
         );
     }
 

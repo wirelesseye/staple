@@ -470,7 +470,7 @@ impl Collector<'_> {
         let symbol = self.typed.symbol_for(binding.syntax.id)?;
         let mut candidate =
             self.definition(&binding.name, DefinitionId::Symbol(symbol), available_from)?;
-        let prefix = binding.keyword();
+        let prefix = binding.declaration_prefix();
         if let Some(detail) = candidate.item.detail.take() {
             candidate.item.detail = Some(format!("{prefix} {}: {detail}", binding.name));
         }
@@ -705,6 +705,26 @@ mod tests {
         assert!(!outside.iter().any(|item| item.label == "parameter"));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn signal_binding_completion_detail_shows_let_signal_prefix() {
+        let source = "let signal count = 0\ncount = 1\n";
+        let path = std::env::temp_dir().join("staple-completion-signal.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let items = index(&module, &typed).items(source.rfind("count").unwrap());
+        let counts = items
+            .iter()
+            .filter(|item| item.label == "count")
+            .collect::<Vec<_>>();
+        assert_eq!(counts.len(), 1, "items: {items:?}");
+        assert_eq!(counts[0].detail.as_deref(), Some("let signal count: I32"));
     }
 
     #[test]

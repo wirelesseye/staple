@@ -307,4 +307,15 @@ impl Binding {
             BindingKind::Const => "const",
         }
     }
+
+    pub fn declaration_prefix(&self) -> String {
+        let mut prefix = self.keyword().to_owned();
+        if self.mutable {
+            prefix.push_str(" mut");
+        }
+        if self.signal {
+            prefix.push_str(" signal");
+        }
+        prefix
+    }
 }
