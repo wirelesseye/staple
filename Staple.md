@@ -1049,9 +1049,45 @@ Names may likewise be supplied when constructing a product value:
 let args = (name: "staple", 1)
 ```
 
-Named and unnamed elements can be mixed in the same product. Whether names must be
-unique and whether a value's element names must exactly match its annotated
-type remain unspecified.
+Named and unnamed elements can be mixed in the same product. Names in a fixed
+product type must be unique, including names contributed by a product spread.
+
+An ordinary named value element remains positional. When an expected product
+type is available, an explicitly supplied value name must match the expected
+name at the same position. A value may omit an expected name, but it cannot
+supply a different name or attach a name to an unnamed expected position:
+
+```staple
+let point: (x: I32, y: I32) = (x: 10, 20) // valid
+let point: (x: I32, y: I32) = (y: 10, x: 20) // error
+let pair: (I32, y: I32) = (x: 10, 20) // error
+```
+
+#### Designated initializers
+
+A leading dot makes a product value element a contextual, name-directed
+initializer. Designated initializers may follow a positional prefix and may be
+written in any order:
+
+```staple
+let value: (I32, I32, a: I32, b: I32) =
+    (1, 2, .b: 4, .a: 3)
+// Equivalent to (1, 2, a: 3, b: 4)
+```
+
+The expected fixed product shape and its field names must already be known;
+the individual element types may still contain inference variables. Each
+`.name:` selects the uniquely named position in that expected product. A
+designator cannot name an unknown field, initialize a position already
+consumed by the positional prefix or another designator, or leave any expected
+position uninitialized. Positional elements and positional spreads cannot
+appear after the first designator. Initializer expressions are evaluated once
+in source order even though designated values are placed in product order.
+
+Ordinary `name: value` syntax never performs designated placement. Designated
+initializers also do not combine with a `...=` named spread. Named spreads keep
+their separate merge semantics described below, including later-field
+overrides.
 
 #### Element access
 

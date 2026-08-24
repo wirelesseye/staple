@@ -521,6 +521,91 @@ fn rejects_invalid_named_product_spreads() {
 }
 
 #[test]
+fn constructs_products_with_contextual_named_initializers() {
+    let source = concat!(
+        "let value: (I32, I32, a: I32, b: I32) = (1, 2, .b: 4, .a: 3)\n",
+        "let result: I32 = value.0 + value.1 + value.a + value.b\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("designated product should generate LLVM");
+}
+
+#[test]
+fn rejects_invalid_contextual_named_initializers_and_labels() {
+    let cases = [
+        (
+            "let value = (.a: 1, .b: 2)\n",
+            "require a known expected product shape",
+        ),
+        (
+            "let value: (a: I32, b: I32) = (.a: 1, .missing: 2)\n",
+            "unknown designated product field `missing`",
+        ),
+        (
+            "let value: (a: I32, b: I32) = (1, .a: 2, .b: 3)\n",
+            "initialized more than once",
+        ),
+        (
+            "let value: (a: I32, b: I32) = (.a: 1)\n",
+            "missing product field `b`",
+        ),
+        (
+            "let value: (a: I32, b: I32) = (wrong: 1, 2)\n",
+            "expected product field label `a`, found `wrong`",
+        ),
+        (
+            "let value: (I32, b: I32) = (wrong: 1, 2)\n",
+            "does not match an unnamed expected position",
+        ),
+        (
+            "let value: (a: I32, a: I32) = (1, 2)\n",
+            "duplicate product field name `a`",
+        ),
+        (
+            "let value = (a: 1, a: 2)\n",
+            "duplicate product field name `a`",
+        ),
+        (
+            "let pair = (a: 1, b: 2)\nlet value: (x: I32, b: I32) = (...pair)\n",
+            "expected product field label `x`, found `a`",
+        ),
+        (
+            "let pair = (a: 1, b: 2)\nlet value = (...pair, a: 3)\n",
+            "duplicate product field name `a`",
+        ),
+        (
+            "type alias Pair = (a: I32, b: I32)\nlet value: (...Pair, a: I32)\n",
+            "duplicate product field name `a`",
+        ),
+    ];
+    for (source, expected) in cases {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err("invalid product should be rejected");
+        assert!(
+            diagnostics.iter().any(|diagnostic| diagnostic.message.contains(expected)),
+            "expected diagnostic containing `{expected}`, got {diagnostics:?}"
+        );
+    }
+}
+
+#[test]
+fn keeps_named_spread_override_behavior() {
+    let source = concat!(
+        "let original = (a: 1, b: 2)\n",
+        "let value: (a: I32, b: I32) = (...=original, a: 3)\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("named spread overrides should remain valid");
+}
+
+#[test]
 fn type_checks_and_lowers_mutable_places_and_ref_replace() {
     let source = concat!(
         "let mut value = 1\n",

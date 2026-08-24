@@ -1552,6 +1552,46 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_contextual_named_product_initializers_in_source_order() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source =
+            std::env::temp_dir().join(format!("stapler-designated-product-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-designated-product-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let mut calls = 0\n",
+                "def next_value = () => { calls = calls + 1; calls }\n",
+                "let value: (I32, a: I32, b: I32) = (next_value (), .b: next_value (), .a: next_value ())\n",
+                "exit ((value.0 - 1) + (value.a - 3) * 2 + (value.b - 2) * 4 + (calls - 3) * 8)\n",
+            ),
+        )
+        .expect("temporary designated-product source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("designated-product executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("designated-product executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn drops_owned_locals_in_reverse_scope_order() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

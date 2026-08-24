@@ -283,6 +283,7 @@ impl DelimitedSyntaxValue {
                     elements: vec![crate::ProductElement {
                         syntax: generated.next().unwrap_or_else(Syntax::compiler),
                         name: None,
+                        designated: false,
                         value: expression,
                         spread: false,
                         named_spread: false,
@@ -390,6 +391,7 @@ fn separated_parenthesized(
             Value::Syntax(value) => Some(crate::ProductElement {
                 syntax: generated.next().unwrap_or_else(Syntax::compiler),
                 name: None,
+                designated: false,
                 value: value.into_expression()?,
                 spread: false,
                 named_spread: false,
@@ -4206,6 +4208,7 @@ impl MacroExpander {
                         Some(crate::ProductElement {
                             syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                             name,
+                            designated: false,
                             value: self.value_to_expression(value, span.clone())?,
                             spread: false,
                             named_spread: false,

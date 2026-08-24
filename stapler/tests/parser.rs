@@ -1479,6 +1479,31 @@ fn parses_named_product_types_values_and_access() {
 }
 
 #[test]
+fn parses_contextual_named_product_initializers_losslessly() {
+    let source = "let value: (I32, a: I32, b: I32) = (1, .b: 3, .a: 2)\n";
+    let root = parse(source).expect("designated product syntax should parse");
+    assert_eq!(root.text(), source);
+    let Item::Binding(value) = unmodified_item(&root.items[0]) else {
+        panic!("expected binding");
+    };
+    let Some(Expression::Product(product)) = &value.value else {
+        panic!("expected product expression");
+    };
+    assert!(!product.elements[0].designated);
+    assert!(product.elements[1].designated);
+    assert_eq!(product.elements[1].name.as_deref(), Some("b"));
+    assert!(product.elements[2].designated);
+    assert_eq!(product.elements[2].name.as_deref(), Some("a"));
+}
+
+#[test]
+fn rejects_positional_elements_after_a_designated_initializer() {
+    let error = parse("let value: (a: I32, I32) = (.a: 1, 2)\n")
+        .expect_err("positional suffix should be rejected");
+    assert!(error.message.contains("must precede designated initializers"));
+}
+
+#[test]
 fn type_declaration_underlying_type_stops_at_newline() {
     let source = concat!(
         "type Test = ()\n",

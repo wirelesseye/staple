@@ -7034,6 +7034,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         product: &ProductExpression,
     ) -> CodeGenerationResult<Vec<BasicValueEnum<'context>>> {
+        if product.elements.iter().any(|element| element.designated) {
+            return self.compile_designated_product_elements(environment, product);
+        }
         if product.elements.iter().any(|element| element.named_spread) {
             return self.compile_named_spread_product_elements(environment, product);
         }
@@ -7084,6 +7087,104 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             })?);
         }
         Ok(values)
+    }
+
+    /// Evaluates a designated product in source order, but stores each value
+    /// at the position selected by the expression's checked expected type.
+    fn compile_designated_product_elements(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        product: &ProductExpression,
+    ) -> CodeGenerationResult<Vec<BasicValueEnum<'context>>> {
+        let Some(CheckedType::Product(final_type)) =
+            self.concrete_expression_type(&Expression::Product(product.clone()))
+        else {
+            return Err(Diagnostic::new(
+                product.syntax.span.clone(),
+                "designated product initializer does not have a known product type",
+            ));
+        };
+        let mut values = vec![None; final_type.elements.len()];
+        let mut positional_index = 0usize;
+        for element in &product.elements {
+            let value = self.compile_expression(environment, &element.value)?;
+            if environment.did_return {
+                return Ok(Vec::new());
+            }
+            if element.designated {
+                let name = element.name.as_deref().expect("designators always have a name");
+                let index = final_type
+                    .elements
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some(name))
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            element.syntax.span.clone(),
+                            format!("unknown designated product field `{name}`"),
+                        )
+                    })?;
+                values[index] = Some(value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "product element is not a first-class value",
+                    )
+                })?);
+                continue;
+            }
+            if element.spread {
+                let Some(CheckedType::Product(value_type)) =
+                    self.concrete_expression_type(&element.value)
+                else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "product spread operand does not have a fixed product type",
+                    ));
+                };
+                if value_type.elements.is_empty() {
+                    continue;
+                }
+                let Some(BasicValueEnum::StructValue(product_value)) = value_as_basic(value) else {
+                    return Err(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "product spread operand has an invalid representation",
+                    ));
+                };
+                for index in 0..value_type.elements.len() {
+                    values[positional_index] = Some(
+                        self.builder
+                            .build_extract_value(
+                                product_value,
+                                index as u32,
+                                "product.spread.element",
+                            )
+                            .map_err(|error| {
+                                Diagnostic::new(element.syntax.span.clone(), error.to_string())
+                            })?,
+                    );
+                    positional_index += 1;
+                }
+                continue;
+            }
+            values[positional_index] = Some(value_as_basic(value).ok_or_else(|| {
+                Diagnostic::new(
+                    element.syntax.span.clone(),
+                    "product element is not a first-class value",
+                )
+            })?);
+            positional_index += 1;
+        }
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value.ok_or_else(|| {
+                    Diagnostic::new(
+                        product.syntax.span.clone(),
+                        format!("missing product element at position {index}"),
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Compiles a product literal that contains one or more `...=` named

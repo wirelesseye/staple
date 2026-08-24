@@ -4589,6 +4589,173 @@ impl TypeChecker {
         normalize_product_type(elements, false)
     }
 
+    /// Checks a product whose positional prefix is followed by one or more
+    /// `.name:` initializers. Designators select unfilled positions in the
+    /// expected product rather than contributing elements in source order.
+    fn check_designated_product(
+        &mut self,
+        module: &ResolvedModule,
+        product: &ProductExpression,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        if product.elements.iter().any(|element| element.named_spread) {
+            self.diagnostics.push(Diagnostic::new(
+                product.syntax.span.clone(),
+                "designated initializers cannot be combined with a named product spread (`...=`)",
+            ));
+        }
+        let Some(CheckedType::Product(expected_product)) = expected
+            .filter(|expected| matches!(expected, CheckedType::Product(product) if !product.variadic))
+        else {
+            self.diagnostics.push(Diagnostic::new(
+                product.syntax.span.clone(),
+                "designated product initializers require a known expected product shape",
+            ));
+            for element in &product.elements {
+                self.check_expression(module, &element.value);
+            }
+            return CheckedType::Error;
+        };
+
+        let mut initialized = vec![false; expected_product.elements.len()];
+        let mut result = expected_product.elements.clone();
+        let mut positional_index = 0usize;
+        let mut has_error = false;
+        for element in &product.elements {
+            if element.designated {
+                let name = element.name.as_deref().expect("designators always have a name");
+                let destination = expected_product
+                    .elements
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some(name));
+                let expected_field = destination
+                    .and_then(|index| expected_product.elements.get(index))
+                    .map(|field| &field.value_type);
+                let value_type = self.check_expression_expected(module, &element.value, expected_field);
+                let Some(destination) = destination else {
+                    has_error = true;
+                    self.diagnostics.push(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        format!("unknown designated product field `{name}`"),
+                    ));
+                    continue;
+                };
+                if initialized[destination] {
+                    has_error = true;
+                    self.diagnostics.push(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        format!("product field `{name}` is initialized more than once"),
+                    ));
+                    continue;
+                }
+                initialized[destination] = true;
+                if let Some(merged) = merge_types(
+                    value_type.clone(),
+                    expected_product.elements[destination].value_type.clone(),
+                ) {
+                    result[destination].value_type = merged;
+                } else {
+                    has_error = true;
+                }
+                continue;
+            }
+
+            let value_type = if element.spread {
+                self.check_expression(module, &element.value)
+            } else {
+                self.check_expression_expected(
+                    module,
+                    &element.value,
+                    expected_product
+                        .elements
+                        .get(positional_index)
+                        .map(|field| &field.value_type),
+                )
+            };
+            let contributed = if element.spread {
+                match value_type {
+                    CheckedType::Product(product) if !product.variadic => product.elements,
+                    CheckedType::ErasedProduct(_) => {
+                        has_error = true;
+                        self.diagnostics.push(Diagnostic::new(
+                            element.syntax.span.clone(),
+                            "cannot spread an erased product value",
+                        ));
+                        Vec::new()
+                    }
+                    CheckedType::Error => Vec::new(),
+                    other => {
+                        has_error = true;
+                        self.diagnostics.push(Diagnostic::new(
+                            element.syntax.span.clone(),
+                            format!("cannot spread non-product value of type `{other}`"),
+                        ));
+                        Vec::new()
+                    }
+                }
+            } else {
+                vec![CheckedTypeElement {
+                    name: element.name.clone(),
+                    value_type,
+                }]
+            };
+            for field in contributed {
+                let Some(expected_field) = expected_product.elements.get(positional_index) else {
+                    has_error = true;
+                    self.diagnostics.push(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        "too many positional elements in designated product initializer",
+                    ));
+                    break;
+                };
+                if let Some(name) = field.name.as_deref()
+                    && expected_field.name.as_deref() != Some(name)
+                {
+                    has_error = true;
+                    self.diagnostics.push(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        match expected_field.name.as_deref() {
+                            Some(expected_name) => format!(
+                                "expected product field label `{expected_name}`, found `{name}`"
+                            ),
+                            None => format!(
+                                "product field label `{name}` does not match an unnamed expected position"
+                            ),
+                        },
+                    ));
+                }
+                initialized[positional_index] = true;
+                if let Some(merged) = merge_types(
+                    field.value_type.clone(),
+                    expected_field.value_type.clone(),
+                ) {
+                    result[positional_index].value_type = merged;
+                } else {
+                    has_error = true;
+                    self.diagnostics.push(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        format!("expected `{}`, found `{}`", expected_field.value_type, field.value_type),
+                    ));
+                }
+                positional_index += 1;
+            }
+        }
+        for (index, was_initialized) in initialized.iter().enumerate() {
+            if !was_initialized {
+                has_error = true;
+                let field = &expected_product.elements[index];
+                self.diagnostics.push(Diagnostic::new(
+                    product.syntax.span.clone(),
+                    field.name.as_ref().map_or_else(
+                        || format!("missing product element at position {index}"),
+                        |name| format!("missing product field `{name}`"),
+                    ),
+                ));
+            }
+        }
+        if has_error { CheckedType::Error } else { normalize_product_type(result, false) }
+    }
+
     fn check_expression_expected(
         &mut self,
         module: &ResolvedModule,
@@ -4711,12 +4878,18 @@ impl TypeChecker {
                 result
             }
             Expression::Product(product)
+                if product.elements.iter().any(|element| element.designated) =>
+            {
+                self.check_designated_product(module, product, expected)
+            }
+            Expression::Product(product)
                 if product.elements.iter().any(|element| element.named_spread) =>
             {
                 self.check_named_spread_product(module, product, expected)
             }
             Expression::Product(product) => {
                 let mut elements = Vec::new();
+                let mut names = HashSet::new();
                 for element in &product.elements {
                     if element.spread {
                         let value_type = self.check_expression(module, &element.value);
@@ -4735,6 +4908,33 @@ impl TypeChecker {
                                         ),
                                     ));
                                 } else {
+                                    for (offset, field) in product.elements.iter().enumerate() {
+                                        if let Some(name) = &field.name
+                                            && let Some(CheckedType::Product(expected_product)) = expected
+                                            && let Some(expected_element) = expected_product
+                                                .elements
+                                                .get(elements.len() + offset)
+                                            && expected_element.name.as_deref() != Some(name.as_str())
+                                        {
+                                            self.diagnostics.push(Diagnostic::new(
+                                                element.syntax.span.clone(),
+                                                match expected_element.name.as_deref() {
+                                                    Some(expected_name) => format!(
+                                                        "expected product field label `{expected_name}`, found `{name}`"
+                                                    ),
+                                                    None => format!(
+                                                        "product field label `{name}` does not match an unnamed expected position"
+                                                    ),
+                                                },
+                                            ));
+                                        }
+                                        if let Some(name) = &field.name && !names.insert(name.clone()) {
+                                            self.diagnostics.push(Diagnostic::new(
+                                                element.syntax.span.clone(),
+                                                format!("duplicate product field name `{name}`"),
+                                            ));
+                                        }
+                                    }
                                     elements.extend(product.elements);
                                 }
                             }
@@ -4774,6 +4974,30 @@ impl TypeChecker {
                             format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
                         ));
                     } else {
+                        if let Some(name) = &element.name {
+                            if let Some(CheckedType::Product(expected_product)) = expected
+                                && let Some(expected_element) = expected_product.elements.get(index)
+                                && expected_element.name.as_deref() != Some(name.as_str())
+                            {
+                                self.diagnostics.push(Diagnostic::new(
+                                    element.syntax.span.clone(),
+                                    match expected_element.name.as_deref() {
+                                        Some(expected_name) => format!(
+                                            "expected product field label `{expected_name}`, found `{name}`"
+                                        ),
+                                        None => format!(
+                                            "product field label `{name}` does not match an unnamed expected position"
+                                        ),
+                                    },
+                                ));
+                            }
+                            if !names.insert(name.clone()) {
+                                self.diagnostics.push(Diagnostic::new(
+                                    element.syntax.span.clone(),
+                                    format!("duplicate product field name `{name}`"),
+                                ));
+                            }
+                        }
                         elements.push(CheckedTypeElement {
                             name: element.name.clone(),
                             value_type,
@@ -7725,6 +7949,7 @@ impl TypeChecker {
         product: &ProductType,
     ) -> CheckedProductType {
         let mut elements = Vec::new();
+        let mut names = HashSet::new();
         for element in &product.elements {
             if element.spread {
                 if let Type::Repeated(repeated) = &element.ty
@@ -7760,6 +7985,14 @@ impl TypeChecker {
                                 format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
                             ));
                         } else {
+                            for field in &product.elements {
+                                if let Some(name) = &field.name && !names.insert(name.clone()) {
+                                    self.diagnostics.push(Diagnostic::new(
+                                        element.syntax.span.clone(),
+                                        format!("duplicate product field name `{name}`"),
+                                    ));
+                                }
+                            }
                             elements.extend(product.elements);
                         }
                     }
@@ -7779,6 +8012,12 @@ impl TypeChecker {
                     format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
                 ));
             } else {
+                if let Some(name) = &element.name && !names.insert(name.clone()) {
+                    self.diagnostics.push(Diagnostic::new(
+                        element.syntax.span.clone(),
+                        format!("duplicate product field name `{name}`"),
+                    ));
+                }
                 elements.push(CheckedTypeElement {
                     name: element.name.clone(),
                     value_type: self.resolve_source_type_inner(module, &element.ty),

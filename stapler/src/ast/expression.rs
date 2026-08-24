@@ -179,6 +179,9 @@ impl ProductExpression {
 pub struct ProductElement {
     pub syntax: Syntax,
     pub name: Option<String>,
+    /// Whether `name` was written as a contextual `.name:` designator rather
+    /// than an ordinary positional `name:` label.
+    pub designated: bool,
     pub value: Expression,
     pub spread: bool,
     /// Whether this is a `...=` spread, which merges the operand's named

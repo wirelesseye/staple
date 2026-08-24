@@ -2827,10 +2827,19 @@ impl Grammar {
         let previous_brace_termination = self.brace_terminates_expression;
         self.brace_terminates_expression = false;
         let mut elements = Vec::new();
+        let mut saw_designated = false;
         if !self.at(TokenKind::RParen) {
             loop {
                 let element_start = self.position;
-                let name = if self.peek() == Some(TokenKind::Identifier)
+                let designated = self.peek() == Some(TokenKind::Dot)
+                    && self.peek_n(1) == Some(TokenKind::Identifier)
+                    && self.peek_n(2) == Some(TokenKind::Colon);
+                let name = if designated {
+                    self.bump_token();
+                    let name = self.bump_token().expect("peeked designated element name").text;
+                    self.expect(TokenKind::Colon, "expected `:` after designated element name")?;
+                    Some(name)
+                } else if self.peek() == Some(TokenKind::Identifier)
                     && self.peek_n(1) == Some(TokenKind::Colon)
                 {
                     let name = self.bump_token().expect("peeked element name").text;
@@ -2841,6 +2850,12 @@ impl Grammar {
                 };
                 let spread = self.eat(TokenKind::Ellipsis);
                 let named_spread = spread && self.eat(TokenKind::Equals);
+                if saw_designated && !designated {
+                    return Err(self.error(
+                        "positional product elements and spreads must precede designated initializers",
+                    ));
+                }
+                saw_designated |= designated;
                 if spread && name.is_some() {
                     return Err(self.error("a product value spread cannot be named"));
                 }
@@ -2848,6 +2863,7 @@ impl Grammar {
                 elements.push(ProductElement {
                     syntax: self.syntax(element_start),
                     name,
+                    designated,
                     value,
                     spread,
                     named_spread,
