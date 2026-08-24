@@ -1001,7 +1001,7 @@ is needed to determine the result, so side effects in `right` do not happen
 otherwise:
 
 ```staple
-def positive_and_even = n: I32 => n > 0 && n % 2 == 0
+def positive_and_small = n: I32 => n > 0 && n < 10
 ```
 
 `a && b` evaluates `a`; if it is `False`, the result is `False` without

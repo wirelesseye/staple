@@ -30,8 +30,9 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
         };
         let float = |text: &str, at: usize| lex_float(text, at).map(|end| (TokenKind::Float, end));
         let integer = take_while1(|c| c.is_ascii_digit()).map(|_| TokenKind::Integer);
-        let operator =
-            |text: &str, at: usize| lex_operator(text, at).map(|end| (TokenKind::Operator, end));
+        let fixed_operator = |text: &str, at: usize| {
+            lex_fixed_operator(text, at).map(|end| (TokenKind::Operator, end))
+        };
 
         let parsed = newline
             .or(whitespace)
@@ -40,16 +41,10 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
             .or(tag("=>").map(|_| TokenKind::FatArrow))
             .or(tag("->").map(|_| TokenKind::Arrow))
             .or(tag("...").map(|_| TokenKind::Ellipsis))
-            .or(tag("<:").map(|_| TokenKind::Operator))
-            .or(tag("<=").map(|_| TokenKind::Operator))
-            .or(tag(">=").map(|_| TokenKind::Operator))
-            .or(tag("~>").map(|_| TokenKind::Operator))
-            .or(tag("<").map(|_| TokenKind::Operator))
-            .or(tag(">").map(|_| TokenKind::Operator))
             .or(float)
             .or(identifier)
             .or(integer)
-            .or(operator)
+            .or(fixed_operator)
             .parse(source, offset);
 
         let (mut kind, end) = parsed.unwrap_or_else(|| {
@@ -91,20 +86,6 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
                 "where" => TokenKind::Where,
                 "_" => TokenKind::Underscore,
                 _ => TokenKind::Identifier,
-            };
-        }
-        if kind == TokenKind::Operator {
-            kind = match text {
-                ":" => TokenKind::Colon,
-                "." => TokenKind::Dot,
-                "=" => TokenKind::Equals,
-                "*" => TokenKind::Star,
-                "+" => TokenKind::Plus,
-                "-" => TokenKind::Minus,
-                "/" => TokenKind::Slash,
-                "$" => TokenKind::Dollar,
-                "@" => TokenKind::At,
-                _ => TokenKind::Operator,
             };
         }
         tokens.push(SyntaxToken {
@@ -261,24 +242,14 @@ fn lex_identifier(source: &str, offset: usize) -> Option<usize> {
     Some(end)
 }
 
-fn lex_operator(source: &str, offset: usize) -> Option<usize> {
+fn lex_fixed_operator(source: &str, offset: usize) -> Option<usize> {
     let tail = source.get(offset..)?;
-    if tail.starts_with('.') && !tail.starts_with("..") {
-        return None;
-    }
-    // Keep the representation accessor in `value.*.field` as `Star, Dot`
-    // rather than combining `*.` into one user-defined operator token.
-    if tail.starts_with("*.") {
-        return Some(offset + 1);
-    }
-    let mut end = offset;
-    for (relative, character) in tail.char_indices() {
-        if !"!#$%&*+./=?@\\^|-~:".contains(character) {
-            break;
-        }
-        end = offset + relative + character.len_utf8();
-    }
-    (end > offset).then_some(end)
+    [
+        "..=", "&&", "||", "==", "!=", "<=", ">=", "..", "<:", "~>", "?", "|", "<", ">", "^",
+    ]
+    .into_iter()
+    .find(|operator| tail.starts_with(operator))
+    .map(|operator| offset + operator.len())
 }
 
 fn single_character_kind(character: char) -> TokenKind {
@@ -298,6 +269,8 @@ fn single_character_kind(character: char) -> TokenKind {
         '+' => TokenKind::Plus,
         '-' => TokenKind::Minus,
         '/' => TokenKind::Slash,
+        '$' => TokenKind::Dollar,
+        '@' => TokenKind::At,
         _ => TokenKind::Unknown,
     }
 }

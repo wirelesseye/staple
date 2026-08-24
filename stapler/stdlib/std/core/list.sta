@@ -22,10 +22,7 @@ def grow: <T> List T ->{mut} () = list => {
 
 companion<T> List T {
     /// Returns the number of elements in the list.
-    pub def length: List T -> USize = list => {
-        let List buffer = list
-        Buffer.length buffer
-    }
+    pub def length: List T -> USize = list => list.*^length
 
     /// Returns the number of elements the list can hold without growing.
     pub def capacity: List T -> USize = list => {

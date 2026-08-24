@@ -3362,6 +3362,8 @@ impl NameResolver {
         expected_type: Option<&Type>,
         suggested_function: Option<(&str, SyntaxId)>,
     ) {
+        self.syntax_modules
+            .insert(expression.syntax().id, self.current_module);
         match expression {
             Expression::Function(function) => {
                 let function_id = FunctionId(self.next_function_id);

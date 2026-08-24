@@ -6830,6 +6830,18 @@ impl TypeChecker {
             Expression::Call(call) => self
                 .function_origin(module, &call.callee)
                 .and_then(|function| self.function_result_companion_types.get(&function).copied()),
+            Expression::Access(access)
+                if matches!(access.accessor, Accessor::Representation) =>
+            {
+                let represented = self.expression_types.get(&access.value.syntax().id)?;
+                let CheckedType::Distinct { id, .. } = represented else {
+                    return None;
+                };
+                self.type_declarations
+                    .get(id)
+                    .and_then(|declaration| declaration.underlying.as_ref())
+                    .and_then(|underlying| source_type_id(module, underlying))
+            }
             Expression::Product(product)
                 if product.elements.len() == 1 && !product.elements[0].spread =>
             {

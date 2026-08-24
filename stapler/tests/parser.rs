@@ -179,8 +179,46 @@ fn parses_float_literals_losslessly_without_stealing_access_dots() {
 }
 
 #[test]
+fn lexes_only_the_fixed_operator_vocabulary() {
+    let source = "..= && || == != <= >= .. <: ~> ? | < > ^ *^ *. ++ %";
+    let tokens = stapler::lex(source)
+        .into_iter()
+        .filter(|token| !token.kind.is_trivia())
+        .map(|token| (token.kind, token.text))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        tokens,
+        [
+            (TokenKind::Operator, "..="),
+            (TokenKind::Operator, "&&"),
+            (TokenKind::Operator, "||"),
+            (TokenKind::Operator, "=="),
+            (TokenKind::Operator, "!="),
+            (TokenKind::Operator, "<="),
+            (TokenKind::Operator, ">="),
+            (TokenKind::Operator, ".."),
+            (TokenKind::Operator, "<:"),
+            (TokenKind::Operator, "~>"),
+            (TokenKind::Operator, "?"),
+            (TokenKind::Operator, "|"),
+            (TokenKind::Operator, "<"),
+            (TokenKind::Operator, ">"),
+            (TokenKind::Operator, "^"),
+            (TokenKind::Star, "*"),
+            (TokenKind::Operator, "^"),
+            (TokenKind::Star, "*"),
+            (TokenKind::Dot, "."),
+            (TokenKind::Plus, "+"),
+            (TokenKind::Plus, "+"),
+            (TokenKind::Unknown, "%"),
+        ]
+        .map(|(kind, text)| (kind, text.to_owned()))
+    );
+}
+
+#[test]
 fn parses_nominal_representation_access_losslessly() {
-    let source = "user.*\nuser.*.name\nouter.*.*.0\n";
+    let source = "user.*\nuser.*.name\nouter.*.*.0\nlist.*^length\n";
     let root = parse(source).expect("representation access should parse");
     assert_eq!(root.text(), source);
     assert!(matches!(
@@ -206,6 +244,16 @@ fn parses_nominal_representation_access_losslessly() {
         panic!("expected first representation projection");
     };
     assert_eq!(inner.accessor, Accessor::Representation);
+    let Item::Expression(Expression::Call(call)) = unmodified_item(&root.items[3]) else {
+        panic!("expected a companion call after representation access");
+    };
+    assert!(matches!(
+        call.callee.as_ref(),
+        Expression::Access(method)
+            if method.accessor == Accessor::Method("length".into())
+                && matches!(method.value.as_ref(), Expression::Access(representation)
+                    if representation.accessor == Accessor::Representation)
+    ));
     assert!(parse("user.+\n").is_err());
 }
 
