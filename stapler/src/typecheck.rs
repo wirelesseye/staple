@@ -762,6 +762,7 @@ pub struct TypedModule {
     into_iterator_trait: Option<TraitId>,
     iterator_trait: Option<TraitId>,
     io_type: Option<TypeId>,
+    reactive_type: Option<TypeId>,
     mutated_parameter_symbols: HashSet<SymbolId>,
     method_symbols: HashMap<SyntaxId, SymbolId>,
     symbol_companion_types: HashMap<SymbolId, TypeId>,
@@ -945,6 +946,10 @@ impl TypedModule {
 
     pub(crate) fn is_io_type(&self, value_type: &CheckedType) -> bool {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.io_type)
+    }
+
+    pub(crate) fn is_reactive_type(&self, value_type: &CheckedType) -> bool {
+        matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.reactive_type)
     }
 
     pub(crate) fn io_resource(&self) -> Option<CheckedResource> {
@@ -1260,6 +1265,7 @@ pub struct TypeChecker {
     return_reachable: bool,
     diagnostics: Vec<Diagnostic>,
     io_type: Option<TypeId>,
+    reactive_type: Option<TypeId>,
     /// Parameter symbols covered by an explicit function effect, parameter
     /// marker, or trait contract. Only these are writable in function bodies.
     mutable_parameter_symbols: HashSet<SymbolId>,
@@ -1302,6 +1308,11 @@ impl TypeChecker {
             .type_declarations()
             .keys()
             .find(|id| module.builtin_type(**id) == Some(BuiltinType::IO))
+            .copied();
+        self.reactive_type = module
+            .type_declarations()
+            .keys()
+            .find(|id| module.builtin_type(**id) == Some(BuiltinType::Reactive))
             .copied();
         self.copy_trait = module.standard_trait("Copy");
         self.sized_trait = module.standard_trait("Sized");
@@ -1358,6 +1369,7 @@ impl TypeChecker {
             self.ensure_function_checked(&module, function_id);
         }
         self.infer_effects(&module);
+        self.validate_reactive_snapshots(&module);
 
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
@@ -1395,6 +1407,7 @@ impl TypeChecker {
             into_iterator_trait: self.into_iterator_trait,
             iterator_trait: self.iterator_trait,
             io_type: self.io_type,
+            reactive_type: self.reactive_type,
             mutated_parameter_symbols: self.mutated_parameter_symbols,
             method_symbols: self.method_symbols,
             symbol_companion_types: self.symbol_companion_types,
@@ -2535,6 +2548,13 @@ impl TypeChecker {
                                     && *function.result == CheckedType::empty_product())
                     })
                     .unwrap_or(CheckedType::Error),
+                crate::IntrinsicFunction::ReactiveScope
+                | crate::IntrinsicFunction::Reaction
+                | crate::IntrinsicFunction::Snapshot => self
+                    .symbol_types
+                    .get(symbol)
+                    .cloned()
+                    .unwrap_or(CheckedType::Error),
             };
             if self.symbol_types.get(symbol) != Some(&expected) {
                 self.diagnostics.push(Diagnostic::new(
@@ -3141,7 +3161,43 @@ impl TypeChecker {
                         .find(|function| function.id == function_id)
                 })
                 .is_some_and(|function| function.captures.contains(&symbol));
-        (external_to_function && module.is_mutable_symbol(symbol)).then_some(symbol)
+        (external_to_function && module.has_mutable_storage(symbol)).then_some(symbol)
+    }
+
+    fn validate_reactive_snapshots(&mut self, module: &ResolvedModule) {
+        for source_module in module.program().modules() {
+            for item in &source_module.syntax.items {
+                let Item::Binding(binding) = item else {
+                    continue;
+                };
+                let Some(value) = &binding.value else {
+                    continue;
+                };
+                let explicit_snapshot = matches!(value, Expression::Call(call)
+                    if module.symbol_for(call.callee.syntax().id)
+                        .and_then(|symbol| module.intrinsic_function(symbol))
+                        == Some(crate::IntrinsicFunction::Snapshot));
+                if explicit_snapshot {
+                    continue;
+                }
+                let direct = expression_reads_signal(module, value);
+                let summarized = self
+                    .expression_state_accesses
+                    .get(&value.syntax().id)
+                    .is_some_and(|accesses| {
+                        accesses
+                            .reads
+                            .iter()
+                            .any(|symbol| module.is_signal_symbol(*symbol))
+                    });
+                if direct || summarized {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.syntax().span.clone(),
+                        "a persistent binding derived from a signal requires `snapshot`; persistent derived bindings are not implemented yet",
+                    ));
+                }
+            }
+        }
     }
 
     fn call_argument_resources_now(
@@ -4450,7 +4506,7 @@ impl TypeChecker {
     ) -> Option<PlaceIssue> {
         if let Some(symbol) = module.symbol_for(expression.syntax().id) {
             let is_parameter = self.mutable_parameter_symbols.contains(&symbol);
-            let permitted = is_parameter || module.is_mutable_symbol(symbol);
+            let permitted = is_parameter || module.has_mutable_storage(symbol);
             if permitted && module.symbol_module(symbol) == current_module {
                 return None;
             }
@@ -4521,7 +4577,7 @@ impl TypeChecker {
             // anchor on), the module boundary is not enforced; it only ever
             // protects a `pub` global from another module, which cannot
             // apply to a symbol reached from an unnamed closure regardless.
-            let permitted = (module.is_mutable_symbol(root)
+            let permitted = (module.has_mutable_storage(root)
                 || self.mutable_parameter_symbols.contains(&root))
                 && (current_module.is_none() || module.symbol_module(root) == current_module);
             if !permitted {
@@ -7882,23 +7938,27 @@ impl TypeChecker {
                 continue;
             }
             let value_type = self.resolve_source_type_inner(module, resource);
-            let valid_nominal = matches!(&value_type, CheckedType::Distinct { .. })
-                || matches!(&value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.io_type);
+            let builtin_resource = matches!(&value_type, CheckedType::Opaque { id, .. }
+                if Some(*id) == self.io_type || Some(*id) == self.reactive_type);
+            let valid_nominal =
+                matches!(&value_type, CheckedType::Distinct { .. }) || builtin_resource;
             let concrete = !contains_type_parameter(&value_type)
                 && !contains_inferred_type(&value_type)
                 && value_type.is_fully_known();
-            let copy = is_copy_type(
-                &value_type,
-                self.copy_trait,
-                self.drop_trait,
-                self.io_type,
-                &self.trait_implementations,
-                &[],
-            );
+            let copy = builtin_resource
+                || is_copy_type(
+                    &value_type,
+                    self.copy_trait,
+                    self.drop_trait,
+                    self.io_type,
+                    &self.trait_implementations,
+                    &[],
+                );
             if value_type == CheckedType::Error {
                 continue;
             }
-            if !valid_nominal || !concrete || !value_type.is_sized() || !copy {
+            if !valid_nominal || !concrete || (!builtin_resource && !value_type.is_sized()) || !copy
+            {
                 self.diagnostics.push(Diagnostic::new(
                     resource.syntax().span.clone(),
                     format!(
@@ -8537,6 +8597,11 @@ impl TypeChecker {
                 BuiltinType::IO => CheckedType::Opaque {
                     id,
                     name: "IO".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::Reactive => CheckedType::Opaque {
+                    id,
+                    name: "Reactive".to_owned(),
                     arguments: Vec::new(),
                 },
                 BuiltinType::Syntax => {
@@ -9918,6 +9983,85 @@ fn call_mutation_target_expression<'a>(
                 .map_or(argument, |element| &element.value),
             _ => argument,
         },
+    }
+}
+
+fn expression_reads_signal(module: &ResolvedModule, expression: &Expression) -> bool {
+    fn item(module: &ResolvedModule, item: &Item) -> bool {
+        match item {
+            Item::Binding(value) => value
+                .value
+                .as_ref()
+                .is_some_and(|value| expression_reads_signal(module, value)),
+            Item::PatternBinding(value) => expression_reads_signal(module, &value.value),
+            Item::Assignment(value) => {
+                expression_reads_signal(module, &value.target)
+                    || expression_reads_signal(module, &value.value)
+            }
+            Item::Return(value) => expression_reads_signal(module, &value.value),
+            Item::Break(value) => value
+                .value
+                .as_ref()
+                .is_some_and(|value| expression_reads_signal(module, value)),
+            Item::Expression(value) => expression_reads_signal(module, value),
+            _ => false,
+        }
+    }
+    match expression {
+        Expression::Name(value) => module
+            .symbol_for(value.syntax.id)
+            .is_some_and(|symbol| module.is_signal_symbol(symbol)),
+        Expression::Access(value) => {
+            module
+                .symbol_for(value.syntax.id)
+                .is_some_and(|symbol| module.is_signal_symbol(symbol))
+                || expression_reads_signal(module, &value.value)
+        }
+        Expression::Call(value) => {
+            expression_reads_signal(module, &value.callee)
+                || expression_reads_signal(module, &value.argument)
+        }
+        Expression::Product(value) => value
+            .elements
+            .iter()
+            .any(|element| expression_reads_signal(module, &element.value)),
+        Expression::Block(value) => value.items.iter().any(|value| item(module, value)),
+        Expression::Loop(value) => value.body.items.iter().any(|value| item(module, value)),
+        Expression::With(value) => {
+            expression_reads_signal(module, &value.value)
+                || value.body.items.iter().any(|value| item(module, value))
+        }
+        Expression::Function(value) => expression_reads_signal(module, &value.body),
+        Expression::Satisfies(value) => expression_reads_signal(module, &value.value),
+        Expression::Match(value) => {
+            expression_reads_signal(module, &value.subject)
+                || value
+                    .arms
+                    .iter()
+                    .any(|arm| expression_reads_signal(module, &arm.body))
+        }
+        Expression::Index(value) => {
+            expression_reads_signal(module, &value.value)
+                || expression_reads_signal(module, &value.index)
+        }
+        Expression::Logical(value) => {
+            expression_reads_signal(module, &value.left)
+                || expression_reads_signal(module, &value.right)
+        }
+        Expression::StringTemplate(value) => value.parts.iter().any(|part| {
+            matches!(part,
+            crate::StringTemplatePart::Interpolation(value)
+                if expression_reads_signal(module, &value.expression))
+        }),
+        Expression::Resource(_)
+        | Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
+        | Expression::Quote(_)
+        | Expression::Splice(_)
+        | Expression::String(_)
+        | Expression::CString(_)
+        | Expression::Integer(_)
+        | Expression::Float(_) => false,
     }
 }
 

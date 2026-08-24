@@ -627,3 +627,47 @@ trap:
   call void @llvm.trap()
   unreachable
 }
+
+; Removes a previously registered root range.
+define void @__staple_gc_unregister_root(ptr %start) {
+entry:
+  %first = load ptr, ptr @__staple_gc_roots
+  br label %loop
+
+loop:
+  %previous = phi ptr [ null, %entry ], [ %node, %advance ]
+  %node = phi ptr [ %first, %entry ], [ %next, %advance ]
+  %done = icmp eq ptr %node, null
+  br i1 %done, label %exit, label %check
+
+check:
+  %start.slot = getelementptr %GcRoot, ptr %node, i32 0, i32 0
+  %candidate = load ptr, ptr %start.slot
+  %matches = icmp eq ptr %candidate, %start
+  %next.slot = getelementptr %GcRoot, ptr %node, i32 0, i32 2
+  %next = load ptr, ptr %next.slot
+  br i1 %matches, label %remove, label %advance
+
+remove:
+  %at.head = icmp eq ptr %previous, null
+  br i1 %at.head, label %remove.head, label %remove.after
+
+remove.head:
+  store ptr %next, ptr @__staple_gc_roots
+  br label %release
+
+remove.after:
+  %previous.next = getelementptr %GcRoot, ptr %previous, i32 0, i32 2
+  store ptr %next, ptr %previous.next
+  br label %release
+
+release:
+  call void @free(ptr %node)
+  ret void
+
+advance:
+  br label %loop
+
+exit:
+  ret void
+}

@@ -68,6 +68,19 @@ fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
 }
 
 #[test]
+fn parses_signal_bindings_losslessly() {
+    let source = "let signal count: I32 = 0\n";
+    let module = parse(source).expect("signal binding should parse");
+    assert_eq!(module.syntax.text(), source);
+    assert!(matches!(&module.items[0], Item::Binding(binding)
+        if binding.signal && !binding.mutable && binding.name == "count"));
+
+    assert!(parse("let signal missing\n").is_err());
+    assert!(parse("let mut signal duplicate = 0\n").is_err());
+    assert!(parse("def signal invalid = 0\n").is_err());
+}
+
+#[test]
 fn parses_effect_parameters_and_open_effect_rows() {
     let source = "def twice: <T, effect E> (T, () ->{E} ()) ->{E, IO} T = (value, f) => value\n";
     let module = parse(source).expect("effect parameters should parse");

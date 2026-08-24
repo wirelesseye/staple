@@ -78,6 +78,7 @@ pub enum BuiltinType {
     CString,
     CPointer,
     IO,
+    Reactive,
     Syntax,
 }
 
@@ -283,6 +284,9 @@ pub enum IntrinsicFunction {
     BufferTransfer,
     RefReplace,
     Drop,
+    ReactiveScope,
+    Reaction,
+    Snapshot,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -345,6 +349,7 @@ pub struct ResolvedModule {
     checked_initialization_symbols: HashSet<SymbolId>,
     checked_initialization_reads: HashSet<SyntaxId>,
     mutable_symbols: HashSet<SymbolId>,
+    signal_symbols: HashSet<SymbolId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
@@ -683,6 +688,10 @@ impl ResolvedModule {
         self.mutable_symbols.contains(&symbol)
     }
 
+    pub fn is_signal_symbol(&self, symbol: SymbolId) -> bool {
+        self.signal_symbols.contains(&symbol)
+    }
+
     pub fn is_module_symbol(&self, symbol: SymbolId) -> bool {
         self.symbol_owners.get(&symbol) == Some(&None)
     }
@@ -692,7 +701,7 @@ impl ResolvedModule {
     }
 
     pub fn has_mutable_storage(&self, symbol: SymbolId) -> bool {
-        self.is_mutable_symbol(symbol)
+        self.is_mutable_symbol(symbol) || self.is_signal_symbol(symbol)
     }
 
     pub fn symbol_module(&self, symbol: SymbolId) -> Option<ModuleId> {
@@ -855,6 +864,7 @@ pub struct NameResolver {
     trait_implementations: Vec<ResolvedTraitImplementation>,
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     mutable_symbols: HashSet<SymbolId>,
+    signal_symbols: HashSet<SymbolId>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
@@ -1129,6 +1139,7 @@ impl NameResolver {
             checked_initialization_symbols: HashSet::new(),
             checked_initialization_reads: HashSet::new(),
             mutable_symbols: self.mutable_symbols,
+            signal_symbols: self.signal_symbols,
             symbol_owners: self.symbol_owners,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
@@ -1207,6 +1218,19 @@ impl NameResolver {
         }
         if let Some(io) = program.standard_library_io() {
             self.register_builtin_type(io, "std.io", "IO", BuiltinType::IO);
+        }
+        if let Some(reactive) = program
+            .modules()
+            .iter()
+            .find(|module| module.path.ends_with("std/core/reactive.sta"))
+            .map(|module| module.id)
+        {
+            self.register_builtin_type(
+                reactive,
+                "std.core.reactive",
+                "Reactive",
+                BuiltinType::Reactive,
+            );
         }
 
         for (id, declaration) in &self.type_declarations {
@@ -1373,6 +1397,9 @@ impl NameResolver {
             ("__buffer_get", IntrinsicFunction::BufferGet),
             ("__buffer_freeze", IntrinsicFunction::BufferFreeze),
             ("__buffer_transfer", IntrinsicFunction::BufferTransfer),
+            ("__reactive_scope", IntrinsicFunction::ReactiveScope),
+            ("reaction", IntrinsicFunction::Reaction),
+            ("snapshot", IntrinsicFunction::Snapshot),
         ] {
             let symbol = program
                 .modules()
@@ -1982,6 +2009,9 @@ impl NameResolver {
         self.symbol_modules.insert(symbol, self.current_module);
         if binding.mutable {
             self.mutable_symbols.insert(symbol);
+        }
+        if binding.signal {
+            self.signal_symbols.insert(symbol);
         }
         symbol
     }
@@ -4343,6 +4373,9 @@ impl NameResolver {
         if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
             if binding.mutable {
                 self.mutable_symbols.insert(symbol);
+            }
+            if binding.signal {
+                self.signal_symbols.insert(symbol);
             }
         }
     }

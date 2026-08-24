@@ -109,6 +109,63 @@ fn implicitly_thunks_call_arguments_and_preserves_callback_effects() {
 }
 
 #[test]
+fn signals_and_scoped_reactions_type_check_and_lower() {
+    let module = type_check(concat!(
+        "let signal count = 0\n",
+        "with Reactive = reactive_scope () {\n",
+        "  reaction { let current = count; () }\n",
+        "  count = 1\n",
+        "}\n",
+    ));
+
+    let count = module
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Binding(binding) if binding.name == "count" => {
+                module.symbol_for(binding.syntax.id)
+            }
+            _ => None,
+        })
+        .expect("signal binding");
+    assert!(module.resolved().is_signal_symbol(count));
+    assert_eq!(module.type_of_symbol(count), Some(&CheckedType::I32));
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("signals and reactions should lower");
+    assert!(llvm.contains("__staple_signal_track"));
+    assert!(llvm.contains("__staple_signal_notify"));
+    assert!(llvm.contains("__staple_reaction_create"));
+    assert!(llvm.contains("__staple_reactive_scope_dispose"));
+}
+
+#[test]
+fn persistent_signal_derivations_require_snapshot() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("let signal count = 1\nlet doubled = count + count\n", root)
+        .expect("source should load");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .expect("source should resolve");
+    let diagnostics = match TypeChecker::new().check(resolved) {
+        Err(diagnostics) => diagnostics,
+        Ok(_) => panic!("persistent derivation should require snapshot"),
+    };
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("requires `snapshot`"))
+    );
+
+    type_check("let signal count = 1\nlet doubled = snapshot (count + count)\n");
+}
+
+#[test]
 fn implicitly_thunks_fixed_product_argument_positions() {
     let module = type_check(concat!(
         "def add_later: (I32, () -> I32) -> I32 = (left, right) => left + right ()\n",

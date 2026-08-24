@@ -528,7 +528,13 @@ impl<'a> Classifier<'a> {
                     .map(|symbol| self.value_symbol_kind(symbol))
             })
             .unwrap_or(VARIABLE);
-        let modifiers = DECLARATION | DEFINITION | if binding.mutable { 0 } else { READONLY };
+        let modifiers = DECLARATION
+            | DEFINITION
+            | if binding.mutable || binding.signal {
+                0
+            } else {
+                READONLY
+            };
         self.mark_declaration(
             &binding.syntax,
             &binding.name,

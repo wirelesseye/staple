@@ -1115,6 +1115,10 @@ impl Grammar {
         let checkpoint = self.position;
         let pattern_start = start.unwrap_or(self.position);
         self.expect(TokenKind::Let, "expected `let`")?;
+        if self.at(TokenKind::Signal) {
+            self.position = checkpoint;
+            return self.parse_binding(visibility, start).map(Item::Binding);
+        }
         let pattern = self.parse_pattern()?;
         let propagating = self.eat_operator("?");
         if !matches!(pattern, Pattern::Binding(_)) {
@@ -1232,6 +1236,9 @@ impl Grammar {
             if binding.mutable {
                 return Err(self.error("external bindings cannot be mutable"));
             }
+            if binding.signal {
+                return Err(self.error("external bindings cannot be signals"));
+            }
             if !binding.type_parameters.is_empty() {
                 return Err(self.error("external bindings cannot have compile-time parameters"));
             }
@@ -1338,8 +1345,15 @@ impl Grammar {
             _ => return Err(self.error("expected `let`, `def`, `const`, `type`, or `extern`")),
         };
         let mutable = self.eat(TokenKind::Mut);
+        let signal = self.eat(TokenKind::Signal);
         if mutable && kind != BindingKind::Let {
             return Err(self.error("`mut` is only allowed on `let` bindings"));
+        }
+        if signal && kind != BindingKind::Let {
+            return Err(self.error("`signal` is only allowed on `let` bindings"));
+        }
+        if mutable && signal {
+            return Err(self.error("a signal binding is already writable and cannot also be `mut`"));
         }
         let name = self.parse_binding_name()?;
         let annotation = if self.eat(TokenKind::Colon) {
@@ -1370,12 +1384,16 @@ impl Grammar {
         if value.is_none() && kind == BindingKind::Const {
             return Err(self.error("`const` bindings require an initializer"));
         }
+        if signal && value.is_none() {
+            return Err(self.error("signal bindings require an initializer"));
+        }
         Ok(Binding {
             syntax: self.syntax(start),
             docs: Vec::new(),
             visibility,
             kind,
             mutable,
+            signal,
             name,
             type_parameters,
             trait_bounds,

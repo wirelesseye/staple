@@ -290,6 +290,7 @@ pub struct Binding {
     pub visibility: Visibility,
     pub kind: BindingKind,
     pub mutable: bool,
+    pub signal: bool,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,

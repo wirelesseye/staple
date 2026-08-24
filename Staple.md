@@ -17,8 +17,7 @@ staple has two major, long-term goals:
    directness and expressive power associated with Lisp metaprogramming while
    retaining staple's own syntax.
 
-These are defining goals of the language, even though their precise syntax and
-semantics have not yet been designed. Other language features should be
+These are defining goals of the language. Other language features should be
 evaluated partly by how well they compose with reactivity and metaprogramming.
 
 ### Reactions and signals
@@ -37,15 +36,10 @@ types and functions supplied solely by a framework. This allows staple's type
 system, compiler, runtime, tooling, and metaprogramming facilities to understand
 reactive relationships directly.
 
-The following details remain unspecified:
-
-- the syntax for creating, reading, and writing signals;
-- the syntax for declaring reactions and derived computations;
-- whether signal reads are implicit or explicit;
-- reaction scheduling and batching;
-- ownership, disposal, and lifetime rules;
-- error handling and cycle detection; and
-- how reactive behavior appears in the type system.
+The first reactive slice provides writable `let signal` bindings, synchronous
+reactions, dynamic dependency tracking, and lexical reaction ownership through
+the `Reactive` resource. Persistent derived bindings, batching, and alternative
+schedulers remain future work.
 
 ### Metaprogramming
 
@@ -1449,7 +1443,7 @@ type Logger = (
 Transparent aliases use the identity of their underlying nominal type. A
 structural type, ordinary opaque type, unspecialized generic type, unsized type,
 or move-only nominal type is not eligible. The compiler-represented opaque
-`std.io.IO` type is the sole opaque exception. Consequently resources never add
+`std.io.IO` and `std.core.Reactive` are compiler-represented opaque exceptions. Consequently resources never add
 a new borrowing or ownership mode: their hidden values can always be copied.
 
 Function arrows list their effects in braces. Effect sets are
@@ -1474,6 +1468,42 @@ combination of them. It can form an open row with fixed effects, as in
 occurrence. Each set may contain at most one variable. Effect parameters exist
 only on generic function bindings, may appear only in effect sets, have no
 runtime representation, and are concrete before code generation.
+
+### Signals and reactions
+
+A signal is a writable binding whose ordinary reads and writes participate in
+runtime dependency tracking. Its visible type remains the value type:
+
+```staple
+let signal count = 0
+count = count + 1
+```
+
+`reaction` accepts a zero-argument callback (and therefore benefits from
+call-site implicit thunking), runs it immediately, and reruns it synchronously
+after every assignment to a signal read by its previous run. Dependencies are
+recollected on every run. Assigning the same value still notifies dependents.
+
+Reactions belong to the innermost `Reactive` resource and are disposed when its
+`with` scope exits, including through `return`, `break`, or `continue`:
+
+```staple
+with Reactive = reactive_scope () {
+    reaction { println "count: $count" }
+    count = 1
+}
+```
+
+Persistent derived bindings are not implemented yet. A top-level initializer
+that reads a signal must use `snapshot` to state that eager evaluation is
+intentional:
+
+```staple
+let frozen = snapshot (count * 2)
+```
+
+The initial runtime is single-threaded and unbatched. A reaction that
+synchronously triggers itself traps instead of recurring indefinitely.
 
 ### Call-site implicit thunking
 

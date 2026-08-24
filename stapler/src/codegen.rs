@@ -55,6 +55,7 @@ struct ModuleEmitter<'module, 'context> {
     external_symbols: HashSet<SymbolId>,
     storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initialization_states: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
+    signal_metadata: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initializers: HashMap<ModuleId, inkwell::values::FunctionValue<'context>>,
     size_type: inkwell::types::IntType<'context>,
     target_data: TargetData,
@@ -90,6 +91,7 @@ struct FunctionEnvironment<'context> {
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
     resources: Vec<(CheckedResource, inkwell::values::AnyValueEnum<'context>)>,
+    reactive_scopes: Vec<inkwell::values::PointerValue<'context>>,
     did_return: bool,
     loops: Vec<LoopCodegenContext<'context>>,
 }
@@ -110,6 +112,7 @@ struct LoopCodegenContext<'context> {
     header: inkwell::basic_block::BasicBlock<'context>,
     exit: inkwell::basic_block::BasicBlock<'context>,
     owned_before: usize,
+    reactive_before: usize,
     incoming: Vec<(
         inkwell::values::BasicValueEnum<'context>,
         inkwell::basic_block::BasicBlock<'context>,
@@ -119,6 +122,27 @@ struct LoopCodegenContext<'context> {
 type CodeGenerationResult<T> = Result<T, Diagnostic>;
 
 impl<'module, 'context> ModuleEmitter<'module, 'context> {
+    fn build_reactive_runtime_call(
+        &self,
+        name: &str,
+        arguments: &[inkwell::values::BasicMetadataValueEnum<'context>],
+        _result: Option<BasicTypeEnum<'context>>,
+        call_name: &str,
+        span: Span,
+    ) -> CodeGenerationResult<Option<BasicValueEnum<'context>>> {
+        let function = self.llvm_module.get_function(name).ok_or_else(|| {
+            Diagnostic::new(
+                span.clone(),
+                format!("missing reactive runtime function `{name}`"),
+            )
+        })?;
+        let call = self
+            .builder
+            .build_direct_call(function, arguments, call_name)
+            .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        Ok(call.try_as_basic_value().basic())
+    }
+
     fn new(
         context: &'context inkwell::context::Context,
         typed_module: &'module TypedModule,
@@ -149,6 +173,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             external_symbols: HashSet::new(),
             storage: HashMap::new(),
             initialization_states: HashMap::new(),
+            signal_metadata: HashMap::new(),
             initializers: HashMap::new(),
             size_type: context.ptr_sized_int_type(&target_machine.get_target_data(), None),
             target_data: target_machine.get_target_data(),
@@ -215,6 +240,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.llvm_module
             .set_data_layout(&target_machine.get_target_data().get_data_layout());
         self.install_gc_runtime()?;
+        self.install_reactive_runtime()?;
         self.declare_external_functions()?;
         self.declare_functions()?;
         self.declare_top_level_storage()?;
@@ -289,6 +315,34 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Diagnostic::new(
                 Span::Compiler,
                 format!("could not link garbage collector runtime: {error}"),
+            )
+        })
+    }
+
+    fn install_reactive_runtime(&self) -> CodeGenerationResult<()> {
+        let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
+        let bits = pointer_bytes * 8;
+        let runtime = include_str!("reactive.ll")
+            .replace("{{SIZE}}", &format!("i{bits}"))
+            .replace("{{SCOPE_BYTES}}", &pointer_bytes.to_string())
+            .replace("{{SIGNAL_BYTES}}", &pointer_bytes.to_string())
+            .replace("{{REACTION_BYTES}}", &(pointer_bytes * 5).to_string())
+            .replace("{{DEP_BYTES}}", &(pointer_bytes * 5).to_string());
+        let buffer =
+            MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-reactive");
+        let module = self
+            .context
+            .create_module_from_ir(buffer)
+            .map_err(|error| {
+                Diagnostic::new(
+                    Span::Compiler,
+                    format!("could not build reactive runtime: {error}"),
+                )
+            })?;
+        self.llvm_module.link_in_module(module).map_err(|error| {
+            Diagnostic::new(
+                Span::Compiler,
+                format!("could not link reactive runtime: {error}"),
             )
         })
     }
@@ -401,6 +455,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 global.set_initializer(&zero);
                 global.set_linkage(inkwell::module::Linkage::Internal);
                 self.storage.insert(symbol, global);
+                if self.typed_module.resolved().is_signal_symbol(symbol) {
+                    let metadata = self.llvm_module.add_global(
+                        self.context.ptr_type(AddressSpace::default()),
+                        None,
+                        &format!("{name}_signal"),
+                    );
+                    metadata.set_initializer(
+                        &self.context.ptr_type(AddressSpace::default()).const_null(),
+                    );
+                    metadata.set_linkage(inkwell::module::Linkage::Internal);
+                    self.signal_metadata.insert(symbol, metadata);
+                }
             }
         }
         Ok(())
@@ -1403,6 +1469,22 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 };
                 self.store_global_initialization_state(symbol, 1, binding.syntax.span.clone())?;
                 let value = self.compile_expression(environment, expression)?;
+                if self.typed_module.resolved().is_signal_symbol(symbol)
+                    && let Some(metadata) = self.signal_metadata.get(&symbol).copied()
+                {
+                    let signal = self
+                        .build_reactive_runtime_call(
+                            "__staple_signal_create",
+                            &[],
+                            Some(self.context.ptr_type(AddressSpace::default()).into()),
+                            "signal.create",
+                            binding.syntax.span.clone(),
+                        )?
+                        .expect("signal_create returns a pointer");
+                    self.builder
+                        .build_store(metadata.as_pointer_value(), signal)
+                        .map_err(compiler_diagnostic)?;
+                }
                 if let Some(global) = self.storage.get(&symbol) {
                     let value = value_as_basic(value).ok_or_else(|| {
                         Diagnostic::new(
@@ -1635,9 +1717,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .ok_or_else(|| Diagnostic::new(Span::Compiler, "unchecked binding cell"))?;
         let value_type = substitute_type(value_type, &self.active_type_substitutions);
         let llvm_type = self.compile_type(&value_type)?;
-        Ok(self
-            .context
-            .struct_type(&[llvm_type, self.context.i8_type().into()], false))
+        let mut fields = vec![llvm_type, self.context.i8_type().into()];
+        if self.typed_module.resolved().is_signal_symbol(symbol) {
+            fields.push(self.context.ptr_type(AddressSpace::default()).into());
+        }
+        Ok(self.context.struct_type(&fields, false))
     }
 
     fn allocate_binding_cell(
@@ -1670,6 +1754,24 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder
             .build_store(state, self.context.i8_type().const_zero())
             .map_err(|error| Diagnostic::new(span, error.to_string()))?;
+        if self.typed_module.resolved().is_signal_symbol(symbol) {
+            let metadata = self
+                .builder
+                .build_struct_gep(cell_type, cell, 2, "signal.metadata")
+                .map_err(compiler_diagnostic)?;
+            let signal = self
+                .build_reactive_runtime_call(
+                    "__staple_signal_create",
+                    &[],
+                    Some(self.context.ptr_type(AddressSpace::default()).into()),
+                    "signal.create",
+                    Span::Compiler,
+                )?
+                .expect("signal_create returns a pointer");
+            self.builder
+                .build_store(metadata, signal)
+                .map_err(compiler_diagnostic)?;
+        }
         let value_type = self
             .typed_module
             .type_of_symbol(symbol)
@@ -1751,7 +1853,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
                     })?;
-                if binding.mutable {
+                if self.typed_module.has_mutable_storage(symbol) {
                     self.allocate_binding_cell(environment, symbol, binding.syntax.span.clone())?;
                 }
                 if environment.binding_cells.contains_key(&symbol) {
@@ -1830,6 +1932,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "function result is not a first-class value",
                     )
                 })?;
+                self.dispose_reactive_scopes(environment, 0, item.syntax.span.clone())?;
                 self.drop_all_owned(environment, item.syntax.span.clone())?;
                 self.builder
                     .build_return(Some(&value))
@@ -1852,11 +1955,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 } else {
                     value_as_basic(self.unit_value()).expect("unit is a basic value")
                 };
-                let (exit, owned_before) = environment
+                let (exit, owned_before, reactive_before) = environment
                     .loops
                     .last()
-                    .map(|loop_| (loop_.exit, loop_.owned_before))
+                    .map(|loop_| (loop_.exit, loop_.owned_before, loop_.reactive_before))
                     .expect("break inside loop");
+                self.dispose_reactive_scopes(
+                    environment,
+                    reactive_before,
+                    item.syntax.span.clone(),
+                )?;
                 self.drop_owned_since(environment, owned_before, item.syntax.span.clone())?;
                 self.builder
                     .build_unconditional_branch(exit)
@@ -1874,11 +1982,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Ok(None)
             }
             Item::Continue(item) => {
-                let (header, owned_before) = environment
+                let (header, owned_before, reactive_before) = environment
                     .loops
                     .last()
-                    .map(|loop_| (loop_.header, loop_.owned_before))
+                    .map(|loop_| (loop_.header, loop_.owned_before, loop_.reactive_before))
                     .expect("continue inside loop");
+                self.dispose_reactive_scopes(
+                    environment,
+                    reactive_before,
+                    item.syntax.span.clone(),
+                )?;
                 self.drop_owned_since(environment, owned_before, item.syntax.span.clone())?;
                 self.builder
                     .build_unconditional_branch(header)
@@ -1963,6 +2076,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 assignment.syntax.span.clone(),
             )?;
             self.store_global_initialization_state(symbol, 2, assignment.syntax.span.clone())?;
+            if let Some(signal) =
+                self.signal_metadata_value(environment, symbol, assignment.syntax.span.clone())?
+            {
+                self.build_reactive_runtime_call(
+                    "__staple_signal_notify",
+                    &[signal.into()],
+                    None,
+                    "signal.notify",
+                    assignment.syntax.span.clone(),
+                )?;
+            }
         }
         Ok(())
     }
@@ -2513,8 +2637,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     return Ok(self.unit_value());
                 }
                 environment.resources.push((resource, value));
+                let reactive = self
+                    .typed_module
+                    .is_reactive_type(&environment.resources.last().unwrap().0.value_type);
+                if reactive {
+                    let scope = value_as_basic(value)
+                        .expect("Reactive is first-class")
+                        .into_pointer_value();
+                    environment.reactive_scopes.push(scope);
+                }
                 let result =
                     self.compile_expression(environment, &Expression::Block(with.body.clone()));
+                if reactive {
+                    if !environment.did_return {
+                        self.dispose_reactive_scopes(
+                            environment,
+                            environment.reactive_scopes.len() - 1,
+                            with.syntax.span.clone(),
+                        )?;
+                    }
+                    environment.reactive_scopes.pop();
+                }
                 environment.resources.pop();
                 result
             }
@@ -3843,6 +3986,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             header,
             exit,
             owned_before: environment.owned_order.len(),
+            reactive_before: environment.reactive_scopes.len(),
             incoming: Vec::new(),
         });
         environment.did_return = false;
@@ -5455,6 +5599,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .ok_or_else(|| Diagnostic::new(span.clone(), "unchecked local binding"))?;
             let value_type = substitute_type(value_type, &self.active_type_substitutions);
             let llvm_type = self.compile_type(&value_type)?;
+            self.track_signal_read(environment, symbol, span.clone())?;
             return self
                 .builder
                 .build_load(llvm_type, value_slot, "binding")
@@ -5491,6 +5636,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .type_of_symbol(symbol)
                 .ok_or_else(|| Diagnostic::new(span.clone(), "unchecked global value"))?;
             let llvm_type = self.compile_type(value_type)?;
+            self.track_signal_read(environment, symbol, span.clone())?;
             return self
                 .builder
                 .build_load(llvm_type, global.as_pointer_value(), "global")
@@ -5498,6 +5644,73 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(|error| Diagnostic::new(span, error.to_string()));
         }
         Err(Diagnostic::new(span, unavailable))
+    }
+
+    fn signal_metadata_value(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        span: Span,
+    ) -> CodeGenerationResult<Option<inkwell::values::PointerValue<'context>>> {
+        if !self.typed_module.resolved().is_signal_symbol(symbol) {
+            return Ok(None);
+        }
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let slot = if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+            self.builder
+                .build_struct_gep(
+                    self.compile_binding_cell_type(symbol)?,
+                    cell,
+                    2,
+                    "signal.metadata",
+                )
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+        } else if let Some(global) = self.signal_metadata.get(&symbol).copied() {
+            global.as_pointer_value()
+        } else {
+            return Err(Diagnostic::new(span, "signal metadata is unavailable"));
+        };
+        self.builder
+            .build_load(pointer_type, slot, "signal")
+            .map(|value| Some(value.into_pointer_value()))
+            .map_err(|error| Diagnostic::new(span, error.to_string()))
+    }
+
+    fn track_signal_read(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let Some(signal) = self.signal_metadata_value(environment, symbol, span.clone())? else {
+            return Ok(());
+        };
+        self.build_reactive_runtime_call(
+            "__staple_signal_track",
+            &[signal.into()],
+            None,
+            "signal.track",
+            span,
+        )?;
+        Ok(())
+    }
+
+    fn dispose_reactive_scopes(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        keep: usize,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        for scope in environment.reactive_scopes[keep..].iter().rev() {
+            self.build_reactive_runtime_call(
+                "__staple_reactive_scope_dispose",
+                &[(*scope).into()],
+                None,
+                "reactive.dispose",
+                span.clone(),
+            )?;
+        }
+        Ok(())
     }
 
     fn build_initialization_check(
@@ -5893,6 +6106,22 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         intrinsic: IntrinsicFunction,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         match intrinsic {
+            IntrinsicFunction::ReactiveScope => {
+                self.compile_expression(environment, &call.argument)?;
+                let value = self
+                    .build_reactive_runtime_call(
+                        "__staple_reactive_scope_create",
+                        &[],
+                        Some(self.context.ptr_type(AddressSpace::default()).into()),
+                        "reactive.scope",
+                        call.syntax.span.clone(),
+                    )?
+                    .expect("reactive_scope_create returns a pointer");
+                return Ok(value.as_any_value_enum());
+            }
+            IntrinsicFunction::Reaction => {
+                return self.compile_reaction(environment, call);
+            }
             IntrinsicFunction::ToString { value } => {
                 return self.compile_numeric_to_string(environment, call, value);
             }
@@ -5938,6 +6167,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     self.compile_drop_value(value, &value_type, call.syntax.span.clone())?;
                 }
                 return Ok(self.unit_value());
+            }
+            IntrinsicFunction::Snapshot => {
+                return self.compile_expression(environment, &call.argument);
             }
             IntrinsicFunction::SliceLength => {
                 let value = self.compile_expression(environment, &call.argument)?;
@@ -6173,12 +6405,197 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             | IntrinsicFunction::BufferFreeze
             | IntrinsicFunction::BufferTransfer
             | IntrinsicFunction::RefReplace
-            | IntrinsicFunction::Drop => {
+            | IntrinsicFunction::Drop
+            | IntrinsicFunction::ReactiveScope
+            | IntrinsicFunction::Reaction
+            | IntrinsicFunction::Snapshot => {
                 unreachable!()
             }
         }
         .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
         Ok(value.as_any_value_enum())
+    }
+
+    fn compile_reaction(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let implicit = self
+            .typed_module
+            .implicit_thunk_for(call.argument.syntax().id)
+            .cloned();
+        let callback = if let Some(thunk) = &implicit {
+            self.build_closure(environment, thunk.id, call.argument.syntax().span.clone())?
+                .as_any_value_enum()
+        } else {
+            self.compile_expression(environment, &call.argument)?
+        };
+        let AnyValueEnum::StructValue(callback) = callback else {
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "reaction callback is not a closure",
+            ));
+        };
+        let callback_type = if let Some(thunk) = &implicit {
+            self.typed_module.type_of_function(thunk.id).cloned()
+        } else {
+            self.concrete_expression_type(&call.argument)
+                .and_then(|ty| match ty {
+                    CheckedType::Function(function) => Some(function),
+                    _ => None,
+                })
+        }
+        .ok_or_else(|| {
+            Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "reaction callback has no function type",
+            )
+        })?;
+        let resources = self.compile_resource_arguments(
+            environment,
+            &callback_type.effects,
+            call.syntax.span.clone(),
+        )?;
+        let scope = environment
+            .resources
+            .iter()
+            .rev()
+            .find_map(|(resource, value)| {
+                self.typed_module
+                    .is_reactive_type(&resource.value_type)
+                    .then(|| value_as_basic(*value))
+                    .flatten()
+                    .map(|value| value.into_pointer_value())
+            })
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    call.syntax.span.clone(),
+                    "resource `Reactive` is not available",
+                )
+            })?;
+
+        let mut payload_fields = vec![callback.get_type().into()];
+        for resource in &callback_type.effects.resources {
+            payload_fields.push(self.compile_type(&resource.value_type)?);
+        }
+        let payload_type = self.context.struct_type(&payload_fields, false);
+        let payload = self
+            .builder
+            .build_malloc(payload_type, "reaction.payload")
+            .map_err(compiler_diagnostic)?;
+        let callback_slot = self
+            .builder
+            .build_struct_gep(payload_type, payload, 0, "reaction.callback")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(callback_slot, callback)
+            .map_err(compiler_diagnostic)?;
+        for (index, resource) in resources.iter().enumerate() {
+            let slot = self
+                .builder
+                .build_struct_gep(
+                    payload_type,
+                    payload,
+                    (index + 1) as u32,
+                    "reaction.resource",
+                )
+                .map_err(compiler_diagnostic)?;
+            let resource = BasicValueEnum::try_from(*resource).map_err(|_| {
+                Diagnostic::new(
+                    call.syntax.span.clone(),
+                    "reaction resource is not first-class",
+                )
+            })?;
+            self.builder
+                .build_store(slot, resource)
+                .map_err(compiler_diagnostic)?;
+        }
+
+        let previous = self.builder.get_insert_block();
+        let runner_type = self.context.void_type().fn_type(
+            &[self.context.ptr_type(AddressSpace::default()).into()],
+            false,
+        );
+        let runner = self.llvm_module.add_function(
+            &format!("__staple_reaction_runner_{}", call.syntax.id.0),
+            runner_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(runner, "entry");
+        self.builder.position_at_end(entry);
+        let payload_argument = runner.get_first_param().unwrap().into_pointer_value();
+        let callback_slot = self
+            .builder
+            .build_struct_gep(payload_type, payload_argument, 0, "reaction.callback")
+            .map_err(compiler_diagnostic)?;
+        let loaded_callback = self
+            .builder
+            .build_load(callback.get_type(), callback_slot, "reaction.callback")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        let code = self
+            .builder
+            .build_extract_value(loaded_callback, 0, "reaction.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let closure_environment = self
+            .builder
+            .build_extract_value(loaded_callback, 1, "reaction.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let mut arguments = vec![closure_environment.into()];
+        for (index, resource) in callback_type.effects.resources.iter().enumerate() {
+            let slot = self
+                .builder
+                .build_struct_gep(
+                    payload_type,
+                    payload_argument,
+                    (index + 1) as u32,
+                    "reaction.resource",
+                )
+                .map_err(compiler_diagnostic)?;
+            arguments.push(
+                self.builder
+                    .build_load(
+                        self.compile_type(&resource.value_type)?,
+                        slot,
+                        "reaction.resource",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .into(),
+            );
+        }
+        self.builder
+            .build_indirect_call(
+                self.compile_closure_function_type(&callback_type)?,
+                code,
+                &arguments,
+                "reaction.call",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
+        if let Some(block) = previous {
+            self.builder.position_at_end(block);
+        }
+        let payload_size = self
+            .size_type
+            .const_int(self.target_data.get_store_size(&payload_type), false);
+        self.build_reactive_runtime_call(
+            "__staple_reaction_create",
+            &[
+                scope.into(),
+                runner.as_global_value().as_pointer_value().into(),
+                payload.into(),
+                payload_size.into(),
+            ],
+            None,
+            "reaction.create",
+            call.syntax.span.clone(),
+        )?;
+        Ok(self.unit_value())
     }
 
     fn compile_numeric_to_string(
@@ -7805,6 +8222,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )),
             CheckedType::Opaque { .. } if self.typed_module.is_io_type(value_type) => {
                 Ok(self.context.struct_type(&[], false).into())
+            }
+            CheckedType::Opaque { .. } if self.typed_module.is_reactive_type(value_type) => {
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             CheckedType::Opaque { name, .. } => Err(Diagnostic::new(
                 Span::Compiler,

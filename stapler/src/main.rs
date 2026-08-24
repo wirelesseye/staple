@@ -1464,6 +1464,49 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_signals_and_scoped_reactions_synchronously() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-reactive-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-reactive-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let signal count = 0\n",
+                "let mut observed = 0\n",
+                "with Reactive = reactive_scope () {\n",
+                "  reaction { observed = count; () }\n",
+                "  count = 7\n",
+                "}\n",
+                "count = 8\n",
+                "exit (observed - 7)\n",
+            ),
+        )
+        .expect("temporary reactive source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("reactive executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("reactive executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_structurally_derived_product_defaults() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

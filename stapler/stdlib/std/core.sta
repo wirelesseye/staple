@@ -11,6 +11,7 @@ pub use std.core.iterator.*
 pub use std.core.list.(List, ListIter)
 pub use std.core.number.*
 pub use std.core.range.*
+pub use std.core.reactive.*
 pub use std.core.reference.(Ref)
 pub use std.core.result.*
 pub use std.core.sized.*

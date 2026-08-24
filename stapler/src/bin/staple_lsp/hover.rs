@@ -151,7 +151,11 @@ impl Collector<'_> {
             self.declarations.insert(
                 symbol,
                 Declaration {
-                    prefix: Some(binding.keyword()),
+                    prefix: Some(if binding.signal {
+                        "signal"
+                    } else {
+                        binding.keyword()
+                    }),
                     name: binding.name.clone(),
                     docs,
                 },

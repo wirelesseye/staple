@@ -1,0 +1,13 @@
+/// The lexical owner of reactions created within a reactive scope.
+pub type Reactive = opaque
+
+pub def __reactive_scope: () -> Reactive = () => __reactive_scope ()
+
+/// Creates a resource that owns reactions until its `with` block exits.
+pub def reactive_scope: () -> Reactive = () => __reactive_scope ()
+
+/// Runs a callback immediately and again whenever one of its signal reads changes.
+pub def reaction: <effect E> (() ->{E} ()) ->{Reactive, E} () = callback => ()
+
+/// Reads a reactive expression as an explicitly eager value.
+pub def snapshot: <T> T -> T = value => value
