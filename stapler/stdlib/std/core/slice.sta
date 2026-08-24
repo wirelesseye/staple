@@ -1,6 +1,6 @@
 /// A borrowed immutable sequence of values.
 @recursive_constructor
-pub(repr) type Slice T = T
+pub type Slice T = T
 
 companion<T> Slice T {
     /// Returns the number of elements in the slice.

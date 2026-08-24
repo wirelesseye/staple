@@ -1512,9 +1512,12 @@ impl NameResolver {
                 ));
             }
         } else if builtin != BuiltinType::Syntax {
-            let valid_kind = if matches!(builtin, BuiltinType::Ref | BuiltinType::Slice) {
+            let valid_kind = if builtin == BuiltinType::Ref {
                 declaration.kind == crate::TypeDeclarationKind::Distinct
                     && declaration.representation_visibility == Visibility::Public
+            } else if builtin == BuiltinType::Slice {
+                declaration.kind == crate::TypeDeclarationKind::Distinct
+                    && declaration.representation_visibility == Visibility::Private
             } else {
                 declaration.kind == crate::TypeDeclarationKind::Opaque
             };
