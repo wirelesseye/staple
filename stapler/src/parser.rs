@@ -1254,7 +1254,9 @@ impl Grammar {
         } else {
             TypeDeclarationKind::Distinct
         };
+        let name_start = self.position;
         let name = self.parse_quoted_identifier("expected type name")?;
+        let name_syntax = self.syntax(name_start);
         let (mut type_parameters, default_bounds) = self.parse_juxtaposed_type_parameters()?;
         let (trait_bounds, subtype_bounds, _) =
             self.parse_where_clause(&mut type_parameters, false)?;
@@ -1292,6 +1294,7 @@ impl Grammar {
         }
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
+            name_syntax,
             docs: Vec::new(),
             recursive_constructor: false,
             visibility,

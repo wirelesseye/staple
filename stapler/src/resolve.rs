@@ -1155,6 +1155,7 @@ impl NameResolver {
         for name in [
             "Ident",
             "CallExpr",
+            "StringExpr",
             "Sequence",
             "Optional",
             "Separated",
@@ -1166,6 +1167,15 @@ impl NameResolver {
             "Expr",
             "Type",
             "Pattern",
+            "BindingPattern",
+            "NominalPattern",
+            "AliasDeclaration",
+            "DistinctDeclaration",
+            "SingletonDeclaration",
+            "OpaqueDeclaration",
+            "TypeDeclarationKind",
+            "TypeDeclarationItem",
+            "UnstructuredItem",
             "Item",
             "Syntax",
             "SyntaxNode",
@@ -4458,13 +4468,19 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
     match name {
         "Ident" => Some("String -> Ident String"),
         "CallExpr" => Some("(callee: Expr, argument: Expr) -> CallExpr"),
+        "StringExpr" => Some("String -> StringExpr"),
+        "BindingPattern" => Some("Ident String -> BindingPattern"),
+        "NominalPattern" => Some("(name: Ident String, argument: Pattern) -> NominalPattern"),
         "Sequence" => Some("Element => Element -> Sequence Element"),
         "Separated" => Some("Element => Separator => (separator: Separator, elements: Sequence Element, trailing: Bool) -> Separated Element Separator"),
         "Parenthesized" => Some("Contents => Contents -> Parenthesized Contents"),
         "Bracketed" => Some("Contents => Contents -> Bracketed Contents"),
         "Braced" => Some("Contents => Contents -> Braced Contents"),
+        "TypeDeclarationItem" => Some("(kind: TypeDeclarationKind, name: Ident String, name_spelling: String, declared_type: Type, type_parameters: Sequence (Ident String), underlying: Optional Type) -> TypeDeclarationItem"),
         "Syntax" | "SyntaxNode" | "Expr" | "UnstructuredExpr" | "Type" | "Pattern"
-        | "Item" | "Visibility" | "MacroCallVisibility" | "Comma" | "Equals"
+        | "Item" | "UnstructuredItem" | "TypeDeclarationKind" | "AliasDeclaration"
+        | "DistinctDeclaration" | "SingletonDeclaration" | "OpaqueDeclaration"
+        | "Visibility" | "MacroCallVisibility" | "Comma" | "Equals"
         | "FatArrow" => Some(name),
         _ => None,
     }
@@ -4489,7 +4505,7 @@ fn declare_compile_pattern(pattern: &Pattern, scope: &mut CompileTimeScope, kind
 
 fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) -> Option<String> {
     match expression {
-        Expression::Name(name) => scope.lookup_type(&name.name).or_else(|| matches!(name.name.as_str(), "Syntax" | "SyntaxNode" | "Expr" | "Ident" | "CallExpr" | "UnstructuredExpr" | "Type" | "Pattern" | "Item" | "Visibility" | "MacroCallVisibility" | "Comma" | "Equals" | "FatArrow").then(|| name.name.clone())),
+        Expression::Name(name) => scope.lookup_type(&name.name).or_else(|| matches!(name.name.as_str(), "Syntax" | "SyntaxNode" | "Expr" | "Ident" | "CallExpr" | "StringExpr" | "UnstructuredExpr" | "Type" | "Pattern" | "BindingPattern" | "NominalPattern" | "Item" | "TypeDeclarationItem" | "UnstructuredItem" | "TypeDeclarationKind" | "AliasDeclaration" | "DistinctDeclaration" | "SingletonDeclaration" | "OpaqueDeclaration" | "Visibility" | "MacroCallVisibility" | "Comma" | "Equals" | "FatArrow").then(|| name.name.clone())),
         Expression::Quote(quote) => Some(match quote.kind { crate::QuoteKind::Quote => "Syntax".to_owned(), crate::QuoteKind::ParseQuote => "SyntaxNode".to_owned() }),
         Expression::String(_) => Some("String".to_owned()),
         Expression::Integer(_) => Some("Integer".to_owned()),

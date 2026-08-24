@@ -182,6 +182,7 @@ pub enum TypeDeclarationKind {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDeclaration {
     pub syntax: Syntax,
+    pub name_syntax: Syntax,
     pub docs: Vec<String>,
     pub recursive_constructor: bool,
     pub visibility: Visibility,

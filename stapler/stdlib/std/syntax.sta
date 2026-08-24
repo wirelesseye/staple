@@ -10,6 +10,9 @@ pub(repr) type CallExpr = (
     callee: Expr,
     argument: Expr,
 )
+/// A string-literal expression constructed from a compile-time string.
+@recursive_constructor
+pub(repr) type StringExpr = String
 /// A sequence of syntax values.
 @recursive_constructor
 pub(repr) type Sequence Element =
@@ -43,14 +46,41 @@ pub(repr) type Braced Contents = Contents
 /// An expression syntax node without structured fields.
 pub type UnstructuredExpr = opaque
 /// The syntax category for expressions.
-pub type alias Expr = Ident String | CallExpr | UnstructuredExpr
+pub type alias Expr = Ident String | CallExpr | StringExpr | UnstructuredExpr
 
 /// The syntax category for types.
 pub type Type = opaque
+/// A binding pattern constructed from an identifier.
+@recursive_constructor
+pub(repr) type BindingPattern = Ident String
+/// A nominal destructuring pattern.
+@recursive_constructor
+pub(repr) type NominalPattern = (name: Ident String, argument: Pattern)
+/// A pattern whose structure is not exposed yet.
+pub type UnstructuredPattern = opaque
 /// The syntax category for patterns.
-pub type Pattern = opaque
+pub type alias Pattern = BindingPattern | NominalPattern | UnstructuredPattern
+/// The kind of a type declaration.
+pub type AliasDeclaration
+pub type DistinctDeclaration
+pub type SingletonDeclaration
+pub type OpaqueDeclaration
+pub type alias TypeDeclarationKind = AliasDeclaration | DistinctDeclaration | SingletonDeclaration | OpaqueDeclaration
+/// An inspectable type declaration item. Type parameters are exposed by name;
+/// their original declaration syntax remains part of the lossless item value.
+@recursive_constructor
+pub(repr) type TypeDeclarationItem = (
+    kind: TypeDeclarationKind,
+    name: Ident String,
+    name_spelling: String,
+    declared_type: Type,
+    type_parameters: Sequence (Ident String),
+    underlying: Optional Type,
+)
+/// An item whose structure is not exposed yet.
+pub type UnstructuredItem = opaque
 /// The syntax category for items.
-pub type Item = opaque
+pub type alias Item = TypeDeclarationItem | UnstructuredItem
 
 /// Compiler-owned visibility syntax. `MacroCallVisibility` is an invocation
 /// marker whose value is usable as `Visibility` in compile-time code.

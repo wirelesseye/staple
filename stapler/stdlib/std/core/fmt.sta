@@ -1,4 +1,5 @@
 use std.core.string.(String, ToString)
+use std.syntax.*
 
 /// A growable UTF-8 output buffer used by formatting traits.
 pub type Formatter = Buffer U8
@@ -11,6 +12,61 @@ pub trait Display T {
 /// Formats a value for developer-facing output.
 pub trait Debug T {
     fmt: (T, Formatter) ->{mut 1} ()
+}
+
+def derived_debug_implementation: Ident String -> String -> Type -> Sequence (Ident String) -> Type -> Item =
+name_syntax => name => target => parameters => representation => {
+    let name_expression: Expr = StringExpr name
+    let inner_name: Ident String = Ident "inner"
+    let inner_pattern: Pattern = BindingPattern inner_name
+    let value_pattern: Pattern = NominalPattern (name: name_syntax, argument: inner_pattern)
+    match parameters {
+        Sequence () => {
+            parse_quote {
+                impl Debug $target {
+                    def fmt = ($value_pattern, formatter) => {
+                        Formatter.write (formatter, $name_expression)
+                        Formatter.write (formatter, " ")
+                        Debug.fmt ($inner_name, formatter)
+                    }
+                }
+            } satisfies Item
+        },
+        _ => {
+            parse_quote {
+                impl<$parameters... where Debug $representation> Debug $target {
+                    def fmt = ($value_pattern, formatter) => {
+                        Formatter.write (formatter, $name_expression)
+                        Formatter.write (formatter, " ")
+                        Debug.fmt ($inner_name, formatter)
+                    }
+                }
+            } satisfies Item
+        },
+    }
+}
+
+/// Derives `Debug` for a represented nominal type by prefixing its name and
+/// delegating formatting to its representation.
+pub macro @derive_debug: Item -> Sequence Item = item => match item {
+    TypeDeclarationItem (
+        DistinctDeclaration(), name_syntax, name, target, parameters, Some representation,
+    ) => Sequence (
+        first: item,
+        rest: Sequence (
+            first: derived_debug_implementation name_syntax name target parameters representation,
+            rest: Sequence (),
+        ),
+    ),
+    TypeDeclarationItem (
+        SingletonDeclaration(), name_syntax, name, target, parameters, Some representation,
+    ) => Sequence (
+        first: item,
+        rest: Sequence (
+            first: derived_debug_implementation name_syntax name target parameters representation,
+            rest: Sequence (),
+        ),
+    ),
 }
 
 def grow_formatter: Formatter ->{mut} () = formatter => {

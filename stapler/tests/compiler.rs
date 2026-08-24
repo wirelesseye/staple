@@ -6068,6 +6068,50 @@ fn provides_formatter_display_debug_and_structural_product_debug() {
 }
 
 #[test]
+fn provides_structural_debug_for_sum_types() {
+    let module = type_check(concat!(
+        "let integer: I32 | String = 42\n",
+        "let string: I32 | String = \"text\"\n",
+        "let integer_debug: String = Formatter.debug integer\n",
+        "let string_debug: String = Formatter.debug string\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context).compile_module(&module).expect("sum Debug should generate LLVM");
+    assert!(llvm.contains("__staple_structural_Debug"));
+    assert!(llvm.contains("debug.sum.fmt"));
+}
+
+#[test]
+fn derives_debug_for_nominal_representations() {
+    let module = type_check(concat!(
+        "@derive_debug\ntype Point = (x: I32, y: I32)\n",
+        "@derive_debug\ntype Choice = I32 | String\n",
+        "@derive_debug\ntype Box T = T\n",
+        "let point_debug: String = Formatter.debug (Point (x: 3, y: 4))\n",
+        "let choice_debug: String = Formatter.debug (Choice (42 satisfies I32 | String))\n",
+        "let box_debug: String = Formatter.debug (Box 7)\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context).compile_module(&module).expect("derived Debug implementations should generate LLVM");
+    assert!(llvm.contains("formatter.write"));
+    assert!(llvm.contains("__staple_structural_Debug"));
+}
+
+#[test]
+fn exposes_type_declarations_as_structured_items() {
+    let module = type_check(concat!(
+        "macro @inspect_item: Item -> Item = item => match item {\n",
+        "  TypeDeclarationItem (DistinctDeclaration(), Ident name, spelling, declared_type, parameters, Some representation) => item,\n",
+        "  UnstructuredItem() => item,\n}\n",
+        "@inspect_item\ntype Pair T = (T, T)\n",
+        "@inspect_item\ndef answer = () => 42\n",
+        "let pair = Pair (1, 2)\nlet result = answer ()\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context).compile_module(&module).expect("structured and fallback item views should round-trip");
+}
+
+#[test]
 fn type_checks_and_generates_string_templates() {
     let module = type_check(concat!(
         "type Label = String\n",

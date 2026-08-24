@@ -2950,11 +2950,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let [value, formatter] = values else {
             return Err(Diagnostic::new(span, "invalid structural Debug arguments"));
         };
-        let CheckedType::Product(product) = target else {
-            return Err(Diagnostic::new(span, "structural Debug requires a product"));
-        };
         let BasicValueEnum::StructValue(value) = value else {
-            return Err(Diagnostic::new(span, "invalid structural Debug product value"));
+            return Err(Diagnostic::new(span, "invalid structural Debug value"));
+        };
+        if let CheckedType::Sum(sum) = target {
+            return self.compile_structural_sum_debug_body(*value, *formatter, sum, span);
+        }
+        let CheckedType::Product(product) = target else {
+            return Err(Diagnostic::new(span, "structural Debug requires a product or sum"));
         };
         self.compile_formatter_write_literal(*formatter, "(", span.clone())?;
         let debug_trait = self
@@ -3002,6 +3005,42 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(compiler_diagnostic)?;
         }
         self.compile_formatter_write_literal(*formatter, ")", span.clone())?;
+        value_as_basic(self.unit_value()).ok_or_else(|| Diagnostic::new(span, "invalid unit value"))
+    }
+
+    fn compile_structural_sum_debug_body(
+        &mut self,
+        value: inkwell::values::StructValue<'context>,
+        formatter: BasicValueEnum<'context>,
+        sum: &crate::CheckedSumType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let tag = self.builder.build_extract_value(value, 0, "debug.sum.tag")
+            .map_err(compiler_diagnostic)?.into_int_value();
+        let function = self.builder.get_insert_block().and_then(|block| block.get_parent())
+            .ok_or_else(|| Diagnostic::new(span.clone(), "sum Debug is not in a function"))?;
+        let merge = self.context.append_basic_block(function, "debug.sum.done");
+        let cases = sum.alternatives.iter().enumerate().map(|(index, _)| (
+            self.context.i32_type().const_int(index as u64, false),
+            self.context.append_basic_block(function, "debug.sum.case"),
+        )).collect::<Vec<_>>();
+        self.builder.build_switch(tag, merge, &cases).map_err(compiler_diagnostic)?;
+        let debug_trait = self.typed_module.resolved().standard_trait("Debug")
+            .ok_or_else(|| Diagnostic::new(span.clone(), "standard Debug trait is unavailable"))?;
+        let debug_method = self.typed_module.resolved().traits().get(&debug_trait)
+            .and_then(|trait_| trait_.methods.first()).copied()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "standard Debug method is unavailable"))?;
+        for (index, alternative) in sum.alternatives.iter().enumerate() {
+            self.builder.position_at_end(cases[index].1);
+            let payload = self.extract_sum_alternative(value, sum, index, span.clone())?;
+            let function = self.trait_method_code(debug_trait, std::slice::from_ref(alternative), debug_method, span.clone())?;
+            self.builder.build_direct_call(function, &[
+                self.context.ptr_type(AddressSpace::default()).const_null().into(),
+                payload.into(), formatter.into(),
+            ], "debug.sum.fmt").map_err(compiler_diagnostic)?;
+            self.builder.build_unconditional_branch(merge).map_err(compiler_diagnostic)?;
+        }
+        self.builder.position_at_end(merge);
         value_as_basic(self.unit_value()).ok_or_else(|| Diagnostic::new(span, "invalid unit value"))
     }
 

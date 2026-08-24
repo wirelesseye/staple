@@ -369,9 +369,11 @@ chain — become the item's replacement; zero items there deletes the item
 entirely, matching how an item-producing function-style macro invocation with
 no replacement behaves.
 
-`Item` remains structurally opaque: a modifier can preserve, replace, choose,
-or pass its input through compile-time helpers, but cannot inspect item fields
-yet.
+`Item` exposes type declarations as `TypeDeclarationItem`, including their
+kind, name and spelling, applied declared type, flattened type-parameter names,
+and optional opaque representation. All other items match `UnstructuredItem`
+and remain lossless but opaque. `BindingPattern` and `NominalPattern` provide
+the structured pattern construction needed by declaration modifiers.
 
 Visibility is also compiler-owned syntax. Its three atomic variants are
 `Private`, `Public`, and `PublicRepr`. They can be matched and passed through
@@ -2173,11 +2175,13 @@ impl Debug Point {
 }
 ```
 
-Products have a compiler-provided structural `Debug` implementation whenever
-all their elements implement `Debug`. Positional elements are comma-separated
-inside parentheses and named elements include their field names. Nominal types
-do not inherit `Debug` from their representation and must implement it
-explicitly. Scalar `ToString` implementations delegate to `Display`.
+Products and sums have compiler-provided structural `Debug` implementations
+whenever all their elements or alternatives implement `Debug`. Products use
+parentheses and comma-separated fields; sums delegate directly to the active
+alternative. Nominal types do not inherit `Debug` from their representation,
+but the source-defined stdlib modifier `@derive_debug` generates an
+implementation that prefixes the type name and delegates to the representation.
+Scalar `ToString` implementations delegate to `Display`.
 
 `String` is an immutable garbage-collected UTF-8 byte sequence. The standard
 library declares it as a nominal type with the private representation

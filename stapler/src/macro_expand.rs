@@ -92,10 +92,15 @@ pub(crate) enum MetaType {
     Expr,
     Ident(Option<String>),
     CallExpr,
+    StringExpr,
     UnstructuredExpr,
     Type,
     Pattern,
+    BindingPattern,
+    NominalPattern,
     Item,
+    TypeDeclarationItem,
+    UnstructuredItem,
     Visibility,
     MacroCallVisibility,
     Comma,
@@ -1956,18 +1961,23 @@ impl MacroExpander {
         match value {
             Value::Syntax(SyntaxValue::Item(item)) => Some(vec![*item]),
             Value::Syntax(SyntaxValue::Items(items)) => Some(items),
+            Value::Sequence(values) if matches!(&definition.result, MetaType::Sequence(element) if **element == MetaType::Item) => values
+                .into_iter()
+                .map(|value| match value {
+                    Value::Syntax(SyntaxValue::Item(item)) => Some(*item),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>(),
             Value::Syntax(SyntaxValue::Raw(raw)) => {
-                let Ok(mut items) =
-                    crate::parser::parse_item_list_fragment(&raw, &mut self.next_syntax_id)
-                else {
-                    self.diagnostics.push(Diagnostic::new(
-                        definition.declaration.syntax.span.clone(),
-                        format!(
-                            "modifier macro `@{}` produced a syntax fragment that is not valid in item position",
-                            definition.key.name
-                        ),
-                    ));
-                    return None;
+                let mut items = match crate::parser::parse_item_list_fragment(&raw, &mut self.next_syntax_id) {
+                    Ok(items) => items,
+                    Err(error) => {
+                        self.diagnostics.push(Diagnostic::new(
+                            definition.declaration.syntax.span.clone(),
+                            format!("modifier macro `@{}` produced a syntax fragment that is not valid in item position: {}", definition.key.name, error.message),
+                        ));
+                        return None;
+                    }
                 };
                 let mark = self.next_mark;
                 self.next_mark += 1;
@@ -2000,6 +2010,7 @@ impl MacroExpander {
             }
         }
     }
+
 
     fn expand_top_level_macro(
         &mut self,
@@ -2982,10 +2993,15 @@ impl MacroExpander {
                     }
                     MetaType::Ident(None) => "an identifier".to_owned(),
                     MetaType::CallExpr => "a call expression".to_owned(),
+                    MetaType::StringExpr => "a string-literal expression".to_owned(),
                     MetaType::UnstructuredExpr => "an unstructured expression".to_owned(),
                     MetaType::Type => "a type".to_owned(),
                     MetaType::Pattern => "a pattern".to_owned(),
+                    MetaType::BindingPattern => "a binding pattern".to_owned(),
+                    MetaType::NominalPattern => "a nominal pattern".to_owned(),
                     MetaType::Item => "an item".to_owned(),
+                    MetaType::TypeDeclarationItem => "a type declaration item".to_owned(),
+                    MetaType::UnstructuredItem => "an unstructured item".to_owned(),
                     MetaType::Visibility => "visibility syntax".to_owned(),
                     MetaType::MacroCallVisibility => "macro-call visibility".to_owned(),
                     MetaType::Comma => "comma syntax".to_owned(),
@@ -3330,6 +3346,9 @@ impl MacroExpander {
                         name.name.as_str(),
                         "Ident"
                             | "CallExpr"
+                            | "StringExpr"
+                            | "BindingPattern"
+                            | "NominalPattern"
                             | "Sequence"
                             | "Separated"
                             | "Parenthesized"
@@ -3391,6 +3410,14 @@ impl MacroExpander {
                             None
                         }
                     };
+                }
+                if let Value::Syntax(SyntaxValue::Item(item)) = &value {
+                    if let Item::TypeDeclaration(declaration) = item.as_ref() {
+                        value = type_declaration_item_value(declaration);
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(access.syntax.span.clone(), "unstructured item syntax has no inspectable fields"));
+                        return None;
+                    }
                 }
                 if matches!(access.accessor, Accessor::Representation) {
                     if let Value::Nominal(_, representation) = value {
@@ -3700,6 +3727,52 @@ impl MacroExpander {
                     callee: Box::new(callee.to_expression()?),
                     argument: Box::new(argument.to_expression()?),
                 })))
+            }
+            "StringExpr" => {
+                let Value::String(value) = argument else {
+                    self.diagnostics.push(Diagnostic::new(span, "`StringExpr` requires a string"));
+                    return None;
+                };
+                let syntax = self.generated_syntax(module, span);
+                Some(Value::Syntax(SyntaxValue::Unstructured(Expression::String(
+                    crate::StringExpression {
+                        syntax,
+                        literal: crate::string_literal::encode(&value),
+                    },
+                ))))
+            }
+            "BindingPattern" => {
+                let Value::Syntax(SyntaxValue::Ident(identifier)) = argument else {
+                    self.diagnostics.push(Diagnostic::new(span, "`BindingPattern` requires an identifier"));
+                    return None;
+                };
+                Some(Value::Syntax(SyntaxValue::Pattern(Pattern::Binding(
+                    crate::BindingPattern {
+                        syntax: identifier.syntax,
+                        mutable: false,
+                        name: identifier.name.clone(),
+                        resolution_name: Some(identifier.name),
+                        ty: Type::Inferred(crate::InferredType::new()),
+                    },
+                ))))
+            }
+            "NominalPattern" => {
+                let Value::Product(fields) = argument else {
+                    self.diagnostics.push(Diagnostic::new(span, "`NominalPattern` requires `(name: Ident String, argument: Pattern)`"));
+                    return None;
+                };
+                let [(_, Value::Syntax(SyntaxValue::Ident(name))), (_, Value::Syntax(SyntaxValue::Pattern(argument)))] = fields.as_slice() else {
+                    self.diagnostics.push(Diagnostic::new(span, "invalid `NominalPattern` fields"));
+                    return None;
+                };
+                Some(Value::Syntax(SyntaxValue::Pattern(Pattern::Nominal(
+                    crate::NominalPattern {
+                        syntax: self.generated_syntax(module, span),
+                        namespace: None,
+                        name: name.name.clone(),
+                        argument: Box::new(argument.clone()),
+                    },
+                ))))
             }
             "Sequence" => {
                 let Value::Product(elements) = argument else {
@@ -4964,10 +5037,15 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "Expr" => Some(MetaType::Expr),
             "Ident" => Some(MetaType::Ident(None)),
             "CallExpr" => Some(MetaType::CallExpr),
+            "StringExpr" => Some(MetaType::StringExpr),
             "UnstructuredExpr" => Some(MetaType::UnstructuredExpr),
             "Type" => Some(MetaType::Type),
             "Pattern" => Some(MetaType::Pattern),
+            "BindingPattern" => Some(MetaType::BindingPattern),
+            "NominalPattern" => Some(MetaType::NominalPattern),
             "Item" => Some(MetaType::Item),
+            "TypeDeclarationItem" => Some(MetaType::TypeDeclarationItem),
+            "UnstructuredItem" => Some(MetaType::UnstructuredItem),
             "Visibility" => Some(MetaType::Visibility),
             "MacroCallVisibility" => Some(MetaType::MacroCallVisibility),
             "Comma" => Some(MetaType::Comma),
@@ -5154,9 +5232,13 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             let mut next_syntax_id = 0;
             parse_type_argument(argument, &mut next_syntax_id).is_some()
         }
-        MetaType::Pattern => {
+        MetaType::Pattern | MetaType::BindingPattern | MetaType::NominalPattern => {
             let mut next_syntax_id = 0;
-            parse_pattern_argument(argument, &mut next_syntax_id).is_some()
+            parse_pattern_argument(argument, &mut next_syntax_id).is_some_and(|pattern| {
+                matches!(expected, MetaType::Pattern)
+                    || matches!(expected, MetaType::BindingPattern) && matches!(pattern, Pattern::Binding(_))
+                    || matches!(expected, MetaType::NominalPattern) && matches!(pattern, Pattern::Nominal(_))
+            })
         }
         MetaType::Visibility => matches!(argument, Expression::VisibilityArgument(_)),
         MetaType::MacroCallVisibility => false,
@@ -5173,11 +5255,13 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             _ => false,
         },
         MetaType::CallExpr => matches!(expression_argument, Expression::Call(_)),
+        MetaType::StringExpr => matches!(expression_argument, Expression::String(_)),
         MetaType::UnstructuredExpr => !matches!(
             expression_argument,
             Expression::Name(_) | Expression::Call(_) | Expression::VisibilityArgument(_)
         ),
-        MetaType::Item | MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
+        MetaType::Item | MetaType::TypeDeclarationItem | MetaType::UnstructuredItem
+        | MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => {
             false
         }
         MetaType::Comma => matches_single_token(argument.syntax(), crate::TokenKind::Comma),
@@ -5467,10 +5551,12 @@ fn match_syntax_fragment(
             }
             SyntaxValue::FatArrow(syntax.clone())
         }
-        MetaType::Expr | MetaType::CallExpr | MetaType::UnstructuredExpr => {
+        MetaType::Expr | MetaType::CallExpr | MetaType::StringExpr | MetaType::UnstructuredExpr => {
             let (value, ids) = expression()?;
             let value = SyntaxValue::from_expression(value);
             if matches!(expected, MetaType::CallExpr) && !matches!(value, SyntaxValue::Call(_))
+                || matches!(expected, MetaType::StringExpr)
+                    && !matches!(value, SyntaxValue::Unstructured(Expression::String(_)))
                 || matches!(expected, MetaType::UnstructuredExpr)
                     && !matches!(value, SyntaxValue::Unstructured(_))
             {
@@ -5482,12 +5568,18 @@ fn match_syntax_fragment(
         MetaType::Type => SyntaxValue::Type(
             crate::parser::parse_type_fragment(syntax, false, next_syntax_id).ok()?,
         ),
-        MetaType::Pattern => SyntaxValue::Pattern(
-            crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id).ok()?,
-        ),
-        MetaType::Item => SyntaxValue::Item(Box::new(
-            crate::parser::parse_item_fragment(syntax, next_syntax_id).ok()?,
-        )),
+        MetaType::Pattern | MetaType::BindingPattern | MetaType::NominalPattern => {
+            let pattern = crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id).ok()?;
+            if matches!(expected, MetaType::BindingPattern) && !matches!(pattern, Pattern::Binding(_))
+                || matches!(expected, MetaType::NominalPattern) && !matches!(pattern, Pattern::Nominal(_)) { return None; }
+            SyntaxValue::Pattern(pattern)
+        }
+        MetaType::Item | MetaType::TypeDeclarationItem | MetaType::UnstructuredItem => {
+            let item = crate::parser::parse_item_fragment(syntax, next_syntax_id).ok()?;
+            if matches!(expected, MetaType::TypeDeclarationItem) && !matches!(item, Item::TypeDeclaration(_))
+                || matches!(expected, MetaType::UnstructuredItem) && matches!(item, Item::TypeDeclaration(_)) { return None; }
+            SyntaxValue::Item(Box::new(item))
+        }
         MetaType::Visibility | MetaType::MacroCallVisibility => {
             let (value, ids) = expression()?;
             let Expression::VisibilityArgument(value) = value else {
@@ -5947,10 +6039,15 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Ident(None) => "Ident String".to_owned(),
             MetaType::Ident(Some(spelling)) => format!("Ident {spelling:?}"),
             MetaType::CallExpr => "CallExpr".to_owned(),
+            MetaType::StringExpr => "StringExpr".to_owned(),
             MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
             MetaType::Type => "Type".to_owned(),
             MetaType::Pattern => "Pattern".to_owned(),
+            MetaType::BindingPattern => "BindingPattern".to_owned(),
+            MetaType::NominalPattern => "NominalPattern".to_owned(),
             MetaType::Item => "Item".to_owned(),
+            MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
+            MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
             MetaType::Visibility => "Visibility".to_owned(),
             MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
             MetaType::Comma => "Comma".to_owned(),
@@ -6028,10 +6125,15 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::Ident(None) => "Ident String".to_owned(),
         MetaType::Ident(Some(spelling)) => format!("Ident {spelling:?}"),
         MetaType::CallExpr => "CallExpr".to_owned(),
+        MetaType::StringExpr => "StringExpr".to_owned(),
         MetaType::UnstructuredExpr => "UnstructuredExpr".to_owned(),
         MetaType::Type => "Type".to_owned(),
         MetaType::Pattern => "Pattern".to_owned(),
+        MetaType::BindingPattern => "BindingPattern".to_owned(),
+        MetaType::NominalPattern => "NominalPattern".to_owned(),
         MetaType::Item => "Item".to_owned(),
+        MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
+        MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
         MetaType::Visibility => "Visibility".to_owned(),
         MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
         MetaType::Comma => "Comma".to_owned(),
@@ -6662,6 +6764,18 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                     environment,
                 );
             }
+            if pattern.namespace.is_none() && pattern.name == "TypeDeclarationItem"
+                && let Value::Syntax(SyntaxValue::Item(item)) = &value
+                && let Item::TypeDeclaration(declaration) = item.as_ref()
+            {
+                return bind_pattern(&pattern.argument, type_declaration_item_value(declaration), environment);
+            }
+            if pattern.namespace.is_none() && pattern.name == "UnstructuredItem"
+                && let Value::Syntax(SyntaxValue::Item(item)) = &value
+                && !matches!(item.as_ref(), Item::TypeDeclaration(_))
+            {
+                return bind_pattern(&pattern.argument, Value::Product(Vec::new()), environment);
+            }
             if pattern.namespace.is_none()
                 && let Some(kind) = delimiter_kind(&pattern.name)
                 && let Value::Syntax(SyntaxValue::Delimited(delimited)) = &value
@@ -6776,6 +6890,79 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
     }
 }
 
+fn type_declaration_item_value(declaration: &crate::TypeDeclaration) -> Value {
+    let kind = match declaration.kind {
+        crate::TypeDeclarationKind::Alias => "AliasDeclaration",
+        crate::TypeDeclarationKind::Distinct => "DistinctDeclaration",
+        crate::TypeDeclarationKind::Singleton => "SingletonDeclaration",
+        crate::TypeDeclarationKind::Opaque => "OpaqueDeclaration",
+    };
+    let identifier = |name: &str| {
+        let mut syntax = if name == declaration.name {
+            declaration.name_syntax.clone()
+        } else {
+            declaration.syntax.clone()
+        };
+        if let Some(index) = syntax.tokens().iter().position(|token| {
+            token.kind == crate::TokenKind::Identifier && token.text == name
+        }) {
+            let start = syntax.token_range.start + index;
+            syntax.token_range = start..start + 1;
+        }
+        Value::Syntax(SyntaxValue::Ident(crate::NameExpression {
+            syntax,
+            name: name.to_owned(),
+        }))
+    };
+    let parameters = declaration.type_parameters.iter().flat_map(crate::TypeParameterPattern::names).map(identifier).collect();
+    let mut declared_type = Type::Named(crate::NamedType {
+        syntax: declaration.name_syntax.clone(),
+        namespace: None,
+        name: declaration.name.clone(),
+    });
+    for parameter in &declaration.type_parameters {
+        let argument = type_parameter_pattern_type(parameter);
+        declared_type = Type::Application(crate::TypeApplication {
+            syntax: declaration.syntax.clone(),
+            callee: Box::new(declared_type),
+            argument: Box::new(argument),
+        });
+    }
+    let underlying = match &declaration.underlying {
+        Some(ty) => Value::Nominal("Some".to_owned(), Box::new(Value::Syntax(SyntaxValue::Type(ty.clone())))),
+        None => Value::Nominal("None".to_owned(), Box::new(Value::Product(Vec::new()))),
+    };
+    Value::Product(vec![
+        (Some("kind".to_owned()), Value::Nominal(kind.to_owned(), Box::new(Value::Product(Vec::new())))),
+        (Some("name".to_owned()), identifier(&declaration.name)),
+        (Some("name_spelling".to_owned()), Value::String(declaration.name.clone())),
+        (Some("declared_type".to_owned()), Value::Syntax(SyntaxValue::Type(declared_type))),
+        (Some("type_parameters".to_owned()), Value::Sequence(parameters)),
+        (Some("underlying".to_owned()), underlying),
+    ])
+}
+
+fn type_parameter_pattern_type(parameter: &crate::TypeParameterPattern) -> Type {
+    match parameter {
+        crate::TypeParameterPattern::Binding(binding) => Type::Named(crate::NamedType {
+            syntax: binding.syntax.clone(),
+            namespace: None,
+            name: binding.name.clone(),
+        }),
+        crate::TypeParameterPattern::Product(product) => Type::Product(crate::ProductType {
+            syntax: product.syntax.clone(),
+            elements: product.elements.iter().map(|element| crate::TypeElement {
+                syntax: element.syntax().clone(),
+                name: None,
+                ty: type_parameter_pattern_type(element),
+                spread: false,
+            }).collect(),
+            variadic: false,
+        }),
+        crate::TypeParameterPattern::Splice(splice) => Type::Splice(splice.clone()),
+    }
+}
+
 fn visibility_pattern_matches(name: &str, kind: VisibilityKind) -> bool {
     matches!(
         (name, kind),
@@ -6801,10 +6988,15 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
             .as_ref()
             .is_none_or(|expected| expected == &name.name),
         (MetaType::CallExpr, Value::Syntax(SyntaxValue::Call(_))) => true,
+        (MetaType::StringExpr, Value::Syntax(SyntaxValue::Unstructured(Expression::String(_)))) => true,
         (MetaType::UnstructuredExpr, Value::Syntax(SyntaxValue::Unstructured(_))) => true,
         (MetaType::Type, Value::Syntax(SyntaxValue::Type(_))) => true,
         (MetaType::Pattern, Value::Syntax(SyntaxValue::Pattern(_))) => true,
+        (MetaType::BindingPattern, Value::Syntax(SyntaxValue::Pattern(Pattern::Binding(_)))) => true,
+        (MetaType::NominalPattern, Value::Syntax(SyntaxValue::Pattern(Pattern::Nominal(_)))) => true,
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
+        (MetaType::TypeDeclarationItem, Value::Syntax(SyntaxValue::Item(item))) => matches!(item.as_ref(), Item::TypeDeclaration(_)),
+        (MetaType::UnstructuredItem, Value::Syntax(SyntaxValue::Item(item))) => !matches!(item.as_ref(), Item::TypeDeclaration(_)),
         (MetaType::Comma, Value::Syntax(SyntaxValue::Comma(_))) => true,
         (MetaType::Equals, Value::Syntax(SyntaxValue::Equals(_))) => true,
         (MetaType::FatArrow, Value::Syntax(SyntaxValue::FatArrow(_))) => true,

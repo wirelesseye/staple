@@ -1578,7 +1578,7 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     match structural {
-                        StructuralTraitMethod::Debug => "`Debug` is derived structurally for this product type and cannot be implemented explicitly",
+                        StructuralTraitMethod::Debug => "`Debug` is derived structurally for this product or sum type and cannot be implemented explicitly",
                         _ => "indexing and iteration traits are derived structurally for this product type and cannot be implemented explicitly",
                     },
                 ));
@@ -9308,13 +9308,13 @@ fn structural_trait_arguments(
 ) -> Option<(Vec<CheckedType>, StructuralTraitMethod)> {
     if Some(trait_id) == debug_trait {
         let [target] = arguments else { return None };
-        let CheckedType::Product(product) = target else { return None };
-        if !product.variadic
-            && product
-                .elements
-                .iter()
-                .all(|element| is_debug(&element.value_type))
-        {
+        let available = match target {
+            CheckedType::Product(product) => !product.variadic
+                && product.elements.iter().all(|element| is_debug(&element.value_type)),
+            CheckedType::Sum(sum) => sum.alternatives.iter().all(&is_debug),
+            _ => false,
+        };
+        if available {
             return Some((vec![target.clone()], StructuralTraitMethod::Debug));
         }
         return None;
