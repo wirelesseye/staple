@@ -4,7 +4,7 @@ use std.core.index.(Index, MutateIndex)
 use std.syntax.*
 
 /// A growable sequence backed by a mutable buffer.
-pub(repr) type List T = Buffer T
+pub type List T = Buffer T
 
 // Doubles capacity (minimum 4 on first growth) and moves every element
 // across in one Buffer.transfer call.

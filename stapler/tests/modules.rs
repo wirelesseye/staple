@@ -1454,6 +1454,40 @@ fn rejects_destructuring_an_imported_private_representation() {
 }
 
 #[test]
+fn destructures_a_private_representation_from_the_defining_module_including_its_companion() {
+    // Regression test: `Staple.md`'s `type` section says an ordinary
+    // `pub type`'s representation and constructor are "private to its
+    // defining module" — i.e. visible within that module, not just to
+    // external importers being excluded. The check used to compare the
+    // type's defining module against the *exact* current module only, so a
+    // companion body (a separate `ModuleId`, even though `Staple.md`'s
+    // "Type companions" section says a companion "sees the parent's
+    // declarations without spelling `use super.*`") was treated as if it
+    // were a different module entirely, and destructuring the very type the
+    // companion belongs to failed with "the representation of `X` is
+    // private" from inside `X`'s own companion.
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "pub type Wrapped = I32\n",
+            "companion Wrapped {\n",
+            "    pub def unwrap: Wrapped -> I32 = value => {\n",
+            "        let Wrapped inner = value\n",
+            "        inner\n",
+            "    }\n",
+            "}\n",
+            "let wrapped = Wrapped 42\n",
+            "Wrapped.unwrap wrapped\n",
+        ),
+    );
+    fixture.compile().expect(
+        "a companion should be able to destructure its own type's representation, \
+         the same as the rest of the defining module can",
+    );
+}
+
+#[test]
 fn resolves_mutually_recursive_module_namespaces() {
     let fixture = Fixture::new();
     fixture.write("main.sta", "use ma\nma.a (1)\n");

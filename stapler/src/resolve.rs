@@ -4062,8 +4062,11 @@ impl NameResolver {
                             format!("`{}` is not a represented nominal type", pattern.name),
                         ));
                     } else if declaration.kind != crate::TypeDeclarationKind::Singleton
-                        && self.type_modules.get(&id).copied() != Some(self.current_module)
                         && declaration.representation_visibility != Visibility::Public
+                        && self.type_modules.get(&id).copied() != Some(self.current_module)
+                        && !self.type_modules.get(&id).is_some_and(|module| {
+                            self.is_ancestor(*module, self.current_module)
+                        })
                     {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
