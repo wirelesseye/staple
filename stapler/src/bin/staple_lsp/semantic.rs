@@ -969,8 +969,40 @@ impl<'a> Classifier<'a> {
 
     fn finish(self) -> Vec<SemanticEntry> {
         let mut raw = self.tokens.into_values().collect::<Vec<_>>();
-        raw.sort_by_key(|token| (token.start, token.end));
-        raw.into_iter()
+        // Narrower tokens (e.g. an interpolated `$name` inside a string
+        // template) take precedence over wider tokens that merely contain
+        // them (e.g. the string literal's own token). Placing narrow tokens
+        // first lets wider ones be clipped around whatever already claimed
+        // that range, instead of emitting overlapping ranges that clients
+        // can't render.
+        raw.sort_by_key(|token| (token.end - token.start, token.start));
+
+        let mut result: Vec<RawToken> = Vec::new();
+        for token in raw {
+            let mut segments = vec![(token.start, token.end)];
+            for placed in &result {
+                if placed.start >= token.end || placed.end <= token.start {
+                    continue;
+                }
+                segments = segments
+                    .into_iter()
+                    .flat_map(|(start, end)| clip(start, end, placed.start, placed.end))
+                    .collect();
+            }
+            for (start, end) in segments {
+                if start < end {
+                    result.push(RawToken {
+                        start,
+                        end,
+                        ..token
+                    });
+                }
+            }
+        }
+
+        result.sort_by_key(|token| (token.start, token.end));
+        result
+            .into_iter()
             .map(|token| SemanticEntry {
                 start: token.start,
                 end: token.end,
@@ -979,6 +1011,17 @@ impl<'a> Classifier<'a> {
             })
             .collect()
     }
+}
+
+fn clip(start: usize, end: usize, hole_start: usize, hole_end: usize) -> Vec<(usize, usize)> {
+    let mut parts = Vec::new();
+    if start < hole_start {
+        parts.push((start, hole_start.min(end)));
+    }
+    if hole_end < end {
+        parts.push((hole_end.max(start), end));
+    }
+    parts
 }
 
 pub fn encode(source: &str, entries: &[SemanticEntry]) -> Vec<SemanticToken> {
@@ -1526,6 +1569,35 @@ mod tests {
                 .iter()
                 .any(|token| *token == ("if_clauses", FUNCTION)),
             "{labels:?}"
+        );
+    }
+
+    #[test]
+    fn string_template_interpolations_are_not_covered_by_the_string_token() {
+        let source = "let count = 1\nlet doubled = 2\n\"count: $count, doubled: $doubled\"\n";
+        let module = parse(source).unwrap();
+        let classified = entries(source, Some(&module), None, None);
+
+        for a in &classified {
+            for b in &classified {
+                if a.start == b.start && a.end == b.end {
+                    continue;
+                }
+                assert!(
+                    a.start >= b.end || b.start >= a.end,
+                    "overlapping entries: {a:?} vs {b:?}"
+                );
+            }
+        }
+
+        let labels = classified
+            .iter()
+            .map(|entry| (&source[entry.start..entry.end], entry.token_type))
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&("count", VARIABLE)), "labels: {labels:?}");
+        assert!(
+            labels.contains(&("doubled", VARIABLE)),
+            "labels: {labels:?}"
         );
     }
 
