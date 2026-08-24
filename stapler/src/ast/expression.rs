@@ -232,6 +232,7 @@ pub enum Accessor {
     Name(String),
     Index(String),
     Method(String),
+    Representation,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

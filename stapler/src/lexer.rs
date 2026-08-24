@@ -129,7 +129,7 @@ fn lex_float(source: &str, offset: usize) -> Option<usize> {
             .is_some_and(|character| {
                 character == '_'
                     || character.is_alphanumeric()
-                    || matches!(character, ')' | ']' | '}')
+                    || matches!(character, ')' | ']' | '}' | '*')
             })
         {
             return None;
@@ -265,6 +265,11 @@ fn lex_operator(source: &str, offset: usize) -> Option<usize> {
     let tail = source.get(offset..)?;
     if tail.starts_with('.') && !tail.starts_with("..") {
         return None;
+    }
+    // Keep the representation accessor in `value.*.field` as `Star, Dot`
+    // rather than combining `*.` into one user-defined operator token.
+    if tail.starts_with("*.") {
+        return Some(offset + 1);
     }
     let mut end = offset;
     for (relative, character) in tail.char_indices() {

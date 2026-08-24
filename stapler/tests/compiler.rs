@@ -6720,6 +6720,47 @@ fn destructures_nominal_values_in_lets_and_functions() {
 }
 
 #[test]
+fn accesses_visible_nominal_representations_explicitly_and_by_shortcut() {
+    let module = type_check(concat!(
+        "type User = (name: String, age: I32)\n",
+        "type Inner = (name: String, tag: I32)\n",
+        "type Outer = Inner\n",
+        "let mut user = User (name: \"Ada\", age: 42)\n",
+        "let inner: (name: String, age: I32) = user.*\n",
+        "let name: String = user.*.name\n",
+        "let age: I32 = user.age\n",
+        "user.*.age = 43\n",
+        "let outer = Outer (Inner (name: \"Grace\", tag: 1))\n",
+        "let nested_name: String = outer.*.*.name\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("representation projections should be zero-cost and preserve places");
+}
+
+#[test]
+fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Inner = (name: String, tag: I32)\n",
+            "type Outer = Inner\n",
+            "let outer = Outer (Inner (name: \"Ada\", tag: 1))\n",
+            "let invalid: String = outer.name\n",
+            "let also_invalid = (42).*\n",
+        )))
+        .expect_err("invalid representation projections should be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("cannot access an element of `Inner`")
+    }));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected a represented nominal type")
+    }));
+}
+
+#[test]
 fn destructures_contextually_typed_generic_nominal_patterns() {
     let module = type_check(concat!(
         "type Box T = (value: T)\n",

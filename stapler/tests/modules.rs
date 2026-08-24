@@ -1454,6 +1454,52 @@ fn rejects_destructuring_an_imported_private_representation() {
 }
 
 #[test]
+fn enforces_representation_visibility_for_explicit_and_shortcut_access() {
+    let private = Fixture::new();
+    private.write(
+        "users.sta",
+        concat!(
+            "pub type User = (name: String)\n",
+            "pub def make: String -> User = name => User (name)\n",
+        ),
+    );
+    private.write(
+        "main.sta",
+        concat!(
+            "use users.*\n",
+            "let user = make \"Ada\"\n",
+            "let explicit = user.*\n",
+            "let shortcut = user.name\n",
+        ),
+    );
+    let error = private
+        .compile()
+        .expect_err("private representations must not be projected by either spelling");
+    assert!(
+        error.contains("the representation of `m1.User` is private"),
+        "{error}"
+    );
+
+    let public = Fixture::new();
+    public.write(
+        "users.sta",
+        "pub(repr) type User = (name: String)\n",
+    );
+    public.write(
+        "main.sta",
+        concat!(
+            "use users.*\n",
+            "let user = User (name: \"Ada\")\n",
+            "let inner: (name: String) = user.*\n",
+            "let name: String = user.name\n",
+        ),
+    );
+    public
+        .compile()
+        .expect("public representations should support both access spellings");
+}
+
+#[test]
 fn destructures_a_private_representation_from_the_defining_module_including_its_companion() {
     // Regression test: `Staple.md`'s `type` section says an ordinary
     // `pub type`'s representation and constructor are "private to its

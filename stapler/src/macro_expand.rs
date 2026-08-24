@@ -3357,7 +3357,7 @@ impl MacroExpander {
                 {
                     return Some(Value::Helper(helper.module, helper.binding));
                 }
-                let value = self.eval_expression(module, &access.value, environment)?;
+                let mut value = self.eval_expression(module, &access.value, environment)?;
                 if let Value::Syntax(SyntaxValue::Call(call)) = value {
                     return match &access.accessor {
                         Accessor::Name(name) if name == "callee" => Some(Value::Syntax(
@@ -3381,7 +3381,27 @@ impl MacroExpander {
                             None
                         }
                         Accessor::Method(_) => None,
+                        Accessor::Representation => {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                "call syntax has no nominal representation",
+                            ));
+                            None
+                        }
                     };
+                }
+                if matches!(access.accessor, Accessor::Representation) {
+                    if let Value::Nominal(_, representation) = value {
+                        return Some(*representation);
+                    }
+                    self.diagnostics.push(Diagnostic::new(
+                        access.syntax.span.clone(),
+                        "compile-time representation access requires a nominal value",
+                    ));
+                    return None;
+                }
+                if let Value::Nominal(_, representation) = value {
+                    value = *representation;
                 }
                 let Value::Product(elements) = value else {
                     self.diagnostics.push(Diagnostic::new(
@@ -3400,6 +3420,7 @@ impl MacroExpander {
                         .find(|(field, _)| field.as_deref() == Some(name))
                         .map(|(_, value)| value),
                     Accessor::Method(_) => None,
+                    Accessor::Representation => unreachable!("handled above"),
                 }
             }
             Expression::Index(index) => {

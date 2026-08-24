@@ -560,9 +560,22 @@ impl ResolvedModule {
     }
 
     pub fn representation_visible_from(&self, id: TypeId, module: ModuleId) -> bool {
-        self.type_declarations[&id].kind == crate::TypeDeclarationKind::Singleton
-            || self.type_modules.get(&id).copied() == Some(module)
+        if self.type_declarations[&id].kind == crate::TypeDeclarationKind::Singleton
             || self.type_declarations[&id].representation_visibility == Visibility::Public
+        {
+            return true;
+        }
+        let Some(defining_module) = self.type_modules.get(&id).copied() else {
+            return false;
+        };
+        let mut current = Some(module);
+        while let Some(candidate) = current {
+            if candidate == defining_module {
+                return true;
+            }
+            current = self.program.parent_module(candidate);
+        }
+        false
     }
 
     pub fn type_parameter_for(&self, syntax_id: SyntaxId) -> Option<TypeParameterId> {

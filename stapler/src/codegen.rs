@@ -2105,12 +2105,37 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let result_type = self.concrete_expression_type(expression).ok_or_else(|| {
                     Diagnostic::new(access.syntax.span.clone(), "unchecked access place")
                 })?;
-                if checked.scalar {
+                if let crate::CheckedAccess::Representation { dereference } = &checked {
+                    if dereference.is_some() {
+                        let reference = self.compile_expression(environment, &access.value)?;
+                        let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(reference)
+                        else {
+                            return Err(Diagnostic::new(
+                                access.syntax.span.clone(),
+                                "invalid Ref place",
+                            ));
+                        };
+                        return Ok((pointer, result_type, None));
+                    }
                     let (pointer, _, symbol) =
                         self.compile_place_pointer(environment, &access.value)?;
                     return Ok((pointer, result_type, symbol));
                 }
-                if checked.erased {
+                let crate::CheckedAccess::Product {
+                    index,
+                    dereference,
+                    erased,
+                    scalar,
+                } = checked
+                else {
+                    unreachable!("representation access handled above")
+                };
+                if scalar {
+                    let (pointer, _, symbol) =
+                        self.compile_place_pointer(environment, &access.value)?;
+                    return Ok((pointer, result_type, symbol));
+                }
+                if erased {
                     let reference = self.compile_expression(environment, &access.value)?;
                     let Some(BasicValueEnum::StructValue(reference)) = value_as_basic(reference)
                     else {
@@ -2129,7 +2154,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .build_extract_value(reference, 1, "place.length")
                         .map_err(compiler_diagnostic)?
                         .into_int_value();
-                    let position = self.size_type.const_int(checked.index as u64, false);
+                    let position = self.size_type.const_int(index as u64, false);
                     let out = self
                         .builder
                         .build_int_compare(
@@ -2149,7 +2174,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     return Ok((pointer, result_type, None));
                 }
 
-                let (pointer, container_type) = if let Some(payload) = checked.dereference.clone() {
+                let (pointer, container_type) = if let Some(payload) = dereference {
                     let reference = self.compile_expression(environment, &access.value)?;
                     let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(reference)
                     else {
@@ -2184,7 +2209,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 };
                 let pointer = self
                     .builder
-                    .build_struct_gep(container_llvm, pointer, checked.index as u32, "place.field")
+                    .build_struct_gep(container_llvm, pointer, index as u32, "place.field")
                     .map_err(compiler_diagnostic)?;
                 Ok((pointer, result_type, None))
             }
@@ -2587,10 +2612,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "element access requires a product value",
                     )
                 })?;
-                if checked.scalar {
+                if let crate::CheckedAccess::Representation { dereference } = &checked {
+                    return if let Some(payload) = dereference {
+                        self.load_ref_payload(value, payload, access.syntax.span.clone())
+                            .map(|value| value.as_any_value_enum())
+                    } else {
+                        Ok(value.as_any_value_enum())
+                    };
+                }
+                let crate::CheckedAccess::Product {
+                    index,
+                    dereference,
+                    erased,
+                    scalar,
+                } = checked
+                else {
+                    unreachable!("representation access handled above")
+                };
+                if scalar {
                     return Ok(value.as_any_value_enum());
                 }
-                if checked.erased {
+                if erased {
                     let BasicValueEnum::StructValue(reference) = value else {
                         return Err(Diagnostic::new(
                             access.value.syntax().span.clone(),
@@ -2607,7 +2649,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .build_extract_value(reference, 1, "erased_ref.length")
                         .map_err(compiler_diagnostic)?
                         .into_int_value();
-                    let position = self.size_type.const_int(checked.index as u64, false);
+                    let position = self.size_type.const_int(index as u64, false);
                     return self
                         .compile_index_load(
                             pointer,
@@ -2621,7 +2663,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         )
                         .map(|value| value.as_any_value_enum());
                 }
-                let value = if let Some(payload) = &checked.dereference {
+                let value = if let Some(payload) = &dereference {
                     self.load_ref_payload(value, payload, access.syntax.span.clone())?
                 } else {
                     value
@@ -2633,7 +2675,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     ));
                 };
                 self.builder
-                    .build_extract_value(value, checked.index as u32, "element")
+                    .build_extract_value(value, index as u32, "element")
                     .map(|value| value.as_any_value_enum())
                     .map_err(|error| Diagnostic::new(access.syntax.span.clone(), error.to_string()))
             }

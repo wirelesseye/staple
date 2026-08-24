@@ -179,6 +179,37 @@ fn parses_float_literals_losslessly_without_stealing_access_dots() {
 }
 
 #[test]
+fn parses_nominal_representation_access_losslessly() {
+    let source = "user.*\nuser.*.name\nouter.*.*.0\n";
+    let root = parse(source).expect("representation access should parse");
+    assert_eq!(root.text(), source);
+    assert!(matches!(
+        unmodified_item(&root.items[0]),
+        Item::Expression(Expression::Access(access))
+            if access.accessor == Accessor::Representation
+    ));
+    assert!(matches!(
+        unmodified_item(&root.items[1]),
+        Item::Expression(Expression::Access(access))
+            if access.accessor == Accessor::Name("name".into())
+                && matches!(access.value.as_ref(), Expression::Access(inner) if inner.accessor == Accessor::Representation)
+    ));
+    let Item::Expression(Expression::Access(index)) = unmodified_item(&root.items[2]) else {
+        panic!("expected positional access after representation projections");
+    };
+    assert_eq!(index.accessor, Accessor::Index("0".into()));
+    let Expression::Access(middle) = index.value.as_ref() else {
+        panic!("expected second representation projection");
+    };
+    assert_eq!(middle.accessor, Accessor::Representation);
+    let Expression::Access(inner) = middle.value.as_ref() else {
+        panic!("expected first representation projection");
+    };
+    assert_eq!(inner.accessor, Accessor::Representation);
+    assert!(parse("user.+\n").is_err());
+}
+
+#[test]
 fn parses_match_expressions_and_wildcards_losslessly() {
     let source = concat!(
         "def choose = result: Ok I32 | IOError => match result {\n",

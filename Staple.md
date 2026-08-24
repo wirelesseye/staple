@@ -2477,6 +2477,23 @@ standalone unwrap operation is generated. With ordinary `pub type`, the type is
 public but its representation and constructor remain private to its defining
 module. Opaque declarations have no constructor.
 
+A represented nominal value can expose one layer of its inner representation
+with `.*` when that representation is visible in the current scope:
+
+```staple
+type User = (name: String, age: I32)
+let user = User (name: "Ada", age: 42)
+let inner = user.*
+inner.name
+```
+
+This projection is zero-cost and preserves the value's storage when used as a
+place. Named and positional access provide a one-layer shortcut, so `user.name`
+and `user.0` mean `user.*.name` and `user.*.0`. The shortcut does not recursively
+unwrap nested nominal types; use one `.*` for each visible layer, as in
+`outer.*.*.name`. Both explicit and shortcut forms are rejected when the
+representation is private in the current scope.
+
 `pub(repr)` exposes the representation and generated constructor as part of the
 module interface:
 

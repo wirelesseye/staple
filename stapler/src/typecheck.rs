@@ -28,6 +28,7 @@ fn place_expression_name(expression: &Expression) -> String {
             Accessor::Name(name) => name.clone(),
             Accessor::Index(index) => index.clone(),
             Accessor::Method(name) => name.clone(),
+            Accessor::Representation => "*".to_string(),
         },
         _ => "value".to_string(),
     }
@@ -116,11 +117,16 @@ pub struct CheckedLogical {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CheckedAccess {
-    pub index: usize,
-    pub dereference: Option<CheckedType>,
-    pub erased: bool,
-    pub scalar: bool,
+pub enum CheckedAccess {
+    Representation {
+        dereference: Option<CheckedType>,
+    },
+    Product {
+        index: usize,
+        dereference: Option<CheckedType>,
+        erased: bool,
+        scalar: bool,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -5111,41 +5117,96 @@ impl TypeChecker {
                 if self.did_return {
                     return CheckedType::empty_product();
                 }
-                if let CheckedType::Distinct {
-                    id, representation, ..
-                } = &value_type
-                    && let Some(Type::Product(product)) = self
-                        .type_declarations
-                        .get(id)
-                        .and_then(|declaration| declaration.underlying.as_ref())
-                    && let [element] = product.elements.as_slice()
-                    && matches!(&access.accessor, Accessor::Name(name) if element.name.as_deref() == Some(name))
-                {
-                    self.accesses.insert(
-                        access.syntax.id,
-                        CheckedAccess {
-                            index: 0,
-                            dereference: None,
-                            erased: false,
-                            scalar: true,
-                        },
-                    );
-                    return representation.as_ref().clone();
-                }
                 let mut accessible = value_type.clone();
                 let mut dereference = None;
-                accessible = loop {
-                    match accessible {
-                        CheckedType::Distinct { representation, .. } => {
-                            accessible = *representation;
+                if let CheckedType::Ref(payload) = accessible {
+                    dereference = Some(payload.as_ref().clone());
+                    accessible = *payload;
+                }
+
+                let current_module = module
+                    .module_for_syntax(access.syntax.id)
+                    .unwrap_or_else(|| module.program().entry());
+                if matches!(access.accessor, Accessor::Representation) {
+                    let representation_type = match accessible {
+                        CheckedType::Distinct {
+                            id,
+                            name,
+                            representation,
+                            ..
+                        } => {
+                            if !module.representation_visible_from(id, current_module) {
+                                self.diagnostics.push(Diagnostic::new(
+                                    access.syntax.span.clone(),
+                                    format!("the representation of `{name}` is private"),
+                                ));
+                                CheckedType::Error
+                            } else {
+                                self.accesses.insert(
+                                    access.syntax.id,
+                                    CheckedAccess::Representation { dereference },
+                                );
+                                *representation
+                            }
                         }
-                        CheckedType::Ref(payload) if dereference.is_none() => {
-                            dereference = Some(payload.as_ref().clone());
-                            accessible = *payload;
+                        CheckedType::Error => CheckedType::Error,
+                        other => {
+                            self.diagnostics.push(Diagnostic::new(
+                                access.value.syntax().span.clone(),
+                                format!("cannot access the representation of `{other}`; expected a represented nominal type"),
+                            ));
+                            CheckedType::Error
                         }
-                        other => break other,
+                    };
+                    return self.finish_expression_type(
+                        expression,
+                        representation_type,
+                        expected,
+                    );
+                }
+
+                if let CheckedType::Distinct {
+                    id,
+                    name,
+                    representation,
+                    ..
+                } = accessible
+                {
+                    if !module.representation_visible_from(id, current_module) {
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            format!("the representation of `{name}` is private"),
+                        ));
+                        return CheckedType::Error;
                     }
-                };
+                    if let Some(Type::Product(product)) = self
+                        .type_declarations
+                        .get(&id)
+                        .and_then(|declaration| declaration.underlying.as_ref())
+                        && let [element] = product.elements.as_slice()
+                        && matches!(&access.accessor, Accessor::Name(field) if element.name.as_deref() == Some(field))
+                    {
+                        self.accesses.insert(
+                            access.syntax.id,
+                            CheckedAccess::Product {
+                                index: 0,
+                                dereference,
+                                erased: false,
+                                scalar: true,
+                            },
+                        );
+                        return self.finish_expression_type(
+                            expression,
+                            *representation,
+                            expected,
+                        );
+                    }
+                    accessible = *representation;
+                    if let CheckedType::Ref(payload) = accessible {
+                        dereference = Some(payload.as_ref().clone());
+                        accessible = *payload;
+                    }
+                }
                 match accessible {
                     CheckedType::Product(product) => {
                         let index = match &access.accessor {
@@ -5155,6 +5216,7 @@ impl TypeChecker {
                                 .iter()
                                 .position(|element| element.name.as_deref() == Some(name)),
                             Accessor::Method(_) => None,
+                            Accessor::Representation => unreachable!("handled above"),
                         };
                         let Some(index) = index else {
                             self.diagnostics.push(Diagnostic::new(
@@ -5169,6 +5231,7 @@ impl TypeChecker {
                                     Accessor::Method(name) => {
                                         format!("unknown companion method `{name}`")
                                     }
+                                    Accessor::Representation => unreachable!("handled above"),
                                 },
                             ));
                             return CheckedType::Error;
@@ -5182,7 +5245,7 @@ impl TypeChecker {
                         };
                         self.accesses.insert(
                             access.syntax.id,
-                            CheckedAccess {
+                            CheckedAccess::Product {
                                 index,
                                 dereference,
                                 erased: false,
@@ -5202,7 +5265,7 @@ impl TypeChecker {
                             };
                             self.accesses.insert(
                                 access.syntax.id,
-                                CheckedAccess {
+                                CheckedAccess::Product {
                                     index,
                                     dereference,
                                     erased: true,
@@ -5225,6 +5288,7 @@ impl TypeChecker {
                             ));
                             CheckedType::Error
                         }
+                        Accessor::Representation => unreachable!("handled above"),
                     },
                     CheckedType::Error => CheckedType::Error,
                     other => {

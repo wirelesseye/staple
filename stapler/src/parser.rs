@@ -2330,17 +2330,21 @@ impl Grammar {
         let mut expression = self.parse_atom()?;
         loop {
             if self.eat(TokenKind::Dot) {
-                let accessor = match self.peek() {
-                    Some(TokenKind::Identifier) => {
-                        Accessor::Name(self.bump_token().expect("peeked name").text)
-                    }
-                    Some(TokenKind::Integer) => {
-                        Accessor::Index(self.bump_token().expect("peeked index").text)
-                    }
-                    _ => {
-                        return Err(
-                            self.error("expected a product element name or index after `.`")
-                        );
+                let accessor = if self.eat(TokenKind::Star) {
+                    Accessor::Representation
+                } else {
+                    match self.peek() {
+                        Some(TokenKind::Identifier) => {
+                            Accessor::Name(self.bump_token().expect("peeked name").text)
+                        }
+                        Some(TokenKind::Integer) => {
+                            Accessor::Index(self.bump_token().expect("peeked index").text)
+                        }
+                        _ => {
+                            return Err(self.error(
+                                "expected a product element name, index, or `*` after `.`",
+                            ));
+                        }
                     }
                 };
                 expression = Expression::Access(AccessExpression {
