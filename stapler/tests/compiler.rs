@@ -429,9 +429,10 @@ fn spreads_fixed_product_values_and_call_arguments() {
     let source = concat!(
         "def sum: I32[4] -> I32 = (a, b, c, d) => a + b + c + d\n",
         "let pair = (left: 2, right: 3)\n",
+        "let arguments = (2, 3)\n",
         "let expanded = (prefix: \"value\", ...pair, suffix: False)\n",
         "let selected: I32 = expanded.left + expanded.right\n",
-        "let answer: I32 = sum (1, ...pair, 4)\n",
+        "let answer: I32 = sum (1, ...arguments, 4)\n",
     );
     let module = type_check(source);
     let context = Context::create();
