@@ -361,6 +361,7 @@ enum Value {
     Helper(ModuleId, Binding),
     Product(Vec<(Option<String>, Value)>),
     Integer(i128),
+    Float(f64),
     String(String),
     Nominal(String, Box<Value>),
     Sequence(Vec<Value>),
@@ -3194,13 +3195,7 @@ impl MacroExpander {
             Expression::Integer(integer) => {
                 integer.literal.parse::<i128>().ok().map(Value::Integer)
             }
-            Expression::Float(float) => {
-                self.diagnostics.push(Diagnostic::new(
-                    float.syntax.span.clone(),
-                    "float literals are not supported in compile-time evaluation",
-                ));
-                None
-            }
+            Expression::Float(float) => float.literal.parse::<f64>().ok().map(Value::Float),
             Expression::SyntaxArgument(argument) => {
                 self.diagnostics.push(Diagnostic::new(
                     argument.syntax.span.clone(),
@@ -4256,9 +4251,9 @@ impl MacroExpander {
     /// Converts a compile-time `Value` produced by folding a `const`
     /// initializer back into a literal `Expression` the rest of the
     /// pipeline (resolve, typecheck, codegen) can treat like any other
-    /// literal-valued binding. Only integers, strings, and (possibly
-    /// nested) products of those can be represented this way; anything
-    /// else is reported as a diagnostic.
+    /// literal-valued binding. Only integers, finite floats, strings, and
+    /// (possibly nested) products of those can be represented this way;
+    /// anything else is reported as a diagnostic.
     fn value_to_expression(&mut self, value: Value, span: Span) -> Option<Expression> {
         match value {
             Value::Integer(integer) if integer >= 0 => {
@@ -4298,6 +4293,52 @@ impl MacroExpander {
                     argument: Box::new(magnitude),
                 }))
             }
+            Value::Float(float) if float.is_finite() && float >= 0.0 => {
+                Some(Expression::Float(crate::FloatExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span),
+                    literal: format!("{float:?}"),
+                }))
+            }
+            // Mirrors the `Value::Integer` case above: float literals can
+            // never carry a leading `-` either, so a negative compile-time
+            // result is desugared the same way, via `Subtract.subtract`.
+            Value::Float(float) if float.is_finite() => {
+                let zero = Expression::Float(crate::FloatExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    literal: "0.0".to_string(),
+                });
+                let magnitude = Expression::Float(crate::FloatExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    literal: format!("{:?}", float.abs()),
+                });
+                let access = Expression::Access(crate::AccessExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    value: Box::new(Expression::Name(crate::NameExpression {
+                        syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                        name: "Subtract".to_string(),
+                    })),
+                    accessor: Accessor::Name("subtract".to_string()),
+                });
+                Some(Expression::Call(crate::CallExpression {
+                    syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                    callee: Box::new(Expression::Call(crate::CallExpression {
+                        syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
+                        callee: Box::new(access),
+                        argument: Box::new(zero),
+                    })),
+                    argument: Box::new(magnitude),
+                }))
+            }
+            Value::Float(float) => {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "compile-time float result `{float}` is not finite; \
+                         `const` initializers must fold to a finite value"
+                    ),
+                ));
+                None
+            }
             // `Value::String`'s payload is already the raw, quoted source
             // literal (see `Expression::String`'s handling in
             // `eval_expression`, which clones `StringExpression::literal`
@@ -4333,13 +4374,15 @@ impl MacroExpander {
                     Value::Sequence(_) => "a sequence value",
                     Value::Separated { .. } => "a separated sequence value",
                     Value::Nominal(..) => "a nominal value",
-                    Value::Integer(_) | Value::String(_) | Value::Product(_) => unreachable!(),
+                    Value::Integer(_) | Value::Float(_) | Value::String(_) | Value::Product(_) => {
+                        unreachable!()
+                    }
                 };
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     format!(
                         "{description} cannot be represented as a compile-time constant; \
-                         `const` initializers must fold to an integer, a string, or a product of those"
+                         `const` initializers must fold to an integer, a float, a string, or a product of those"
                     ),
                 ));
                 None
@@ -4419,6 +4462,16 @@ impl MacroExpander {
             (Value::Integer(left), Value::Integer(right), ">=") => Some(bool_value(left >= right)),
             (Value::String(left), Value::String(right), "==") => Some(bool_value(left == right)),
             (Value::String(left), Value::String(right), "!=") => Some(bool_value(left != right)),
+            (Value::Float(left), Value::Float(right), "+") => Some(Value::Float(left + right)),
+            (Value::Float(left), Value::Float(right), "-") => Some(Value::Float(left - right)),
+            (Value::Float(left), Value::Float(right), "*") => Some(Value::Float(left * right)),
+            (Value::Float(left), Value::Float(right), "/") => Some(Value::Float(left / right)),
+            (Value::Float(left), Value::Float(right), "==") => Some(bool_value(left == right)),
+            (Value::Float(left), Value::Float(right), "!=") => Some(bool_value(left != right)),
+            (Value::Float(left), Value::Float(right), "<") => Some(bool_value(left < right)),
+            (Value::Float(left), Value::Float(right), "<=") => Some(bool_value(left <= right)),
+            (Value::Float(left), Value::Float(right), ">") => Some(bool_value(left > right)),
+            (Value::Float(left), Value::Float(right), ">=") => Some(bool_value(left >= right)),
             _ => {
                 self.diagnostics.push(Diagnostic::new(
                     access.syntax.span.clone(),

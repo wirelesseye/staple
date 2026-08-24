@@ -8227,6 +8227,44 @@ fn folds_const_strings_and_products() {
 }
 
 #[test]
+fn folds_const_float_arithmetic_at_compile_time() {
+    let module = type_check(concat!(
+        "const x: F64 = 1.5 + 2.5\n",
+        "const y: F64 = 10.0 / 4.0\n",
+        "const z: F64 = 1.0 - 3.0\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("float const bindings should fold and compile");
+    // `x` and `y` fold directly to literal constants. `z`'s negative
+    // result instead goes through the same zero-minus-magnitude
+    // desugaring already used for negative integer consts, so it's
+    // computed by a call at module-init time rather than appearing as a
+    // bare `double -2` literal; compiling successfully is enough to
+    // exercise that path.
+    assert!(llvm.contains("double 4.000000e+00"));
+    assert!(llvm.contains("double 2.500000e+00"));
+}
+
+#[test]
+fn rejects_const_float_initializers_that_fold_to_non_finite_values() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source("const x: F64 = 1.0 / 0.0\n", root)
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("dividing by zero at compile time should not fold to an infinite constant");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("is not finite"))
+    );
+}
+
+#[test]
 fn rejects_const_initializers_that_cannot_be_folded_to_a_compile_time_constant() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
