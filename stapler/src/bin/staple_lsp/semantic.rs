@@ -112,6 +112,7 @@ impl<'a> Classifier<'a> {
                 | TokenKind::Pub
                 | TokenKind::Let
                 | TokenKind::Mut
+                | TokenKind::Signal
                 | TokenKind::Return
                 | TokenKind::Loop
                 | TokenKind::Break
@@ -1163,6 +1164,7 @@ mod tests {
             "type Clock = I32\n",
             "def read: () ->{Clock} Clock = () => resource Clock\n",
             "with Clock = Clock 1 { read () }\n",
+            "let signal counter = 0\n",
         );
         let module = parse(source).unwrap();
         let labels = labels(source, &tokens(source, Some(&module), None, None));
@@ -1179,6 +1181,7 @@ mod tests {
             ("nested", VARIABLE),
             ("resource", KEYWORD),
             ("with", KEYWORD),
+            ("signal", KEYWORD),
         ] {
             assert!(
                 labels.contains(&expected),
