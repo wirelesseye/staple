@@ -9,5 +9,5 @@ pub def reactive_scope: () -> Reactive = () => __reactive_scope ()
 /// Runs a callback immediately and again whenever one of its signal reads changes.
 pub def reaction: <effect E> (() ->{E} ()) ->{Reactive, E} () = callback => ()
 
-/// Reads a reactive expression as an explicitly eager value.
+/// Reads an expression eagerly without retaining or recording reactive dependencies.
 pub def snapshot: <T> T -> T = value => value

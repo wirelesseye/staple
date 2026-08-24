@@ -1507,6 +1507,54 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_lazy_persistent_derived_bindings() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-derived-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-derived-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "let signal count = 2\n",
+                "let mut observed = 0\n",
+                "let mut runs = 0\n",
+                "let mut frozen_runs = 0\n",
+                "with Reactive = reactive_scope () {\n",
+                "  let left = count + 1\n",
+                "  let right = count + 2\n",
+                "  let total = left + right\n",
+                "  reaction { observed = total; runs = runs + 1; () }\n",
+                "  reaction { let frozen = snapshot count; frozen_runs = frozen_runs + 1; () }\n",
+                "  count = 7\n",
+                "}\n",
+                "exit ((observed - 17) + (runs - 2) + (frozen_runs - 1))\n",
+            ),
+        )
+        .expect("temporary derived source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("derived executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("derived executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_structurally_derived_product_defaults() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

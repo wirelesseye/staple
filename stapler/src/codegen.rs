@@ -56,6 +56,7 @@ struct ModuleEmitter<'module, 'context> {
     storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initialization_states: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     signal_metadata: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
+    derived_metadata: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
     initializers: HashMap<ModuleId, inkwell::values::FunctionValue<'context>>,
     size_type: inkwell::types::IntType<'context>,
     target_data: TargetData,
@@ -151,8 +152,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let captured_cell_symbols = typed_module
             .functions()
             .iter()
+            .chain(typed_module.implicit_thunks())
             .flat_map(|function| function.captures.iter().copied())
-            .filter(|symbol| typed_module.has_mutable_storage(*symbol))
+            .filter(|symbol| {
+                typed_module.has_mutable_storage(*symbol) || typed_module.is_derived_symbol(*symbol)
+            })
             .collect();
         Self {
             context,
@@ -174,6 +178,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             storage: HashMap::new(),
             initialization_states: HashMap::new(),
             signal_metadata: HashMap::new(),
+            derived_metadata: HashMap::new(),
             initializers: HashMap::new(),
             size_type: context.ptr_sized_int_type(&target_machine.get_target_data(), None),
             target_data: target_machine.get_target_data(),
@@ -326,7 +331,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .replace("{{SIZE}}", &format!("i{bits}"))
             .replace("{{SCOPE_BYTES}}", &pointer_bytes.to_string())
             .replace("{{SIGNAL_BYTES}}", &pointer_bytes.to_string())
-            .replace("{{REACTION_BYTES}}", &(pointer_bytes * 5).to_string())
+            .replace("{{REACTION_BYTES}}", &(pointer_bytes * 8).to_string())
             .replace("{{DEP_BYTES}}", &(pointer_bytes * 5).to_string());
         let buffer =
             MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-reactive");
@@ -466,6 +471,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     );
                     metadata.set_linkage(inkwell::module::Linkage::Internal);
                     self.signal_metadata.insert(symbol, metadata);
+                } else if self.typed_module.is_derived_symbol(symbol) {
+                    let metadata = self.llvm_module.add_global(
+                        self.context.ptr_type(AddressSpace::default()),
+                        None,
+                        &format!("{name}_derived"),
+                    );
+                    metadata.set_initializer(
+                        &self.context.ptr_type(AddressSpace::default()).const_null(),
+                    );
+                    metadata.set_linkage(inkwell::module::Linkage::Internal);
+                    self.derived_metadata.insert(symbol, metadata);
                 }
             }
         }
@@ -835,6 +851,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .resolved()
                     .requires_initialization_state(symbol)
                     || self.typed_module.has_mutable_storage(symbol)
+                    || self.typed_module.is_derived_symbol(symbol)
                 {
                     if self.typed_module.is_mutated_parameter(symbol) {
                         environment
@@ -1468,6 +1485,30 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     return Ok(());
                 };
                 self.store_global_initialization_state(symbol, 1, binding.syntax.span.clone())?;
+                if self.typed_module.is_derived_symbol(symbol) {
+                    let global = self.storage.get(&symbol).copied().ok_or_else(|| {
+                        Diagnostic::new(
+                            binding.syntax.span.clone(),
+                            "derived storage is unavailable",
+                        )
+                    })?;
+                    let metadata =
+                        self.derived_metadata.get(&symbol).copied().ok_or_else(|| {
+                            Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                "derived metadata is unavailable",
+                            )
+                        })?;
+                    self.compile_derived_create(
+                        environment,
+                        symbol,
+                        global.as_pointer_value(),
+                        metadata.as_pointer_value(),
+                        binding.syntax.span.clone(),
+                    )?;
+                    self.store_global_initialization_state(symbol, 2, binding.syntax.span.clone())?;
+                    return Ok(());
+                }
                 let value = self.compile_expression(environment, expression)?;
                 if self.typed_module.resolved().is_signal_symbol(symbol)
                     && let Some(metadata) = self.signal_metadata.get(&symbol).copied()
@@ -1718,7 +1759,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let value_type = substitute_type(value_type, &self.active_type_substitutions);
         let llvm_type = self.compile_type(&value_type)?;
         let mut fields = vec![llvm_type, self.context.i8_type().into()];
-        if self.typed_module.resolved().is_signal_symbol(symbol) {
+        if self.typed_module.resolved().is_signal_symbol(symbol)
+            || self.typed_module.is_derived_symbol(symbol)
+        {
             fields.push(self.context.ptr_type(AddressSpace::default()).into());
         }
         Ok(self.context.struct_type(&fields, false))
@@ -1853,7 +1896,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| {
                         Diagnostic::new(binding.syntax.span.clone(), "unresolved binding")
                     })?;
-                if self.typed_module.has_mutable_storage(symbol) {
+                if self.typed_module.has_mutable_storage(symbol)
+                    || self.typed_module.is_derived_symbol(symbol)
+                {
                     self.allocate_binding_cell(environment, symbol, binding.syntax.span.clone())?;
                 }
                 if environment.binding_cells.contains_key(&symbol) {
@@ -1865,6 +1910,42 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     )?;
                 }
                 if let Some(expression) = &binding.value {
+                    if self.typed_module.is_derived_symbol(symbol) {
+                        let cell =
+                            environment
+                                .binding_cells
+                                .get(&symbol)
+                                .copied()
+                                .ok_or_else(|| {
+                                    Diagnostic::new(
+                                        binding.syntax.span.clone(),
+                                        "derived cell is unavailable",
+                                    )
+                                })?;
+                        let cell_type = self.compile_binding_cell_type(symbol)?;
+                        let value_slot = self
+                            .builder
+                            .build_struct_gep(cell_type, cell, 0, "derived.value")
+                            .map_err(compiler_diagnostic)?;
+                        let metadata_slot = self
+                            .builder
+                            .build_struct_gep(cell_type, cell, 2, "derived.metadata")
+                            .map_err(compiler_diagnostic)?;
+                        self.compile_derived_create(
+                            environment,
+                            symbol,
+                            value_slot,
+                            metadata_slot,
+                            binding.syntax.span.clone(),
+                        )?;
+                        self.store_local_initialization_state(
+                            environment,
+                            symbol,
+                            2,
+                            binding.syntax.span.clone(),
+                        )?;
+                        return Ok(None);
+                    }
                     let value = self.compile_expression(environment, expression)?;
                     if environment.did_return {
                         return Ok(None);
@@ -5581,6 +5662,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
         if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
             let cell_type = self.compile_binding_cell_type(symbol)?;
+            self.force_derived_read(environment, symbol, span.clone())?;
             let state = self
                 .builder
                 .build_struct_gep(cell_type, cell, 1, "binding.state")
@@ -5626,6 +5708,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ));
         }
         if let Some(global) = self.storage.get(&symbol).copied() {
+            self.force_derived_read(environment, symbol, span.clone())?;
             if check_initialization
                 && let Some(state) = self.initialization_states.get(&symbol).copied()
             {
@@ -5691,6 +5774,45 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             None,
             "signal.track",
             span,
+        )?;
+        Ok(())
+    }
+
+    fn force_derived_read(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        if !self.typed_module.is_derived_symbol(symbol) {
+            return Ok(());
+        }
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let slot = if let Some(cell) = environment.binding_cells.get(&symbol).copied() {
+            self.builder
+                .build_struct_gep(
+                    self.compile_binding_cell_type(symbol)?,
+                    cell,
+                    2,
+                    "derived.metadata",
+                )
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+        } else if let Some(global) = self.derived_metadata.get(&symbol).copied() {
+            global.as_pointer_value()
+        } else {
+            return Err(Diagnostic::new(span, "derived metadata is unavailable"));
+        };
+        let derived = self
+            .builder
+            .build_load(pointer_type, slot, "derived")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        self.build_reactive_runtime_call(
+            "__staple_derived_read",
+            &[derived.into()],
+            None,
+            "derived.read",
+            Span::Compiler,
         )?;
         Ok(())
     }
@@ -6169,7 +6291,24 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 return Ok(self.unit_value());
             }
             IntrinsicFunction::Snapshot => {
-                return self.compile_expression(environment, &call.argument);
+                let previous = self
+                    .build_reactive_runtime_call(
+                        "__staple_tracking_suspend",
+                        &[],
+                        Some(self.context.ptr_type(AddressSpace::default()).into()),
+                        "tracking.suspend",
+                        call.syntax.span.clone(),
+                    )?
+                    .expect("tracking_suspend returns a pointer");
+                let value = self.compile_expression(environment, &call.argument)?;
+                self.build_reactive_runtime_call(
+                    "__staple_tracking_restore",
+                    &[previous.into()],
+                    None,
+                    "tracking.restore",
+                    call.syntax.span.clone(),
+                )?;
+                return Ok(value);
             }
             IntrinsicFunction::SliceLength => {
                 let value = self.compile_expression(environment, &call.argument)?;
@@ -6596,6 +6735,147 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             call.syntax.span.clone(),
         )?;
         Ok(self.unit_value())
+    }
+
+    fn compile_derived_create(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        symbol: SymbolId,
+        value_slot: inkwell::values::PointerValue<'context>,
+        metadata_slot: inkwell::values::PointerValue<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        let evaluator = self
+            .typed_module
+            .derived_evaluator(symbol)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "derived evaluator is unavailable"))?;
+        let callback = self
+            .build_closure(environment, evaluator.id, span.clone())?
+            .as_any_value_enum();
+        let AnyValueEnum::StructValue(callback) = callback else {
+            return Err(Diagnostic::new(span, "derived evaluator is not a closure"));
+        };
+        let callback_type = self
+            .typed_module
+            .type_of_function(evaluator.id)
+            .cloned()
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "derived evaluator has no function type")
+            })?;
+        if !callback_type.effects.resources.is_empty() {
+            return Err(Diagnostic::new(
+                span,
+                "derived evaluators cannot capture resources",
+            ));
+        }
+
+        let pointer_type = self.context.ptr_type(AddressSpace::default());
+        let payload_type = self
+            .context
+            .struct_type(&[callback.get_type().into(), pointer_type.into()], false);
+        let payload = self
+            .builder
+            .build_malloc(payload_type, "derived.payload")
+            .map_err(compiler_diagnostic)?;
+        let callback_slot = self
+            .builder
+            .build_struct_gep(payload_type, payload, 0, "derived.callback")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(callback_slot, callback)
+            .map_err(compiler_diagnostic)?;
+        let output_slot = self
+            .builder
+            .build_struct_gep(payload_type, payload, 1, "derived.output")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(output_slot, value_slot)
+            .map_err(compiler_diagnostic)?;
+
+        let previous = self.builder.get_insert_block();
+        let runner_type = self
+            .context
+            .void_type()
+            .fn_type(&[pointer_type.into()], false);
+        let runner = self.llvm_module.add_function(
+            &format!("__staple_derived_runner_{}", evaluator.id.0),
+            runner_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(runner, "entry");
+        self.builder.position_at_end(entry);
+        let payload_argument = runner.get_first_param().unwrap().into_pointer_value();
+        let callback_slot = self
+            .builder
+            .build_struct_gep(payload_type, payload_argument, 0, "derived.callback")
+            .map_err(compiler_diagnostic)?;
+        let loaded_callback = self
+            .builder
+            .build_load(callback.get_type(), callback_slot, "derived.callback")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        let code = self
+            .builder
+            .build_extract_value(loaded_callback, 0, "derived.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let closure_environment = self
+            .builder
+            .build_extract_value(loaded_callback, 1, "derived.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let call = self
+            .builder
+            .build_indirect_call(
+                self.compile_closure_function_type(&callback_type)?,
+                code,
+                &[closure_environment.into()],
+                "derived.evaluate",
+            )
+            .map_err(compiler_diagnostic)?;
+        let value = call.try_as_basic_value().basic().ok_or_else(|| {
+            Diagnostic::new(span.clone(), "derived evaluator result is not storable")
+        })?;
+        let output_slot = self
+            .builder
+            .build_struct_gep(payload_type, payload_argument, 1, "derived.output")
+            .map_err(compiler_diagnostic)?;
+        let output = self
+            .builder
+            .build_load(pointer_type, output_slot, "derived.output")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        self.builder
+            .build_store(output, value)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
+        if let Some(block) = previous {
+            self.builder.position_at_end(block);
+        }
+
+        let payload_size = self
+            .size_type
+            .const_int(self.target_data.get_store_size(&payload_type), false);
+        let derived = self
+            .build_reactive_runtime_call(
+                "__staple_derived_create",
+                &[
+                    runner.as_global_value().as_pointer_value().into(),
+                    payload.into(),
+                    payload_size.into(),
+                ],
+                Some(pointer_type.into()),
+                "derived.create",
+                span,
+            )?
+            .expect("derived_create returns a pointer");
+        self.builder
+            .build_store(metadata_slot, derived)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
     }
 
     fn compile_numeric_to_string(
@@ -7397,6 +7677,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .resolved()
                     .requires_initialization_state(symbol)
                     || self.typed_module.has_mutable_storage(symbol)
+                    || self.typed_module.is_derived_symbol(symbol)
                 {
                     environment
                         .parameter_pointers
@@ -7498,6 +7779,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .resolved()
                 .requires_initialization_state(symbol)
                 || self.typed_module.has_mutable_storage(symbol)
+                || self.typed_module.is_derived_symbol(symbol)
             {
                 continue;
             }
@@ -7558,6 +7840,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .resolved()
                     .requires_initialization_state(*symbol)
                     || self.typed_module.has_mutable_storage(*symbol)
+                    || self.typed_module.is_derived_symbol(*symbol)
                 {
                     return Ok(self.context.ptr_type(AddressSpace::default()).into());
                 }

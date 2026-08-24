@@ -1,9 +1,11 @@
 %ReactiveScope = type { ptr }
-%Reaction = type { ptr, ptr, ptr, ptr, i1, i1 }
+%Reaction = type { ptr, ptr, ptr, ptr, i1, i1, i1, ptr, ptr, i1 }
 %Signal = type { ptr }
 %Dependency = type { ptr, ptr, ptr, ptr, ptr }
 
 @__staple_current_reaction = internal global ptr null
+@__staple_notify_depth = internal global i32 0
+@__staple_pending_reactions = internal global ptr null
 
 declare ptr @malloc({{SIZE}})
 declare void @free(ptr)
@@ -121,6 +123,14 @@ ok:
   store i1 false, ptr %running.slot
   %active.slot = getelementptr %Reaction, ptr %reaction, i32 0, i32 5
   store i1 true, ptr %active.slot
+  %dirty.slot = getelementptr %Reaction, ptr %reaction, i32 0, i32 6
+  store i1 false, ptr %dirty.slot
+  %signal.slot = getelementptr %Reaction, ptr %reaction, i32 0, i32 7
+  store ptr null, ptr %signal.slot
+  %pending.slot = getelementptr %Reaction, ptr %reaction, i32 0, i32 8
+  store ptr null, ptr %pending.slot
+  %queued.slot = getelementptr %Reaction, ptr %reaction, i32 0, i32 9
+  store i1 false, ptr %queued.slot
   store ptr %reaction, ptr %scope
   call void @__staple_reaction_run(ptr %reaction)
   ret void
@@ -185,6 +195,9 @@ exit:
 
 define void @__staple_signal_notify(ptr %signal) {
 entry:
+  %depth = load i32, ptr @__staple_notify_depth
+  %next.depth = add i32 %depth, 1
+  store i32 %next.depth, ptr @__staple_notify_depth
   %first = load ptr, ptr %signal
   br label %loop
 loop:
@@ -198,13 +211,125 @@ body:
   %owner = load ptr, ptr %owner.slot
   %active.slot = getelementptr %Reaction, ptr %owner, i32 0, i32 5
   %active = load i1, ptr %active.slot
-  br i1 %active, label %run, label %advance
+  br i1 %active, label %classify, label %advance
+classify:
+  %derived.signal.slot = getelementptr %Reaction, ptr %owner, i32 0, i32 7
+  %derived.signal = load ptr, ptr %derived.signal.slot
+  %is.derived = icmp ne ptr %derived.signal, null
+  br i1 %is.derived, label %invalidate.derived, label %run
+invalidate.derived:
+  %dirty.slot = getelementptr %Reaction, ptr %owner, i32 0, i32 6
+  %dirty = load i1, ptr %dirty.slot
+  br i1 %dirty, label %advance, label %mark.dirty
+mark.dirty:
+  store i1 true, ptr %dirty.slot
+  call void @__staple_signal_notify(ptr %derived.signal)
+  br label %advance
 run:
-  call void @__staple_reaction_run(ptr %owner)
+  %queued.slot = getelementptr %Reaction, ptr %owner, i32 0, i32 9
+  %queued = load i1, ptr %queued.slot
+  br i1 %queued, label %advance, label %enqueue
+enqueue:
+  store i1 true, ptr %queued.slot
+  %pending = load ptr, ptr @__staple_pending_reactions
+  %pending.slot = getelementptr %Reaction, ptr %owner, i32 0, i32 8
+  store ptr %pending, ptr %pending.slot
+  store ptr %owner, ptr @__staple_pending_reactions
   br label %advance
 advance:
   br label %loop
 exit:
+  %exit.depth = load i32, ptr @__staple_notify_depth
+  %remaining = sub i32 %exit.depth, 1
+  store i32 %remaining, ptr @__staple_notify_depth
+  %outermost = icmp eq i32 %remaining, 0
+  br i1 %outermost, label %flush, label %return
+flush:
+  call void @__staple_reaction_flush()
+  br label %return
+return:
+  ret void
+}
+
+define void @__staple_reaction_flush() {
+entry:
+  br label %loop
+loop:
+  %reaction = load ptr, ptr @__staple_pending_reactions
+  %done = icmp eq ptr %reaction, null
+  br i1 %done, label %exit, label %run
+run:
+  %pending.slot = getelementptr %Reaction, ptr %reaction, i32 0, i32 8
+  %next = load ptr, ptr %pending.slot
+  store ptr %next, ptr @__staple_pending_reactions
+  store ptr null, ptr %pending.slot
+  %queued.slot = getelementptr %Reaction, ptr %reaction, i32 0, i32 9
+  store i1 false, ptr %queued.slot
+  call void @__staple_reaction_run(ptr %reaction)
+  br label %loop
+exit:
+  ret void
+}
+
+define ptr @__staple_derived_create(ptr %runner, ptr %payload, {{SIZE}} %payload.size) {
+entry:
+  call void @__staple_gc_register_root(ptr %payload, {{SIZE}} %payload.size)
+  %derived = call ptr @malloc({{SIZE}} {{REACTION_BYTES}})
+  %failed = icmp eq ptr %derived, null
+  br i1 %failed, label %trap, label %ok
+ok:
+  store ptr %runner, ptr %derived
+  %payload.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 1
+  store ptr %payload, ptr %payload.slot
+  %deps.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 2
+  store ptr null, ptr %deps.slot
+  %next.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 3
+  store ptr null, ptr %next.slot
+  %running.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 4
+  store i1 false, ptr %running.slot
+  %active.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 5
+  store i1 true, ptr %active.slot
+  %dirty.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 6
+  store i1 true, ptr %dirty.slot
+  %signal = call ptr @__staple_signal_create()
+  %signal.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 7
+  store ptr %signal, ptr %signal.slot
+  %pending.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 8
+  store ptr null, ptr %pending.slot
+  %queued.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 9
+  store i1 false, ptr %queued.slot
+  ret ptr %derived
+trap:
+  call void @llvm.trap()
+  unreachable
+}
+
+define void @__staple_derived_read(ptr %derived) {
+entry:
+  %signal.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 7
+  %signal = load ptr, ptr %signal.slot
+  call void @__staple_signal_track(ptr %signal)
+  %dirty.slot = getelementptr %Reaction, ptr %derived, i32 0, i32 6
+  %dirty = load i1, ptr %dirty.slot
+  br i1 %dirty, label %evaluate, label %exit
+evaluate:
+  call void @__staple_reaction_run(ptr %derived)
+  store i1 false, ptr %dirty.slot
+  br label %exit
+exit:
+  ret void
+}
+
+define ptr @__staple_tracking_suspend() {
+entry:
+  %previous = load ptr, ptr @__staple_current_reaction
+  store ptr null, ptr @__staple_current_reaction
+  ret ptr %previous
+}
+
+define void @__staple_tracking_restore(ptr %previous) {
+entry:
+  store ptr %previous, ptr @__staple_current_reaction
   ret void
 }
 

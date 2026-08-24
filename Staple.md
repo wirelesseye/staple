@@ -36,10 +36,10 @@ types and functions supplied solely by a framework. This allows staple's type
 system, compiler, runtime, tooling, and metaprogramming facilities to understand
 reactive relationships directly.
 
-The first reactive slice provides writable `let signal` bindings, synchronous
-reactions, dynamic dependency tracking, and lexical reaction ownership through
-the `Reactive` resource. Persistent derived bindings, batching, and alternative
-schedulers remain future work.
+The reactive runtime provides writable `let signal` bindings, lazily cached
+derived `let` bindings, synchronous reactions, dynamic dependency tracking, and
+lexical reaction ownership through the `Reactive` resource. Batching and
+alternative schedulers remain future work.
 
 ### Metaprogramming
 
@@ -1494,16 +1494,34 @@ with Reactive = reactive_scope () {
 }
 ```
 
-Persistent derived bindings are not implemented yet. A top-level initializer
-that reads a signal must use `snapshot` to state that eager evaluation is
-intentional:
+An immutable `let` whose initializer depends on a signal is a persistent
+derived binding. Its visible type is unchanged. The initializer is evaluated
+on the first read, cached, and evaluated again on the first read after one of
+the signals used by its previous evaluation changes:
+
+```staple
+let signal count = 1
+let doubled = count * 2
+```
+
+Dependencies are recollected after each evaluation, so conditional
+derivations only subscribe to the branch they actually read. Derived bindings
+are not writable and their initializers must be pure apart from reading
+signals. A mutable binding or independent signal initialized from reactive
+data must use `snapshot`.
+
+`snapshot` evaluates its argument without recording reactive dependencies and
+states that an eager, non-reactive value is intentional:
 
 ```staple
 let frozen = snapshot (count * 2)
 ```
 
-The initial runtime is single-threaded and unbatched. A reaction that
-synchronously triggers itself traps instead of recurring indefinitely.
+The runtime propagates derived invalidation before synchronously flushing
+reactions, preventing intermediate values in derived chains and diamonds.
+Separate assignments remain unbatched. A reaction that synchronously triggers
+itself, or a derived binding that reads itself while evaluating, traps instead
+of recurring indefinitely.
 
 ### Call-site implicit thunking
 

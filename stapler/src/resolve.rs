@@ -696,8 +696,41 @@ impl ResolvedModule {
         self.symbol_owners.get(&symbol) == Some(&None)
     }
 
+    pub fn is_top_level_symbol(&self, symbol: SymbolId) -> bool {
+        fn pattern_contains(module: &ResolvedModule, pattern: &Pattern, symbol: SymbolId) -> bool {
+            match pattern {
+                Pattern::Binding(value) => module.symbol_for(value.syntax.id) == Some(symbol),
+                Pattern::At(value) => {
+                    module.symbol_for(value.binding.syntax.id) == Some(symbol)
+                        || pattern_contains(module, &value.pattern, symbol)
+                }
+                Pattern::Product(value) => value
+                    .elements
+                    .iter()
+                    .any(|element| pattern_contains(module, element, symbol)),
+                Pattern::Nominal(value) => pattern_contains(module, &value.argument, symbol),
+                Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+            }
+        }
+        self.program.modules().iter().any(|source| {
+            source.syntax.items.iter().any(|item| match item {
+                Item::Binding(value) => self.symbol_for(value.syntax.id) == Some(symbol),
+                Item::PatternBinding(value) => pattern_contains(self, &value.pattern, symbol),
+                _ => false,
+            })
+        })
+    }
+
     pub(crate) fn symbol_owner(&self, symbol: SymbolId) -> Option<FunctionId> {
         self.symbol_owners.get(&symbol).copied().flatten()
+    }
+
+    pub(crate) fn function_for_symbol(&self, symbol: SymbolId) -> Option<FunctionId> {
+        self.functions.iter().find_map(|function| {
+            function
+                .binding_syntax
+                .and_then(|syntax| (self.symbol_for(syntax) == Some(symbol)).then_some(function.id))
+        })
     }
 
     pub fn has_mutable_storage(&self, symbol: SymbolId) -> bool {

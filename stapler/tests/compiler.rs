@@ -143,26 +143,76 @@ fn signals_and_scoped_reactions_type_check_and_lower() {
 }
 
 #[test]
-fn persistent_signal_derivations_require_snapshot() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
-    let program = ProgramLoader::new()
-        .with_standard_library_root(root.join("stdlib"))
-        .load_source("let signal count = 1\nlet doubled = count + count\n", root)
-        .expect("source should load");
-    let resolved = NameResolver::new()
-        .resolve_program(program)
-        .expect("source should resolve");
-    let diagnostics = match TypeChecker::new().check(resolved) {
-        Err(diagnostics) => diagnostics,
-        Ok(_) => panic!("persistent derivation should require snapshot"),
-    };
+fn infers_persistent_signal_derivations_and_respects_snapshot() {
+    let module = type_check(concat!(
+        "let signal count = 1\n",
+        "let doubled = count + count\n",
+        "let frozen = snapshot (count + count)\n",
+    ));
+    let mut bindings = module.syntax().items.iter().filter_map(|item| match item {
+        Item::Binding(binding) => module
+            .symbol_for(binding.syntax.id)
+            .map(|symbol| (binding.name.as_str(), symbol)),
+        _ => None,
+    });
+    let _count = bindings.next().expect("count");
+    let (_, doubled) = bindings.next().expect("doubled");
+    let (_, frozen) = bindings.next().expect("frozen");
+    assert!(module.is_derived_symbol(doubled));
+    assert!(!module.is_derived_symbol(frozen));
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("derived bindings should lower");
+    assert!(llvm.contains("__staple_derived_create"));
+    assert!(llvm.contains("__staple_derived_read"));
+}
+
+#[test]
+fn reactive_provenance_flows_only_through_used_function_parameters() {
+    let module = type_check(concat!(
+        "let signal count = 1\n",
+        "def double: I32 -> I32 = value => value + value\n",
+        "def constant: I32 -> I32 = _ => 42\n",
+        "let doubled = double count\n",
+        "let fixed = constant count\n",
+    ));
+    let symbols = module
+        .syntax()
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::Binding(binding) => module
+                .symbol_for(binding.syntax.id)
+                .map(|symbol| (binding.name.as_str(), symbol)),
+            _ => None,
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    assert!(module.is_derived_symbol(symbols["doubled"]));
+    assert!(!module.is_derived_symbol(symbols["fixed"]));
+}
+
+#[test]
+fn derived_initializers_reject_independent_state_and_writes() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let signal count = 1\n",
+            "let mut offset = 2\n",
+            "let invalid = { offset = offset + 1; count + offset }\n",
+        )))
+        .expect_err("effectful derived initializers should be rejected");
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("requires `snapshot`"))
+            .any(|diagnostic| { diagnostic.message.contains("derived binding must be pure") })
     );
 
-    type_check("let signal count = 1\nlet doubled = snapshot (count + count)\n");
+    type_check(concat!(
+        "let signal count = 1\n",
+        "let mut offset = 2\n",
+        "let valid = snapshot { offset = offset + 1; count + offset }\n",
+    ));
 }
 
 #[test]

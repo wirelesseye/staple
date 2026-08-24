@@ -769,6 +769,8 @@ pub struct TypedModule {
     function_result_companion_types: HashMap<FunctionId, TypeId>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
+    derived_symbols: HashSet<SymbolId>,
+    derived_evaluators: HashMap<SymbolId, SyntaxId>,
 }
 
 impl TypedModule {
@@ -803,6 +805,16 @@ impl TypedModule {
 
     pub(crate) fn implicit_thunk_for(&self, syntax: SyntaxId) -> Option<&ResolvedFunction> {
         self.implicit_thunks.get(&syntax)
+    }
+
+    pub fn is_derived_symbol(&self, symbol: SymbolId) -> bool {
+        self.derived_symbols.contains(&symbol)
+    }
+
+    pub(crate) fn derived_evaluator(&self, symbol: SymbolId) -> Option<&ResolvedFunction> {
+        self.derived_evaluators
+            .get(&symbol)
+            .and_then(|syntax| self.implicit_thunks.get(syntax))
     }
 
     pub(crate) fn function_by_id(&self, id: FunctionId) -> Option<&ResolvedFunction> {
@@ -1277,6 +1289,8 @@ pub struct TypeChecker {
     /// The same explicit set retained for code generation and capture layout.
     mutated_parameter_symbols: HashSet<SymbolId>,
     implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
+    derived_symbols: HashSet<SymbolId>,
+    derived_evaluators: HashMap<SymbolId, SyntaxId>,
     next_implicit_function: usize,
     implicit_thunk_context: bool,
 }
@@ -1369,7 +1383,7 @@ impl TypeChecker {
             self.ensure_function_checked(&module, function_id);
         }
         self.infer_effects(&module);
-        self.validate_reactive_snapshots(&module);
+        self.infer_derived_bindings(&module);
 
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
@@ -1414,6 +1428,8 @@ impl TypeChecker {
             function_result_companion_types: self.function_result_companion_types,
             function_symbols: self.function_symbols,
             implicit_thunks: self.implicit_thunks,
+            derived_symbols: self.derived_symbols,
+            derived_evaluators: self.derived_evaluators,
         };
         let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
         if ownership_diagnostics.is_empty() {
@@ -3164,40 +3180,109 @@ impl TypeChecker {
         (external_to_function && module.has_mutable_storage(symbol)).then_some(symbol)
     }
 
-    fn validate_reactive_snapshots(&mut self, module: &ResolvedModule) {
-        for source_module in module.program().modules() {
-            for item in &source_module.syntax.items {
-                let Item::Binding(binding) = item else {
-                    continue;
-                };
+    fn infer_derived_bindings(&mut self, module: &ResolvedModule) {
+        let bindings = collect_value_bindings(module);
+        let ordinary_mutable = bindings
+            .iter()
+            .filter(|binding| binding.mutable && !binding.signal)
+            .filter_map(|binding| module.symbol_for(binding.syntax.id))
+            .collect::<HashSet<_>>();
+        for _ in 0..=bindings.len() {
+            let mut changed = false;
+            for binding in &bindings {
                 let Some(value) = &binding.value else {
                     continue;
                 };
-                let explicit_snapshot = matches!(value, Expression::Call(call)
-                    if module.symbol_for(call.callee.syntax().id)
-                        .and_then(|symbol| module.intrinsic_function(symbol))
-                        == Some(crate::IntrinsicFunction::Snapshot));
-                if explicit_snapshot {
+                let Some(symbol) = module.symbol_for(binding.syntax.id) else {
                     continue;
-                }
-                let direct = expression_reads_signal(module, value);
+                };
+                let direct = expression_reads_reactive(module, value, &self.derived_symbols);
                 let summarized = self
                     .expression_state_accesses
                     .get(&value.syntax().id)
                     .is_some_and(|accesses| {
-                        accesses
-                            .reads
-                            .iter()
-                            .any(|symbol| module.is_signal_symbol(*symbol))
+                        accesses.reads.iter().any(|symbol| {
+                            module.is_signal_symbol(*symbol)
+                                || self.derived_symbols.contains(symbol)
+                        })
                     });
-                if direct || summarized {
+                if !(direct || summarized) {
+                    continue;
+                }
+                if binding.mutable || binding.signal {
                     self.diagnostics.push(Diagnostic::new(
                         value.syntax().span.clone(),
-                        "a persistent binding derived from a signal requires `snapshot`; persistent derived bindings are not implemented yet",
+                        "a mutable or signal binding initialized from reactive data requires `snapshot`",
                     ));
+                    continue;
                 }
+                if binding.kind != crate::BindingKind::Let {
+                    continue;
+                }
+                changed |= self.derived_symbols.insert(symbol);
+            }
+            if !changed {
+                break;
             }
         }
+
+        for binding in bindings {
+            let Some(symbol) = module.symbol_for(binding.syntax.id) else {
+                continue;
+            };
+            if !self.derived_symbols.contains(&symbol) {
+                continue;
+            }
+            let Some(value) = &binding.value else {
+                continue;
+            };
+            let effects = self
+                .expression_effects
+                .get(&value.syntax().id)
+                .cloned()
+                .unwrap_or_default();
+            let accesses = self
+                .expression_state_accesses
+                .get(&value.syntax().id)
+                .cloned()
+                .unwrap_or_default();
+            let invalid_read = accesses.reads.iter().any(|symbol| {
+                module.is_mutable_symbol(*symbol) && !module.is_signal_symbol(*symbol)
+            }) || expression_mentions_symbols(module, value, &ordinary_mutable);
+            if !effects.resources.is_empty()
+                || matches!(
+                    effects.state,
+                    Some(CheckedStateEffect::Write | CheckedStateEffect::ReadWrite)
+                )
+                || !accesses.writes.is_empty()
+                || invalid_read
+                || expression_contains_assignment(value)
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax().span.clone(),
+                    "a derived binding must be pure apart from reading signals; use `snapshot` for an effectful initializer",
+                ));
+                continue;
+            }
+            let result = self
+                .symbol_types
+                .get(&symbol)
+                .cloned()
+                .unwrap_or(CheckedType::Error);
+            self.make_derived_evaluator(module, symbol, value, result);
+        }
+    }
+
+    fn make_derived_evaluator(
+        &mut self,
+        module: &ResolvedModule,
+        symbol: SymbolId,
+        expression: &Expression,
+        result: CheckedType,
+    ) {
+        let syntax = expression.syntax().id;
+        self.make_implicit_thunk(module, expression, result);
+        self.derived_evaluators.insert(symbol, syntax);
     }
 
     fn call_argument_resources_now(
@@ -9986,78 +10071,395 @@ fn call_mutation_target_expression<'a>(
     }
 }
 
-fn expression_reads_signal(module: &ResolvedModule, expression: &Expression) -> bool {
-    fn item(module: &ResolvedModule, item: &Item) -> bool {
+fn expression_reads_reactive(
+    module: &ResolvedModule,
+    expression: &Expression,
+    derived: &HashSet<SymbolId>,
+) -> bool {
+    fn item(module: &ResolvedModule, item: &Item, derived: &HashSet<SymbolId>) -> bool {
         match item {
             Item::Binding(value) => value
                 .value
                 .as_ref()
-                .is_some_and(|value| expression_reads_signal(module, value)),
-            Item::PatternBinding(value) => expression_reads_signal(module, &value.value),
+                .is_some_and(|value| expression_reads_reactive(module, value, derived)),
+            Item::PatternBinding(value) => expression_reads_reactive(module, &value.value, derived),
             Item::Assignment(value) => {
-                expression_reads_signal(module, &value.target)
-                    || expression_reads_signal(module, &value.value)
+                expression_reads_reactive(module, &value.target, derived)
+                    || expression_reads_reactive(module, &value.value, derived)
             }
-            Item::Return(value) => expression_reads_signal(module, &value.value),
+            Item::Return(value) => expression_reads_reactive(module, &value.value, derived),
             Item::Break(value) => value
                 .value
                 .as_ref()
-                .is_some_and(|value| expression_reads_signal(module, value)),
-            Item::Expression(value) => expression_reads_signal(module, value),
+                .is_some_and(|value| expression_reads_reactive(module, value, derived)),
+            Item::Expression(value) => expression_reads_reactive(module, value, derived),
             _ => false,
         }
+    }
+    if matches!(expression, Expression::Call(call)
+        if module.symbol_for(call.callee.syntax().id)
+            .and_then(|symbol| module.intrinsic_function(symbol))
+            == Some(crate::IntrinsicFunction::Snapshot))
+    {
+        return false;
     }
     match expression {
         Expression::Name(value) => module
             .symbol_for(value.syntax.id)
-            .is_some_and(|symbol| module.is_signal_symbol(symbol)),
+            .is_some_and(|symbol| module.is_signal_symbol(symbol) || derived.contains(&symbol)),
         Expression::Access(value) => {
             module
                 .symbol_for(value.syntax.id)
-                .is_some_and(|symbol| module.is_signal_symbol(symbol))
-                || expression_reads_signal(module, &value.value)
+                .is_some_and(|symbol| module.is_signal_symbol(symbol) || derived.contains(&symbol))
+                || expression_reads_reactive(module, &value.value, derived)
         }
         Expression::Call(value) => {
-            expression_reads_signal(module, &value.callee)
-                || expression_reads_signal(module, &value.argument)
+            let argument_flows = module
+                .symbol_for(value.callee.syntax().id)
+                .and_then(|symbol| module.function_for_symbol(symbol))
+                .and_then(|id| module.functions().iter().find(|function| function.id == id))
+                .map(|function| {
+                    let mut parameters = HashSet::new();
+                    pattern_symbols(module, &function.pattern, &mut parameters);
+                    expression_mentions_symbols(module, &function.body, &parameters)
+                })
+                .unwrap_or(true);
+            expression_reads_reactive(module, &value.callee, derived)
+                || (argument_flows && expression_reads_reactive(module, &value.argument, derived))
         }
         Expression::Product(value) => value
             .elements
             .iter()
-            .any(|element| expression_reads_signal(module, &element.value)),
-        Expression::Block(value) => value.items.iter().any(|value| item(module, value)),
-        Expression::Loop(value) => value.body.items.iter().any(|value| item(module, value)),
+            .any(|element| expression_reads_reactive(module, &element.value, derived)),
+        Expression::Block(value) => value.items.iter().any(|value| item(module, value, derived)),
+        Expression::Loop(value) => value
+            .body
+            .items
+            .iter()
+            .any(|value| item(module, value, derived)),
         Expression::With(value) => {
-            expression_reads_signal(module, &value.value)
-                || value.body.items.iter().any(|value| item(module, value))
+            expression_reads_reactive(module, &value.value, derived)
+                || value
+                    .body
+                    .items
+                    .iter()
+                    .any(|value| item(module, value, derived))
         }
-        Expression::Function(value) => expression_reads_signal(module, &value.body),
-        Expression::Satisfies(value) => expression_reads_signal(module, &value.value),
+        Expression::Function(value) => expression_reads_reactive(module, &value.body, derived),
+        Expression::Satisfies(value) => expression_reads_reactive(module, &value.value, derived),
         Expression::Match(value) => {
-            expression_reads_signal(module, &value.subject)
+            expression_reads_reactive(module, &value.subject, derived)
                 || value
                     .arms
                     .iter()
-                    .any(|arm| expression_reads_signal(module, &arm.body))
+                    .any(|arm| expression_reads_reactive(module, &arm.body, derived))
         }
         Expression::Index(value) => {
-            expression_reads_signal(module, &value.value)
-                || expression_reads_signal(module, &value.index)
+            expression_reads_reactive(module, &value.value, derived)
+                || expression_reads_reactive(module, &value.index, derived)
         }
         Expression::Logical(value) => {
-            expression_reads_signal(module, &value.left)
-                || expression_reads_signal(module, &value.right)
+            expression_reads_reactive(module, &value.left, derived)
+                || expression_reads_reactive(module, &value.right, derived)
         }
         Expression::StringTemplate(value) => value.parts.iter().any(|part| {
             matches!(part,
             crate::StringTemplatePart::Interpolation(value)
-                if expression_reads_signal(module, &value.expression))
+                if expression_reads_reactive(module, &value.expression, derived))
         }),
         Expression::Resource(_)
         | Expression::SyntaxArgument(_)
         | Expression::VisibilityArgument(_)
         | Expression::Quote(_)
         | Expression::Splice(_)
+        | Expression::String(_)
+        | Expression::CString(_)
+        | Expression::Integer(_)
+        | Expression::Float(_) => false,
+    }
+}
+
+fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
+    fn expression(value: &Expression, bindings: &mut Vec<Binding>) {
+        match value {
+            Expression::Function(value) => expression(&value.body, bindings),
+            Expression::Satisfies(value) => expression(&value.value, bindings),
+            Expression::Match(value) => {
+                expression(&value.subject, bindings);
+                for arm in &value.arms {
+                    expression(&arm.body, bindings);
+                }
+            }
+            Expression::Loop(value) => {
+                for item in &value.body.items {
+                    item_value_bindings(item, bindings);
+                }
+            }
+            Expression::With(value) => {
+                expression(&value.value, bindings);
+                for item in &value.body.items {
+                    item_value_bindings(item, bindings);
+                }
+            }
+            Expression::Block(value) => {
+                for item in &value.items {
+                    item_value_bindings(item, bindings);
+                }
+            }
+            Expression::Product(value) => {
+                for element in &value.elements {
+                    expression(&element.value, bindings);
+                }
+            }
+            Expression::Call(value) => {
+                expression(&value.callee, bindings);
+                expression(&value.argument, bindings);
+            }
+            Expression::Access(value) => expression(&value.value, bindings),
+            Expression::Index(value) => {
+                expression(&value.value, bindings);
+                expression(&value.index, bindings);
+            }
+            Expression::Logical(value) => {
+                expression(&value.left, bindings);
+                expression(&value.right, bindings);
+            }
+            Expression::StringTemplate(value) => {
+                for part in &value.parts {
+                    if let crate::StringTemplatePart::Interpolation(value) = part {
+                        expression(&value.expression, bindings);
+                    }
+                }
+            }
+            Expression::Resource(_)
+            | Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_)
+            | Expression::Name(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
+        }
+    }
+    fn item_value_bindings(item: &Item, bindings: &mut Vec<Binding>) {
+        match item {
+            Item::Binding(binding) => {
+                bindings.push(binding.clone());
+                if let Some(value) = &binding.value {
+                    expression(value, bindings);
+                }
+            }
+            Item::PatternBinding(value) => expression(&value.value, bindings),
+            Item::Assignment(value) => {
+                expression(&value.target, bindings);
+                expression(&value.value, bindings);
+            }
+            Item::Return(value) => expression(&value.value, bindings),
+            Item::Break(value) => {
+                if let Some(value) = &value.value {
+                    expression(value, bindings);
+                }
+            }
+            Item::Expression(value) => expression(value, bindings),
+            _ => {}
+        }
+    }
+    let mut bindings = Vec::new();
+    for source in module.program().modules() {
+        for item in &source.syntax.items {
+            item_value_bindings(item, &mut bindings);
+        }
+    }
+    bindings
+}
+
+fn pattern_symbols(module: &ResolvedModule, pattern: &Pattern, symbols: &mut HashSet<SymbolId>) {
+    match pattern {
+        Pattern::Binding(value) => {
+            if let Some(symbol) = module.symbol_for(value.syntax.id) {
+                symbols.insert(symbol);
+            }
+        }
+        Pattern::At(value) => {
+            pattern_symbols(
+                module,
+                &Pattern::Binding(value.binding.as_ref().clone()),
+                symbols,
+            );
+            pattern_symbols(module, &value.pattern, symbols);
+        }
+        Pattern::Product(value) => {
+            for element in &value.elements {
+                pattern_symbols(module, element, symbols);
+            }
+        }
+        Pattern::Nominal(value) => pattern_symbols(module, &value.argument, symbols),
+        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+    }
+}
+
+fn expression_mentions_symbols(
+    module: &ResolvedModule,
+    expression: &Expression,
+    symbols: &HashSet<SymbolId>,
+) -> bool {
+    fn block_item(module: &ResolvedModule, item: &Item, symbols: &HashSet<SymbolId>) -> bool {
+        match item {
+            Item::Binding(value) => value
+                .value
+                .as_ref()
+                .is_some_and(|value| expression_mentions_symbols(module, value, symbols)),
+            Item::PatternBinding(value) => {
+                expression_mentions_symbols(module, &value.value, symbols)
+            }
+            Item::Assignment(value) => {
+                expression_mentions_symbols(module, &value.target, symbols)
+                    || expression_mentions_symbols(module, &value.value, symbols)
+            }
+            Item::Return(value) => expression_mentions_symbols(module, &value.value, symbols),
+            Item::Break(value) => value
+                .value
+                .as_ref()
+                .is_some_and(|value| expression_mentions_symbols(module, value, symbols)),
+            Item::Expression(value) => expression_mentions_symbols(module, value, symbols),
+            _ => false,
+        }
+    }
+    if module
+        .symbol_for(expression.syntax().id)
+        .is_some_and(|symbol| symbols.contains(&symbol))
+    {
+        return true;
+    }
+    match expression {
+        Expression::Function(value) => expression_mentions_symbols(module, &value.body, symbols),
+        Expression::Satisfies(value) => expression_mentions_symbols(module, &value.value, symbols),
+        Expression::Match(value) => {
+            expression_mentions_symbols(module, &value.subject, symbols)
+                || value
+                    .arms
+                    .iter()
+                    .any(|arm| expression_mentions_symbols(module, &arm.body, symbols))
+        }
+        Expression::Loop(value) => value
+            .body
+            .items
+            .iter()
+            .any(|item| block_item(module, item, symbols)),
+        Expression::With(value) => {
+            expression_mentions_symbols(module, &value.value, symbols)
+                || value
+                    .body
+                    .items
+                    .iter()
+                    .any(|item| block_item(module, item, symbols))
+        }
+        Expression::Block(value) => value
+            .items
+            .iter()
+            .any(|item| block_item(module, item, symbols)),
+        Expression::Product(value) => value
+            .elements
+            .iter()
+            .any(|element| expression_mentions_symbols(module, &element.value, symbols)),
+        Expression::Call(value) => {
+            expression_mentions_symbols(module, &value.callee, symbols)
+                || expression_mentions_symbols(module, &value.argument, symbols)
+        }
+        Expression::Access(value) => expression_mentions_symbols(module, &value.value, symbols),
+        Expression::Index(value) => {
+            expression_mentions_symbols(module, &value.value, symbols)
+                || expression_mentions_symbols(module, &value.index, symbols)
+        }
+        Expression::Logical(value) => {
+            expression_mentions_symbols(module, &value.left, symbols)
+                || expression_mentions_symbols(module, &value.right, symbols)
+        }
+        Expression::StringTemplate(value) => value.parts.iter().any(|part| {
+            matches!(
+                part,
+                crate::StringTemplatePart::Interpolation(value)
+                    if expression_mentions_symbols(module, &value.expression, symbols)
+            )
+        }),
+        Expression::Resource(_)
+        | Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
+        | Expression::Quote(_)
+        | Expression::Splice(_)
+        | Expression::Name(_)
+        | Expression::String(_)
+        | Expression::CString(_)
+        | Expression::Integer(_)
+        | Expression::Float(_) => false,
+    }
+}
+
+fn expression_contains_assignment(expression: &Expression) -> bool {
+    fn block_item(item: &Item) -> bool {
+        match item {
+            Item::Assignment(_) => true,
+            Item::Binding(value) => value
+                .value
+                .as_ref()
+                .is_some_and(expression_contains_assignment),
+            Item::PatternBinding(value) => expression_contains_assignment(&value.value),
+            Item::Return(value) => expression_contains_assignment(&value.value),
+            Item::Break(value) => value
+                .value
+                .as_ref()
+                .is_some_and(expression_contains_assignment),
+            Item::Expression(value) => expression_contains_assignment(value),
+            _ => false,
+        }
+    }
+    match expression {
+        Expression::Function(value) => expression_contains_assignment(&value.body),
+        Expression::Satisfies(value) => expression_contains_assignment(&value.value),
+        Expression::Match(value) => {
+            expression_contains_assignment(&value.subject)
+                || value
+                    .arms
+                    .iter()
+                    .any(|arm| expression_contains_assignment(&arm.body))
+        }
+        Expression::Loop(value) => value.body.items.iter().any(block_item),
+        Expression::With(value) => {
+            expression_contains_assignment(&value.value) || value.body.items.iter().any(block_item)
+        }
+        Expression::Block(value) => value.items.iter().any(block_item),
+        Expression::Product(value) => value
+            .elements
+            .iter()
+            .any(|element| expression_contains_assignment(&element.value)),
+        Expression::Call(value) => {
+            expression_contains_assignment(&value.callee)
+                || expression_contains_assignment(&value.argument)
+        }
+        Expression::Access(value) => expression_contains_assignment(&value.value),
+        Expression::Index(value) => {
+            expression_contains_assignment(&value.value)
+                || expression_contains_assignment(&value.index)
+        }
+        Expression::Logical(value) => {
+            expression_contains_assignment(&value.left)
+                || expression_contains_assignment(&value.right)
+        }
+        Expression::StringTemplate(value) => value.parts.iter().any(|part| {
+            matches!(
+                part,
+                crate::StringTemplatePart::Interpolation(value)
+                    if expression_contains_assignment(&value.expression)
+            )
+        }),
+        Expression::Resource(_)
+        | Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
+        | Expression::Quote(_)
+        | Expression::Splice(_)
+        | Expression::Name(_)
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Integer(_)
@@ -10151,7 +10553,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
         declared: &HashSet<SymbolId>,
         captures: &mut Vec<SymbolId>,
     ) {
-        if module.symbol_owner(symbol).is_some()
+        if (module.symbol_owner(symbol).is_some() || !module.is_top_level_symbol(symbol))
             && !declared.contains(&symbol)
             && !captures.contains(&symbol)
         {
