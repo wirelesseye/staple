@@ -1420,6 +1420,50 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_implicit_thunks_lazily_with_mutable_captures() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-thunk-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-thunk-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { let exit: I32 -> () }\n",
+                "def ignore: <effect E> (() ->{E} I32) -> I32 = callback => 0\n",
+                "def twice: (() ->{state} I32) ->{state} I32 = callback => { callback (); callback () }\n",
+                "def test = () => {\n",
+                "  let mut count = 0\n",
+                "  ignore { count = count + 10; count }\n",
+                "  let result = twice { count = count + 1; count }\n",
+                "  (count - 2) + (result - 2)\n",
+                "}\n",
+                "exit (test ())\n",
+            ),
+        )
+        .expect("temporary thunk source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("implicit-thunk executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("implicit-thunk executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_structurally_derived_product_defaults() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

@@ -687,6 +687,10 @@ impl ResolvedModule {
         self.symbol_owners.get(&symbol) == Some(&None)
     }
 
+    pub(crate) fn symbol_owner(&self, symbol: SymbolId) -> Option<FunctionId> {
+        self.symbol_owners.get(&symbol).copied().flatten()
+    }
+
     pub fn has_mutable_storage(&self, symbol: SymbolId) -> bool {
         self.is_mutable_symbol(symbol)
     }

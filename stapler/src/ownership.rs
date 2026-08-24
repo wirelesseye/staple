@@ -64,6 +64,9 @@ impl<'a> OwnershipChecker<'a> {
         for function in module.functions() {
             checker.check_function(function);
         }
+        for function in module.implicit_thunks() {
+            checker.check_function(function);
+        }
 
         (checker.info, checker.diagnostics)
     }
@@ -239,7 +242,15 @@ impl<'a> OwnershipChecker<'a> {
                         .module
                         .type_of_expression(value.argument.syntax().id)
                         .is_some_and(|ty| matches!(ty, crate::CheckedType::CString));
-                self.check_expression(&value.argument, !scoped_c_string);
+                if let Some(thunk) = self.module.implicit_thunk_for(value.argument.syntax().id) {
+                    for capture in &thunk.captures {
+                        if !self.module.has_mutable_storage(*capture) {
+                            self.use_symbol(*capture, value.argument.syntax(), true);
+                        }
+                    }
+                } else {
+                    self.check_expression(&value.argument, !scoped_c_string);
+                }
                 true
             }
             Expression::Access(value) => {

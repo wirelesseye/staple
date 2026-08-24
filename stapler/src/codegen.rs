@@ -221,7 +221,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.declare_initializers();
         self.build_utf8_validator()?;
         let typed_module = self.typed_module;
-        for function in typed_module.functions() {
+        let functions = typed_module
+            .functions()
+            .iter()
+            .chain(typed_module.implicit_thunks())
+            .cloned()
+            .collect::<Vec<_>>();
+        for function in &functions {
             let function_type = typed_module
                 .type_of_function(function.id)
                 .expect("checked function");
@@ -477,7 +483,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     }
 
     fn declare_functions(&mut self) -> CodeGenerationResult<()> {
-        for function in self.typed_module.functions() {
+        let functions = self
+            .typed_module
+            .functions()
+            .iter()
+            .chain(self.typed_module.implicit_thunks())
+            .cloned()
+            .collect::<Vec<_>>();
+        for function in &functions {
             let function_type =
                 self.typed_module
                     .type_of_function(function.id)
@@ -6953,9 +6966,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
         let function = self
             .typed_module
-            .functions()
-            .iter()
-            .find(|function| function.id == function_id)
+            .function_by_id(function_id)
             .cloned()
             .ok_or_else(|| Diagnostic::new(span.clone(), "unknown function"))?;
         let environment_pointer = if function.captures.is_empty() {
@@ -7183,7 +7194,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
         let mut values = Vec::new();
         for element in &product.elements {
-            let value = self.compile_expression(environment, &element.value)?;
+            let value = self.compile_adapted_call_argument(environment, &element.value)?;
             if environment.did_return {
                 return Ok(Vec::new());
             }
@@ -7248,7 +7259,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let mut values = vec![None; final_type.elements.len()];
         let mut positional_index = 0usize;
         for element in &product.elements {
-            let value = self.compile_expression(environment, &element.value)?;
+            let value = self.compile_adapted_call_argument(environment, &element.value)?;
             if environment.did_return {
                 return Ok(Vec::new());
             }
@@ -7343,7 +7354,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<Vec<BasicValueEnum<'context>>> {
         let mut fields: HashMap<String, BasicValueEnum<'context>> = HashMap::new();
         for element in &product.elements {
-            let value = self.compile_expression(environment, &element.value)?;
+            let value = self.compile_adapted_call_argument(environment, &element.value)?;
             if environment.did_return {
                 return Ok(Vec::new());
             }
@@ -7591,21 +7602,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         expected_count: usize,
         variadic: bool,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
-        let arguments = if let Expression::Product(product) = argument {
-            self.compile_product_elements(environment, product)?
-        } else {
-            let value = self.compile_expression(environment, argument)?;
-            if environment.did_return {
-                Vec::new()
+        let arguments =
+            if let Some(thunk) = self.typed_module.implicit_thunk_for(argument.syntax().id) {
+                vec![
+                    self.build_closure(environment, thunk.id, argument.syntax().span.clone())?
+                        .as_basic_value_enum(),
+                ]
+            } else if let Expression::Product(product) = argument {
+                self.compile_product_elements(environment, product)?
             } else {
-                vec![value_as_basic(value).ok_or_else(|| {
-                    Diagnostic::new(
-                        argument.syntax().span.clone(),
-                        "argument is not a first-class value",
-                    )
-                })?]
-            }
-        };
+                let value = self.compile_expression(environment, argument)?;
+                if environment.did_return {
+                    Vec::new()
+                } else {
+                    vec![value_as_basic(value).ok_or_else(|| {
+                        Diagnostic::new(
+                            argument.syntax().span.clone(),
+                            "argument is not a first-class value",
+                        )
+                    })?]
+                }
+            };
         if environment.did_return {
             return Ok(Vec::new());
         }
@@ -7630,6 +7647,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             argument.syntax().span.clone(),
             "argument layout does not match the called function",
         ))
+    }
+
+    fn compile_adapted_call_argument(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        expression: &Expression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let Some(thunk) = self.typed_module.implicit_thunk_for(expression.syntax().id) {
+            return self
+                .build_closure(environment, thunk.id, expression.syntax().span.clone())
+                .map(Into::into);
+        }
+        self.compile_expression(environment, expression)
     }
 
     fn build_product_value(

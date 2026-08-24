@@ -93,6 +93,80 @@ fn type_check(source: &str) -> stapler::TypedModule {
 }
 
 #[test]
+fn implicitly_thunks_call_arguments_and_preserves_callback_effects() {
+    let module = type_check(concat!(
+        "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+        "let mut count = 0\n",
+        "let first = evaluate { count = count + 1; count }\n",
+        "let second = evaluate count\n",
+    ));
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("implicit thunks should lower as ordinary callbacks");
+    assert!(llvm.contains("implicit_thunk"));
+}
+
+#[test]
+fn implicitly_thunks_fixed_product_argument_positions() {
+    let module = type_check(concat!(
+        "def add_later: (I32, () -> I32) -> I32 = (left, right) => left + right ()\n",
+        "let implicit = add_later (40, 2)\n",
+        "let direct = add_later (40, () => 2)\n",
+    ));
+
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("fixed product slots should lower implicit thunks independently");
+}
+
+#[test]
+fn implicit_thunking_is_not_a_general_value_coercion() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let callback: () -> I32 = 42\n"))
+        .expect_err("non-call contexts must not implicitly thunk values");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("expected `() -> I32`, found `I32`")
+    }));
+}
+
+#[test]
+fn direct_trait_method_matches_beat_implicit_thunking() {
+    let module = type_check(concat!(
+        "trait Direct T { choose: T -> I32 }\n",
+        "trait Lazy T { choose: (() -> T) -> I32 }\n",
+        "impl Direct I32 { def choose = value => value }\n",
+        "impl Lazy I32 { def choose = callback => callback () }\n",
+        "let answer = choose 42\n",
+    ));
+    let answer = module.syntax().items.last().expect("answer binding");
+    let Item::Binding(answer) = answer else {
+        panic!("expected answer binding");
+    };
+    assert_eq!(
+        module.type_of_expression(answer.value.as_ref().unwrap().syntax().id),
+        Some(&CheckedType::I32),
+    );
+}
+
+#[test]
+fn trait_methods_fall_back_to_implicit_thunking() {
+    let module = type_check(concat!(
+        "trait Lazy T { force: (() -> T) -> T }\n",
+        "impl Lazy I32 { def force = callback => callback () }\n",
+        "let answer = force 42\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("trait dispatch should use thunking when no direct match exists");
+}
+
+#[test]
 fn specializes_generic_effect_parameters() {
     let module = type_check(concat!(
         "use std.io.(IO, println)\n",

@@ -1475,6 +1475,25 @@ occurrence. Each set may contain at most one variable. Effect parameters exist
 only on generic function bindings, may appear only in effect sets, have no
 runtime representation, and are concrete before code generation.
 
+### Call-site implicit thunking
+
+At a function call, an expression of type `T` may be supplied to a parameter
+of type `() -> T`. The compiler treats that argument as `() => expression`, so
+the expression is evaluated only when the callback is invoked:
+
+```staple
+def evaluate: (() -> I32) -> I32 = callback => callback ()
+
+let answer = evaluate { expensive_computation () }
+```
+
+This adaptation is restricted to call arguments. It is not a general coercion,
+so `let callback: () -> I32 = 42` remains invalid. A directly compatible
+function value always wins over implicit thunking. The generated callback
+captures values and infers the effects of its body exactly like an explicit
+anonymous function; this allows effect-polymorphic higher-order functions to
+preserve deferred resource and state effects.
+
 The empty set may be written explicitly as `->{}`. Reordering or repeating
 entries does not change a function type or the canonical hidden-parameter
 order.

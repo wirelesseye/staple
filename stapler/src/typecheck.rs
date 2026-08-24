@@ -5,8 +5,8 @@ use std::fmt;
 use crate::{
     Accessor, Binding, BuiltinType, Diagnostic, Expression, FloatType, FunctionId, IntegerType,
     Item, Module, ModuleId, Pattern, PatternBindingKind, ProductExpression, ProductType,
-    ResolvedFunction, ResolvedModule, Span, SymbolId, SyntaxId, TraitId, TraitMethodId, Type,
-    TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
+    ResolvedFunction, ResolvedModule, Span, SymbolId, Syntax, SyntaxId, TraitId, TraitMethodId,
+    Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
 };
 
 const MAX_PRODUCT_ARITY: usize = 65_535;
@@ -767,6 +767,7 @@ pub struct TypedModule {
     symbol_companion_types: HashMap<SymbolId, TypeId>,
     function_result_companion_types: HashMap<FunctionId, TypeId>,
     function_symbols: HashMap<SymbolId, FunctionId>,
+    implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
 }
 
 impl TypedModule {
@@ -793,6 +794,26 @@ impl TypedModule {
 
     pub fn functions(&self) -> &[ResolvedFunction] {
         self.resolved.functions()
+    }
+
+    pub(crate) fn implicit_thunks(&self) -> impl Iterator<Item = &ResolvedFunction> {
+        self.implicit_thunks.values()
+    }
+
+    pub(crate) fn implicit_thunk_for(&self, syntax: SyntaxId) -> Option<&ResolvedFunction> {
+        self.implicit_thunks.get(&syntax)
+    }
+
+    pub(crate) fn function_by_id(&self, id: FunctionId) -> Option<&ResolvedFunction> {
+        self.resolved
+            .functions()
+            .iter()
+            .find(|function| function.id == id)
+            .or_else(|| {
+                self.implicit_thunks
+                    .values()
+                    .find(|function| function.id == id)
+            })
     }
 
     pub fn symbol_for(&self, syntax_id: SyntaxId) -> Option<SymbolId> {
@@ -1249,6 +1270,9 @@ pub struct TypeChecker {
     parameter_symbols: HashMap<FunctionId, Vec<Option<SymbolId>>>,
     /// The same explicit set retained for code generation and capture layout.
     mutated_parameter_symbols: HashSet<SymbolId>,
+    implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
+    next_implicit_function: usize,
+    implicit_thunk_context: bool,
 }
 
 impl TypeChecker {
@@ -1273,6 +1297,7 @@ impl TypeChecker {
     }
 
     fn check_inner(mut self, module: ResolvedModule) -> Result<TypedModule, Vec<Diagnostic>> {
+        self.next_implicit_function = module.functions().len();
         self.io_type = module
             .type_declarations()
             .keys()
@@ -1375,6 +1400,7 @@ impl TypeChecker {
             symbol_companion_types: self.symbol_companion_types,
             function_result_companion_types: self.function_result_companion_types,
             function_symbols: self.function_symbols,
+            implicit_thunks: self.implicit_thunks,
         };
         let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
         if ownership_diagnostics.is_empty() {
@@ -3015,17 +3041,24 @@ impl TypeChecker {
                         _ => None,
                     }
                 };
-                let argument_effects = called_type.as_ref().map_or_else(
-                    || self.expression_effects_now(module, &value.argument, target_parameters),
-                    |function| {
-                        self.call_argument_resources_now(
-                            module,
-                            &value.argument,
-                            &function.mutations,
-                            target_parameters,
-                        )
-                    },
-                );
+                let argument_effects = if self
+                    .implicit_thunks
+                    .contains_key(&value.argument.syntax().id)
+                {
+                    CheckedEffectSet::default()
+                } else {
+                    called_type.as_ref().map_or_else(
+                        || self.expression_effects_now(module, &value.argument, target_parameters),
+                        |function| {
+                            self.call_argument_resources_now(
+                                module,
+                                &value.argument,
+                                &function.mutations,
+                                target_parameters,
+                            )
+                        },
+                    )
+                };
                 let mut result = callee_effects.union(&argument_effects);
                 if let Some(function_type) = &called_type {
                     result = result.union(
@@ -3102,6 +3135,11 @@ impl TypeChecker {
                 .functions()
                 .iter()
                 .find(|function| function.id == function_id)
+                .or_else(|| {
+                    self.implicit_thunks
+                        .values()
+                        .find(|function| function.id == function_id)
+                })
                 .is_some_and(|function| function.captures.contains(&symbol));
         (external_to_function && module.is_mutable_symbol(symbol)).then_some(symbol)
     }
@@ -3120,7 +3158,12 @@ impl TypeChecker {
             return product.elements.iter().enumerate().fold(
                 CheckedEffectSet::default(),
                 |effects, (index, element)| {
-                    let item = if mutations.contains(&CheckedMutation::Element(index)) {
+                    let item = if self
+                        .implicit_thunks
+                        .contains_key(&element.value.syntax().id)
+                    {
+                        CheckedEffectSet::default()
+                    } else if mutations.contains(&CheckedMutation::Element(index)) {
                         self.place_resources_now(module, &element.value, target_parameters)
                     } else {
                         self.expression_effects_now(module, &element.value, target_parameters)
@@ -3201,9 +3244,16 @@ impl TypeChecker {
             })
             .collect::<HashMap<_, _>>();
 
-        for _ in 0..=module.functions().len() {
+        let effect_function_count = module.functions().len() + self.implicit_thunks.len();
+        for _ in 0..=effect_function_count {
             let mut updates = Vec::new();
-            for function in module.functions() {
+            let functions = module
+                .functions()
+                .iter()
+                .chain(self.implicit_thunks.values())
+                .cloned()
+                .collect::<Vec<_>>();
+            for function in &functions {
                 // An implementation member uses its trait method's complete
                 // effect set as its callable ABI even when this particular
                 // body exercises only a subset of those effects.
@@ -3250,9 +3300,15 @@ impl TypeChecker {
         // converge them separately after the public effect types settle. This
         // preserves exact dependencies through known calls, including calls
         // to explicitly annotated and recursive functions.
-        for _ in 0..=module.functions().len() {
+        for _ in 0..=effect_function_count {
             let mut changed = false;
-            for function in module.functions() {
+            let functions = module
+                .functions()
+                .iter()
+                .chain(self.implicit_thunks.values())
+                .cloned()
+                .collect::<Vec<_>>();
+            for function in &functions {
                 self.current_effect_function.set(Some(function.id));
                 *self.current_state_accesses.borrow_mut() = StateAccesses::default();
                 let target_parameters = self.parameter_positions(function.id);
@@ -3268,7 +3324,13 @@ impl TypeChecker {
             }
         }
 
-        for function in module.functions() {
+        let functions = module
+            .functions()
+            .iter()
+            .chain(self.implicit_thunks.values())
+            .cloned()
+            .collect::<Vec<_>>();
+        for function in &functions {
             let target_parameters = self.parameter_positions(function.id);
             self.current_effect_function.set(Some(function.id));
             *self.current_state_accesses.borrow_mut() = StateAccesses::default();
@@ -3592,8 +3654,10 @@ impl TypeChecker {
                 self.refresh_expression_function_types(module, &element.value) | changed
             }),
             Expression::Call(value) => {
-                self.refresh_expression_function_types(module, &value.callee)
-                    | self.refresh_expression_function_types(module, &value.argument)
+                let mut changed = self.refresh_expression_function_types(module, &value.callee)
+                    | self.refresh_expression_function_types(module, &value.argument);
+                changed |= self.refresh_implicit_thunk_call(module, value);
+                changed
             }
             Expression::Access(value) => {
                 self.refresh_expression_function_types(module, &value.value)
@@ -3627,6 +3691,54 @@ impl TypeChecker {
         {
             self.expression_types
                 .insert(expression.syntax().id, value_type);
+            changed = true;
+        }
+        changed
+    }
+
+    fn refresh_implicit_thunk_call(
+        &mut self,
+        module: &ResolvedModule,
+        call: &crate::CallExpression,
+    ) -> bool {
+        let Some(thunk) = self.implicit_thunks.get(&call.argument.syntax().id) else {
+            return false;
+        };
+        let Some(actual) = self.function_types.get(&thunk.id).cloned() else {
+            return false;
+        };
+        let template = self
+            .function_origin(module, &call.callee)
+            .and_then(|id| self.function_types.get(&id).cloned())
+            .map(CheckedType::Function)
+            .or_else(|| self.expression_types.get(&call.callee.syntax().id).cloned());
+        let Some(template) = template else {
+            return false;
+        };
+        let mut substitutions = HashMap::new();
+        let CheckedType::Function(function) = &template else {
+            return false;
+        };
+        if !infer_type_parameters(
+            &function.parameter,
+            &CheckedType::Function(actual),
+            &mut substitutions,
+        ) {
+            return false;
+        }
+        let instantiated = substitute_type(template, &substitutions);
+        let CheckedType::Function(instantiated_function) = &instantiated else {
+            return false;
+        };
+        let result = instantiated_function.result.as_ref().clone();
+        let mut changed =
+            self.expression_types.get(&call.callee.syntax().id) != Some(&instantiated);
+        if changed {
+            self.expression_types
+                .insert(call.callee.syntax().id, instantiated);
+        }
+        if self.expression_types.get(&call.syntax.id) != Some(&result) {
+            self.expression_types.insert(call.syntax.id, result);
             changed = true;
         }
         changed
@@ -4961,6 +5073,30 @@ impl TypeChecker {
         // annotation resolves to), so treat it exactly like "no expected type" rather
         // than letting it take the `Some(_)` branch of expected-type-driven logic below.
         let expected = expected.filter(|expected| **expected != CheckedType::Inferred);
+        if self.implicit_thunk_context
+            && let Some(CheckedType::Function(callback)) = expected
+            && is_empty_product_type(&callback.parameter)
+        {
+            self.implicit_thunk_context = false;
+            let direct = self.check_expression(module, expression);
+            if merge_types(direct.clone(), CheckedType::Function(callback.clone())).is_some() {
+                self.implicit_thunk_context = true;
+                return direct;
+            }
+            let result_expected = erase_type_parameters(&callback.result);
+            let result = if result_expected == CheckedType::Inferred {
+                direct
+            } else {
+                self.coerce_expression_type(
+                    expression.syntax().id,
+                    direct,
+                    &result_expected,
+                    expression.syntax().span.clone(),
+                )
+            };
+            self.implicit_thunk_context = true;
+            return self.make_implicit_thunk(module, expression, result);
+        }
         let trait_methods = module.trait_methods_for_expression(expression.syntax().id);
         if !trait_methods.is_empty() && !matches!(expression, Expression::Call(_)) {
             let value_type = self.resolve_trait_method_use(
@@ -5375,9 +5511,47 @@ impl TypeChecker {
                     let trait_methods =
                         module.trait_methods_for_expression(call.callee.syntax().id);
                     if !trait_methods.is_empty() {
-                        let argument_type = self.check_expression(module, &call.argument);
+                        let mut argument_type = self.check_expression(module, &call.argument);
                         if self.did_return {
                             return CheckedType::empty_product();
+                        }
+                        let has_direct_shape = trait_methods.iter().any(|method| {
+                            let Some(CheckedType::Function(function)) =
+                                self.trait_method_types.get(method)
+                            else {
+                                return false;
+                            };
+                            infer_type_parameters(
+                                &function.parameter,
+                                &argument_type,
+                                &mut HashMap::new(),
+                            )
+                        });
+                        if !has_direct_shape {
+                            let has_thunk_shape = trait_methods.iter().any(|method| {
+                                let Some(CheckedType::Function(function)) =
+                                    self.trait_method_types.get(method)
+                                else {
+                                    return false;
+                                };
+                                let CheckedType::Function(callback) = function.parameter.as_ref()
+                                else {
+                                    return false;
+                                };
+                                is_empty_product_type(&callback.parameter)
+                                    && infer_type_parameters(
+                                        &callback.result,
+                                        &argument_type,
+                                        &mut HashMap::new(),
+                                    )
+                            });
+                            if has_thunk_shape {
+                                argument_type = self.make_implicit_thunk(
+                                    module,
+                                    &call.argument,
+                                    argument_type.clone(),
+                                );
+                            }
                         }
                         let callee_type = self.resolve_trait_method_use(
                             module,
@@ -5449,7 +5623,15 @@ impl TypeChecker {
                             }
                         }
                     } else {
-                        self.check_expression_expected(module, &call.argument, argument_expected)
+                        let previous = self.implicit_thunk_context;
+                        self.implicit_thunk_context = true;
+                        let value = self.check_expression_expected(
+                            module,
+                            &call.argument,
+                            argument_expected,
+                        );
+                        self.implicit_thunk_context = previous;
+                        value
                     };
                     if self.did_return {
                         return CheckedType::empty_product();
@@ -7470,6 +7652,52 @@ impl TypeChecker {
             return;
         }
         self.coerce_expression_type(syntax, actual, expected, span);
+    }
+
+    fn make_implicit_thunk(
+        &mut self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        result: CheckedType,
+    ) -> CheckedType {
+        let id = FunctionId(self.next_implicit_function);
+        self.next_implicit_function += 1;
+        let captures = implicit_thunk_captures(module, expression);
+        let function = ResolvedFunction {
+            id,
+            name: format!("__staple_implicit_thunk_{}", id.0),
+            binding_syntax: None,
+            pattern: Pattern::Product(crate::ProductPattern {
+                syntax: Syntax::compiler(),
+                elements: Vec::new(),
+            }),
+            result_annotation: None,
+            binding_annotation: None,
+            type_parameters: Vec::new(),
+            trait_bounds: Vec::new(),
+            subtype_bounds: Vec::new(),
+            captures,
+            body: expression.clone(),
+        };
+        self.implicit_thunks
+            .insert(expression.syntax().id, function);
+
+        let previous_function = self.current_effect_function.replace(Some(id));
+        let previous_accesses = self
+            .current_state_accesses
+            .replace(StateAccesses::default());
+        let effects = self.expression_effects_now(module, expression, &HashMap::new());
+        self.current_effect_function.set(previous_function);
+        self.current_state_accesses.replace(previous_accesses);
+
+        let function_type = CheckedFunctionType {
+            parameter: Box::new(CheckedType::empty_product()),
+            mutations: Vec::new(),
+            effects,
+            result: Box::new(result),
+        };
+        self.function_types.insert(id, function_type.clone());
+        CheckedType::Function(function_type)
     }
 
     fn require_compatible(
@@ -9691,6 +9919,199 @@ fn call_mutation_target_expression<'a>(
             _ => argument,
         },
     }
+}
+
+fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> Vec<SymbolId> {
+    fn declare_pattern(
+        module: &ResolvedModule,
+        pattern: &Pattern,
+        declared: &mut HashSet<SymbolId>,
+    ) {
+        match pattern {
+            Pattern::Binding(value) => {
+                if let Some(symbol) = module.symbol_for(value.syntax.id) {
+                    declared.insert(symbol);
+                }
+            }
+            Pattern::At(value) => {
+                declare_pattern(
+                    module,
+                    &Pattern::Binding(value.binding.as_ref().clone()),
+                    declared,
+                );
+                declare_pattern(module, &value.pattern, declared);
+            }
+            Pattern::Product(value) => {
+                for element in &value.elements {
+                    declare_pattern(module, element, declared);
+                }
+            }
+            Pattern::Nominal(value) => declare_pattern(module, &value.argument, declared),
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        }
+    }
+
+    fn declarations(
+        module: &ResolvedModule,
+        expression: &Expression,
+        declared: &mut HashSet<SymbolId>,
+    ) {
+        let mut item = |item: &Item| match item {
+            Item::Binding(value) => {
+                if let Some(symbol) = module.symbol_for(value.syntax.id) {
+                    declared.insert(symbol);
+                }
+            }
+            Item::PatternBinding(value) => declare_pattern(module, &value.pattern, declared),
+            _ => {}
+        };
+        match expression {
+            Expression::Block(value) => value.items.iter().for_each(&mut item),
+            Expression::Loop(value) => value.body.items.iter().for_each(&mut item),
+            Expression::With(value) => value.body.items.iter().for_each(&mut item),
+            _ => {}
+        }
+    }
+
+    fn visit_item(
+        module: &ResolvedModule,
+        item: &Item,
+        declared: &HashSet<SymbolId>,
+        captures: &mut Vec<SymbolId>,
+    ) {
+        match item {
+            Item::Binding(value) => value
+                .value
+                .as_ref()
+                .into_iter()
+                .for_each(|value| visit(module, value, declared, captures)),
+            Item::PatternBinding(value) => visit(module, &value.value, declared, captures),
+            Item::Assignment(value) => {
+                visit(module, &value.target, declared, captures);
+                visit(module, &value.value, declared, captures);
+            }
+            Item::Return(value) => visit(module, &value.value, declared, captures),
+            Item::Break(value) => value
+                .value
+                .as_ref()
+                .into_iter()
+                .for_each(|value| visit(module, value, declared, captures)),
+            Item::Expression(value) => visit(module, value, declared, captures),
+            _ => {}
+        }
+    }
+
+    fn add(
+        module: &ResolvedModule,
+        symbol: SymbolId,
+        declared: &HashSet<SymbolId>,
+        captures: &mut Vec<SymbolId>,
+    ) {
+        if module.symbol_owner(symbol).is_some()
+            && !declared.contains(&symbol)
+            && !captures.contains(&symbol)
+        {
+            captures.push(symbol);
+        }
+    }
+
+    fn visit(
+        module: &ResolvedModule,
+        expression: &Expression,
+        outer_declared: &HashSet<SymbolId>,
+        captures: &mut Vec<SymbolId>,
+    ) {
+        let mut declared = outer_declared.clone();
+        declarations(module, expression, &mut declared);
+        match expression {
+            Expression::Function(value) => {
+                if let Some(id) = module.function_for(value.syntax.id)
+                    && let Some(function) =
+                        module.functions().iter().find(|function| function.id == id)
+                {
+                    for symbol in &function.captures {
+                        add(module, *symbol, &declared, captures);
+                    }
+                }
+            }
+            Expression::Satisfies(value) => visit(module, &value.value, &declared, captures),
+            Expression::Match(value) => {
+                visit(module, &value.subject, &declared, captures);
+                for arm in &value.arms {
+                    visit(module, &arm.body, &declared, captures);
+                }
+            }
+            Expression::Loop(value) => {
+                for item in &value.body.items {
+                    visit_item(module, item, &declared, captures);
+                }
+            }
+            Expression::With(value) => {
+                visit(module, &value.value, &declared, captures);
+                for item in &value.body.items {
+                    visit_item(module, item, &declared, captures);
+                }
+            }
+            Expression::Block(value) => {
+                for item in &value.items {
+                    visit_item(module, item, &declared, captures);
+                }
+            }
+            Expression::Product(value) => {
+                for element in &value.elements {
+                    visit(module, &element.value, &declared, captures);
+                }
+            }
+            Expression::Call(value) => {
+                visit(module, &value.callee, &declared, captures);
+                visit(module, &value.argument, &declared, captures);
+            }
+            Expression::Access(value) => {
+                if let Some(symbol) = module.symbol_for(value.syntax.id) {
+                    add(module, symbol, &declared, captures);
+                } else {
+                    visit(module, &value.value, &declared, captures);
+                }
+            }
+            Expression::Index(value) => {
+                visit(module, &value.value, &declared, captures);
+                visit(module, &value.index, &declared, captures);
+            }
+            Expression::Logical(value) => {
+                visit(module, &value.left, &declared, captures);
+                visit(module, &value.right, &declared, captures);
+            }
+            Expression::Name(value) => {
+                if let Some(symbol) = module.symbol_for(value.syntax.id) {
+                    add(module, symbol, &declared, captures);
+                }
+            }
+            Expression::StringTemplate(value) => {
+                for part in &value.parts {
+                    if let crate::StringTemplatePart::Interpolation(value) = part {
+                        visit(module, &value.expression, &declared, captures);
+                    }
+                }
+            }
+            Expression::Resource(_)
+            | Expression::SyntaxArgument(_)
+            | Expression::VisibilityArgument(_)
+            | Expression::Quote(_)
+            | Expression::Splice(_)
+            | Expression::String(_)
+            | Expression::CString(_)
+            | Expression::Integer(_)
+            | Expression::Float(_) => {}
+        }
+    }
+
+    let mut captures = Vec::new();
+    visit(module, expression, &HashSet::new(), &mut captures);
+    captures
+}
+
+fn is_empty_product_type(value_type: &CheckedType) -> bool {
+    matches!(value_type, CheckedType::Product(product) if product.elements.is_empty() && !product.variadic)
 }
 
 /// Whether `product` is eligible for a structural derivation (`Index`,
