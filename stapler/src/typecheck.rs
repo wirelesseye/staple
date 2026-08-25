@@ -1811,10 +1811,12 @@ impl TypeChecker {
                 ));
                 continue;
             }
-            if implementation.negative && !matches!(target, CheckedType::Distinct { .. }) {
+            if implementation.negative
+                && !matches!(target, CheckedType::Distinct { .. } | CheckedType::Buffer(_))
+            {
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "`!Copy` may only be implemented for a represented nominal type",
+                    "`!Copy` may only be implemented for a represented nominal type or Buffer",
                 ));
                 continue;
             }
@@ -1968,6 +1970,20 @@ impl TypeChecker {
     /// so it's assumed satisfiable, matching this check's conservative bias
     /// toward flagging overlap rather than silently accepting it.
     fn bound_could_hold(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
+        if Some(trait_id) == self.copy_trait
+            && arguments
+                .first()
+                .is_some_and(|argument| !matches!(argument, CheckedType::Parameter { .. }))
+        {
+            return is_copy_type(
+                &arguments[0],
+                self.copy_trait,
+                self.drop_trait,
+                self.io_type,
+                &self.trait_implementations,
+                &[],
+            );
+        }
         if arguments.iter().any(contains_type_parameter) {
             return true;
         }
@@ -2681,7 +2697,8 @@ impl TypeChecker {
                 | crate::IntrinsicFunction::BufferPop
                 | crate::IntrinsicFunction::BufferGet
                 | crate::IntrinsicFunction::BufferFreeze
-                | crate::IntrinsicFunction::BufferTransfer => self
+                | crate::IntrinsicFunction::BufferTransfer
+                | crate::IntrinsicFunction::BufferClone => self
                     .symbol_types
                     .get(symbol)
                     .cloned()
@@ -11463,6 +11480,12 @@ fn valid_buffer_intrinsic_type(
                     if matches!(result.as_ref(), CheckedType::ErasedProduct(result) if result == element)
             ) && function.effects == no_effects
         }
+        crate::IntrinsicFunction::BufferClone => {
+            matches!(
+                (function.parameter.as_ref(), function.result.as_ref()),
+                (CheckedType::Buffer(source), CheckedType::Buffer(result)) if source == result
+            ) && function.effects == no_effects
+        }
         crate::IntrinsicFunction::BufferTransfer => {
             let CheckedType::Product(product) = function.parameter.as_ref() else {
                 return false;
@@ -11546,9 +11569,8 @@ fn is_copy_type(
         | CheckedType::CChar
         | CheckedType::CPointer { .. }
         | CheckedType::Ref(_)
-        | CheckedType::Buffer(_)
         | CheckedType::Function(_) => true,
-        CheckedType::CString => false,
+        CheckedType::CString | CheckedType::Buffer(_) => false,
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
             bounds.iter().any(|bound| {
                 bound.trait_id == copy_trait

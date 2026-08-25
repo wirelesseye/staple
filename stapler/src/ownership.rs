@@ -62,6 +62,13 @@ impl<'a> OwnershipChecker<'a> {
         checker.check_globals();
 
         for function in module.functions() {
+            if function
+                .binding_syntax
+                .and_then(|syntax| module.symbol_for(syntax))
+                .is_some_and(|symbol| module.resolved().intrinsic_function(symbol).is_some())
+            {
+                continue;
+            }
             checker.check_function(function);
         }
         for function in module.implicit_thunks() {
@@ -228,7 +235,7 @@ impl<'a> OwnershipChecker<'a> {
             }
             Expression::Product(value) => {
                 for element in &value.elements {
-                    self.check_expression(&element.value, true);
+                    self.check_expression(&element.value, consume);
                 }
                 true
             }
@@ -254,6 +261,11 @@ impl<'a> OwnershipChecker<'a> {
                     let callee_function_type =
                         self.module
                             .type_of_expression(value.callee.syntax().id)
+                            .or_else(|| {
+                                self.module
+                                    .symbol_for(value.callee.syntax().id)
+                                    .and_then(|symbol| self.module.type_of_symbol(symbol))
+                            })
                             .and_then(|ty| match ty {
                                 crate::CheckedType::Function(function) => Some(function),
                                 _ => None,
@@ -281,7 +293,7 @@ impl<'a> OwnershipChecker<'a> {
                 true
             }
             Expression::Index(value) => {
-                self.check_expression(&value.value, true);
+                self.check_expression(&value.value, false);
                 self.check_expression(&value.index, true);
                 true
             }
@@ -390,7 +402,7 @@ impl<'a> OwnershipChecker<'a> {
             }
             Item::Assignment(assignment) => {
                 if let Expression::Index(index) = &assignment.target {
-                    self.check_expression(&index.value, true);
+                    self.check_expression(&index.value, false);
                     self.check_expression(&index.index, true);
                     self.check_expression(&assignment.value, true);
                     return true;

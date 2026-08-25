@@ -823,7 +823,12 @@ mod tests {
 
     #[test]
     fn completes_accessible_companion_methods_for_a_typed_receiver() {
-        let source = concat!("let mut numbers: List I32 = List.new ()\n", "numbers\n",);
+        let source = concat!(
+            "def exercise = () => {\n",
+            "let mut numbers: List I32 = List.new ()\n",
+            "numbers\n",
+            "}\n",
+        );
         let path = std::env::temp_dir().join("staple-completion-methods.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))

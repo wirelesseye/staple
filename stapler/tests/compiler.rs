@@ -3123,15 +3123,18 @@ fn string_literals_have_the_canonical_string_type() {
 #[test]
 fn buffer_intrinsics_type_check_and_compile() {
     let module = type_check(concat!(
+        "def exercise: () -> () = () => {\n",
         "let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
         "let empty_length: USize = Buffer.length values\n",
         "let capacity: USize = Buffer.capacity values\n",
         "Buffer.push values 10\n",
         "Buffer.push values 20\n",
-        "let first: Ref I32 = Buffer.get_ref values (0 satisfies USize)\n",
+        "let first: Ref I32 = Buffer.get_ref (values, 0 satisfies USize)\n",
         "let popped: Option I32 = Buffer.pop values\n",
         "let frozen: Slice I32 = Buffer.freeze values\n",
         "let frozen_length: USize = Slice.length frozen\n",
+        "()\n",
+        "}\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -3144,8 +3147,11 @@ fn buffer_intrinsics_type_check_and_compile() {
 
     let module = type_check(concat!(
         "use std.cinterop.*\n",
+        "def exercise: () -> () = () => {\n",
         "let mut owned: Buffer CString = Buffer.with_capacity (1 satisfies USize)\n",
         "Buffer.push owned (c_string \"owned\")\n",
+        "()\n",
+        "}\n",
     ));
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
@@ -3154,8 +3160,79 @@ fn buffer_intrinsics_type_check_and_compile() {
 }
 
 #[test]
+fn buffer_and_list_are_move_only_and_clone_their_elements() {
+    let module = type_check(concat!(
+        "type Resource = I32\n",
+        "impl !Copy Resource {}\n",
+        "impl Clone Resource { def clone = Resource value => Resource value }\n",
+        "def exercise: () -> () = () => {\n",
+        "let mut buffer: Buffer Resource = Buffer.with_capacity (4 satisfies USize)\n",
+        "Buffer.push buffer (Resource 7)\n",
+        "let mut cloned_buffer: Buffer Resource = Clone.clone buffer\n",
+        "Buffer.push cloned_buffer (Resource 8)\n",
+        "let buffer_capacity: USize = Buffer.capacity cloned_buffer\n",
+        "let mut list: List Resource = List.with_capacity (4 satisfies USize)\n",
+        "List.push list (Resource 9)\n",
+        "let mut cloned_list: List Resource = Clone.clone list\n",
+        "List.push cloned_list (Resource 10)\n",
+        "let list_capacity: USize = List.capacity cloned_list\n",
+        "()\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("Buffer and List deep clones should compile");
+    assert!(llvm.contains("buffer.clone.allocate"));
+    assert!(llvm.contains("buffer.clone.element"));
+    assert!(llvm.contains("buffer.clone.destination.length.slot"));
+
+    for source in [
+        concat!(
+            "def invalid: () -> USize = () => {\n",
+            "let buffer: Buffer I32 = Buffer.with_capacity (1 satisfies USize)\n",
+            "let moved = buffer\n",
+            "Buffer.length buffer\n",
+            "}\n",
+        ),
+        concat!(
+            "def invalid: () -> USize = () => {\n",
+            "let list: List I32 = List.new ()\n",
+            "let moved = list\n",
+            "List.length list\n",
+            "}\n",
+        ),
+        concat!(
+            "def invalid: () -> USize = () => {\n",
+            "let buffer: Buffer I32 = Buffer.with_capacity (1 satisfies USize)\n",
+            "let frozen: Slice I32 = Buffer.freeze buffer\n",
+            "Buffer.length buffer\n",
+            "}\n",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err("moved containers must not remain usable");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("moved")));
+    }
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Resource = I32\n",
+            "impl !Copy Resource {}\n",
+            "def invalid: Buffer Resource -> Buffer Resource = buffer => Clone.clone buffer\n",
+        )))
+        .expect_err("Buffer cloning should require Clone elements");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("trait implementation")
+            || diagnostic.message.contains("trait bound")
+    }));
+}
+
+#[test]
 fn buffer_transfer_type_checks_and_compiles() {
     let module = type_check(concat!(
+        "def exercise: () -> () = () => {\n",
         "let mut source: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
         "Buffer.push source 1\n",
         "Buffer.push source 2\n",
@@ -3164,6 +3241,7 @@ fn buffer_transfer_type_checks_and_compiles() {
         "Buffer.transfer (source, destination)\n",
         "let moved_length: USize = Buffer.length destination\n",
         "let emptied_length: USize = Buffer.length source\n",
+        "()\n}\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -3178,6 +3256,7 @@ fn buffer_transfer_type_checks_and_compiles() {
 #[test]
 fn list_grows_past_initial_capacity_and_type_checks() {
     let module = type_check(concat!(
+        "def exercise: () -> () = () => {\n",
         "let mut values: List I32 = List.new ()\n",
         "List.push values 1\n",
         "List.push values 2\n",
@@ -3192,6 +3271,7 @@ fn list_grows_past_initial_capacity_and_type_checks() {
         "let last_ref_unchecked: Ref I32 = List.get_ref_unchecked values (4 satisfies USize)\n",
         "let popped: Option I32 = List.pop values\n",
         "let sized: List I32 = List.with_capacity (10 satisfies USize)\n",
+        "()\n}\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -3297,6 +3377,7 @@ fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_t
 #[test]
 fn list_supports_bracket_indexing_mutation_and_iteration() {
     let module = type_check(concat!(
+        "def exercise: () -> () = () => {\n",
         "let mut values: List I32 = List.new ()\n",
         "List.push values 10\n",
         "List.push values 20\n",
@@ -3308,6 +3389,7 @@ fn list_supports_bracket_indexing_mutation_and_iteration() {
         "for item in values {\n",
         "  sum = sum + item\n",
         "}\n",
+        "()\n}\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -3318,9 +3400,11 @@ fn list_supports_bracket_indexing_mutation_and_iteration() {
 #[test]
 fn list_of_macro_builds_a_list_from_values() {
     let module = type_check(concat!(
+        "def exercise: () -> () = () => {\n",
         "let empty: List I32 = List.of ()\n",
         "let one: List I32 = List.of (42)\n",
         "let many: List I32 = List.of (1, 2, 3, 4, 5)\n",
+        "()\n}\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -3341,10 +3425,12 @@ fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
         "def push_value: (mut Buffer I32, I32) -> () = (buffer, value) => {\n",
         "  Buffer.push buffer value\n",
         "}\n",
+        "def exercise: () -> () = () => {\n",
         "let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
         "push_value (values, 10)\n",
         "push_value (values, 20)\n",
         "let length: USize = Buffer.length values\n",
+        "()\n}\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -6486,6 +6572,14 @@ fn provides_to_string_for_prelude_scalar_types() {
 #[test]
 fn provides_formatter_display_debug_and_structural_product_debug() {
     let module = type_check(concat!(
+        "type Point = (x: I32, y: I32)\n",
+        "impl Debug Point {\n",
+        "  def fmt = (Point (x, y), formatter) => {\n",
+        "    Formatter.write (formatter, \"Point \" )\n",
+        "    Debug.fmt ((x: x, y: y), formatter)\n",
+        "  }\n",
+        "}\n",
+        "def exercise: () -> () = () => {\n",
         "let mut formatter = Formatter.new ()\n",
         "Formatter.write (formatter, \"left\")\n",
         "Formatter.write (formatter, \" + right\")\n",
@@ -6495,14 +6589,8 @@ fn provides_formatter_display_debug_and_structural_product_debug() {
         "let product: (I32, name: String, Bool) = (1, name: \"two\", True)\n",
         "let product_debug: String = Formatter.debug product\n",
         "let empty_debug: String = Formatter.debug ()\n",
-        "type Point = (x: I32, y: I32)\n",
-        "impl Debug Point {\n",
-        "  def fmt = (Point (x, y), formatter) => {\n",
-        "    Formatter.write (formatter, \"Point \" )\n",
-        "    Debug.fmt ((x: x, y: y), formatter)\n",
-        "  }\n",
-        "}\n",
         "let point_debug: String = Formatter.debug (Point (x: 3, y: 4))\n",
+        "()\n}\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)

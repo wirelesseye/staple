@@ -1063,7 +1063,7 @@ mod tests {
                 "  let mut values: Buffer I32 = Buffer.with_capacity 2\n",
                 "  Buffer.push values 41\n",
                 "  Buffer.push values 42\n",
-                "  Buffer.get_ref values 1\n",
+                "  Buffer.get_ref (values, 1)\n",
                 "}\n",
                 "def make_slice = () => {\n",
                 "  let mut values: Buffer I32 = Buffer.with_capacity 2\n",
@@ -1117,6 +1117,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { let exit: I32 -> () }\n",
+                "def run = () => {\n",
                 "let mut from: Buffer I32 = Buffer.with_capacity 3\n",
                 "Buffer.push from 10\n",
                 "Buffer.push from 20\n",
@@ -1129,10 +1130,10 @@ mod tests {
                 "match into_length == 4 {\n",
                 "  True() => match from_length == 0 {\n",
                 "    True() => {\n",
-                "      let Ref a = Buffer.get_ref into 0\n",
-                "      let Ref b = Buffer.get_ref into 1\n",
-                "      let Ref c = Buffer.get_ref into 2\n",
-                "      let Ref d = Buffer.get_ref into 3\n",
+                "      let Ref a = Buffer.get_ref (into, 0)\n",
+                "      let Ref b = Buffer.get_ref (into, 1)\n",
+                "      let Ref c = Buffer.get_ref (into, 2)\n",
+                "      let Ref d = Buffer.get_ref (into, 3)\n",
                 "      match a == 1 {\n",
                 "        True() => match b == 10 {\n",
                 "          True() => match c == 20 {\n",
@@ -1151,6 +1152,7 @@ mod tests {
                 "  },\n",
                 "  False() => exit 1,\n",
                 "}\n",
+                "}\nrun ()\n",
             ),
         )
         .expect("temporary Buffer.transfer source should be writable");
@@ -1189,6 +1191,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { let exit: I32 -> () }\n",
+                "def run = () => {\n",
                 "let mut values: List I32 = List.new ()\n",
                 "let mut i: I32 = 0\n",
                 "while (i < 10) {\n",
@@ -1223,6 +1226,7 @@ mod tests {
                 "  },\n",
                 "  False() => exit 1,\n",
                 "}\n",
+                "}\nrun ()\n",
             ),
         )
         .expect("temporary List source should be writable");
@@ -1258,6 +1262,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { let exit: I32 -> () }\n",
+                "def run = () => {\n",
                 "let mut values: List I32 = List.new ()\n",
                 "List.push values 10\n",
                 "List.push values 20\n",
@@ -1279,6 +1284,7 @@ mod tests {
                 "  },\n",
                 "  False() => exit 1,\n",
                 "}\n",
+                "}\nrun ()\n",
             ),
         )
         .expect("temporary List index source should be writable");
@@ -1317,6 +1323,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { let exit: I32 -> () }\n",
+                "def run = () => {\n",
                 "let empty: List I32 = List.of ()\n",
                 "let one: List I32 = List.of (42)\n",
                 "let five: List I32 = List.of (1, 2, 3, 4, 5)\n",
@@ -1339,6 +1346,7 @@ mod tests {
                 "  },\n",
                 "  False() => exit 1,\n",
                 "}\n",
+                "}\nrun ()\n",
             ),
         )
         .expect("temporary List.of source should be writable");

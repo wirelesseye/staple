@@ -118,7 +118,10 @@ def formatter_write_debug: (mut Formatter, String) -> () = (formatter, value) =>
     formatter_write (formatter, "\"")
 }
 
-def formatter_finish: Formatter -> String = formatter => String.from_utf8_unchecked (formatter.*^freeze)
+def formatter_finish: move Formatter -> String = move formatter => {
+    let Formatter buffer = formatter
+    String.from_utf8_unchecked (Buffer.freeze buffer)
+}
 
 def formatter_new: () -> Formatter = () => Formatter (Buffer.with_capacity (16 satisfies USize))
 
@@ -130,7 +133,7 @@ companion Formatter {
     pub def write: (mut Formatter, String) -> () = (formatter, value) => formatter_write (formatter, value)
 
     /// Finishes formatting and returns the accumulated string.
-    pub def finish: Formatter -> String = formatter => formatter_finish formatter
+    pub def finish: move Formatter -> String = move formatter => formatter_finish formatter
 
     /// Formats a value using its Display implementation.
     pub def display: <T where Display T> T -> String = value => {

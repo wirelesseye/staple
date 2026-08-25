@@ -1,10 +1,16 @@
 use std.core.iterator.(Iterator, IntoIterator)
 use std.core.iterator.IterStep.(Done, Yield)
 use std.core.index.(Index, MutateIndex)
+use std.core.buffer.__buffer_clone
 use std.syntax.*
 
 /// A growable sequence backed by a mutable buffer.
 pub type List T = Buffer T
+impl<T> !Copy (List T) {}
+
+impl<T where Clone T> Clone (List T) {
+    def clone = List buffer => List (__buffer_clone buffer)
+}
 
 // Doubles capacity (minimum 4 on first growth) and moves every element
 // across in one Buffer.transfer call.
@@ -42,15 +48,15 @@ companion<T> List T {
     pub def pop: mut List T -> Option T = list => list.*^pop
 
     /// Returns a reference to the value at an index, or `None` when out of bounds.
-    pub def get_ref: List T -> USize -> Option (Ref T) = list => index => {
-        match index < list.*^length {
-            True() => Some (list.*^get_ref index),
+    pub def get_ref: List T -> USize -> Option (Ref T) = List buffer => index => {
+        match index < Buffer.length buffer {
+            True() => Some (Buffer.get_ref (buffer, index)),
             False() => None,
         }
     }
 
     /// Returns a reference at an index, trapping when out of bounds.
-    pub def get_ref_unchecked: List T -> USize -> Ref T = list => index => list.*^get_ref index
+    pub def get_ref_unchecked: List T -> USize -> Ref T = List buffer => index => Buffer.get_ref (buffer, index)
 }
 
 companion<T> List T {
@@ -141,10 +147,10 @@ companion<T> List T {
 // borrowed Ref by copy.
 companion<T where Copy T> List T {
     /// Returns a copied value at an index, or `None` when out of bounds.
-    pub def get: List T -> USize -> Option T = list => index => {
-        match index < list^length {
+    pub def get: List T -> USize -> Option T = List buffer => index => {
+        match index < Buffer.length buffer {
             True() => {
-                let Ref value = list.*^get_ref index
+                let Ref value = Buffer.get_ref (buffer, index)
                 Some value
             },
             False() => None,
@@ -152,8 +158,8 @@ companion<T where Copy T> List T {
     }
 
     /// Returns a copied value at an index, trapping when out of bounds.
-    pub def get_unchecked: List T -> USize -> T = list => index => {
-        let Ref value = list.*^get_ref index
+    pub def get_unchecked: List T -> USize -> T = List buffer => index => {
+        let Ref value = Buffer.get_ref (buffer, index)
         value
     }
 }
@@ -186,6 +192,6 @@ impl<T where Copy T> Iterator (ListIter T) T {
     }
 }
 
-impl<T where Copy T> IntoIterator (List T) (ListIter T) {
-    def into_iterator = list => ListIter (list: list, index: 0)
+impl<T where Copy T, Clone T> IntoIterator (List T) (ListIter T) {
+    def into_iterator = List buffer => ListIter (list: List (__buffer_clone buffer), index: 0)
 }

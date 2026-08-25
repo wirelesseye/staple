@@ -2451,9 +2451,11 @@ place always goes through `Slice`.
 
 `Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
 prefix. `Buffer.with_capacity` allocates space without constructing any `T`
-values, so it does not require `Default T`. Buffer handles are Copy aliases of
-the same managed allocation; `Buffer.length` and `Buffer.capacity` report its
-current initialized length and fixed capacity.
+values, so it does not require `Default T`. Buffers are move-only owners of
+their managed allocation; `Buffer.length` and `Buffer.capacity` report its
+current initialized length and fixed capacity. Where `Clone T`, cloning a
+buffer clones every initialized element into an independent allocation while
+preserving the original capacity.
 
 `Buffer.push` appends while spare capacity remains, and `Buffer.pop` moves the
 last initialized element into an `Option T`. Both require a mutable buffer
@@ -2462,10 +2464,10 @@ containers such as `List`. `Buffer.get_ref` returns a managed reference to an
 initialized element and traps for an out-of-bounds index. Pushing does not
 relocate storage, but popping invalidates references to the removed slot.
 
-`Buffer.freeze` seals the shared allocation against every subsequent push and
-pop and returns a zero-copy `Slice T` over its initialized prefix. Repeated
-freezes are harmless. The allocation drops exactly its initialized elements
-when unreachable; an element reference or frozen slice keeps it alive.
+`Buffer.freeze` consumes the buffer and returns a zero-copy `Slice T` over its
+initialized prefix. The consumed buffer cannot subsequently be used or frozen
+again. The allocation drops exactly its initialized elements when unreachable;
+an element reference or frozen slice keeps it alive.
 
 `Buffer.transfer` moves every initialized element of one buffer onto the end
 of another's initialized prefix, in order, and empties the source. Both
@@ -2507,12 +2509,10 @@ language; `for item in list` delegates to `IntoIterator`/`Iterator` and
 yields owned copies. Both bracket indexing and iteration therefore require
 `Copy T`, the same as `List.get`.
 
-`List` handles are Copy aliases of the underlying `Buffer`, just as `Buffer`
-handles alias their allocation, with one difference: growth replaces that
-`Buffer` outright rather than mutating it in place, and only the specific
-binding passed to the growing `push` call is updated to point at the new
-allocation. A `List` handle copied out beforehand keeps referring to the
-pre-growth allocation and does not observe later pushes.
+`List` is move-only like its underlying `Buffer`. Where `Clone T`, cloning a
+list clones every initialized element into independent storage and preserves
+the source list's capacity; subsequent growth or mutation of either list does
+not affect the other.
 
 Managed references use a non-moving, single-threaded, stop-the-world
 mark-and-sweep collector. Collection occurs automatically as the live heap
