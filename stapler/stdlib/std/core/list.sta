@@ -1,7 +1,6 @@
 use std.core.iterator.(Iterator, IntoIterator)
 use std.core.iterator.IterStep.(Done, Yield)
 use std.core.index.(Index, MutateIndex)
-use std.core.buffer.__buffer_clone
 use std.syntax.*
 
 /// A growable sequence backed by a mutable buffer.
@@ -9,7 +8,7 @@ pub type List T = Buffer T
 impl<T> !Copy (List T) {}
 
 impl<T where Clone T> Clone (List T) {
-    def clone = List buffer => List (__buffer_clone buffer)
+    def clone = List buffer => List (Clone.clone buffer)
 }
 
 // Doubles capacity (minimum 4 on first growth) and moves every element
@@ -193,5 +192,5 @@ impl<T where Copy T> Iterator (ListIter T) T {
 }
 
 impl<T where Copy T, Clone T> IntoIterator (List T) (ListIter T) {
-    def into_iterator = List buffer => ListIter (list: List (__buffer_clone buffer), index: 0)
+    def into_iterator = List buffer => ListIter (list: List (Clone.clone buffer), index: 0)
 }

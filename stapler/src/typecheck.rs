@@ -7652,12 +7652,9 @@ impl TypeChecker {
                 bounds
                     .iter()
                     .any(|bound| bound.trait_id == trait_id && bound.arguments == arguments)
-            }) || arguments
-                .iter()
-                .all(|argument| !contains_type_parameter(argument))
-                && !self
-                    .matching_trait_implementations(trait_id, arguments)
-                    .is_empty();
+            }) || !self
+                .matching_trait_implementations(trait_id, arguments)
+                .is_empty();
         };
         if Some(trait_id) == self.sized_trait {
             return target.is_sized()
@@ -7699,19 +7696,13 @@ impl TypeChecker {
                 .matching_trait_implementations(trait_id, arguments)
                 .is_empty();
         }
-        if arguments
-            .iter()
-            .all(|argument| !contains_type_parameter(argument))
-        {
-            return !self
-                .matching_trait_implementations(trait_id, arguments)
-                .is_empty();
-        }
         self.active_function_bounds.iter().rev().any(|bounds| {
             bounds
                 .iter()
                 .any(|bound| bound.trait_id == trait_id && bound.arguments == arguments)
-        })
+        }) || !self
+            .matching_trait_implementations(trait_id, arguments)
+            .is_empty()
     }
 
     /// Finds every trait implementation whose (possibly parameterized)

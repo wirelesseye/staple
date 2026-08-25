@@ -10,7 +10,7 @@ def __buffer_pop: <T> mut Buffer T -> Option T = buffer => __buffer_pop buffer
 def __buffer_get: <T> (Buffer T, USize) -> Ref T = (buffer, position) => __buffer_get (buffer, position)
 def __buffer_freeze: <T> move Buffer T -> Slice T = move buffer => __buffer_freeze buffer
 def __buffer_transfer: <T> (mut Buffer T, mut Buffer T) -> () = (source, destination) => __buffer_transfer (source, destination)
-pub def __buffer_clone: <T where Clone T> Buffer T -> Buffer T = buffer => __buffer_clone buffer
+def __buffer_clone: <T where Clone T> Buffer T -> Buffer T = buffer => __buffer_clone buffer
 
 companion<T> Buffer T {
     /// Allocates storage for exactly capacity elements without initialising values.
