@@ -247,6 +247,7 @@ pub struct CheckedSumType {
 pub struct CheckedFunctionType {
     pub parameter: Box<CheckedType>,
     pub mutations: Vec<CheckedMutation>,
+    pub moves: Vec<CheckedMutation>,
     pub effects: CheckedEffectSet,
     pub result: Box<CheckedType>,
 }
@@ -256,8 +257,10 @@ pub struct CheckedResource {
     pub value_type: CheckedType,
 }
 
-/// A parameter a function may write into: either the whole parameter value
-/// or one positional element of a product parameter.
+/// A parameter position addressed by a `mut` or `move` marker: either the
+/// whole parameter value or one positional element of a product parameter.
+/// Reused for both `CheckedFunctionType::mutations` and `::moves` since
+/// their target shapes are identical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckedMutation {
     Whole,
@@ -430,8 +433,20 @@ fn format_mutable_checked_parameter(
     parameter: &CheckedType,
     mutations: &[CheckedMutation],
 ) -> String {
-    if mutations.contains(&CheckedMutation::Whole) {
-        return format!("mut {parameter}");
+    format_checked_parameter_with_marker(parameter, mutations, "mut")
+}
+
+fn format_move_checked_parameter(parameter: &CheckedType, moves: &[CheckedMutation]) -> String {
+    format_checked_parameter_with_marker(parameter, moves, "move")
+}
+
+fn format_checked_parameter_with_marker(
+    parameter: &CheckedType,
+    targets: &[CheckedMutation],
+    keyword: &str,
+) -> String {
+    if targets.contains(&CheckedMutation::Whole) {
+        return format!("{keyword} {parameter}");
     }
     let CheckedType::Product(product) = parameter else {
         return parameter.to_string();
@@ -441,8 +456,9 @@ fn format_mutable_checked_parameter(
         if index > 0 {
             result.push_str(", ");
         }
-        if mutations.contains(&CheckedMutation::Element(index)) {
-            result.push_str("mut ");
+        if targets.contains(&CheckedMutation::Element(index)) {
+            result.push_str(keyword);
+            result.push(' ');
         }
         if let Some(name) = &element.name {
             result.push_str(name);
@@ -766,6 +782,7 @@ pub struct TypedModule {
     reactive_type: Option<TypeId>,
     entry_reactive_required: bool,
     mutated_parameter_symbols: HashSet<SymbolId>,
+    move_parameter_symbols: HashSet<SymbolId>,
     method_symbols: HashMap<SyntaxId, SymbolId>,
     symbol_companion_types: HashMap<SymbolId, TypeId>,
     function_result_companion_types: HashMap<FunctionId, TypeId>,
@@ -791,6 +808,13 @@ impl TypedModule {
 
     pub fn is_mutated_parameter(&self, symbol: SymbolId) -> bool {
         self.mutated_parameter_symbols.contains(&symbol)
+    }
+
+    /// Whether `symbol` is a function parameter explicitly marked `move`:
+    /// it owns its value (may move/drop it) rather than implicitly
+    /// borrowing it, matching today's default parameter-passing behavior.
+    pub(crate) fn is_move_parameter(&self, symbol: SymbolId) -> bool {
+        self.move_parameter_symbols.contains(&symbol)
     }
 
     pub fn syntax(&self) -> &Module {
@@ -1307,6 +1331,9 @@ pub struct TypeChecker {
     parameter_symbols: HashMap<FunctionId, Vec<Option<SymbolId>>>,
     /// The same explicit set retained for code generation and capture layout.
     mutated_parameter_symbols: HashSet<SymbolId>,
+    /// Parameter symbols explicitly marked `move`: they own their value
+    /// (may move/drop it) rather than implicitly borrowing it.
+    move_parameter_symbols: HashSet<SymbolId>,
     implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
     derived_symbols: HashSet<SymbolId>,
     derived_evaluators: HashMap<SymbolId, SyntaxId>,
@@ -1443,6 +1470,7 @@ impl TypeChecker {
             reactive_type: self.reactive_type,
             entry_reactive_required: self.entry_reactive_required,
             mutated_parameter_symbols: self.mutated_parameter_symbols,
+            move_parameter_symbols: self.move_parameter_symbols,
             method_symbols: self.method_symbols,
             symbol_companion_types: self.symbol_companion_types,
             function_result_companion_types: self.function_result_companion_types,
@@ -1869,14 +1897,15 @@ impl TypeChecker {
     }
 
     fn validate_indexing_trait_method_types(&mut self, module: &ResolvedModule) {
-        for (trait_id, trait_name, arity, result_parameter, mutations) in [
-            (self.index_trait, "Index", 2, Some(2usize), Vec::new()),
+        for (trait_id, trait_name, arity, result_parameter, mutations, moves) in [
+            (self.index_trait, "Index", 2, Some(2usize), Vec::new(), Vec::new()),
             (
                 self.mutate_index_trait,
                 "MutateIndex",
                 3,
                 None,
                 vec![CheckedMutation::Element(0)],
+                vec![CheckedMutation::Element(2)],
             ),
         ] {
             let Some(trait_id) = trait_id else {
@@ -1907,6 +1936,7 @@ impl TypeChecker {
                     variadic: false,
                 })),
                 mutations,
+                moves,
                 effects: CheckedEffectSet::default(),
                 result: Box::new(
                     result_parameter.map_or_else(CheckedType::empty_product, |index| {
@@ -2282,7 +2312,7 @@ impl TypeChecker {
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
                     mutations: Vec::new(),
-                    effects: CheckedEffectSet::default(),
+                    moves: Vec::new(),                    effects: CheckedEffectSet::default(),
                     result: Box::new(result),
                 }),
             );
@@ -2410,7 +2440,7 @@ impl TypeChecker {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(parameter),
                         mutations: Vec::new(),
-                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
                 }
@@ -2431,7 +2461,7 @@ impl TypeChecker {
                             variadic: false,
                         })),
                         mutations: Vec::new(),
-                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
                         result: Box::new(integer),
                     })
                 }
@@ -2460,7 +2490,7 @@ impl TypeChecker {
                             variadic: false,
                         })),
                         mutations: Vec::new(),
-                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
                 }
@@ -2475,7 +2505,7 @@ impl TypeChecker {
                             variadic: false,
                         })),
                         mutations: Vec::new(),
-                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
                         result: Box::new(float),
                     })
                 }
@@ -2498,7 +2528,7 @@ impl TypeChecker {
                             variadic: false,
                         })),
                         mutations: Vec::new(),
-                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
                         result: Box::new(result),
                     })
                 }
@@ -2506,7 +2536,7 @@ impl TypeChecker {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::CString),
                         mutations: Vec::new(),
-                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::String),
                     })
                 }
@@ -2514,7 +2544,7 @@ impl TypeChecker {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::String),
                         mutations: Vec::new(),
-                        effects: CheckedEffectSet::default(),
+                        moves: Vec::new(),                        effects: CheckedEffectSet::default(),
                         result: Box::new(CheckedType::CString),
                     })
                 }
@@ -2527,7 +2557,7 @@ impl TypeChecker {
                         variadic: false,
                     })),
                     mutations: Vec::new(),
-                    effects: CheckedEffectSet::default(),
+                    moves: Vec::new(),                    effects: CheckedEffectSet::default(),
                     result: Box::new(CheckedType::String),
                 }),
                 crate::IntrinsicFunction::SliceLength => self
@@ -2661,6 +2691,7 @@ impl TypeChecker {
         for function in module.functions() {
             let parameter_symbols = function_parameter_symbols(module, &function.pattern);
             let parameter_mutations = pattern_parameter_mutations(&function.pattern);
+            let parameter_moves = pattern_parameter_moves(&function.pattern);
             if let Some(Type::Function(annotation)) = function.binding_annotation.as_ref() {
                 let symbols = parameter_symbols
                     .iter()
@@ -2696,9 +2727,22 @@ impl TypeChecker {
                         ),
                     ));
                 }
+                if !parameter_moves.is_empty() && parameter_moves != expected.moves {
+                    self.diagnostics.push(Diagnostic::new(
+                        function.pattern.syntax().span.clone(),
+                        format!(
+                            "parameter `move` markers declare {}, but the trait method declares {}",
+                            format_move_checked_parameter(&expected.parameter, &parameter_moves),
+                            format_move_checked_parameter(&expected.parameter, &expected.moves),
+                        ),
+                    ));
+                }
                 for symbol in mutation_parameter_symbols(&parameter_symbols, &expected.mutations) {
                     self.mutable_parameter_symbols.insert(symbol);
                     self.mutated_parameter_symbols.insert(symbol);
+                }
+                for symbol in mutation_parameter_symbols(&parameter_symbols, &expected.moves) {
+                    self.move_parameter_symbols.insert(symbol);
                 }
                 self.function_types.insert(function.id, expected);
                 if let Some(trait_id) = self.default_function_traits.get(&function.id).copied() {
@@ -2813,13 +2857,35 @@ impl TypeChecker {
                     mutations = parameter_mutations.clone();
                 }
             }
+            let mut moves = annotated_function
+                .as_ref()
+                .map(|function| function.moves.clone())
+                .unwrap_or_default();
+            if !parameter_moves.is_empty() {
+                if function.binding_annotation.is_some() && parameter_moves != moves {
+                    self.diagnostics.push(Diagnostic::new(
+                        function.pattern.syntax().span.clone(),
+                        format!(
+                            "parameter `move` markers declare {}, but the function annotation declares {}",
+                            format_move_checked_parameter(&parameter, &parameter_moves),
+                            format_move_checked_parameter(&parameter, &moves),
+                        ),
+                    ));
+                } else {
+                    moves = parameter_moves.clone();
+                }
+            }
             for symbol in mutation_parameter_symbols(&parameter_symbols, &mutations) {
                 self.mutable_parameter_symbols.insert(symbol);
                 self.mutated_parameter_symbols.insert(symbol);
             }
+            for symbol in mutation_parameter_symbols(&parameter_symbols, &moves) {
+                self.move_parameter_symbols.insert(symbol);
+            }
             let mut function_type = CheckedFunctionType {
                 parameter: Box::new(parameter),
                 mutations,
+                moves,
                 effects: resources,
                 result: Box::new(result),
             };
@@ -2967,6 +3033,7 @@ impl TypeChecker {
         let checked_function_type = CheckedFunctionType {
             parameter: function_type.parameter,
             mutations: function_type.mutations,
+            moves: function_type.moves,
             effects: function_type.effects,
             result: Box::new(result_type),
         };
@@ -5869,6 +5936,10 @@ impl TypeChecker {
                                 CheckedType::Function(function) => function.mutations.clone(),
                                 _ => Vec::new(),
                             },
+                            moves: match &raw_callee_type {
+                                CheckedType::Function(function) => function.moves.clone(),
+                                _ => Vec::new(),
+                            },
                             effects: match &raw_callee_type {
                                 CheckedType::Function(function) => function.effects.clone(),
                                 _ => CheckedEffectSet::default(),
@@ -7913,7 +7984,7 @@ impl TypeChecker {
         let function_type = CheckedFunctionType {
             parameter: Box::new(CheckedType::empty_product()),
             mutations: Vec::new(),
-            effects,
+            moves: Vec::new(),            effects,
             result: Box::new(result),
         };
         self.function_types.insert(id, function_type.clone());
@@ -8014,6 +8085,15 @@ impl TypeChecker {
                         })
                         .collect(),
                 );
+                let moves = canonical_mutations(
+                    function
+                        .moves
+                        .iter()
+                        .filter_map(|target| {
+                            self.resolve_mutation_target(Some(&function.parameter), target)
+                        })
+                        .collect(),
+                );
                 let result = self.resolve_source_type_inner(module, &function.result);
                 if (!parameter.is_sized() && parameter != CheckedType::Error)
                     || (!result.is_sized() && result != CheckedType::Error)
@@ -8027,6 +8107,7 @@ impl TypeChecker {
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
                     mutations,
+                    moves,
                     effects: resources,
                     result: Box::new(result),
                 })
@@ -8998,6 +9079,7 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
             Some(CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(merge_types(*actual.parameter, *expected.parameter)?),
                 mutations: actual.mutations,
+                moves: actual.moves,
                 effects,
                 result: Box::new(merge_types(*actual.result, *expected.result)?),
             }))
@@ -9165,7 +9247,7 @@ fn effect_substitution_type(effects: CheckedEffectSet) -> CheckedType {
     CheckedType::Function(CheckedFunctionType {
         parameter: Box::new(CheckedType::Error),
         mutations: Vec::new(),
-        effects,
+        moves: Vec::new(),        effects,
         result: Box::new(CheckedType::Error),
     })
 }
@@ -9314,6 +9396,7 @@ pub(crate) fn substitute_type(
             CheckedType::Function(CheckedFunctionType {
                 parameter: Box::new(substitute_type(*function.parameter, substitutions)),
                 mutations: function.mutations,
+                moves: function.moves,
                 effects,
                 result: Box::new(substitute_type(*function.result, substitutions)),
             })
@@ -10084,6 +10167,25 @@ fn pattern_parameter_mutations(pattern: &Pattern) -> Vec<CheckedMutation> {
         _ => Vec::new(),
     };
     canonical_mutations(mutations)
+}
+
+fn pattern_parameter_moves(pattern: &Pattern) -> Vec<CheckedMutation> {
+    let moves = match pattern {
+        Pattern::Binding(binding) if binding.moved => vec![CheckedMutation::Whole],
+        Pattern::At(at) if at.binding.moved => vec![CheckedMutation::Whole],
+        Pattern::Product(product) => product
+            .elements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, element)| match element {
+                Pattern::Binding(binding) if binding.moved => Some(CheckedMutation::Element(index)),
+                Pattern::At(at) if at.binding.moved => Some(CheckedMutation::Element(index)),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    };
+    canonical_mutations(moves)
 }
 
 fn canonical_mutations(mut mutations: Vec<CheckedMutation>) -> Vec<CheckedMutation> {

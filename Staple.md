@@ -1695,6 +1695,76 @@ address-passing ABI.
 `MutateIndex.mutate_index` declares its `Target` parameter mutable, so
 `a[i] = v` requires `a`'s root binding to be declared `mut`.
 
+### Move and borrow parameters
+
+An ordinary (unmarked) parameter of a `Copy` type is passed by copy, as
+before. An ordinary parameter of a non-`Copy` type is instead an implicit
+**shared borrow**: the callee may read it — access fields, pass it on to
+another borrow parameter, match on it — but may not move it, drop it, or
+write through it, and the caller keeps ownership and its value remains usable
+after the call:
+
+```staple
+type File = I32
+impl Drop File {
+    def drop = File descriptor => close descriptor
+}
+
+def describe: File -> String = file => "file $file"
+// `file` is borrowed here: `describe` cannot move, drop, or return it whole.
+```
+
+`move` marks a parameter as an ownership transfer instead, matching a plain
+`Copy` parameter's behavior for `Copy` types and today's ordinary
+argument-passing for non-`Copy` types: the callee owns the value, may move it,
+store it, return it, or let it drop at scope exit, and the caller can no
+longer use the argument afterward:
+
+```staple
+def close_file: move File -> () = file => drop file
+
+let handle: File = open "log.txt"
+close_file handle
+handle // error: use of moved value
+```
+
+`move` uses the same syntax and placement rules as `mut`: it may prefix a
+whole parameter type or binding, or a direct positional or named element of a
+top-level product parameter, and a `move` marker on a parameter binding
+declares the same effect without requiring a function type annotation:
+
+```staple
+def f1: move A -> () = a => { ... }                    // owns the whole parameter
+def f2: (A, move B) -> () = (a, b) => { ... }          // owns parameter 1 only
+def f3 = (a: A, move b: B) => { ... }                  // same, from the binding
+```
+
+If a function has both parameter markers and an explicit annotation, their
+`move` targets must match exactly, the same as for `mut`. A parameter cannot
+be marked both `mut` and `move`: a mutable borrow and an ownership transfer
+are different effects. `move` and `mut` never change the parameter's exposed
+type — it stays `T`, never `Ref T` — only its ownership and calling
+convention.
+
+`move` is always legal on a `Copy` parameter, where it is a no-op: copying
+and moving a `Copy` value are indistinguishable, so `move T` and plain `T`
+behave identically for `Copy` types. It matters only for non-`Copy` types,
+where it is the only way to hand ownership of a parameter to the callee.
+Consequently, generic code over an unconstrained type parameter `T` — which
+is conservatively treated as non-`Copy`, since no `Copy T` bound is known —
+must mark a parameter `move` before moving, returning, or storing it:
+
+```staple
+def identity: <T> move T -> T = value => value
+```
+
+Constructs that consume a value outright — `drop`, a match expression's
+subject, string interpolation, indexed assignment's replacement value, and
+closure capture of a non-`mut` binding — always require ownership, the same
+as any other consuming use; a borrowed parameter cannot be passed to them
+without first being copied (if `Copy`) or received through a `move`
+parameter.
+
 ### Traits and bounded generic functions
 
 A trait declares a set of functions for one or more compile-time parameters,
@@ -2455,9 +2525,11 @@ collector-statistics operations. Closure environments are managed objects.
 Recursive binding cells remain permanent conservative root regions and are a
 future migration.
 
-Values are affine unless they are structurally `Copy`. Assignment, argument
-passing, return, whole-value destructuring, and closure capture move a
-non-`Copy` value; using it afterward is an error. Integers, `Bool`, `String`,
+Values are affine unless they are structurally `Copy`. Assignment, return,
+whole-value destructuring, and closure capture move a non-`Copy` value; using
+it afterward is an error. Argument passing moves a non-`Copy` value only into
+a `move` parameter; an ordinary parameter borrows it instead (see "Move and
+borrow parameters" above). Integers, `Bool`, `String`,
 `Ref T`, C pointers, functions, and products/sums/distinct values made entirely
 from `Copy` fields are copied implicitly. The public prelude trait `Copy` can be
 used as a generic bound, but implementations are compiler-inferred and an

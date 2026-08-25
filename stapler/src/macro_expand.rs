@@ -3770,6 +3770,7 @@ impl MacroExpander {
                     crate::BindingPattern {
                         syntax: identifier.syntax,
                         mutable: false,
+                        moved: false,
                         name: identifier.name.clone(),
                         resolution_name: Some(identifier.name),
                         ty: Type::Inferred(crate::InferredType::new()),
@@ -7088,6 +7089,7 @@ fn type_parameter_pattern_type(parameter: &crate::TypeParameterPattern) -> Type 
                     ty: type_parameter_pattern_type(element),
                     spread: false,
                     mutable: false,
+                    moved: false,
                 })
                 .collect(),
             variadic: false,
@@ -7674,6 +7676,7 @@ fn substitute_type(
                             }),
                             spread: false,
                             mutable: false,
+                            moved: false,
                         })
                     })
                     .collect::<Option<Vec<_>>>();

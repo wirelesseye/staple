@@ -10,4 +10,4 @@ pub def reactive_scope: () -> Reactive = () => __reactive_scope ()
 pub def reaction: <effect E> (() ->{E} ()) ->{Reactive, E} () = callback => ()
 
 /// Reads an expression eagerly without retaining or recording reactive dependencies.
-pub def snapshot: <T> T -> T = value => value
+pub def snapshot: <T> move T -> T = value => value

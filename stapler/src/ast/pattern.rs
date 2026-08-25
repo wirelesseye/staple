@@ -73,6 +73,7 @@ impl Pattern {
             ty: self.ty(),
             spread: false,
             mutable: false,
+            moved: false,
         }
     }
 }
@@ -101,6 +102,7 @@ pub struct WildcardPattern {
 pub struct BindingPattern {
     pub syntax: Syntax,
     pub mutable: bool,
+    pub moved: bool,
     pub name: String,
     /// The spelling before macro hygiene, used to resolve singleton patterns
     /// in the macro definition context.

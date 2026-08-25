@@ -22,6 +22,7 @@ pub enum TokenKind {
     Pub,
     Let,
     Mut,
+    Move,
     Signal,
     Return,
     Loop,

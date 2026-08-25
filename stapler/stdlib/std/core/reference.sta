@@ -4,5 +4,5 @@ pub(repr) type Ref T where ?Sized T = T
 
 companion<T> Ref T {
     /// Replaces the referenced value and returns the old value.
-    pub def replace: (mut Ref T, T) -> T = (reference, value) => value
+    pub def replace: (mut Ref T, move T) -> T = (reference, value) => value
 }

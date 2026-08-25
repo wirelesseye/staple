@@ -67,6 +67,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
                 "pub" => TokenKind::Pub,
                 "let" => TokenKind::Let,
                 "mut" => TokenKind::Mut,
+                "move" => TokenKind::Move,
                 "signal" => TokenKind::Signal,
                 "return" => TokenKind::Return,
                 "loop" => TokenKind::Loop,

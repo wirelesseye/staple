@@ -71,7 +71,11 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Self::Function(function) => {
-                let parameter = format_mutable_parameter(&function.parameter, &function.mutations);
+                let parameter = format_mutable_parameter(
+                    &function.parameter,
+                    &function.mutations,
+                    &function.moves,
+                );
                 if function.effects.is_empty() {
                     write!(formatter, "{parameter} -> {}", function.result)
                 } else {
@@ -103,12 +107,22 @@ impl fmt::Display for Type {
     }
 }
 
-fn format_mutable_parameter(parameter: &Type, mutations: &[MutationTarget]) -> String {
+fn format_mutable_parameter(
+    parameter: &Type,
+    mutations: &[MutationTarget],
+    moves: &[MutationTarget],
+) -> String {
     if mutations
         .iter()
         .any(|mutation| mutation.target == MutationTargetKind::Whole)
     {
         return format!("mut {parameter}");
+    }
+    if moves
+        .iter()
+        .any(|target| target.target == MutationTargetKind::Whole)
+    {
+        return format!("move {parameter}");
     }
     let Type::Product(product) = parameter else {
         return parameter.to_string();
@@ -123,6 +137,11 @@ fn format_mutable_parameter(parameter: &Type, mutations: &[MutationTarget]) -> S
             .any(|mutation| mutation.target == MutationTargetKind::Element(index))
         {
             result.push_str("mut ");
+        } else if moves
+            .iter()
+            .any(|target| target.target == MutationTargetKind::Element(index))
+        {
+            result.push_str("move ");
         }
         if let Some(name) = &element.name {
             result.push_str(name);
@@ -268,6 +287,8 @@ pub struct TypeElement {
     pub spread: bool,
     /// Temporary parser marker, normalized into the enclosing function type.
     pub mutable: bool,
+    /// Temporary parser marker, normalized into the enclosing function type.
+    pub moved: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -283,6 +304,7 @@ pub struct FunctionType {
     pub syntax: Syntax,
     pub parameter: Box<Type>,
     pub mutations: Vec<MutationTarget>,
+    pub moves: Vec<MutationTarget>,
     pub effects: EffectSet,
     pub result: Box<Type>,
 }
@@ -333,6 +355,9 @@ impl fmt::Display for StateEffect {
     }
 }
 
+/// A parameter position addressed by a `mut` or `move` marker; reused for
+/// both since their target shapes (whole parameter, or one direct element of
+/// a top-level product parameter) are identical.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MutationTarget {
     pub syntax: Syntax,
@@ -341,9 +366,9 @@ pub struct MutationTarget {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MutationTargetKind {
-    /// `mut` with no argument: the whole parameter.
+    /// `mut`/`move` with no argument: the whole parameter.
     Whole,
-    /// A mutable element of the top-level product parameter.
+    /// A marked element of the top-level product parameter.
     Element(usize),
 }
 

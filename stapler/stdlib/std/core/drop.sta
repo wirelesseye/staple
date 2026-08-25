@@ -5,4 +5,4 @@ pub trait Drop T {
 }
 
 /// Consumes a value and runs its cleanup behavior when applicable.
-pub def drop: <T> T -> () = value => ()
+pub def drop: <T> move T -> () = value => ()

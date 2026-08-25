@@ -135,7 +135,7 @@ impl<'a> OwnershipChecker<'a> {
         self.loops.clear();
 
         let drop_method = self.module.is_drop_method(function.id);
-        self.bind_pattern(&function.pattern, drop_method);
+        self.bind_function_pattern(&function.pattern, drop_method);
         for capture in &function.captures {
             let Some(value_type) = self.module.type_of_symbol(*capture) else {
                 continue;
@@ -248,8 +248,17 @@ impl<'a> OwnershipChecker<'a> {
                             self.use_symbol(*capture, value.argument.syntax(), true);
                         }
                     }
+                } else if scoped_c_string {
+                    self.check_expression(&value.argument, false);
                 } else {
-                    self.check_expression(&value.argument, !scoped_c_string);
+                    let callee_function_type =
+                        self.module
+                            .type_of_expression(value.callee.syntax().id)
+                            .and_then(|ty| match ty {
+                                crate::CheckedType::Function(function) => Some(function),
+                                _ => None,
+                            });
+                    self.check_call_argument(&value.argument, callee_function_type);
                 }
                 true
             }
@@ -311,6 +320,45 @@ impl<'a> OwnershipChecker<'a> {
             | Expression::Integer(_)
             | Expression::Float(_) => true,
         }
+    }
+
+    /// Checks a call's argument against the callee's per-position parameter
+    /// modes: a position is consuming only when the callee marks it `move`
+    /// (or the whole parameter is `move`d as one unit). `mut` positions and
+    /// ordinary non-`Copy` positions (the new implicit-borrow default) are
+    /// non-consuming — `use_symbol` already no-ops for `Copy` positions
+    /// regardless of `consume`, so this doesn't need to consult Copy-ness
+    /// itself. When the argument is a literal product matching the callee's
+    /// product-shaped parameter, each element is checked against its own
+    /// position; otherwise the whole argument is consumed only if the
+    /// callee requires a move somewhere in it, matching the existing rule
+    /// that a partial move out of a single bound value is rejected.
+    fn check_call_argument(
+        &mut self,
+        argument: &Expression,
+        callee: Option<&crate::CheckedFunctionType>,
+    ) {
+        let Some(callee) = callee else {
+            self.check_expression(argument, true);
+            return;
+        };
+        if callee.moves.contains(&crate::CheckedMutation::Whole) {
+            self.check_expression(argument, true);
+            return;
+        }
+        if let Expression::Product(product) = argument
+            && let crate::CheckedType::Product(parameter) = callee.parameter.as_ref()
+            && product.elements.len() == parameter.elements.len()
+        {
+            for (index, element) in product.elements.iter().enumerate() {
+                let consume = callee
+                    .moves
+                    .contains(&crate::CheckedMutation::Element(index));
+                self.check_expression(&element.value, consume);
+            }
+            return;
+        }
+        self.check_expression(argument, !callee.moves.is_empty());
     }
 
     fn check_item(&mut self, item: &Item) -> bool {
@@ -379,6 +427,46 @@ impl<'a> OwnershipChecker<'a> {
             Item::UseDeclaration(_) => true,
             _ => true,
         }
+    }
+
+    /// Binds a function's parameter pattern, applying the implicit-borrow
+    /// default to each top-level parameter position (the whole pattern, or a
+    /// direct element of a top-level product — exactly the positions `mut`
+    /// and `move` markers can address). A position freezes when it is
+    /// `drop_method`'s `self` (existing, always frozen) or when it is an
+    /// ordinary, non-`Copy` position that isn't covered by a `mut` marker
+    /// (a mutable borrow) or a `move` marker (ownership transfer). Any other
+    /// pattern shape at a position (e.g. a `Nominal` destructured directly at
+    /// the parameter level) has no representable symbol to grant `mut`/`move`
+    /// to, so it keeps today's behavior — that's `bind_pattern`'s existing
+    /// recursive freeze propagation, unaffected by the new default.
+    fn bind_function_pattern(&mut self, pattern: &Pattern, drop_method: bool) {
+        if let Pattern::Product(product) = pattern {
+            for element in &product.elements {
+                let freeze = drop_method || self.parameter_element_freeze(element);
+                self.bind_pattern(element, freeze);
+            }
+        } else {
+            let freeze = drop_method || self.parameter_element_freeze(pattern);
+            self.bind_pattern(pattern, freeze);
+        }
+    }
+
+    fn parameter_element_freeze(&self, pattern: &Pattern) -> bool {
+        let symbol = match pattern {
+            Pattern::Binding(binding) => self.module.symbol_for(binding.syntax.id),
+            Pattern::At(at) => self.module.symbol_for(at.binding.syntax.id),
+            _ => None,
+        };
+        let Some(symbol) = symbol else {
+            return false;
+        };
+        let Some(value_type) = self.module.type_of_symbol(symbol) else {
+            return false;
+        };
+        !self.module.is_copy_in_function(value_type, self.function)
+            && !self.module.has_mutable_storage(symbol)
+            && !self.module.is_move_parameter(symbol)
     }
 
     fn bind_pattern(&mut self, pattern: &Pattern, freeze: bool) {
@@ -472,7 +560,7 @@ impl<'a> OwnershipChecker<'a> {
             )),
             ValueState::Frozen if consume => self.diagnostics.push(Diagnostic::new(
                 syntax.span.clone(),
-                "cannot move this value from a destructor or closure capture",
+                "cannot move out of a borrowed value",
             )),
             ValueState::Available if consume => {
                 self.states.insert(symbol, ValueState::Moved);

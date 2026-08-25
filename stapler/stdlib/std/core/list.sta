@@ -28,7 +28,7 @@ companion<T> List T {
     pub def capacity: List T -> USize = list => list.*^capacity
 
     /// Appends a value, growing the list when necessary.
-    pub def push: mut List T -> T -> () = list => value => {
+    pub def push: mut List T -> move T -> () = list => value => {
         match list.*^length < list.*^capacity {
             True() => list.*^push value,
             False() => {
@@ -71,7 +71,7 @@ companion<T> List T {
 
 companion<T> List T {
     /// Creates a list containing one value.
-    pub def singleton: T -> List T = value => {
+    pub def singleton: move T -> List T = value => {
         let mut list: List T = List.with_capacity 1
         list^push value
         list
@@ -88,7 +88,7 @@ companion<T> List T {
     // `List.of` threads the list handle through nested calls to this
     // instead.
     /// Appends a value and returns the list handle.
-    pub def push_and_return: mut List T -> T -> List T = list => value => {
+    pub def push_and_return: mut List T -> move T -> List T = list => value => {
         list^push value
         list
     }

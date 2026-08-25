@@ -899,7 +899,7 @@ mod tests {
             "type Wrapper T = (value: T)\n",
             "trait Identity T { identity: T -> T }\n",
             "impl Identity I32 { def identity = value => value }\n",
-            "def wrap: <T> T -> Wrapper T = value => Wrapper (value: value)\n",
+            "def wrap: <T> move T -> Wrapper T = value => Wrapper (value: value)\n",
             "def apply = () => identity 1\n",
             "let (first, second) = (1, 2)\n",
             "first\n",
@@ -1009,7 +1009,7 @@ mod tests {
     fn indexes_generic_trait_implementation_type_parameters() {
         let source = concat!(
             "trait Bound T { check: T -> Bool }\n",
-            "trait Target T { act: T -> T }\n",
+            "trait Target T { act: move T -> T }\n",
             "impl Bound I32 { def check = value => True }\n",
             "impl <T where Bound T> Target T { def act = value => value }\n",
         );

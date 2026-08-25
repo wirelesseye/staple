@@ -112,6 +112,7 @@ impl<'a> Classifier<'a> {
                 | TokenKind::Pub
                 | TokenKind::Let
                 | TokenKind::Mut
+                | TokenKind::Move
                 | TokenKind::Signal
                 | TokenKind::Return
                 | TokenKind::Loop
@@ -1407,7 +1408,7 @@ mod tests {
     fn classifies_generic_trait_implementation_generics() {
         let source = concat!(
             "trait Bound T { check: T -> Bool }\n",
-            "trait Target T { act: T -> T }\n",
+            "trait Target T { act: move T -> T }\n",
             "impl Bound I32 { def check = value => True }\n",
             "impl <T where Bound T> Target T { def act = value => value }\n",
         );

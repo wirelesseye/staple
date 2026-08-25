@@ -1122,6 +1122,9 @@ impl Grammar {
             return self.parse_binding(visibility, start).map(Item::Binding);
         }
         let pattern = self.parse_pattern()?;
+        if pattern_has_move(&pattern) {
+            return Err(self.error("`move` is only allowed on a function parameter"));
+        }
         let propagating = self.eat_operator("?");
         if !matches!(pattern, Pattern::Binding(_)) {
             if visibility == Visibility::Public {
@@ -1633,6 +1636,12 @@ impl Grammar {
                  top-level product parameter",
             ));
         }
+        if parameter_has_nested_move(&pattern) {
+            return Err(self.error(
+                "`move` is only allowed on a whole parameter binding or a direct element of a \
+                 top-level product parameter",
+            ));
+        }
         self.expect(TokenKind::FatArrow, "expected `=>` before function body")?;
         let body = Box::new(self.parse_expression()?);
         Ok(FunctionExpression {
@@ -1660,8 +1669,21 @@ impl Grammar {
             }));
         }
         let mutable = self.eat(TokenKind::Mut);
-        let mut pattern = if mutable {
-            self.parse_named_pattern_from(start, mutable)?
+        let moved = if mutable {
+            if self.eat(TokenKind::Move) {
+                return Err(self.error("a parameter cannot be marked both `mut` and `move`"));
+            }
+            false
+        } else if self.eat(TokenKind::Move) {
+            if self.eat(TokenKind::Mut) {
+                return Err(self.error("a parameter cannot be marked both `mut` and `move`"));
+            }
+            true
+        } else {
+            false
+        };
+        let mut pattern = if mutable || moved {
+            self.parse_named_pattern_from(start, mutable, moved)?
         } else if self.eat(TokenKind::Underscore) {
             let ty = if self.eat(TokenKind::Colon) {
                 self.parse_type()?
@@ -1714,13 +1736,14 @@ impl Grammar {
 
     fn parse_named_pattern(&mut self) -> Result<Pattern, ParseError> {
         let start = self.position;
-        self.parse_named_pattern_from(start, false)
+        self.parse_named_pattern_from(start, false, false)
     }
 
     fn parse_named_pattern_from(
         &mut self,
         start: usize,
         mutable: bool,
+        moved: bool,
     ) -> Result<Pattern, ParseError> {
         let first = match self.peek() {
             Some(TokenKind::Identifier) => self.bump_token().expect("peeked pattern").text,
@@ -1757,6 +1780,9 @@ impl Grammar {
             if mutable {
                 return Err(self.error("`mut` can only modify a binding pattern"));
             }
+            if moved {
+                return Err(self.error("`move` can only modify a binding pattern"));
+            }
             let argument = Box::new(self.parse_pattern()?);
             return Ok(Pattern::Nominal(NominalPattern {
                 syntax: self.syntax(start),
@@ -1775,6 +1801,7 @@ impl Grammar {
         Ok(Pattern::Binding(BindingPattern {
             syntax: self.syntax(start),
             mutable,
+            moved,
             name,
             resolution_name: None,
             ty,
@@ -1785,6 +1812,19 @@ impl Grammar {
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
         let whole_mutable = self.eat(TokenKind::Mut);
+        let whole_moved = if whole_mutable {
+            if self.eat(TokenKind::Move) {
+                return Err(self.error("a parameter type cannot be marked both `mut` and `move`"));
+            }
+            false
+        } else if self.eat(TokenKind::Move) {
+            if self.eat(TokenKind::Mut) {
+                return Err(self.error("a parameter type cannot be marked both `mut` and `move`"));
+            }
+            true
+        } else {
+            false
+        };
         let mut parameter = self.parse_type_union()?;
         if self.eat(TokenKind::Arrow) {
             let mutations = if whole_mutable {
@@ -1798,6 +1838,17 @@ impl Grammar {
             } else {
                 self.extract_parameter_mutations(&mut parameter)?
             };
+            let moves = if whole_moved {
+                if contains_move_type_element(&parameter) {
+                    return Err(self.error("a whole move parameter cannot also mark individual product elements `move`"));
+                }
+                vec![MutationTarget {
+                    syntax: self.syntax(start),
+                    target: MutationTargetKind::Whole,
+                }]
+            } else {
+                self.extract_parameter_moves(&mut parameter)?
+            };
             let resources = if self.at(TokenKind::LBrace) {
                 self.parse_effect_set()?
             } else {
@@ -1808,12 +1859,16 @@ impl Grammar {
                 syntax: self.syntax(start),
                 parameter: Box::new(parameter),
                 mutations,
+                moves,
                 effects: resources,
                 result: Box::new(result),
             }))
         } else {
             if whole_mutable || contains_mutable_type_element(&parameter) {
                 return Err(self.error("`mut` is only allowed on a function parameter type"));
+            }
+            if whole_moved || contains_move_type_element(&parameter) {
+                return Err(self.error("`move` is only allowed on a function parameter type"));
             }
             Ok(parameter)
         }
@@ -1850,6 +1905,8 @@ impl Grammar {
                     state.push(effect);
                 } else if self.at(TokenKind::Mut) {
                     return Err(self.error("`mut` is not an effect; place it before the function parameter type or a direct product element type"));
+                } else if self.at(TokenKind::Move) {
+                    return Err(self.error("`move` is not an effect; place it before the function parameter type or a direct product element type"));
                 } else {
                     resources.push(self.parse_type_union()?);
                 }
@@ -1890,6 +1947,31 @@ impl Grammar {
             }
         }
         Ok(mutations)
+    }
+
+    fn extract_parameter_moves(
+        &mut self,
+        parameter: &mut Type,
+    ) -> Result<Vec<MutationTarget>, ParseError> {
+        let Type::Product(product) = parameter else {
+            return Ok(Vec::new());
+        };
+        let mut moves = Vec::new();
+        for (index, element) in product.elements.iter_mut().enumerate() {
+            if element.moved {
+                element.moved = false;
+                moves.push(MutationTarget {
+                    syntax: element.syntax.clone(),
+                    target: MutationTargetKind::Element(index),
+                });
+            }
+            if contains_move_type_element(&element.ty) {
+                return Err(self.error(
+                    "`move` is only allowed on a direct element of a function parameter product",
+                ));
+            }
+        }
+        Ok(moves)
     }
 
     /// Parses an unordered structural sum, tighter than a function arrow.
@@ -2013,6 +2095,23 @@ impl Grammar {
                 loop {
                     let element_start = self.position;
                     let mutable = self.eat(TokenKind::Mut);
+                    let moved = if mutable {
+                        if self.eat(TokenKind::Move) {
+                            return Err(self.error(
+                                "a product element cannot be marked both `mut` and `move`",
+                            ));
+                        }
+                        false
+                    } else if self.eat(TokenKind::Move) {
+                        if self.eat(TokenKind::Mut) {
+                            return Err(self.error(
+                                "a product element cannot be marked both `mut` and `move`",
+                            ));
+                        }
+                        true
+                    } else {
+                        false
+                    };
                     let name = if self.peek() == Some(TokenKind::Identifier)
                         && self.peek_n(1) == Some(TokenKind::Colon)
                     {
@@ -2027,6 +2126,10 @@ impl Grammar {
                         if mutable {
                             return Err(self
                                 .error("`mut` cannot modify a variadic marker or product spread"));
+                        }
+                        if moved {
+                            return Err(self
+                                .error("`move` cannot modify a variadic marker or product spread"));
                         }
                         if self.at(TokenKind::RParen)
                             || (self.at(TokenKind::Comma)
@@ -2047,6 +2150,7 @@ impl Grammar {
                                 ty,
                                 spread: true,
                                 mutable: false,
+                                moved: false,
                             });
                         }
                     } else {
@@ -2057,6 +2161,7 @@ impl Grammar {
                             ty,
                             spread: false,
                             mutable,
+                            moved,
                         });
                     }
 
@@ -2854,6 +2959,9 @@ impl Grammar {
             }
             let arm_start = self.position;
             let pattern = self.parse_pattern()?;
+            if pattern_has_move(&pattern) {
+                return Err(self.error("`move` is only allowed on a function parameter"));
+            }
             self.expect(TokenKind::FatArrow, "expected `=>` after match pattern")?;
             let body = self.parse_expression()?;
             arms.push(MatchArm {
@@ -3329,6 +3437,26 @@ fn contains_mutable_type_element(ty: &Type) -> bool {
     }
 }
 
+fn contains_move_type_element(ty: &Type) -> bool {
+    match ty {
+        Type::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| element.moved || contains_move_type_element(&element.ty)),
+        Type::Sum(sum) => sum.alternatives.iter().any(contains_move_type_element),
+        Type::Function(function) => {
+            contains_move_type_element(&function.parameter)
+                || contains_move_type_element(&function.result)
+        }
+        Type::Application(application) => {
+            contains_move_type_element(&application.callee)
+                || contains_move_type_element(&application.argument)
+        }
+        Type::Repeated(repeated) => contains_move_type_element(&repeated.element),
+        _ => false,
+    }
+}
+
 fn line_starts(source: &str) -> Vec<usize> {
     let bytes = source.as_bytes();
     let mut starts = vec![0];
@@ -3433,6 +3561,34 @@ fn parameter_has_nested_mutable(pattern: &Pattern) -> bool {
             other => pattern_has_mutable(other),
         }),
         other => pattern_has_mutable(other),
+    }
+}
+
+/// Returns whether `pattern` marks any binding `move`. `move` has no meaning
+/// outside function parameter position, so callers other than
+/// `parse_function_expression` reject it outright.
+fn pattern_has_move(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(binding) => binding.moved,
+        Pattern::At(at) => at.binding.moved || pattern_has_move(&at.pattern),
+        Pattern::Product(product) => product.elements.iter().any(pattern_has_move),
+        Pattern::Nominal(nominal) => pattern_has_move(&nominal.argument),
+        Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+    }
+}
+
+/// The `move` counterpart of `parameter_has_nested_mutable`: only the whole
+/// parameter or one direct element of its top-level product may be marked.
+fn parameter_has_nested_move(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(_) => false,
+        Pattern::At(at) => pattern_has_move(&at.pattern),
+        Pattern::Product(product) => product.elements.iter().any(|element| match element {
+            Pattern::Binding(_) => false,
+            Pattern::At(at) => pattern_has_move(&at.pattern),
+            other => pattern_has_move(other),
+        }),
+        other => pattern_has_move(other),
     }
 }
 
