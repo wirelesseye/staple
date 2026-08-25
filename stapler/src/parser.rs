@@ -3379,6 +3379,15 @@ impl Grammar {
             .map_or(span_start, |token| token.span.start);
         let id = SyntaxId(self.next_syntax_id);
         self.next_syntax_id += 1;
+        let identifier_origins = tokens
+            .iter()
+            .filter_map(|token| {
+                token
+                    .origin
+                    .as_ref()
+                    .map(|origin| (token.text.clone(), origin.clone()))
+            })
+            .collect();
         Syntax {
             id,
             span: Span::User {
@@ -3390,7 +3399,7 @@ impl Grammar {
             token_range: start..self.position,
             definition_module: None,
             expansion_mark: None,
-            identifier_origins: Vec::new(),
+            identifier_origins,
         }
     }
 

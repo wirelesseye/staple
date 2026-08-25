@@ -114,6 +114,13 @@ pub struct SyntaxToken {
     pub kind: TokenKind,
     pub text: String,
     pub span: Range<usize>,
+    pub(crate) origin: Option<Span>,
+}
+
+impl SyntaxToken {
+    pub fn origin(&self) -> Option<&Span> {
+        self.origin.as_ref()
+    }
 }
 
 /// The exact source covered by an AST node.

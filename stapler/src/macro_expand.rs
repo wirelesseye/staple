@@ -442,6 +442,32 @@ fn quote_contains_raw_splice(contents: &Syntax, environment: &Environment) -> bo
     })
 }
 
+fn append_syntax_tokens(output: &mut Vec<crate::SyntaxToken>, syntax: &Syntax) {
+    let mut occurrences = HashMap::<String, usize>::new();
+    for token in syntax.tokens() {
+        let mut token = token.clone();
+        if token.origin.is_none() && !token.kind.is_trivia() {
+            let occurrence = occurrences.entry(token.text.clone()).or_default();
+            token.origin = syntax
+                .identifier_origins
+                .iter()
+                .filter(|(name, _)| name == &token.text)
+                .nth(*occurrence)
+                .map(|(_, origin)| origin.clone())
+                .or_else(|| match &syntax.span {
+                    Span::User { source, .. } => Some(Span::User {
+                        source: source.clone(),
+                        range: token.span.clone(),
+                        location: None,
+                    }),
+                    Span::Compiler => None,
+                });
+            *occurrence += 1;
+        }
+        output.push(token);
+    }
+}
+
 pub(crate) struct MacroAnalysis {
     pub definitions: HashMap<SyntaxId, ResolvedMacro>,
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
@@ -4846,7 +4872,7 @@ impl MacroExpander {
             match value {
                 Value::Syntax(SyntaxValue::Items(items)) if repeated => {
                     for item in items {
-                        output.extend_from_slice(item_syntax(&item).tokens());
+                        append_syntax_tokens(&mut output, item_syntax(&item));
                     }
                 }
                 Value::Sequence(values) if repeated => {
@@ -4859,7 +4885,7 @@ impl MacroExpander {
                             return None;
                         };
                         let syntax = value.syntax()?;
-                        output.extend_from_slice(syntax.tokens());
+                        append_syntax_tokens(&mut output, syntax);
                     }
                 }
                 Value::Syntax(value) if !repeated => {
@@ -4870,7 +4896,7 @@ impl MacroExpander {
                         ));
                         return None;
                     };
-                    output.extend_from_slice(syntax.tokens());
+                    append_syntax_tokens(&mut output, syntax);
                 }
                 _ => {
                     self.diagnostics.push(Diagnostic::new(

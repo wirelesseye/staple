@@ -461,18 +461,23 @@ impl Server {
                             .module(resolved.program().entry())
                             .path
                             .clone();
-                        definition_entries =
-                            Some(definition::entries_at_path(&path, module, &resolved, None));
+                        definition_entries = Some(definition::entries_at_path(
+                            &definition_path,
+                            module,
+                            &resolved,
+                            None,
+                        ));
                         resolved_for_tokens = Some(resolved.clone());
                         match TypeChecker::new().check(resolved) {
                             Ok(typed) => {
                                 definition_entries = Some(definition::entries_at_path(
-                                    &path,
+                                    &definition_path,
                                     module,
                                     typed.resolved(),
                                     Some(&typed),
                                 ));
-                                hover_entries = hover::entries_at_path(&path, module, &typed);
+                                hover_entries =
+                                    hover::entries_at_path(&definition_path, module, &typed);
                                 let completion_index =
                                     staple_lsp::completion::index(module, &typed);
                                 typed_for_tokens = Some(typed);
@@ -496,7 +501,7 @@ impl Server {
 
         let current_semantic = semantic::entries_at_path(
             &text,
-            &path,
+            &definition_path,
             parsed.as_ref(),
             resolved_for_tokens.as_ref(),
             typed_for_tokens.as_ref(),
@@ -902,6 +907,12 @@ mod tests {
         let resolved = NameResolver::new().resolve_program(program).unwrap();
         let typed = TypeChecker::new().check(resolved).unwrap();
         let surface = stapler::parse(source).unwrap();
+        let analysis_path = typed
+            .resolved()
+            .program()
+            .module(typed.resolved().program().entry())
+            .path
+            .clone();
         let argument_start = source.find("invoke target").unwrap() + "invoke ".len();
         let argument_range = argument_start..argument_start + "target".len();
         let discarded_start = source.rfind("target").unwrap();
@@ -910,7 +921,7 @@ mod tests {
 
         let semantics = semantic::entries_at_path(
             source,
-            &path,
+            &analysis_path,
             Some(&surface),
             Some(typed.resolved()),
             Some(&typed),
@@ -924,7 +935,7 @@ mod tests {
             "semantic entries: {semantics:?}"
         );
 
-        let hovers = hover::entries_at_path(&path, &surface, &typed);
+        let hovers = hover::entries_at_path(&analysis_path, &surface, &typed);
         assert!(
             hovers.iter().any(|entry| {
                 entry.range == argument_range && entry.signature.contains("target")
@@ -933,7 +944,7 @@ mod tests {
         );
 
         let definitions =
-            definition::entries_at_path(&path, &surface, typed.resolved(), Some(&typed));
+            definition::entries_at_path(&analysis_path, &surface, typed.resolved(), Some(&typed));
         assert!(
             definitions.iter().any(|entry| {
                 entry.range == argument_range
@@ -959,6 +970,83 @@ mod tests {
                 .iter()
                 .any(|entry| entry.range == discarded_range)
         );
+    }
+
+    #[test]
+    fn projects_type_and_pattern_arguments_through_raw_quotes() {
+        let source = concat!(
+            "use std.syntax.(quote, Expr, Type, Pattern)\n",
+            "macro bind = pattern: Pattern => ty: Type => value: Expr => quote { let $pattern: $ty = $value }\n",
+            "macro destructure = pattern: Pattern => value: Expr => quote { let $pattern = $value }\n",
+            "bind pair ((I32, I32)) (20, 22)\n",
+            "destructure ((left, right)) pair\n",
+        );
+        let path = std::env::temp_dir().join("staple-lsp-raw-macro-argument-features.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let surface = stapler::parse(source).unwrap();
+        let analysis_path = typed
+            .resolved()
+            .program()
+            .module(typed.resolved().program().entry())
+            .path
+            .clone();
+        let pair_declaration = source.find("bind pair").unwrap() + "bind ".len();
+        let pair_reference = source.rfind("pair").unwrap();
+        let left = source.rfind("left").unwrap();
+        let i32 = source.find("((I32").unwrap() + 2;
+
+        let semantics = semantic::entries_at_path(
+            source,
+            &analysis_path,
+            Some(&surface),
+            Some(typed.resolved()),
+            Some(&typed),
+        );
+        for (start, kind) in [
+            (pair_declaration, semantic::VARIABLE),
+            (pair_reference, semantic::VARIABLE),
+            (left, semantic::VARIABLE),
+            (i32, semantic::TYPE),
+        ] {
+            assert!(
+                semantics
+                    .iter()
+                    .any(|entry| entry.start == start && entry.token_type == kind),
+                "missing semantic entry at {start}: {semantics:?}"
+            );
+        }
+
+        let hovers = hover::entries_at_path(&analysis_path, &surface, &typed);
+        for start in [pair_declaration, pair_reference, left, i32] {
+            assert!(
+                hovers.iter().any(|entry| entry.range.start == start),
+                "missing hover at {start}: {hovers:?}"
+            );
+        }
+
+        let definitions =
+            definition::entries_at_path(&analysis_path, &surface, typed.resolved(), Some(&typed));
+        assert!(
+            definitions.iter().any(|entry| {
+                entry.range.start == pair_reference
+                    && entry
+                        .targets
+                        .iter()
+                        .any(|target| target.selection_range.start == pair_declaration)
+            }),
+            "definition entries: {definitions:?}"
+        );
+        for start in [pair_declaration, left, i32] {
+            assert!(
+                definitions.iter().any(|entry| entry.range.start == start),
+                "missing definition at {start}: {definitions:?}"
+            );
+        }
     }
 
     #[test]

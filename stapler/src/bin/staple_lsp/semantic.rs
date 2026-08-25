@@ -103,6 +103,7 @@ pub fn entries_at_path(
     if let Some(resolved) = resolved {
         let expanded = resolved.syntax();
         if module.is_none_or(|surface| !std::ptr::eq(surface, expanded)) {
+            classifier.priority_boost = 3;
             classifier.module(expanded, Some(resolved));
         }
     }
@@ -114,6 +115,7 @@ struct Classifier<'a> {
     symbols: HashMap<SymbolId, u32>,
     typed: Option<&'a TypedModule>,
     path: &'a Path,
+    priority_boost: u8,
 }
 
 impl<'a> Classifier<'a> {
@@ -123,6 +125,7 @@ impl<'a> Classifier<'a> {
             symbols: HashMap::new(),
             typed,
             path,
+            priority_boost: 0,
         };
         for token in lex(source) {
             let kind = match token.kind {
@@ -1026,7 +1029,13 @@ impl<'a> Classifier<'a> {
         if let Some(range) =
             crate::staple_lsp::source_projection::named_range(syntax, name, false, self.path)
         {
-            self.insert(range.start, range.end, kind, modifiers, priority);
+            self.insert(
+                range.start,
+                range.end,
+                kind,
+                modifiers,
+                priority + self.priority_boost,
+            );
         }
     }
 
@@ -1034,7 +1043,13 @@ impl<'a> Classifier<'a> {
         if let Some(range) =
             crate::staple_lsp::source_projection::named_range(syntax, name, true, self.path)
         {
-            self.insert(range.start, range.end, kind, modifiers, priority);
+            self.insert(
+                range.start,
+                range.end,
+                kind,
+                modifiers,
+                priority + self.priority_boost,
+            );
         }
     }
 
