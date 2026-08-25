@@ -4032,7 +4032,7 @@ fn block_modifiers_reject_unsupported_and_public_outputs() {
 }
 
 #[test]
-fn non_outermost_modifier_applies_the_next_modifier_to_its_first_item() {
+fn outermost_modifier_can_discard_remaining_modifiers() {
     let module = type_check(concat!(
         "macro @outer: Item -> Item = _ => parse_quote { let transformed: I32 = 100 }\n",
         "macro @inner: Item -> Sequence Item = _ => parse_quote {\n",
@@ -4042,7 +4042,7 @@ fn non_outermost_modifier_applies_the_next_modifier_to_its_first_item() {
         "@outer\n",
         "@inner\n",
         "let original: I32 = 0\n",
-        "let result: I32 = transformed + second\n",
+        "let result: I32 = transformed\n",
     ));
     assert!(!module.resolved().syntax().items.iter().any(|item| {
         matches!(item, item
@@ -4050,14 +4050,13 @@ fn non_outermost_modifier_applies_the_next_modifier_to_its_first_item() {
                 if binding.name == "first"))
     }));
     let context = Context::create();
-    CodeGenerator::new(&context).compile_module(&module).expect(
-        "the outermost modifier should apply to the inner modifier's first item, with the \
-             rest passed through unmodified",
-    );
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("the discarded inner modifier should not run");
 }
 
 #[test]
-fn outermost_modifier_combines_its_own_items_with_earlier_trailing_items() {
+fn outermost_multi_item_result_discards_remaining_modifiers() {
     let module = type_check(concat!(
         "macro @outer: Item -> Sequence Item = _ => parse_quote {\n",
         "    let replaced_first: I32 = 100\n",
@@ -4070,18 +4069,16 @@ fn outermost_modifier_combines_its_own_items_with_earlier_trailing_items() {
         "@outer\n",
         "@inner\n",
         "let original: I32 = 0\n",
-        "let result: I32 = replaced_first + from_outer + second\n",
+        "let result: I32 = replaced_first + from_outer\n",
     ));
     let context = Context::create();
-    CodeGenerator::new(&context).compile_module(&module).expect(
-        "items trailing from an inner modifier should combine with the outermost \
-             modifier's own multi-item result",
-    );
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("the outer modifier's items should replace the entire modified item");
 }
 
 #[test]
-fn diagnoses_non_outermost_modifier_producing_zero_items() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+fn returning_modified_input_continues_to_a_zero_item_modifier() {
     let source = concat!(
         "macro @outer: Item -> Item = item => item\n",
         "macro @inner: Item -> Sequence Item = _ => parse_quote {}\n",
@@ -4089,20 +4086,34 @@ fn diagnoses_non_outermost_modifier_producing_zero_items() {
         "@inner\n",
         "let original: I32 = 0\n",
     );
-    let program = ProgramLoader::new()
-        .with_standard_library_root(root.join("stdlib"))
-        .load_source(&with_syntax_imports(source), root)
-        .expect("source should parse");
-    let diagnostics = NameResolver::new()
-        .resolve_program(program)
-        .expect_err("a non-outermost modifier producing zero items should be diagnosed");
+    let module = type_check(source);
     assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.message
-                == "modifier macro `@inner` produced no items, so the remaining modifiers in the chain have nothing to apply to"
-        }),
-        "expected non-outermost zero-item diagnostic, found {diagnostics:#?}"
+        !module
+            .resolved()
+            .syntax()
+            .items
+            .iter()
+            .any(|item| { matches!(item, Item::Binding(binding) if binding.name == "original") })
     );
+}
+
+#[test]
+fn modified_item_can_be_destructured_and_reconstructed_losslessly() {
+    let module = type_check(concat!(
+        "use std.syntax.(ModifiedItem, parse_quote, Item)\n",
+        "macro @outer: Item -> Item = item => match item {\n",
+        "    ModifiedItem (modifiers, inner) => ModifiedItem (modifiers: modifiers, item: inner),\n",
+        "}\n",
+        "macro @inner: Parenthesized (Expr) -> Item -> Item = value => _ => parse_quote { let reconstructed: I32 = $value }\n",
+        "@outer\n",
+        "@inner(1)\n",
+        "let original: I32 = 0\n",
+        "let result: I32 = reconstructed\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("reconstructing `ModifiedItem` should preserve and continue its modifier");
 }
 
 #[test]

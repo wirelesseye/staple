@@ -79,8 +79,17 @@ pub(repr) type TypeDeclarationItem = (
 )
 /// An item whose structure is not exposed yet.
 pub type UnstructuredItem = opaque
+/// A lossless modifier invocation whose structure is intentionally opaque.
+pub type Modifier = opaque
+/// An item carrying modifiers that have not yet been applied. Modifiers are
+/// ordered outermost first.
+@recursive_constructor
+pub(repr) type ModifiedItem = (
+    modifiers: Sequence Modifier,
+    item: Item,
+)
 /// The syntax category for items.
-pub type alias Item = TypeDeclarationItem | UnstructuredItem
+pub type alias Item = ModifiedItem | TypeDeclarationItem | UnstructuredItem
 
 /// Compiler-owned visibility syntax. `MacroCallVisibility` is an invocation
 /// marker whose value is usable as `Visibility` in compile-time code.

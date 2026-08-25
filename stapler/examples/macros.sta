@@ -108,9 +108,9 @@ generate_pair 41
 
 // Modifier macros receive one opaque Item from the compiler. An optional
 // explicit Parenthesized Expr, Parenthesized Type, or Parenthesized Pattern
-// argument is always written in parentheses. The closest modifier runs
-// first; here @replace discards the definition and @identity passes its
-// generated replacement through unchanged.
+// argument is always written in parentheses. The outermost modifier runs
+// first; here @identity returns the ModifiedItem it receives, explicitly
+// continuing expansion with @replace.
 macro @identity: Item -> Item = item => item
 macro @replace: Parenthesized Expr -> Item -> Item = value => item => parse_quote {
     let replaced: I32 = $value
@@ -121,9 +121,8 @@ macro @replace: Parenthesized Expr -> Item -> Item = value => item => parse_quot
 def discarded = () => 0
 
 // A modifier declared `Item -> Sequence Item` or `Item -> Syntax` may expand
-// into zero, one, or many items instead of exactly one. When it isn't the
-// outermost modifier in the chain, only the first generated item continues
-// on to the next modifier; the rest are spliced in afterward, untouched.
+// into zero, one, or many items instead of exactly one. Each returned modified
+// item continues independently with its own outermost modifier.
 macro @duplicate: Item -> Sequence Item = _ => parse_quote {
     let duplicated_first: I32 = 1
     let duplicated_second: I32 = 2

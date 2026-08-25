@@ -1262,6 +1262,8 @@ impl NameResolver {
             "OpaqueDeclaration",
             "TypeDeclarationKind",
             "TypeDeclarationItem",
+            "Modifier",
+            "ModifiedItem",
             "UnstructuredItem",
             "Item",
             "Syntax",
@@ -4872,6 +4874,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         "TypeDeclarationItem" => Some(
             "(kind: TypeDeclarationKind, name: Ident String, name_spelling: String, declared_type: Type, type_parameters: Sequence (Ident String), underlying: Optional Type) -> TypeDeclarationItem",
         ),
+        "ModifiedItem" => Some("(modifiers: Sequence Modifier, item: Item) -> ModifiedItem"),
         "Syntax"
         | "SyntaxNode"
         | "Expr"
@@ -4880,6 +4883,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         | "Pattern"
         | "Item"
         | "UnstructuredItem"
+        | "Modifier"
         | "TypeDeclarationKind"
         | "AliasDeclaration"
         | "DistinctDeclaration"
@@ -4951,6 +4955,8 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
                     | "BindingPattern"
                     | "NominalPattern"
                     | "Item"
+                    | "Modifier"
+                    | "ModifiedItem"
                     | "TypeDeclarationItem"
                     | "UnstructuredItem"
                     | "TypeDeclarationKind"

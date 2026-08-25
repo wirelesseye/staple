@@ -331,10 +331,12 @@ declared. `Ident`, `CallExpr`, and `UnstructuredExpr` may be used as narrower
 expression parameter types. `SyntaxNode`, opaque `Syntax`, and `Item` are not
 valid explicit modifier arguments.
 
-Modifier lists are part of item syntax. The closest modifier runs first, so
-`@outer @inner def ...` expands as `outer(inner(def ...))`. A modifier may
-return an item that itself has modifiers; those modifiers are expanded before
-the surrounding chain continues. Modifiers may target `let`, `def`, `type`,
+Modifier lists are part of item syntax. The outermost modifier runs first. For
+`@outer @inner def ...`, `@outer` receives a `ModifiedItem` containing
+`@inner` and the definition. Returning that item continues expansion with
+`@inner`; replacing or unwrapping it discards the remaining modifier. A
+returned item with modifiers is handled the same way, one outermost modifier
+per expansion step. Modifiers may target `let`, `def`, `type`,
 `extern`, `trait`, and `impl` items. They cannot target expression statements,
 `use`, `mod`, or `macro` declarations. Modifier and function-style macro names
 occupy separate namespaces, and imports, renames, namespaces, and re-exports
@@ -345,25 +347,19 @@ modifier may produce zero, one, or many replacement items, which are spliced at
 the modifier's position. Every result must itself be valid in a block, so public
 items and `extern`, `macro`, `trait`, or `impl` declarations are rejected.
 
-A modifier declared `Item -> Item` must return exactly one `Item`, as before.
+A modifier declared `Item -> Item` must return exactly one `Item`.
 A modifier declared `Item -> Sequence Item` or `Item -> Syntax` may instead
 expand to zero, one, or many items, reusing the same reparse and splice
-machinery as an item-producing function-style macro. When such a modifier is
-not the outermost one applied to the item — that is, a further modifier in
-the same chain still has to consume its result — only the *first* generated
-item continues the chain: it becomes the item handed to the next modifier
-out, and any of its own nested modifiers are expanded first, exactly as for a
-single-item result. Every other generated item is deferred and spliced in
-after the chain's eventual result, in the order it was produced, untouched by
-the remaining modifiers in this chain. A modifier that produces zero items in
-a non-outermost position has nothing to hand the next modifier and is
-rejected. At the outermost position, all items produced by that final
-application — combined with any items deferred by earlier modifiers in the
-chain — become the item's replacement; zero items there deletes the item
-entirely, matching how an item-producing function-style macro invocation with
-no replacement behaves.
+machinery as an item-producing function-style macro. Every returned item is
+expanded independently; a returned `ModifiedItem` continues with its own
+outermost modifier. Producing zero items deletes the modified item.
 
-`Item` exposes type declarations as `TypeDeclarationItem`, including their
+`Item` exposes pending modifier lists as `ModifiedItem (modifiers, item)`.
+Modifiers are ordered outermost first and represented by lossless, opaque
+`Modifier` values. `ModifiedItem` can be destructured and reconstructed to
+preserve, reorder, or discard pending modifiers. A wrapped type declaration
+matches `ModifiedItem`, not `TypeDeclarationItem`, until unwrapped.
+`Item` exposes unwrapped type declarations as `TypeDeclarationItem`, including their
 kind, name and spelling, applied declared type, flattened type-parameter names,
 and optional opaque representation. All other items match `UnstructuredItem`
 and remain lossless but opaque. `BindingPattern` and `NominalPattern` provide

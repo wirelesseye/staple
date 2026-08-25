@@ -69,22 +69,6 @@ enum ModifierChainResult {
     Items(Vec<Item>),
 }
 
-fn split_first_item(mut items: Vec<Item>) -> (Option<Item>, Vec<Item>) {
-    if items.is_empty() {
-        (None, items)
-    } else {
-        let first = items.remove(0);
-        (Some(first), items)
-    }
-}
-
-fn split_modifier_chain_result(result: ModifierChainResult) -> (Option<Item>, Vec<Item>) {
-    match result {
-        ModifierChainResult::Item(item) => (Some(item), Vec::new()),
-        ModifierChainResult::Items(items) => split_first_item(items),
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum MetaType {
     Syntax,
@@ -99,6 +83,8 @@ pub(crate) enum MetaType {
     BindingPattern,
     NominalPattern,
     Item,
+    Modifier,
+    ModifiedItem,
     TypeDeclarationItem,
     UnstructuredItem,
     Visibility,
@@ -166,11 +152,20 @@ enum SyntaxValue {
     Pattern(Pattern),
     Item(Box<Item>),
     Items(Vec<Item>),
+    Modifier(OpaqueModifier),
     Visibility(VisibilitySyntax),
     Comma(Syntax),
     Equals(Syntax),
     FatArrow(Syntax),
     Delimited(DelimitedSyntaxValue),
+}
+
+#[derive(Clone)]
+struct OpaqueModifier {
+    invocation: crate::ModifierInvocation,
+    /// Retained on the first modifier so destructuring and reconstructing a
+    /// `ModifiedItem` preserves the original lossless wrapper syntax.
+    enclosing: Option<Syntax>,
 }
 
 #[derive(Clone)]
@@ -218,6 +213,7 @@ impl SyntaxValue {
             | Self::Pattern(_)
             | Self::Item(_)
             | Self::Items(_)
+            | Self::Modifier(_)
             | Self::Visibility(_)
             | Self::Comma(_)
             | Self::Equals(_)
@@ -239,6 +235,7 @@ impl SyntaxValue {
             Self::Item(value) => Some(item_syntax(value)),
             Self::Visibility(value) => Some(&value.syntax),
             Self::Delimited(value) => Some(&value.syntax),
+            Self::Modifier(value) => Some(&value.invocation.syntax),
             Self::Items(_) => None,
         }
     }
@@ -328,6 +325,7 @@ fn syntax_category(value: &SyntaxValue) -> &'static str {
         SyntaxValue::Pattern(_) => "pattern",
         SyntaxValue::Item(_) => "item",
         SyntaxValue::Items(_) => "item sequence",
+        SyntaxValue::Modifier(_) => "modifier",
         SyntaxValue::Visibility(_) => "visibility",
         SyntaxValue::Comma(syntax) => {
             let _ = syntax.id;
@@ -1472,7 +1470,7 @@ impl MacroExpander {
                 "macro expansion exceeded the limit of 128 nested expansions",
             ));
             return None;
-        }
+        };
         let definition = selected.definition;
         let consumed_count = selected.consumed;
         let key = definition.key.clone();
@@ -1572,205 +1570,144 @@ impl MacroExpander {
     fn apply_modifier_chain(
         &mut self,
         module: ModuleId,
-        modified: crate::ModifiedItem,
+        mut modified: crate::ModifiedItem,
         depth: usize,
     ) -> Option<ModifierChainResult> {
-        let mut current = *modified.item;
-        let mut trailing: Vec<Item> = Vec::new();
-        if let Item::Modified(nested) = current {
-            let result = self.apply_modifier_chain(module, nested, depth + 1)?;
-            let (first, extra) = split_modifier_chain_result(result);
-            trailing.extend(extra);
-            match first {
-                Some(item) => current = item,
-                None if modified.modifiers.is_empty() => {
-                    return Some(ModifierChainResult::Items(trailing));
-                }
-                None => {
-                    self.diagnostics.push(Diagnostic::new(
-                        modified.syntax.span,
-                        "modifier macro chain produced no item, so the remaining modifiers have nothing to apply to",
-                    ));
-                    return None;
-                }
-            }
-        }
-        if let Item::VisibilityMacroInvocation(invocation) = current {
-            current = self.expand_visibility_macro_invocation(module, invocation, depth + 1)?;
-        }
-        let docs_only = modified
-            .modifiers
-            .iter()
-            .all(|modifier| modifier.namespace.is_none() && modifier.name == "doc");
-        if !modifier_target_supported(&current) && !docs_only {
+        let Some(invocation) = modified.modifiers.first().cloned() else {
             self.diagnostics.push(Diagnostic::new(
                 modified.syntax.span,
+                "modified items must contain at least one modifier",
+            ));
+            return None;
+        };
+        modified.modifiers.remove(0);
+        let mut current = if modified.modifiers.is_empty() {
+            *modified.item
+        } else {
+            Item::Modified(modified)
+        };
+        if let Item::VisibilityMacroInvocation(generated) = current {
+            current = self.expand_visibility_macro_invocation(module, generated, depth + 1)?;
+        }
+        if !modifier_target_supported(&current)
+            && !(invocation.namespace.is_none() && invocation.name == "doc")
+        {
+            self.diagnostics.push(Diagnostic::new(
+                invocation.syntax.span.clone(),
                 "modifier macros may only be applied to `let`, `def`, `type`, `extern`, `trait`, or `impl` items",
             ));
             return None;
         }
-
-        let modifiers = modified.modifiers.into_iter().rev().collect::<Vec<_>>();
-        let last_index = modifiers.len().saturating_sub(1);
-        for (index, invocation) in modifiers.into_iter().enumerate() {
-            let is_last = index == last_index;
-            if depth >= MAX_EXPANSION_DEPTH {
-                self.diagnostics.push(Diagnostic::new(
-                    invocation.syntax.span.clone(),
-                    "macro expansion exceeded the limit of 128 nested expansions",
-                ));
-                return None;
-            }
-            if invocation.namespace.is_none() && invocation.name == "recursive_constructor" {
-                if invocation.argument.is_some() {
-                    self.diagnostics.push(Diagnostic::new(
-                        invocation.syntax.span,
-                        "`@recursive_constructor` does not accept an argument",
-                    ));
-                    return None;
-                }
-                let Item::TypeDeclaration(declaration) = &mut current else {
-                    self.diagnostics.push(Diagnostic::new(
-                        invocation.syntax.span,
-                        "`@recursive_constructor` may only modify a type declaration",
-                    ));
-                    return None;
-                };
-                declaration.recursive_constructor = true;
-                continue;
-            }
-            if invocation.namespace.is_none() && invocation.name == "doc" {
-                let doc = if let Some(doc) = invocation.doc.clone() {
-                    doc
-                } else {
-                    let Some(argument) = invocation.argument.as_ref() else {
-                        self.diagnostics.push(Diagnostic::new(
-                            invocation.syntax.span,
-                            "`@doc` requires a parenthesized string literal",
-                        ));
-                        return None;
-                    };
-                    let Some(Expression::String(literal)) = argument.expression.as_ref() else {
-                        self.diagnostics.push(Diagnostic::new(
-                            invocation.syntax.span,
-                            "`@doc` requires a string literal argument",
-                        ));
-                        return None;
-                    };
-                    match crate::string_literal::decode(&literal.literal) {
-                        Ok(doc) => doc,
-                        Err(message) => {
-                            self.diagnostics
-                                .push(Diagnostic::new(invocation.syntax.span, message));
-                            return None;
-                        }
-                    }
-                };
-                if !attach_doc(&mut current, doc) {
-                    self.diagnostics.push(Diagnostic::new(
-                        invocation.syntax.span,
-                        "`@doc` may only modify a named declaration",
-                    ));
-                    return None;
-                }
-                continue;
-            }
-            let (definition, argument) = self.select_modifier(module, &invocation)?;
-            self.record_invocation(invocation.syntax.id, &definition);
-            let key = definition.key.clone();
-            if self.expansion_stack.contains(&key) {
-                self.diagnostics.push(Diagnostic::new(
-                    invocation.syntax.span.clone(),
-                    format!("recursive modifier macro expansion of `@{}`", key.name),
-                ));
-                return None;
-            }
-            self.expansion_stack.push(key.clone());
-            let diagnostic_start = self.diagnostics.len();
-            let result = self.invoke_modifier(
-                module,
-                &definition,
-                argument,
-                current,
+        if depth >= MAX_EXPANSION_DEPTH {
+            self.diagnostics.push(Diagnostic::new(
                 invocation.syntax.span.clone(),
-            );
-            let Some(items) = result else {
-                self.expansion_stack.pop();
-                if self.diagnostics.len() > diagnostic_start {
-                    self.diagnostics.push(Diagnostic::new(
-                        invocation.syntax.span.clone(),
-                        format!("while expanding modifier macro `@{}`", key.name),
-                    ));
-                }
-                return None;
-            };
-            // The first item produced by this invocation continues the chain (feeding the
-            // next modifier, or becoming part of the final result); any further items are
-            // deferred as `trailing`, to be spliced in after the chain's ultimate result.
-            let (first, mut extra) = split_first_item(items);
-            let first = match first {
-                Some(item @ Item::Modified(_)) => {
-                    let Item::Modified(nested) = item else {
-                        unreachable!()
-                    };
-                    let nested_result = self.apply_modifier_chain(module, nested, depth + 1);
-                    self.expansion_stack.pop();
-                    let (nested_first, nested_extra) = split_modifier_chain_result(nested_result?);
-                    extra.extend(nested_extra);
-                    nested_first
-                }
-                other => {
-                    self.expansion_stack.pop();
-                    other
-                }
-            };
-            let Some(first) = first else {
-                if is_last {
-                    extra.extend(trailing);
-                    return Some(ModifierChainResult::Items(extra));
-                }
+                "macro expansion exceeded the limit of 128 nested expansions",
+            ));
+            return None;
+        }
+        if invocation.namespace.is_none() && invocation.name == "recursive_constructor" {
+            if invocation.argument.is_some() {
                 self.diagnostics.push(Diagnostic::new(
-                    invocation.syntax.span.clone(),
-                    format!(
-                        "modifier macro `@{}` produced no items, so the remaining modifiers in the chain have nothing to apply to",
-                        key.name
-                    ),
+                    invocation.syntax.span,
+                    "`@recursive_constructor` does not accept an argument",
+                ));
+                return None;
+            }
+            let Some(declaration) = modified_type_declaration_mut(&mut current) else {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@recursive_constructor` may only modify a type declaration",
                 ));
                 return None;
             };
-            if !is_last {
-                if !modifier_target_supported(&first) {
-                    self.diagnostics.push(Diagnostic::new(
-                        invocation.syntax.span.clone(),
-                        format!(
-                            "modifier macro `@{}` produced an unsupported item kind",
-                            key.name
-                        ),
-                    ));
-                    return None;
-                }
-                trailing.extend(extra);
-                current = first;
-            } else if extra.is_empty() && trailing.is_empty() {
-                if !modifier_target_supported(&first) {
-                    self.diagnostics.push(Diagnostic::new(
-                        invocation.syntax.span.clone(),
-                        format!(
-                            "modifier macro `@{}` produced an unsupported item kind",
-                            key.name
-                        ),
-                    ));
-                    return None;
-                }
-                return Some(ModifierChainResult::Item(first));
+            declaration.recursive_constructor = true;
+            return Some(ModifierChainResult::Item(current));
+        }
+        if invocation.namespace.is_none() && invocation.name == "doc" {
+            let doc = if let Some(doc) = invocation.doc.clone() {
+                doc
             } else {
-                let mut batch = vec![first];
-                batch.extend(extra);
-                batch.extend(trailing);
-                return Some(ModifierChainResult::Items(batch));
+                let Some(argument) = invocation.argument.as_ref() else {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span,
+                        "`@doc` requires a parenthesized string literal",
+                    ));
+                    return None;
+                };
+                let Some(Expression::String(literal)) = argument.expression.as_ref() else {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span,
+                        "`@doc` requires a string literal argument",
+                    ));
+                    return None;
+                };
+                match crate::string_literal::decode(&literal.literal) {
+                    Ok(doc) => doc,
+                    Err(message) => {
+                        self.diagnostics
+                            .push(Diagnostic::new(invocation.syntax.span, message));
+                        return None;
+                    }
+                }
+            };
+            if !attach_doc(&mut current, doc) {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@doc` may only modify a named declaration",
+                ));
+                return None;
+            }
+            return Some(ModifierChainResult::Item(current));
+        }
+        let (definition, argument) = self.select_modifier(module, &invocation)?;
+        self.record_invocation(invocation.syntax.id, &definition);
+        let key = definition.key.clone();
+        if self.expansion_stack.contains(&key) {
+            self.diagnostics.push(Diagnostic::new(
+                invocation.syntax.span.clone(),
+                format!("recursive modifier macro expansion of `@{}`", key.name),
+            ));
+            return None;
+        }
+        self.expansion_stack.push(key.clone());
+        let diagnostic_start = self.diagnostics.len();
+        let result = self.invoke_modifier(
+            module,
+            &definition,
+            argument,
+            current,
+            invocation.syntax.span.clone(),
+        );
+        let Some(items) = result else {
+            self.expansion_stack.pop();
+            if self.diagnostics.len() > diagnostic_start {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span.clone(),
+                    format!("while expanding modifier macro `@{}`", key.name),
+                ));
+            }
+            return None;
+        };
+        let mut expanded = Vec::new();
+        for item in items {
+            if let Item::Modified(nested) = item {
+                match self.apply_modifier_chain(module, nested, depth + 1) {
+                    Some(ModifierChainResult::Item(item)) => expanded.push(item),
+                    Some(ModifierChainResult::Items(items)) => expanded.extend(items),
+                    None => {
+                        self.expansion_stack.pop();
+                        return None;
+                    }
+                }
+            } else {
+                expanded.push(item);
             }
         }
-        Some(ModifierChainResult::Item(current))
+        self.expansion_stack.pop();
+        match expanded.as_slice() {
+            [item] => Some(ModifierChainResult::Item(item.clone())),
+            _ => Some(ModifierChainResult::Items(expanded)),
+        }
     }
 
     fn resolve_modifier(
@@ -3015,6 +2952,8 @@ impl MacroExpander {
                     MetaType::BindingPattern => "a binding pattern".to_owned(),
                     MetaType::NominalPattern => "a nominal pattern".to_owned(),
                     MetaType::Item => "an item".to_owned(),
+                    MetaType::Modifier => "a modifier".to_owned(),
+                    MetaType::ModifiedItem => "a modified item".to_owned(),
                     MetaType::TypeDeclarationItem => "a type declaration item".to_owned(),
                     MetaType::UnstructuredItem => "an unstructured item".to_owned(),
                     MetaType::Visibility => "visibility syntax".to_owned(),
@@ -3362,6 +3301,7 @@ impl MacroExpander {
                             | "StringExpr"
                             | "BindingPattern"
                             | "NominalPattern"
+                            | "ModifiedItem"
                             | "Sequence"
                             | "Separated"
                             | "Parenthesized"
@@ -3427,6 +3367,8 @@ impl MacroExpander {
                 if let Value::Syntax(SyntaxValue::Item(item)) = &value {
                     if let Item::TypeDeclaration(declaration) = item.as_ref() {
                         value = type_declaration_item_value(declaration);
+                    } else if let Item::Modified(modified) = item.as_ref() {
+                        value = modified_item_value(modified);
                     } else {
                         self.diagnostics.push(Diagnostic::new(
                             access.syntax.span.clone(),
@@ -3802,6 +3744,66 @@ impl MacroExpander {
                         argument: Box::new(argument.clone()),
                     },
                 ))))
+            }
+            "ModifiedItem" => {
+                let Value::Product(fields) = argument else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`ModifiedItem` requires `(modifiers: Sequence Modifier, item: Item)`",
+                    ));
+                    return None;
+                };
+                let [
+                    (Some(modifiers_name), Value::Sequence(modifiers)),
+                    (Some(item_name), Value::Syntax(SyntaxValue::Item(item))),
+                ] = fields.as_slice()
+                else {
+                    self.diagnostics
+                        .push(Diagnostic::new(span, "invalid `ModifiedItem` fields"));
+                    return None;
+                };
+                if modifiers_name != "modifiers" || item_name != "item" {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`ModifiedItem` fields must be named `modifiers` and `item`",
+                    ));
+                    return None;
+                }
+                let enclosing = modifiers.first().and_then(|value| match value {
+                    Value::Syntax(SyntaxValue::Modifier(modifier)) => modifier.enclosing.clone(),
+                    _ => None,
+                });
+                let modifiers = modifiers
+                    .iter()
+                    .map(|value| match value {
+                        Value::Syntax(SyntaxValue::Modifier(modifier)) => {
+                            Some(modifier.invocation.clone())
+                        }
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>();
+                let Some(modifiers) = modifiers else {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`ModifiedItem.modifiers` must contain only `Modifier` values",
+                    ));
+                    return None;
+                };
+                if modifiers.is_empty() {
+                    self.diagnostics.push(Diagnostic::new(
+                        span,
+                        "`ModifiedItem.modifiers` must not be empty",
+                    ));
+                    return None;
+                }
+                let syntax = enclosing.unwrap_or_else(|| self.generated_syntax(module, span));
+                Some(Value::Syntax(SyntaxValue::Item(Box::new(Item::Modified(
+                    crate::ModifiedItem {
+                        syntax,
+                        modifiers,
+                        item: item.clone(),
+                    },
+                )))))
             }
             "Sequence" => {
                 let Value::Product(elements) = argument else {
@@ -5140,6 +5142,8 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "BindingPattern" => Some(MetaType::BindingPattern),
             "NominalPattern" => Some(MetaType::NominalPattern),
             "Item" => Some(MetaType::Item),
+            "Modifier" => Some(MetaType::Modifier),
+            "ModifiedItem" => Some(MetaType::ModifiedItem),
             "TypeDeclarationItem" => Some(MetaType::TypeDeclarationItem),
             "UnstructuredItem" => Some(MetaType::UnstructuredItem),
             "Visibility" => Some(MetaType::Visibility),
@@ -5359,6 +5363,8 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             Expression::Name(_) | Expression::Call(_) | Expression::VisibilityArgument(_)
         ),
         MetaType::Item
+        | MetaType::Modifier
+        | MetaType::ModifiedItem
         | MetaType::TypeDeclarationItem
         | MetaType::UnstructuredItem
         | MetaType::Product(_)
@@ -5680,17 +5686,22 @@ fn match_syntax_fragment(
             }
             SyntaxValue::Pattern(pattern)
         }
-        MetaType::Item | MetaType::TypeDeclarationItem | MetaType::UnstructuredItem => {
+        MetaType::Item
+        | MetaType::ModifiedItem
+        | MetaType::TypeDeclarationItem
+        | MetaType::UnstructuredItem => {
             let item = crate::parser::parse_item_fragment(syntax, next_syntax_id).ok()?;
-            if matches!(expected, MetaType::TypeDeclarationItem)
-                && !matches!(item, Item::TypeDeclaration(_))
+            if matches!(expected, MetaType::ModifiedItem) && !matches!(item, Item::Modified(_))
+                || matches!(expected, MetaType::TypeDeclarationItem)
+                    && !matches!(item, Item::TypeDeclaration(_))
                 || matches!(expected, MetaType::UnstructuredItem)
-                    && matches!(item, Item::TypeDeclaration(_))
+                    && matches!(item, Item::Modified(_) | Item::TypeDeclaration(_))
             {
                 return None;
             }
             SyntaxValue::Item(Box::new(item))
         }
+        MetaType::Modifier => return None,
         MetaType::Visibility | MetaType::MacroCallVisibility => {
             let (value, ids) = expression()?;
             let Expression::VisibilityArgument(value) = value else {
@@ -6157,6 +6168,8 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::BindingPattern => "BindingPattern".to_owned(),
             MetaType::NominalPattern => "NominalPattern".to_owned(),
             MetaType::Item => "Item".to_owned(),
+            MetaType::Modifier => "Modifier".to_owned(),
+            MetaType::ModifiedItem => "ModifiedItem".to_owned(),
             MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
             MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
             MetaType::Visibility => "Visibility".to_owned(),
@@ -6243,6 +6256,8 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::BindingPattern => "BindingPattern".to_owned(),
         MetaType::NominalPattern => "NominalPattern".to_owned(),
         MetaType::Item => "Item".to_owned(),
+        MetaType::Modifier => "Modifier".to_owned(),
+        MetaType::ModifiedItem => "ModifiedItem".to_owned(),
         MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
         MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
         MetaType::Visibility => "Visibility".to_owned(),
@@ -6411,6 +6426,8 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Type"
                 | "Pattern"
                 | "Item"
+                | "Modifier"
+                | "ModifiedItem"
                 | "Visibility"
                 | "MacroCallVisibility"
                 | "Private"
@@ -6861,6 +6878,17 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
                 );
             }
             if pattern.namespace.is_none()
+                && pattern.name == "ModifiedItem"
+                && let Value::Syntax(SyntaxValue::Item(item)) = &value
+                && let Item::Modified(modified) = item.as_ref()
+            {
+                return bind_pattern(
+                    &pattern.argument,
+                    modified_item_value(modified),
+                    environment,
+                );
+            }
+            if pattern.namespace.is_none()
                 && pattern.name == "TypeDeclarationItem"
                 && let Value::Syntax(SyntaxValue::Item(item)) = &value
                 && let Item::TypeDeclaration(declaration) = item.as_ref()
@@ -6874,7 +6902,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             if pattern.namespace.is_none()
                 && pattern.name == "UnstructuredItem"
                 && let Value::Syntax(SyntaxValue::Item(item)) = &value
-                && !matches!(item.as_ref(), Item::TypeDeclaration(_))
+                && !matches!(item.as_ref(), Item::Modified(_) | Item::TypeDeclaration(_))
             {
                 return bind_pattern(&pattern.argument, Value::Product(Vec::new()), environment);
             }
@@ -7066,6 +7094,27 @@ fn type_declaration_item_value(declaration: &crate::TypeDeclaration) -> Value {
     ])
 }
 
+fn modified_item_value(modified: &crate::ModifiedItem) -> Value {
+    let modifiers = modified
+        .modifiers
+        .iter()
+        .enumerate()
+        .map(|(index, invocation)| {
+            Value::Syntax(SyntaxValue::Modifier(OpaqueModifier {
+                invocation: invocation.clone(),
+                enclosing: (index == 0).then(|| modified.syntax.clone()),
+            }))
+        })
+        .collect();
+    Value::Product(vec![
+        (Some("modifiers".to_owned()), Value::Sequence(modifiers)),
+        (
+            Some("item".to_owned()),
+            Value::Syntax(SyntaxValue::Item(modified.item.clone())),
+        ),
+    ])
+}
+
 fn type_parameter_pattern_type(parameter: &crate::TypeParameterPattern) -> Type {
     match parameter {
         crate::TypeParameterPattern::Binding(binding) => Type::Named(crate::NamedType {
@@ -7136,11 +7185,15 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
             true
         }
         (MetaType::Item, Value::Syntax(SyntaxValue::Item(_))) => true,
+        (MetaType::Modifier, Value::Syntax(SyntaxValue::Modifier(_))) => true,
+        (MetaType::ModifiedItem, Value::Syntax(SyntaxValue::Item(item))) => {
+            matches!(item.as_ref(), Item::Modified(_))
+        }
         (MetaType::TypeDeclarationItem, Value::Syntax(SyntaxValue::Item(item))) => {
             matches!(item.as_ref(), Item::TypeDeclaration(_))
         }
         (MetaType::UnstructuredItem, Value::Syntax(SyntaxValue::Item(item))) => {
-            !matches!(item.as_ref(), Item::TypeDeclaration(_))
+            !matches!(item.as_ref(), Item::Modified(_) | Item::TypeDeclaration(_))
         }
         (MetaType::Comma, Value::Syntax(SyntaxValue::Comma(_))) => true,
         (MetaType::Equals, Value::Syntax(SyntaxValue::Equals(_))) => true,
@@ -7458,6 +7511,14 @@ fn modifier_target_supported(item: &Item) -> bool {
         | Item::Continue(_)
         | Item::Expression(_) => false,
         Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => false,
+    }
+}
+
+fn modified_type_declaration_mut(item: &mut Item) -> Option<&mut crate::TypeDeclaration> {
+    match item {
+        Item::Modified(modified) => modified_type_declaration_mut(&mut modified.item),
+        Item::TypeDeclaration(declaration) => Some(declaration),
+        _ => None,
     }
 }
 
