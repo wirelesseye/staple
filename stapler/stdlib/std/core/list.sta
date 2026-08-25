@@ -5,7 +5,6 @@ use std.syntax.*
 
 /// A growable sequence backed by a mutable buffer.
 pub type List T = Buffer T
-impl<T> !Copy (List T) {}
 
 impl<T where Clone T> Clone (List T) {
     def clone = List buffer => List (Clone.clone buffer)
