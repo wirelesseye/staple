@@ -263,6 +263,9 @@ pub struct TraitImplementation {
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
+    /// Whether this is a negative implementation (`impl !Trait T {}`),
+    /// declaring that `T` explicitly does not implement `Trait`.
+    pub negative: bool,
     pub trait_name: NamedType,
     pub arguments: Vec<Type>,
     pub members: Vec<ImplementationMember>,

@@ -901,6 +901,7 @@ impl Grammar {
         self.expect(TokenKind::Impl, "expected `impl`")?;
         let (type_parameters, trait_bounds, subtype_bounds) = self.parse_bracketed_generics()?;
         self.reject_effect_parameters(&type_parameters, "trait implementations")?;
+        let negative = self.eat(TokenKind::Bang);
         let trait_start = self.position;
         let first = self
             .expect(TokenKind::Identifier, "expected trait name")?
@@ -950,6 +951,7 @@ impl Grammar {
             type_parameters,
             trait_bounds,
             subtype_bounds,
+            negative,
             trait_name,
             arguments,
             members,

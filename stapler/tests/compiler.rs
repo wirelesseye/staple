@@ -7753,6 +7753,57 @@ fn exposes_copy_but_rejects_explicit_implementations() {
 }
 
 #[test]
+fn negative_copy_impl_opts_a_nominal_type_out_of_copy_without_drop() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Handle = I32\n",
+            "impl !Copy Handle {}\n",
+            "def invalid = (value: Handle) => { let moved = value; value }\n",
+        )))
+        .expect_err("a `!Copy` type must be move-only");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("use of moved value"))
+    );
+
+    // Declaring `!Copy` alone does not require a `drop` method or add
+    // destructor glue: the type is move-only but not finalized.
+    type_check(concat!(
+        "type Handle = I32\n",
+        "impl !Copy Handle {}\n",
+        "def make = () => Handle 1\n",
+    ));
+}
+
+#[test]
+fn rejects_negative_impl_for_traits_other_than_copy() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Handle = I32\n",
+            "impl !Drop Handle {}\n",
+        )))
+        .expect_err("only `Copy` can be negated");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("only `Copy` can be negated"))
+    );
+}
+
+#[test]
+fn rejects_negative_copy_impl_for_non_nominal_types() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("impl !Copy I32 {}\n"))
+        .expect_err("`!Copy` requires a represented nominal type");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("`!Copy` may only be implemented for a represented nominal type")
+    }));
+}
+
+#[test]
 fn lowers_custom_drop_and_gc_finalizer_glue() {
     let module = type_check(concat!(
         "type Resource = I32\n",

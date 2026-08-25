@@ -138,6 +138,7 @@ impl<'a> Classifier<'a> {
                 | TokenKind::FatArrow
                 | TokenKind::Ellipsis
                 | TokenKind::Dollar
+                | TokenKind::Bang
                 | TokenKind::Star
                 | TokenKind::Plus
                 | TokenKind::Minus

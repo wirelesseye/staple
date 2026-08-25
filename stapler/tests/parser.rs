@@ -413,6 +413,20 @@ fn parses_traits_implementations_and_bounds_losslessly() {
 }
 
 #[test]
+fn parses_negative_trait_implementations_losslessly() {
+    let source = concat!("type Handle = I32\n", "impl !Copy Handle {}\n",);
+    let root = parse(source).expect("negative impl syntax should parse");
+    assert_eq!(root.text(), source);
+    assert!(matches!(
+        &root.items[1],
+        Item::TraitImplementation(implementation)
+            if implementation.negative
+                && implementation.trait_name.name == "Copy"
+                && implementation.members.is_empty()
+    ));
+}
+
+#[test]
 fn parses_generic_conditional_trait_implementations_losslessly() {
     let source = concat!(
         "trait Bound T { check: T -> Bool }\n",

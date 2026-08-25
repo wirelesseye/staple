@@ -2462,7 +2462,11 @@ non-`Copy` value; using it afterward is an error. Integers, `Bool`, `String`,
 from `Copy` fields are copied implicitly. The public prelude trait `Copy` can be
 used as a generic bound, but implementations are compiler-inferred and an
 explicit `impl Copy` is rejected. A custom `Drop` implementation makes its
-distinct target move-only regardless of its representation.
+distinct target move-only regardless of its representation. A distinct target
+can also be opted out of `Copy` directly, without a `Drop` implementation, with
+a negative `impl !Copy T {}` declaration; this only affects assignment and
+moves, not destruction, so the type still needs no `drop` member and is not
+finalized on collection.
 
 ```staple
 trait Copy T {}
@@ -2475,6 +2479,9 @@ type File = I32
 impl Drop File {
     def drop = File descriptor => close descriptor
 }
+
+type Handle = I32
+impl !Copy Handle {}
 ```
 
 Owned locals and parameters are dropped in reverse lexical order on normal

@@ -272,6 +272,7 @@ fn single_character_kind(character: char) -> TokenKind {
         '/' => TokenKind::Slash,
         '$' => TokenKind::Dollar,
         '@' => TokenKind::At,
+        '!' => TokenKind::Bang,
         _ => TokenKind::Unknown,
     }
 }

@@ -64,6 +64,7 @@ pub enum TokenKind {
     Ellipsis,
     Dollar,
     At,
+    Bang,
     Operator,
     Star,
     Plus,

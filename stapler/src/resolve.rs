@@ -63,6 +63,7 @@ pub struct ResolvedTraitImplementation {
     pub arguments: Vec<Type>,
     pub trait_bounds: Vec<crate::TraitBound>,
     pub subtype_bounds: Vec<crate::SubtypeBound>,
+    pub negative: bool,
     pub methods: HashMap<TraitMethodId, FunctionId>,
 }
 
@@ -2956,6 +2957,7 @@ impl NameResolver {
                             arguments: implementation.arguments.clone(),
                             trait_bounds: implementation.trait_bounds.clone(),
                             subtype_bounds: implementation.subtype_bounds.clone(),
+                            negative: implementation.negative,
                             methods,
                         });
                 }

@@ -154,6 +154,7 @@ struct CheckedTraitImplementation {
     parameters: HashSet<TypeParameterId>,
     arguments: Vec<CheckedType>,
     bounds: Vec<CheckedTraitBound>,
+    negative: bool,
     methods: HashMap<TraitMethodId, FunctionId>,
 }
 
@@ -1687,10 +1688,18 @@ impl TypeChecker {
                 ));
                 continue;
             }
-            if Some(implementation.trait_id) == self.copy_trait {
+            if implementation.negative && Some(implementation.trait_id) != self.copy_trait {
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "`Copy` is implemented structurally and cannot be implemented explicitly",
+                    "only `Copy` can be negated with `impl !Trait T {}`",
+                ));
+                continue;
+            }
+            if Some(implementation.trait_id) == self.copy_trait && !implementation.negative {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "`Copy` is implemented structurally and cannot be implemented explicitly; \
+                     declare `impl !Copy T {}` to opt a nominal type out of `Copy`",
                 ));
                 continue;
             }
@@ -1774,6 +1783,13 @@ impl TypeChecker {
                 ));
                 continue;
             }
+            if implementation.negative && !matches!(target, CheckedType::Distinct { .. }) {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "`!Copy` may only be implemented for a represented nominal type",
+                ));
+                continue;
+            }
             let canonical_arguments = canonicalize_impl_header(&declared_parameters, &arguments);
             if self.trait_implementations.iter().any(|existing| {
                 existing.trait_id == implementation.trait_id
@@ -1846,6 +1862,7 @@ impl TypeChecker {
                 parameters: declared_parameters,
                 arguments,
                 bounds,
+                negative: implementation.negative,
                 methods,
             });
         }
@@ -11018,6 +11035,21 @@ fn has_drop_implementation(
     })
 }
 
+fn has_negative_copy_implementation(
+    value_type: &CheckedType,
+    copy_trait: Option<TraitId>,
+    implementations: &[CheckedTraitImplementation],
+) -> bool {
+    copy_trait.is_some_and(|copy_trait| {
+        implementations.iter().any(|implementation| {
+            implementation.trait_id == copy_trait
+                && implementation.negative
+                && implementation.arguments.len() == 1
+                && &implementation.arguments[0] == value_type
+        })
+    })
+}
+
 fn valid_buffer_intrinsic_type(
     value_type: &CheckedType,
     intrinsic: crate::IntrinsicFunction,
@@ -11155,7 +11187,9 @@ fn is_copy_type(
     implementations: &[CheckedTraitImplementation],
     bounds: &[CheckedTraitBound],
 ) -> bool {
-    if has_drop_implementation(value_type, drop_trait, implementations) {
+    if has_drop_implementation(value_type, drop_trait, implementations)
+        || has_negative_copy_implementation(value_type, copy_trait, implementations)
+    {
         return false;
     }
     match value_type {
