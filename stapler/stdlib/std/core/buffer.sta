@@ -2,14 +2,14 @@
 pub type Buffer T = opaque
 impl<T> !Copy (Buffer T) {}
 
-pub def __buffer_with_capacity: <T> USize -> Buffer T = capacity => __buffer_with_capacity capacity
-pub def __buffer_length: <T> Buffer T -> USize = buffer => __buffer_length buffer
-pub def __buffer_capacity: <T> Buffer T -> USize = buffer => __buffer_capacity buffer
-pub def __buffer_push: <T> (mut Buffer T, move T) -> () = (buffer, value) => __buffer_push (buffer, value)
-pub def __buffer_pop: <T> mut Buffer T -> Option T = buffer => __buffer_pop buffer
-pub def __buffer_get: <T> (Buffer T, USize) -> Ref T = (buffer, position) => __buffer_get (buffer, position)
-pub def __buffer_freeze: <T> move Buffer T -> Slice T = move buffer => __buffer_freeze buffer
-pub def __buffer_transfer: <T> (mut Buffer T, mut Buffer T) -> () = (source, destination) => __buffer_transfer (source, destination)
+def __buffer_with_capacity: <T> USize -> Buffer T = capacity => __buffer_with_capacity capacity
+def __buffer_length: <T> Buffer T -> USize = buffer => __buffer_length buffer
+def __buffer_capacity: <T> Buffer T -> USize = buffer => __buffer_capacity buffer
+def __buffer_push: <T> (mut Buffer T, move T) -> () = (buffer, value) => __buffer_push (buffer, value)
+def __buffer_pop: <T> mut Buffer T -> Option T = buffer => __buffer_pop buffer
+def __buffer_get: <T> (Buffer T, USize) -> Ref T = (buffer, position) => __buffer_get (buffer, position)
+def __buffer_freeze: <T> move Buffer T -> Slice T = move buffer => __buffer_freeze buffer
+def __buffer_transfer: <T> (mut Buffer T, mut Buffer T) -> () = (source, destination) => __buffer_transfer (source, destination)
 pub def __buffer_clone: <T where Clone T> Buffer T -> Buffer T = buffer => __buffer_clone buffer
 
 companion<T> Buffer T {

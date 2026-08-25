@@ -1,7 +1,7 @@
 /// The lexical owner of reactions created within a reactive scope.
 pub type Reactive = opaque
 
-pub def __reactive_scope: () -> Reactive = () => __reactive_scope ()
+def __reactive_scope: () -> Reactive = () => __reactive_scope ()
 
 /// Creates a resource that owns reactions until its `with` block exits.
 pub def reactive_scope: () -> Reactive = () => __reactive_scope ()

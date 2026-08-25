@@ -1466,7 +1466,7 @@ impl NameResolver {
                 .modules()
                 .iter()
                 .filter(|module| module.path.starts_with(standard_library_directory))
-                .find_map(|module| self.interfaces[module.id.0].values.get(name).copied());
+                .find_map(|module| self.module_values[module.id.0].get(name).copied());
             if let Some(symbol) = symbol {
                 self.intrinsic_functions.insert(symbol, intrinsic);
             } else {
