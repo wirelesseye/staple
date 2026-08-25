@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::Path;
 
 use stapler::*;
 
@@ -10,11 +11,19 @@ pub struct HoverEntry {
     pub documentation: Vec<String>,
 }
 
+#[cfg(test)]
 pub fn entries(module: &Module, typed: &TypedModule) -> Vec<HoverEntry> {
+    let resolved = typed.resolved();
+    let path = &resolved.program().module(resolved.program().entry()).path;
+    entries_at_path(path, module, typed)
+}
+
+pub fn entries_at_path(path: &Path, module: &Module, typed: &TypedModule) -> Vec<HoverEntry> {
     let mut collector = Collector {
         typed,
         entries: Vec::new(),
         declarations: HashMap::new(),
+        path,
     };
     for source_module in typed.resolved().program().modules() {
         collector.collect_module_declarations(&source_module.syntax);
@@ -24,6 +33,18 @@ pub fn entries(module: &Module, typed: &TypedModule) -> Vec<HoverEntry> {
     for item in &module.items {
         collector.item(item);
     }
+    for item in &typed.resolved().syntax().items {
+        collector.item(item);
+    }
+    collector.entries.sort_by(|left, right| {
+        left.range
+            .start
+            .cmp(&right.range.start)
+            .then(left.range.end.cmp(&right.range.end))
+            .then(left.signature.cmp(&right.signature))
+            .then(left.documentation.cmp(&right.documentation))
+    });
+    collector.entries.dedup();
     collector.entries
 }
 
@@ -31,6 +52,7 @@ struct Collector<'a> {
     typed: &'a TypedModule,
     entries: Vec<HoverEntry>,
     declarations: HashMap<SymbolId, Declaration>,
+    path: &'a Path,
 }
 
 #[derive(Clone)]
@@ -1193,16 +1215,9 @@ impl Collector<'_> {
     }
 
     fn syntax_with_docs(&mut self, syntax: &Syntax, signature: String, documentation: Vec<String>) {
-        if let (Some(first), Some(last)) = (
-            syntax.tokens().iter().find(|token| !token.kind.is_trivia()),
-            syntax
-                .tokens()
-                .iter()
-                .rev()
-                .find(|token| !token.kind.is_trivia()),
-        ) {
+        if let Some(range) = crate::staple_lsp::source_projection::syntax_range(syntax, self.path) {
             self.entries.push(HoverEntry {
-                range: first.span.start..last.span.end,
+                range,
                 signature,
                 documentation,
             });
@@ -1220,9 +1235,11 @@ impl Collector<'_> {
         signature: String,
         documentation: Vec<String>,
     ) {
-        if let Some(token) = syntax.tokens().iter().find(|token| token.text == name) {
+        if let Some(range) =
+            crate::staple_lsp::source_projection::named_range(syntax, name, false, self.path)
+        {
             self.entries.push(HoverEntry {
-                range: token.span.clone(),
+                range,
                 signature,
                 documentation,
             });
@@ -1240,14 +1257,11 @@ impl Collector<'_> {
         signature: String,
         documentation: Vec<String>,
     ) {
-        if let Some(token) = syntax
-            .tokens()
-            .iter()
-            .rev()
-            .find(|token| token.text == name)
+        if let Some(range) =
+            crate::staple_lsp::source_projection::named_range(syntax, name, true, self.path)
         {
             self.entries.push(HoverEntry {
-                range: token.span.clone(),
+                range,
                 signature,
                 documentation,
             });

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
+use std::path::Path;
 use std::path::PathBuf;
 
 use stapler::*;
@@ -17,7 +18,18 @@ pub struct DefinitionEntry {
     pub targets: Vec<DefinitionTarget>,
 }
 
+#[cfg(test)]
 pub fn entries(
+    module: &Module,
+    resolved: &ResolvedModule,
+    typed: Option<&TypedModule>,
+) -> Vec<DefinitionEntry> {
+    let path = &resolved.program().module(resolved.program().entry()).path;
+    entries_at_path(path, module, resolved, typed)
+}
+
+pub fn entries_at_path(
+    path: &Path,
     module: &Module,
     resolved: &ResolvedModule,
     typed: Option<&TypedModule>,
@@ -35,8 +47,10 @@ pub fn entries(
         typed,
         targets,
         entries: Vec::new(),
+        path,
     };
     collector.module(module);
+    collector.module(resolved.syntax());
     collector.entries.sort_by(|left, right| {
         left.range
             .start
@@ -339,6 +353,7 @@ struct Collector<'a> {
     typed: Option<&'a TypedModule>,
     targets: HashMap<DefinitionId, DefinitionTarget>,
     entries: Vec<DefinitionEntry>,
+    path: &'a Path,
 }
 
 impl Collector<'_> {
@@ -841,7 +856,9 @@ impl Collector<'_> {
     }
 
     fn add(&mut self, syntax: &Syntax, name: &str, definitions: &[DefinitionId], last: bool) {
-        let Some(range) = token_range(syntax, name, last) else {
+        let Some(range) =
+            crate::staple_lsp::source_projection::named_range(syntax, name, last, self.path)
+        else {
             return;
         };
         let mut targets = definitions
@@ -860,22 +877,6 @@ impl Collector<'_> {
     }
 }
 
-fn token_range(syntax: &Syntax, name: &str, last: bool) -> Option<Range<usize>> {
-    let tokens = syntax.tokens();
-    if last {
-        tokens
-            .iter()
-            .rev()
-            .find(|token| token.text == name)
-            .map(|token| token.span.clone())
-    } else {
-        tokens
-            .iter()
-            .find(|token| token.text == name)
-            .map(|token| token.span.clone())
-    }
-}
-
 fn syntax_range(syntax: &Syntax) -> Range<usize> {
     let first = syntax.tokens().iter().find(|token| !token.kind.is_trivia());
     let last = syntax
@@ -886,6 +887,15 @@ fn syntax_range(syntax: &Syntax) -> Range<usize> {
     match (first, last) {
         (Some(first), Some(last)) => first.span.start..last.span.end,
         _ => syntax.span.to_range(),
+    }
+}
+
+fn token_range(syntax: &Syntax, name: &str, last: bool) -> Option<Range<usize>> {
+    let mut tokens = syntax.tokens().iter().filter(|token| token.text == name);
+    if last {
+        tokens.next_back().map(|token| token.span.clone())
+    } else {
+        tokens.next().map(|token| token.span.clone())
     }
 }
 

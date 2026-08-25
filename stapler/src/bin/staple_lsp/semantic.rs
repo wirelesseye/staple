@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 
 use lsp_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend};
 use stapler::*;
@@ -82,9 +83,28 @@ pub fn entries(
     resolved: Option<&ResolvedModule>,
     typed: Option<&TypedModule>,
 ) -> Vec<SemanticEntry> {
-    let mut classifier = Classifier::new(source, typed);
+    let path = resolved
+        .map(|resolved| &resolved.program().module(resolved.program().entry()).path)
+        .map_or_else(|| Path::new(""), |path| path.as_path());
+    entries_at_path(source, path, module, resolved, typed)
+}
+
+pub fn entries_at_path(
+    source: &str,
+    path: &Path,
+    module: Option<&Module>,
+    resolved: Option<&ResolvedModule>,
+    typed: Option<&TypedModule>,
+) -> Vec<SemanticEntry> {
+    let mut classifier = Classifier::new(source, path, typed);
     if let Some(module) = module {
         classifier.module(module, resolved);
+    }
+    if let Some(resolved) = resolved {
+        let expanded = resolved.syntax();
+        if module.is_none_or(|surface| !std::ptr::eq(surface, expanded)) {
+            classifier.module(expanded, Some(resolved));
+        }
     }
     classifier.finish()
 }
@@ -93,14 +113,16 @@ struct Classifier<'a> {
     tokens: HashMap<(usize, usize), RawToken>,
     symbols: HashMap<SymbolId, u32>,
     typed: Option<&'a TypedModule>,
+    path: &'a Path,
 }
 
 impl<'a> Classifier<'a> {
-    fn new(source: &str, typed: Option<&'a TypedModule>) -> Self {
+    fn new(source: &str, path: &'a Path, typed: Option<&'a TypedModule>) -> Self {
         let mut this = Self {
             tokens: HashMap::new(),
             symbols: HashMap::new(),
             typed,
+            path,
         };
         for token in lex(source) {
             let kind = match token.kind {
@@ -1001,36 +1023,18 @@ impl<'a> Classifier<'a> {
     }
 
     fn mark_first(&mut self, syntax: &Syntax, name: &str, kind: u32, modifiers: u32, priority: u8) {
-        if let Some(token) = syntax.tokens().iter().find(|token| {
-            token.text == name
-                && matches!(
-                    token.kind,
-                    TokenKind::Identifier
-                        | TokenKind::Operator
-                        | TokenKind::Plus
-                        | TokenKind::Minus
-                        | TokenKind::Star
-                        | TokenKind::Slash
-                )
-        }) {
-            self.insert(token.span.start, token.span.end, kind, modifiers, priority);
+        if let Some(range) =
+            crate::staple_lsp::source_projection::named_range(syntax, name, false, self.path)
+        {
+            self.insert(range.start, range.end, kind, modifiers, priority);
         }
     }
 
     fn mark_last(&mut self, syntax: &Syntax, name: &str, kind: u32, modifiers: u32, priority: u8) {
-        if let Some(token) = syntax.tokens().iter().rev().find(|token| {
-            token.text == name
-                && matches!(
-                    token.kind,
-                    TokenKind::Identifier
-                        | TokenKind::Operator
-                        | TokenKind::Plus
-                        | TokenKind::Minus
-                        | TokenKind::Star
-                        | TokenKind::Slash
-                )
-        }) {
-            self.insert(token.span.start, token.span.end, kind, modifiers, priority);
+        if let Some(range) =
+            crate::staple_lsp::source_projection::named_range(syntax, name, true, self.path)
+        {
+            self.insert(range.start, range.end, kind, modifiers, priority);
         }
     }
 

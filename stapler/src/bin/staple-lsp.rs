@@ -3,6 +3,7 @@ mod staple_lsp {
     pub mod definition;
     pub mod hover;
     pub mod semantic;
+    pub mod source_projection;
 }
 
 use std::collections::{HashMap, HashSet};
@@ -277,18 +278,35 @@ impl Server {
             let requested_position = params.text_document_position_params.position;
             let result = self.documents.get(uri).and_then(|document| {
                 let offset = semantic::offset(&document.text, requested_position)?;
-                let entry = document
+                let width = document
                     .hover_entries
                     .iter()
                     .filter(|entry| entry.range.start <= offset && offset < entry.range.end)
-                    .min_by_key(|entry| entry.range.end - entry.range.start)?;
+                    .map(|entry| entry.range.end - entry.range.start)
+                    .min()?;
+                let mut entries = document
+                    .hover_entries
+                    .iter()
+                    .filter(|entry| {
+                        entry.range.start <= offset
+                            && offset < entry.range.end
+                            && entry.range.end - entry.range.start == width
+                    })
+                    .collect::<Vec<_>>();
+                entries.sort_by(|left, right| {
+                    left.signature
+                        .cmp(&right.signature)
+                        .then(left.documentation.cmp(&right.documentation))
+                });
+                entries.dedup();
+                let entry = entries.first()?;
                 let (start_line, start_character) =
                     semantic::position(&document.text, entry.range.start);
                 let (end_line, end_character) = semantic::position(&document.text, entry.range.end);
-                Some(Hover {
-                    contents: HoverContents::Markup(MarkupContent {
-                        kind: MarkupKind::Markdown,
-                        value: if entry.documentation.is_empty() {
+                let value = entries
+                    .into_iter()
+                    .map(|entry| {
+                        if entry.documentation.is_empty() {
                             format!("```staple\n{}\n```", entry.signature)
                         } else {
                             format!(
@@ -296,7 +314,14 @@ impl Server {
                                 entry.signature,
                                 entry.documentation.join("\n")
                             )
-                        },
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n\n---\n\n");
+                Some(Hover {
+                    contents: HoverContents::Markup(MarkupContent {
+                        kind: MarkupKind::Markdown,
+                        value,
                     }),
                     range: Some(Range::new(
                         Position::new(start_line, start_character),
@@ -436,16 +461,18 @@ impl Server {
                             .module(resolved.program().entry())
                             .path
                             .clone();
-                        definition_entries = Some(definition::entries(module, &resolved, None));
+                        definition_entries =
+                            Some(definition::entries_at_path(&path, module, &resolved, None));
                         resolved_for_tokens = Some(resolved.clone());
                         match TypeChecker::new().check(resolved) {
                             Ok(typed) => {
-                                definition_entries = Some(definition::entries(
+                                definition_entries = Some(definition::entries_at_path(
+                                    &path,
                                     module,
                                     typed.resolved(),
                                     Some(&typed),
                                 ));
-                                hover_entries = hover::entries(module, &typed);
+                                hover_entries = hover::entries_at_path(&path, module, &typed);
                                 let completion_index =
                                     staple_lsp::completion::index(module, &typed);
                                 typed_for_tokens = Some(typed);
@@ -467,8 +494,9 @@ impl Server {
             ));
         }
 
-        let current_semantic = semantic::entries(
+        let current_semantic = semantic::entries_at_path(
             &text,
+            &path,
             parsed.as_ref(),
             resolved_for_tokens.as_ref(),
             typed_for_tokens.as_ref(),
@@ -857,6 +885,83 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn projects_expanded_macro_argument_features_to_the_call_site() {
+        let source = concat!(
+            "use std.syntax.(parse_quote, Expr, Ident)\n",
+            "def target = () => 1\n",
+            "macro invoke: Ident -> Expr = name: Ident => parse_quote { $name () }\n",
+            "macro discard: Expr -> Expr = _: Expr => parse_quote { 1 }\n",
+            "let result = invoke target\n",
+            "let ignored = discard target\n",
+        );
+        let path = std::env::temp_dir().join("staple-lsp-macro-argument-features.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let surface = stapler::parse(source).unwrap();
+        let argument_start = source.find("invoke target").unwrap() + "invoke ".len();
+        let argument_range = argument_start..argument_start + "target".len();
+        let discarded_start = source.rfind("target").unwrap();
+        let discarded_range = discarded_start..discarded_start + "target".len();
+        let declaration_start = source.find("target").unwrap();
+
+        let semantics = semantic::entries_at_path(
+            source,
+            &path,
+            Some(&surface),
+            Some(typed.resolved()),
+            Some(&typed),
+        );
+        assert!(
+            semantics.iter().any(|entry| {
+                entry.start == argument_range.start
+                    && entry.end == argument_range.end
+                    && entry.token_type == semantic::FUNCTION
+            }),
+            "semantic entries: {semantics:?}"
+        );
+
+        let hovers = hover::entries_at_path(&path, &surface, &typed);
+        assert!(
+            hovers.iter().any(|entry| {
+                entry.range == argument_range && entry.signature.contains("target")
+            }),
+            "hover entries: {hovers:?}"
+        );
+
+        let definitions =
+            definition::entries_at_path(&path, &surface, typed.resolved(), Some(&typed));
+        assert!(
+            definitions.iter().any(|entry| {
+                entry.range == argument_range
+                    && entry.targets.iter().any(|target| {
+                        target.selection_range.start == declaration_start
+                            && &source[target.selection_range.clone()] == "target"
+                    })
+            }),
+            "definition entries: {definitions:?}"
+        );
+        assert!(!semantics.iter().any(|entry| {
+            entry.start == discarded_range.start
+                && entry.end == discarded_range.end
+                && entry.token_type == semantic::FUNCTION
+        }));
+        assert!(
+            !hovers.iter().any(|entry| {
+                entry.range == discarded_range && entry.signature.contains("target")
+            })
+        );
+        assert!(
+            !definitions
+                .iter()
+                .any(|entry| entry.range == discarded_range)
+        );
+    }
+
+    #[test]
     fn parses_server_options() {
         assert_eq!(
             parse_options(Vec::<std::ffi::OsString>::new()).unwrap(),
@@ -1105,7 +1210,6 @@ mod tests {
         assert!(
             matches!(hover, Some(Hover { contents: HoverContents::Markup(content), .. }) if content.value.contains("I32"))
         );
-
         client
             .sender
             .send(Message::Request(Request {
