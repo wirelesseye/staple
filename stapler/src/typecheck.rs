@@ -1830,6 +1830,26 @@ impl TypeChecker {
                 ));
                 continue;
             }
+            let bounds = implementation
+                .trait_bounds
+                .iter()
+                .filter_map(|bound| self.resolve_trait_bound(module, bound))
+                .collect::<Vec<_>>();
+            if self.trait_implementations.iter().any(|existing| {
+                existing.trait_id == implementation.trait_id
+                    && self.implementation_headers_overlap(
+                        existing,
+                        &declared_parameters,
+                        &arguments,
+                        &bounds,
+                    )
+            }) {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "duplicate trait implementation for these arguments",
+                ));
+                continue;
+            }
             let dependencies = self
                 .trait_functional_dependencies
                 .get(&implementation.trait_id)
@@ -1879,11 +1899,6 @@ impl TypeChecker {
                     self.impl_function_types.insert(function_id, function_type);
                 }
             }
-            let bounds = implementation
-                .trait_bounds
-                .iter()
-                .filter_map(|bound| self.resolve_trait_bound(module, bound))
-                .collect();
             self.trait_implementations.push(CheckedTraitImplementation {
                 span,
                 trait_id: implementation.trait_id,
@@ -1894,6 +1909,79 @@ impl TypeChecker {
                 methods,
             });
         }
+    }
+
+    /// Whether a not-yet-added implementation header (`new_parameters`,
+    /// `new_arguments`, `new_bounds`) could apply to the same concrete type
+    /// as an already-collected `existing` implementation of the same trait —
+    /// a coherence violation broader than the exact syntactic duplicate
+    /// `canonicalize_impl_header` catches. Unlike that syntactic check, this
+    /// one accounts for bound clauses: a blanket `impl<T where Copy T>
+    /// Trait T` overlaps a concrete `impl Trait I32` (`I32` is `Copy`) but
+    /// not `impl Trait SomeDropType` (which is not `Copy`, so the blanket
+    /// impl never actually applies to it).
+    fn implementation_headers_overlap(
+        &self,
+        existing: &CheckedTraitImplementation,
+        new_parameters: &HashSet<TypeParameterId>,
+        new_arguments: &[CheckedType],
+        new_bounds: &[CheckedTraitBound],
+    ) -> bool {
+        if existing.arguments.len() != new_arguments.len() {
+            return false;
+        }
+        let free_parameters: HashSet<TypeParameterId> = existing
+            .parameters
+            .iter()
+            .chain(new_parameters)
+            .copied()
+            .collect();
+        let mut substitutions = HashMap::new();
+        let unifies = existing.arguments.iter().zip(new_arguments).all(
+            |(existing_argument, new_argument)| {
+                unify_impl_headers(
+                    existing_argument,
+                    new_argument,
+                    &free_parameters,
+                    &mut substitutions,
+                )
+            },
+        );
+        if !unifies {
+            return false;
+        }
+        existing.bounds.iter().chain(new_bounds).all(|bound| {
+            let substituted_arguments = bound
+                .arguments
+                .iter()
+                .cloned()
+                .map(|argument| substitute_type_fixpoint(argument, &substitutions))
+                .collect::<Vec<_>>();
+            self.bound_could_hold(bound.trait_id, &substituted_arguments)
+        })
+    }
+
+    /// Conservatively determines whether a bound could hold for a
+    /// (possibly still partly generic) set of arguments, for use by
+    /// `implementation_headers_overlap`: a bound whose arguments still
+    /// contain a free type parameter after unification can't be evaluated,
+    /// so it's assumed satisfiable, matching this check's conservative bias
+    /// toward flagging overlap rather than silently accepting it.
+    fn bound_could_hold(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
+        if arguments.iter().any(contains_type_parameter) {
+            return true;
+        }
+        if Some(trait_id) == self.copy_trait {
+            return is_copy_type(
+                &arguments[0],
+                self.copy_trait,
+                self.drop_trait,
+                self.io_type,
+                &self.trait_implementations,
+                &[],
+            );
+        }
+        self.trait_obligation_available(trait_id, arguments)
     }
 
     fn validate_indexing_trait_method_types(&mut self, module: &ResolvedModule) {
@@ -9733,6 +9821,151 @@ fn canonicalize_impl_header(
         .cloned()
         .map(|argument| substitute_type(argument, &substitutions))
         .collect()
+}
+
+/// Unifies two trait-implementation header types against each other,
+/// treating any `Parameter` whose id is in `free_parameters` as a free
+/// variable bindable from *either* side — unlike `infer_type_parameters`,
+/// which only lets the `template` side bind. This is what lets
+/// `implementation_headers_overlap` detect overlap regardless of which of
+/// two impls (a generic one or a concrete one) was declared first: e.g.
+/// unifying a concrete existing impl's `I32` against a new generic impl's
+/// bare `T` binds `T ↦ I32` just as readily as the reverse.
+fn unify_impl_headers(
+    left: &CheckedType,
+    right: &CheckedType,
+    free_parameters: &HashSet<TypeParameterId>,
+    substitutions: &mut HashMap<TypeParameterId, CheckedType>,
+) -> bool {
+    fn resolve(
+        value_type: &CheckedType,
+        free_parameters: &HashSet<TypeParameterId>,
+        substitutions: &HashMap<TypeParameterId, CheckedType>,
+    ) -> CheckedType {
+        let mut current = value_type.clone();
+        for _ in 0..32 {
+            let CheckedType::Parameter { id, .. } = &current else {
+                break;
+            };
+            if !free_parameters.contains(id) {
+                break;
+            }
+            match substitutions.get(id) {
+                Some(next) => current = next.clone(),
+                None => break,
+            }
+        }
+        current
+    }
+
+    let left = resolve(left, free_parameters, substitutions);
+    let right = resolve(right, free_parameters, substitutions);
+    match (&left, &right) {
+        (
+            CheckedType::Parameter { id: left_id, .. },
+            CheckedType::Parameter { id: right_id, .. },
+        ) if free_parameters.contains(left_id) && free_parameters.contains(right_id) => {
+            if left_id != right_id {
+                substitutions.insert(*left_id, right);
+            }
+            true
+        }
+        (CheckedType::Parameter { id, .. }, _) if free_parameters.contains(id) => {
+            substitutions.insert(*id, right);
+            true
+        }
+        (_, CheckedType::Parameter { id, .. }) if free_parameters.contains(id) => {
+            substitutions.insert(*id, left);
+            true
+        }
+        (CheckedType::CPointer { pointee: left }, CheckedType::CPointer { pointee: right }) => {
+            unify_impl_headers(left, right, free_parameters, substitutions)
+        }
+        (CheckedType::Ref(left), CheckedType::Ref(right))
+        | (CheckedType::Buffer(left), CheckedType::Buffer(right))
+        | (CheckedType::ErasedProduct(left), CheckedType::ErasedProduct(right)) => {
+            unify_impl_headers(left, right, free_parameters, substitutions)
+        }
+        (
+            CheckedType::Opaque {
+                id: left_id,
+                arguments: left_arguments,
+                ..
+            },
+            CheckedType::Opaque {
+                id: right_id,
+                arguments: right_arguments,
+                ..
+            },
+        )
+        | (
+            CheckedType::TypeConstructor {
+                id: left_id,
+                arguments: left_arguments,
+                ..
+            },
+            CheckedType::TypeConstructor {
+                id: right_id,
+                arguments: right_arguments,
+                ..
+            },
+        )
+        | (
+            CheckedType::Distinct {
+                id: left_id,
+                arguments: left_arguments,
+                ..
+            },
+            CheckedType::Distinct {
+                id: right_id,
+                arguments: right_arguments,
+                ..
+            },
+        ) => {
+            left_id == right_id
+                && left_arguments.len() == right_arguments.len()
+                && left_arguments.iter().zip(right_arguments).all(|(left, right)| {
+                    unify_impl_headers(left, right, free_parameters, substitutions)
+                })
+        }
+        (CheckedType::Product(left), CheckedType::Product(right)) => {
+            left.variadic == right.variadic
+                && left.elements.len() == right.elements.len()
+                && left.elements.iter().zip(&right.elements).all(|(left, right)| {
+                    unify_impl_headers(
+                        &left.value_type,
+                        &right.value_type,
+                        free_parameters,
+                        substitutions,
+                    )
+                })
+        }
+        (CheckedType::Sum(left), CheckedType::Sum(right)) => {
+            left.alternatives.len() == right.alternatives.len()
+                && left.alternatives.iter().zip(&right.alternatives).all(|(left, right)| {
+                    unify_impl_headers(left, right, free_parameters, substitutions)
+                })
+        }
+        _ => left == right,
+    }
+}
+
+/// Repeatedly applies `substitute_type` until it reaches a fixed point (or
+/// gives up after a small bound), so a chain of bindings produced by
+/// `unify_impl_headers` (e.g. `T ↦ U`, `U ↦ I32`) fully resolves to `I32`
+/// rather than leaving a partially-substituted `U` behind.
+fn substitute_type_fixpoint(
+    mut value_type: CheckedType,
+    substitutions: &HashMap<TypeParameterId, CheckedType>,
+) -> CheckedType {
+    for _ in 0..8 {
+        let next = substitute_type(value_type.clone(), substitutions);
+        if next == value_type {
+            return next;
+        }
+        value_type = next;
+    }
+    value_type
 }
 
 /// Finds every trait implementation in `implementations` whose (possibly

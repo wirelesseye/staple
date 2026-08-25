@@ -7122,7 +7122,13 @@ fn rejects_alpha_equivalent_duplicate_generic_trait_implementations() {
 }
 
 #[test]
-fn rejects_ambiguous_dispatch_between_blanket_and_concrete_trait_implementations() {
+fn rejects_a_blanket_implementation_that_overlaps_an_earlier_concrete_one_before_any_call_site() {
+    // Once `Bound I32` holds, the blanket `impl<T where Bound T> Target T`
+    // applies to `I32` exactly as much as the concrete `impl Target I32`
+    // does. This coherence violation is now caught eagerly at the second
+    // impl's declaration (`implementation_headers_overlap`) rather than
+    // waiting for a call site to expose the ambiguity, so this test no
+    // longer needs a `Target.act` call to trigger a diagnostic at all.
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Bound T { check: T -> Bool }\n",
@@ -7130,13 +7136,12 @@ fn rejects_ambiguous_dispatch_between_blanket_and_concrete_trait_implementations
             "impl Bound I32 { def check = value => True }\n",
             "impl Target I32 { def act = value => value }\n",
             "impl <T where Bound T> Target T { def act = value => value }\n",
-            "let answer: I32 = Target.act 41\n",
         )))
-        .expect_err("a concrete impl and an applicable blanket impl must be ambiguous");
+        .expect_err("a concrete impl and an applicable blanket impl must be rejected as overlapping");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("ambiguous trait implementation")
+            .contains("duplicate trait implementation")
     }));
 }
 
@@ -8426,4 +8431,32 @@ fn a_non_copy_type_can_implement_clone_manually() {
         .compile_module(&module)
         .expect("a manual `Clone` implementation for a non-`Copy` type should compile");
     assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn rejects_a_concrete_clone_impl_that_overlaps_the_blanket_copy_implementation() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("impl Clone I32 { def clone = value => value }\n"))
+        .expect_err("`I32` already gets `Clone` from the blanket `Copy` implementation");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("duplicate trait implementation"))
+    );
+}
+
+#[test]
+fn rejects_a_blanket_bounded_impl_that_overlaps_an_earlier_concrete_one() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "trait Greet T { greet: T -> String }\n",
+            "impl Greet I32 { def greet = value => \"hi\" }\n",
+            "impl<T where Copy T> Greet T { def greet = value => \"hi\" }\n",
+        )))
+        .expect_err("the blanket impl also covers `I32`, already implemented concretely above");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("duplicate trait implementation"))
+    );
 }
