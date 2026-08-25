@@ -8397,3 +8397,33 @@ fn resolves_local_const_names_before_their_textual_position_like_def() {
             .any(|diagnostic| diagnostic.message.contains("later"))
     );
 }
+
+#[test]
+fn every_copy_type_gets_a_blanket_clone_implementation() {
+    let module = type_check(concat!(
+        "let value: I32 = 41\n",
+        "let cloned: I32 = Clone.clone value\n",
+        "let pair: (I32, I32) = (1, 2)\n",
+        "let cloned_pair: (I32, I32) = Clone.clone pair\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("the blanket `Clone` impl for `Copy` types should compile");
+    assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn a_non_copy_type_can_implement_clone_manually() {
+    let module = type_check(concat!(
+        "type Resource = I32\n",
+        "impl Drop Resource { def drop = Resource value => () }\n",
+        "impl Clone Resource { def clone = Resource value => Resource value }\n",
+        "def duplicate: Resource -> Resource = resource => Clone.clone resource\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a manual `Clone` implementation for a non-`Copy` type should compile");
+    assert!(llvm.contains("trait.call"));
+}

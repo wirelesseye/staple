@@ -2556,6 +2556,33 @@ type Handle = I32
 impl !Copy Handle {}
 ```
 
+`Clone` is a separate prelude trait for explicit duplication and, unlike Rust,
+is not a prerequisite of `Copy`: `Copy` remains fully compiler-inferred as
+described above, and a type needs no `Clone` implementation to be `Copy`.
+Every `Copy` type conversely gets `Clone` for free, through a blanket
+implementation in the standard library:
+
+```staple
+trait Clone T {
+    clone: T -> T
+}
+
+impl<T where Copy T> Clone T {
+    def clone = value => value
+}
+```
+
+A non-`Copy` type has no implicit `Clone`; implement it manually to allow
+explicit duplication:
+
+```staple
+type Handle = I32
+impl !Copy Handle {}
+impl Clone Handle {
+    def clone = Handle descriptor => Handle descriptor
+}
+```
+
 Owned locals and parameters are dropped in reverse lexical order on normal
 scope exit, explicit `return`, and propagation. `drop value` consumes and
 destroys a value early. A destructor may inspect copied fields and make scoped
