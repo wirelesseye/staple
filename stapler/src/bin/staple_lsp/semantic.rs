@@ -960,10 +960,12 @@ impl<'a> Classifier<'a> {
     /// Classifies the namespace/type segments of a resolved qualified
     /// access chain's receiver, e.g. `std` and `io` in `std.io.println`, or
     /// `List` in `List.push` (a companion access, classified as TYPE rather
-    /// than NAMESPACE). Not every segment of a chain is backed by its own
-    /// module (e.g. `std` is a virtual root with no module of its own), so
-    /// segments without resolution info fall back to the ordinary
-    /// expression walk instead of being left unclassified.
+    /// than NAMESPACE). Every node visited here is, by construction, part of
+    /// a chain that already resolved as a qualified path — so even a
+    /// segment without its own module (e.g. `std`, a virtual root with no
+    /// backing module) is still structurally a namespace, and is painted
+    /// NAMESPACE the same as `use std.io`'s path segments, rather than
+    /// falling back to ordinary name classification.
     fn qualified_receiver(&mut self, expression: &Expression, resolved: Option<&ResolvedModule>) {
         let Some(resolved) = resolved else { return };
         match expression {
@@ -976,7 +978,7 @@ impl<'a> Classifier<'a> {
                     };
                     self.mark_last(&name.syntax, &name.name, kind, READONLY, 2);
                 }
-                None => self.expression(expression, Some(resolved)),
+                None => self.mark_last(&name.syntax, &name.name, NAMESPACE, 0, 1),
             },
             Expression::Access(access) => {
                 self.qualified_receiver(&access.value, Some(resolved));
@@ -990,7 +992,7 @@ impl<'a> Classifier<'a> {
                             };
                             self.mark_last(&access.syntax, name, kind, READONLY, 2);
                         }
-                        None => self.mark_last(&access.syntax, name, PROPERTY, 0, 1),
+                        None => self.mark_last(&access.syntax, name, NAMESPACE, 0, 1),
                     }
                 }
             }
@@ -1763,11 +1765,12 @@ mod tests {
 
     #[test]
     fn classifies_namespace_qualified_access() {
-        // `println`, the final segment, is resolved directly; `io`, the
-        // module it lives in, is the deepest namespace segment and always
-        // gets resolution info. `std` itself is a virtual root with no
-        // backing module of its own, so it isn't (and can't be) reclassified
-        // — it keeps falling back to ordinary name classification.
+        // `println`'s module (`io`) is resolved directly. `std` itself is a
+        // virtual root with no backing module of its own, so it can't be
+        // resolved the same way — but since it's still structurally part of
+        // a resolved qualified path, it's painted NAMESPACE too, matching
+        // `use std.io`'s path segments rather than falling back to ordinary
+        // name classification.
         let source = "let f = std.io.println\n";
         let path = std::env::temp_dir().join("staple-semantic-namespace-access.sta");
         let program = ProgramLoader::new()
@@ -1779,10 +1782,15 @@ mod tests {
         let module = parse(source).unwrap();
         let classified = entries(source, Some(&module), Some(typed.resolved()), Some(&typed));
 
+        let std_start = source.find("std").unwrap();
         let io_start = source.find(".io").unwrap() + 1;
         let println_start = source.find("println").unwrap();
 
-        for (start, expected) in [(io_start, NAMESPACE), (println_start, FUNCTION)] {
+        for (start, expected) in [
+            (std_start, NAMESPACE),
+            (io_start, NAMESPACE),
+            (println_start, FUNCTION),
+        ] {
             assert_eq!(
                 classified
                     .iter()
