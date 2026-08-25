@@ -7929,7 +7929,7 @@ fn lowers_custom_drop_and_gc_finalizer_glue() {
 }
 
 #[test]
-fn rejects_move_only_globals_partial_moves_and_cstring_returns_from_c() {
+fn rejects_partial_moves_and_cstring_returns_from_c() {
     let ffi_diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.cinterop.*\n",
@@ -7945,24 +7945,61 @@ fn rejects_move_only_globals_partial_moves_and_cstring_returns_from_c() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.cinterop.*\n",
-            "let global: CString = c_string \"owned\"\n",
             "def partial = (pair: (CString, I32)) => pair.0\n",
         )))
         .expect_err("unsupported ownership operations should be rejected");
-    let messages = diagnostics
-        .iter()
-        .map(|diagnostic| diagnostic.message.as_str())
-        .collect::<Vec<_>>();
     assert!(
-        messages
+        diagnostics
             .iter()
-            .any(|message| message.contains("move-only values cannot be stored"))
+            .any(|diagnostic| diagnostic.message.contains("cannot move a field"))
     );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("cannot move a field"))
-    );
+}
+
+#[test]
+fn allows_move_only_globals_borrowed_from_top_level_statements_and_functions() {
+    let module = type_check(concat!(
+        "use std.io.println\n",
+        "let mut numbers: List I32 = List.new ()\n",
+        "List.push numbers 1\n",
+        "List.push numbers 2\n",
+        "def push_three = () => List.push numbers 3\n",
+        "push_three ()\n",
+        "println (ToString.to_string (List.length numbers))\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("borrowing a move-only global should compile");
+}
+
+#[test]
+fn rejects_moving_a_move_only_global_out_of_top_level_statements() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let mut data: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
+            "let frozen: Slice I32 = Buffer.freeze data\n",
+        )))
+        .expect_err("moving a global out at top level should be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot move a value out of a global binding")
+    }));
+}
+
+#[test]
+fn rejects_moving_a_move_only_global_out_of_a_function() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let mut data: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
+            "def take = () => Buffer.freeze data\n",
+        )))
+        .expect_err("moving a global out of a function should be rejected");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot move a value out of a global binding")
+    }));
 }
 
 #[test]

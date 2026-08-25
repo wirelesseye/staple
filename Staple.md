@@ -2589,7 +2589,12 @@ destroys a value early. A destructor may inspect copied fields and make scoped
 C calls, but may not move out of its value; after the custom destructor returns,
 the representation's owned fields are dropped automatically. Partial field
 moves through `.name` or `.index` are rejected; destructure the whole owned
-value instead. Move-only globals are not supported.
+value instead.
+
+A global binding may hold a move-only value, but the value can only ever be
+borrowed — shared or `mut` — from top-level statements or from any function;
+it can never be moved out. Top-level values have program lifetime: they are
+not guaranteed to run `Drop` at normal process termination.
 
 When an unreachable managed payload or closure environment owns a `Drop`
 value, collection finalizes it exactly once before reclaiming its storage.

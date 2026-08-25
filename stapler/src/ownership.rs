@@ -38,6 +38,7 @@ pub(crate) struct OwnershipChecker<'a> {
     module: &'a TypedModule,
     function: Option<FunctionId>,
     states: HashMap<SymbolId, ValueState>,
+    top_level_symbols: HashSet<SymbolId>,
     info: OwnershipInfo,
     diagnostics: Vec<Diagnostic>,
     loops: Vec<LoopOwnershipContext>,
@@ -55,11 +56,13 @@ impl<'a> OwnershipChecker<'a> {
             module,
             function: None,
             states: HashMap::new(),
+            top_level_symbols: HashSet::new(),
             info: OwnershipInfo::default(),
             diagnostics: vec![],
             loops: vec![],
         };
-        checker.check_globals();
+        checker.collect_top_level_symbols();
+        checker.check_top_level();
 
         for function in module.functions() {
             if function
@@ -78,26 +81,20 @@ impl<'a> OwnershipChecker<'a> {
         (checker.info, checker.diagnostics)
     }
 
-    fn check_globals(&mut self) {
+    /// Collects the symbol of every top-level `let`/pattern binding across
+    /// every module, so `use_symbol` can recognize a global in O(1) instead
+    /// of rescanning every module's items on each use.
+    fn collect_top_level_symbols(&mut self) {
         for source_module in self.module.resolved().program().modules() {
             for item in &source_module.syntax.items {
                 match item {
-                    Item::Binding(binding) if binding.value.is_some() => {
-                        let Some(symbol) = self.module.symbol_for(binding.syntax.id) else {
-                            continue;
-                        };
-                        let Some(value_type) = self.module.type_of_symbol(symbol) else {
-                            continue;
-                        };
-                        if !self.module.is_copy_type(value_type) {
-                            self.diagnostics.push(Diagnostic::new(
-                                binding.syntax.span.clone(),
-                                "move-only values cannot be stored in global bindings",
-                            ));
+                    Item::Binding(binding) => {
+                        if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
+                            self.top_level_symbols.insert(symbol);
                         }
                     }
                     Item::PatternBinding(binding) => {
-                        self.check_global_pattern(&binding.pattern);
+                        self.collect_top_level_pattern(&binding.pattern);
                     }
                     _ => {}
                 }
@@ -105,34 +102,43 @@ impl<'a> OwnershipChecker<'a> {
         }
     }
 
-    fn check_global_pattern(&mut self, pattern: &Pattern) {
+    fn collect_top_level_pattern(&mut self, pattern: &Pattern) {
         match pattern {
             Pattern::Binding(binding) => {
-                let Some(symbol) = self.module.symbol_for(binding.syntax.id) else {
-                    return;
-                };
-                if self
-                    .module
-                    .type_of_symbol(symbol)
-                    .is_some_and(|ty| !self.module.is_copy_type(ty))
-                {
-                    self.diagnostics.push(Diagnostic::new(
-                        binding.syntax.span.clone(),
-                        "move-only values cannot be stored in global bindings",
-                    ));
+                if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
+                    self.top_level_symbols.insert(symbol);
                 }
             }
             Pattern::At(at) => {
-                self.check_global_pattern(&Pattern::Binding(at.binding.as_ref().clone()));
-                self.check_global_pattern(&at.pattern);
+                self.collect_top_level_pattern(&Pattern::Binding(at.binding.as_ref().clone()));
+                self.collect_top_level_pattern(&at.pattern);
             }
             Pattern::Product(product) => {
                 for element in &product.elements {
-                    self.check_global_pattern(element);
+                    self.collect_top_level_pattern(element);
                 }
             }
-            Pattern::Nominal(nominal) => self.check_global_pattern(&nominal.argument),
+            Pattern::Nominal(nominal) => self.collect_top_level_pattern(&nominal.argument),
             Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        }
+    }
+
+    /// Runs the same per-item ownership checks used for a function body over
+    /// each module's top-level statement sequence. Every symbol bound here is
+    /// a top-level symbol (see `collect_top_level_symbols`), so `use_symbol`
+    /// intercepts moves of it as a global before ever consulting `states` —
+    /// the `states` entries `check_item` inserts along the way are harmless,
+    /// unread bookkeeping for those symbols.
+    fn check_top_level(&mut self) {
+        for source_module in self.module.resolved().program().modules() {
+            self.function = None;
+            self.states.clear();
+            self.loops.clear();
+            for item in &source_module.syntax.items {
+                if !self.check_item(item) {
+                    break;
+                }
+            }
         }
     }
 
@@ -557,9 +563,19 @@ impl<'a> OwnershipChecker<'a> {
             return;
         }
 
+        if self.top_level_symbols.contains(&symbol) {
+            if consume {
+                self.diagnostics.push(Diagnostic::new(
+                    syntax.span.clone(),
+                    "cannot move a value out of a global binding",
+                ));
+            }
+            return;
+        }
+
         let Some(state) = self.states.get(&symbol).copied() else {
-            // A non-local symbol is either a global (diagnosed separately) or a
-            // capture. Captures are seeded when checking their function.
+            // A non-local, non-global symbol is a capture, seeded when
+            // checking its owning function.
             return;
         };
         match state {
