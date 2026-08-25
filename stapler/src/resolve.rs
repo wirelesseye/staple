@@ -1072,6 +1072,10 @@ impl NameResolver {
                     .last_mut()
                     .expect("resolver type scope")
                     .extend(self.declared_types[parent.0].clone());
+                let own_namespaces = self.namespaces.pop().expect("resolver namespace scope");
+                let mut namespaces = self.definition_context_namespaces[parent.0].clone();
+                namespaces.extend(own_namespaces);
+                self.namespaces.push(namespaces);
             }
             self.predeclare_items(&source_module.syntax.items);
             self.record_visible_module_definitions(source_module.id);
@@ -1972,6 +1976,19 @@ impl NameResolver {
                     self.definition_context_namespaces[module.id.0]
                         .insert(submodule.name.clone(), child);
                 }
+            }
+        }
+        // A companion also sees the parent's submodule namespaces, the same
+        // as it sees the parent's values and types above. The companion's
+        // own namespaces take priority over the parent's on a name clash.
+        for module in program.modules() {
+            if module.companion
+                && let Some(parent) = module.parent
+            {
+                let own = std::mem::take(&mut self.definition_context_namespaces[module.id.0]);
+                let mut namespaces = self.definition_context_namespaces[parent.0].clone();
+                namespaces.extend(own);
+                self.definition_context_namespaces[module.id.0] = namespaces;
             }
         }
         if let Some(core) = program.standard_library_core() {

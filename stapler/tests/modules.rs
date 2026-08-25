@@ -1534,6 +1534,40 @@ fn destructures_a_private_representation_from_the_defining_module_including_its_
 }
 
 #[test]
+fn companion_accesses_a_private_submodule_namespace_of_its_defining_module() {
+    // Regression test: a companion's body can already refer directly to
+    // private *values* and *types* declared in its defining module (see
+    // `destructures_a_private_representation_from_the_defining_module_including_its_companion`
+    // above), but the definition context built for it only carried the
+    // parent's values and types, not its submodule namespaces. So a private
+    // `mod` sibling to the type declaration was reported as an unknown name
+    // from within that type's own companion, even though ordinary code in
+    // the same module can reach it directly.
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        concat!(
+            "pub type Wrapped = I32\n",
+            "mod helpers {\n",
+            "    pub def helper: I32 -> I32 = x => x + 1\n",
+            "}\n",
+            "companion Wrapped {\n",
+            "    pub def bump: Wrapped -> I32 = value => {\n",
+            "        let Wrapped inner = value\n",
+            "        helpers.helper inner\n",
+            "    }\n",
+            "}\n",
+            "let wrapped = Wrapped 42\n",
+            "Wrapped.bump wrapped\n",
+        ),
+    );
+    fixture.compile().expect(
+        "a companion should be able to reach a private submodule of its defining module, \
+         the same as the rest of the defining module can",
+    );
+}
+
+#[test]
 fn resolves_mutually_recursive_module_namespaces() {
     let fixture = Fixture::new();
     fixture.write("main.sta", "use ma\nma.a (1)\n");
