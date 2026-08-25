@@ -2128,8 +2128,9 @@ impl Grammar {
                                 .error("`mut` cannot modify a variadic marker or product spread"));
                         }
                         if moved {
-                            return Err(self
-                                .error("`move` cannot modify a variadic marker or product spread"));
+                            return Err(self.error(
+                                "`move` cannot modify a variadic marker or product spread",
+                            ));
                         }
                         if self.at(TokenKind::RParen)
                             || (self.at(TokenKind::Comma)

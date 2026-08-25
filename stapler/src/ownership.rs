@@ -264,18 +264,18 @@ impl<'a> OwnershipChecker<'a> {
                 } else if scoped_c_string {
                     self.check_expression(&value.argument, false);
                 } else {
-                    let callee_function_type =
-                        self.module
-                            .type_of_expression(value.callee.syntax().id)
-                            .or_else(|| {
-                                self.module
-                                    .symbol_for(value.callee.syntax().id)
-                                    .and_then(|symbol| self.module.type_of_symbol(symbol))
-                            })
-                            .and_then(|ty| match ty {
-                                crate::CheckedType::Function(function) => Some(function),
-                                _ => None,
-                            });
+                    let callee_function_type = self
+                        .module
+                        .type_of_expression(value.callee.syntax().id)
+                        .or_else(|| {
+                            self.module
+                                .symbol_for(value.callee.syntax().id)
+                                .and_then(|symbol| self.module.type_of_symbol(symbol))
+                        })
+                        .and_then(|ty| match ty {
+                            crate::CheckedType::Function(function) => Some(function),
+                            _ => None,
+                        });
                     self.check_call_argument(&value.argument, callee_function_type);
                 }
                 true

@@ -1812,7 +1812,10 @@ impl TypeChecker {
                 continue;
             }
             if implementation.negative
-                && !matches!(target, CheckedType::Distinct { .. } | CheckedType::Buffer(_))
+                && !matches!(
+                    target,
+                    CheckedType::Distinct { .. } | CheckedType::Buffer(_)
+                )
             {
                 self.diagnostics.push(Diagnostic::new(
                     span,
@@ -2002,7 +2005,14 @@ impl TypeChecker {
 
     fn validate_indexing_trait_method_types(&mut self, module: &ResolvedModule) {
         for (trait_id, trait_name, arity, result_parameter, mutations, moves) in [
-            (self.index_trait, "Index", 2, Some(2usize), Vec::new(), Vec::new()),
+            (
+                self.index_trait,
+                "Index",
+                2,
+                Some(2usize),
+                Vec::new(),
+                Vec::new(),
+            ),
             (
                 self.mutate_index_trait,
                 "MutateIndex",
@@ -2416,7 +2426,8 @@ impl TypeChecker {
                 CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(parameter),
                     mutations: Vec::new(),
-                    moves: Vec::new(),                    effects: CheckedEffectSet::default(),
+                    moves: Vec::new(),
+                    effects: CheckedEffectSet::default(),
                     result: Box::new(result),
                 }),
             );
@@ -3318,12 +3329,12 @@ impl TypeChecker {
                             .implicit_thunks
                             .get(&value.argument.syntax().id)
                             .and_then(|thunk| self.function_types.get(&thunk.id).cloned())
-                            .or_else(
-                                || match self.expression_types.get(&value.argument.syntax().id) {
+                            .or_else(|| {
+                                match self.expression_types.get(&value.argument.syntax().id) {
                                     Some(CheckedType::Function(argument)) => Some(argument.clone()),
                                     _ => None,
-                                },
-                            );
+                                }
+                            });
                         if let Some(argument_type) = argument_type {
                             infer_type_parameters(
                                 &function_type.parameter,
@@ -8080,7 +8091,8 @@ impl TypeChecker {
         let function_type = CheckedFunctionType {
             parameter: Box::new(CheckedType::empty_product()),
             mutations: Vec::new(),
-            moves: Vec::new(),            effects,
+            moves: Vec::new(),
+            effects,
             result: Box::new(result),
         };
         self.function_types.insert(id, function_type.clone());
@@ -9343,7 +9355,8 @@ fn effect_substitution_type(effects: CheckedEffectSet) -> CheckedType {
     CheckedType::Function(CheckedFunctionType {
         parameter: Box::new(CheckedType::Error),
         mutations: Vec::new(),
-        moves: Vec::new(),        effects,
+        moves: Vec::new(),
+        effects,
         result: Box::new(CheckedType::Error),
     })
 }
@@ -9932,27 +9945,38 @@ fn unify_impl_headers(
         ) => {
             left_id == right_id
                 && left_arguments.len() == right_arguments.len()
-                && left_arguments.iter().zip(right_arguments).all(|(left, right)| {
-                    unify_impl_headers(left, right, free_parameters, substitutions)
-                })
+                && left_arguments
+                    .iter()
+                    .zip(right_arguments)
+                    .all(|(left, right)| {
+                        unify_impl_headers(left, right, free_parameters, substitutions)
+                    })
         }
         (CheckedType::Product(left), CheckedType::Product(right)) => {
             left.variadic == right.variadic
                 && left.elements.len() == right.elements.len()
-                && left.elements.iter().zip(&right.elements).all(|(left, right)| {
-                    unify_impl_headers(
-                        &left.value_type,
-                        &right.value_type,
-                        free_parameters,
-                        substitutions,
-                    )
-                })
+                && left
+                    .elements
+                    .iter()
+                    .zip(&right.elements)
+                    .all(|(left, right)| {
+                        unify_impl_headers(
+                            &left.value_type,
+                            &right.value_type,
+                            free_parameters,
+                            substitutions,
+                        )
+                    })
         }
         (CheckedType::Sum(left), CheckedType::Sum(right)) => {
             left.alternatives.len() == right.alternatives.len()
-                && left.alternatives.iter().zip(&right.alternatives).all(|(left, right)| {
-                    unify_impl_headers(left, right, free_parameters, substitutions)
-                })
+                && left
+                    .alternatives
+                    .iter()
+                    .zip(&right.alternatives)
+                    .all(|(left, right)| {
+                        unify_impl_headers(left, right, free_parameters, substitutions)
+                    })
         }
         _ => left == right,
     }

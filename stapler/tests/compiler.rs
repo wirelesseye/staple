@@ -3213,7 +3213,11 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
             .expect_err("moved containers must not remain usable");
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("moved")));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("moved"))
+        );
     }
 
     let diagnostics = TypeChecker::new()
@@ -7225,7 +7229,9 @@ fn rejects_a_blanket_implementation_that_overlaps_an_earlier_concrete_one_before
             "impl Target I32 { def act = value => value }\n",
             "impl <T where Bound T> Target T { def act = value => value }\n",
         )))
-        .expect_err("a concrete impl and an applicable blanket impl must be rejected as overlapping");
+        .expect_err(
+            "a concrete impl and an applicable blanket impl must be rejected as overlapping",
+        );
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7837,11 +7843,11 @@ fn infers_copy_and_enforces_affine_moves() {
             "def invalid = (value: CString) => { let moved = value; value }\n",
         )))
         .expect_err("a plain non-Copy parameter is an implicit borrow and cannot be moved out of");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("cannot move out of a borrowed value"))
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot move out of a borrowed value")
+    }));
 }
 
 #[test]
@@ -8031,7 +8037,9 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
             .expect_err("captured and Ref-owned resources cannot be moved again");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.message.contains("moved value")
-                || diagnostic.message.contains("cannot move out of a borrowed value")
+                || diagnostic
+                    .message
+                    .contains("cannot move out of a borrowed value")
         }));
     }
 }
@@ -8563,11 +8571,11 @@ fn rejects_a_concrete_clone_impl_that_overlaps_the_blanket_copy_implementation()
     let diagnostics = TypeChecker::new()
         .check(resolve("impl Clone I32 { def clone = value => value }\n"))
         .expect_err("`I32` already gets `Clone` from the blanket `Copy` implementation");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("duplicate trait implementation"))
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate trait implementation")
+    }));
 }
 
 #[test]
@@ -8579,9 +8587,9 @@ fn rejects_a_blanket_bounded_impl_that_overlaps_an_earlier_concrete_one() {
             "impl<T where Copy T> Greet T { def greet = value => \"hi\" }\n",
         )))
         .expect_err("the blanket impl also covers `I32`, already implemented concretely above");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("duplicate trait implementation"))
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate trait implementation")
+    }));
 }

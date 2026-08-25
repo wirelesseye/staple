@@ -671,7 +671,13 @@ impl<'a> Classifier<'a> {
                     // (INTERFACE), not a namespace/type/variable, and the
                     // member is always a function.
                     if let Expression::Name(trait_name) = value.value.as_ref() {
-                        self.mark_last(&trait_name.syntax, &trait_name.name, INTERFACE, READONLY, 2);
+                        self.mark_last(
+                            &trait_name.syntax,
+                            &trait_name.name,
+                            INTERFACE,
+                            READONLY,
+                            2,
+                        );
                     } else {
                         self.expression_with_mod(&value.value, resolved, modifiers);
                     }

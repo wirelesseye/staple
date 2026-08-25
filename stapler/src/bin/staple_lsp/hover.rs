@@ -985,7 +985,8 @@ impl Collector<'_> {
                     // checked type of its own, so hover it as the trait
                     // itself instead of falling through to nothing.
                     if let Expression::Name(trait_name) = access.value.as_ref()
-                        && let Some(trait_id) = self.typed.resolved().trait_for(trait_name.syntax.id)
+                        && let Some(trait_id) =
+                            self.typed.resolved().trait_for(trait_name.syntax.id)
                     {
                         self.trait_name_hover(&trait_name.syntax, &trait_name.name, trait_id);
                     } else {
@@ -1452,8 +1453,7 @@ mod tests {
             "    count = 2\n",
             "}\n",
         );
-        let path =
-            std::env::temp_dir().join("staple-hover-reaction-in-wrapping-function.sta");
+        let path = std::env::temp_dir().join("staple-hover-reaction-in-wrapping-function.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
             .load_source_at(&path, source)

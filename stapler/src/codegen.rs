@@ -1459,9 +1459,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 environment
                     .resources
                     .push((reactive_resource, scope.as_any_value_enum()));
-                environment
-                    .reactive_scopes
-                    .push(scope.into_pointer_value());
+                environment.reactive_scopes.push(scope.into_pointer_value());
                 entry_reactive_scope_pushed = true;
             }
             for item in &items {
@@ -9390,61 +9388,126 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let value = self.compile_expression(environment, &call.argument)?;
         let Some(BasicValueEnum::PointerValue(source)) = value_as_basic(value) else {
-            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer handle"));
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "invalid Buffer handle",
+            ));
         };
         let CheckedType::Buffer(element) = self
             .concrete_expression_type(&call.argument)
             .unwrap_or(CheckedType::Error)
         else {
-            return Err(Diagnostic::new(call.argument.syntax().span.clone(), "invalid Buffer type"));
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "invalid Buffer type",
+            ));
         };
         let llvm_element = self.compile_type(&element)?;
         let header = self.buffer_header_type(llvm_element);
-        let source_length_slot = self.builder
+        let source_length_slot = self
+            .builder
             .build_struct_gep(header, source, 0, "buffer.clone.source.length.slot")
             .map_err(compiler_diagnostic)?;
-        let length = self.builder
+        let length = self
+            .builder
             .build_load(self.size_type, source_length_slot, "buffer.clone.length")
-            .map_err(compiler_diagnostic)?.into_int_value();
-        let source_capacity_slot = self.builder
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let source_capacity_slot = self
+            .builder
             .build_struct_gep(header, source, 1, "buffer.clone.source.capacity.slot")
             .map_err(compiler_diagnostic)?;
-        let capacity = self.builder
-            .build_load(self.size_type, source_capacity_slot, "buffer.clone.capacity")
-            .map_err(compiler_diagnostic)?.into_int_value();
+        let capacity = self
+            .builder
+            .build_load(
+                self.size_type,
+                source_capacity_slot,
+                "buffer.clone.capacity",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
 
-        let offset = self.target_data.offset_of_element(&header, 3)
+        let offset = self
+            .target_data
+            .offset_of_element(&header, 3)
             .expect("Buffer data field has an offset");
         let stride = self.target_data.get_abi_size(&llvm_element);
-        let bytes = self.builder
-            .build_int_mul(capacity, self.size_type.const_int(stride, false), "buffer.clone.element.bytes")
+        let bytes = self
+            .builder
+            .build_int_mul(
+                capacity,
+                self.size_type.const_int(stride, false),
+                "buffer.clone.element.bytes",
+            )
             .map_err(compiler_diagnostic)?;
-        let no_element_bytes = self.builder
-            .build_int_compare(inkwell::IntPredicate::EQ, bytes, self.size_type.const_zero(), "buffer.clone.no.element.bytes")
+        let no_element_bytes = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                bytes,
+                self.size_type.const_zero(),
+                "buffer.clone.no.element.bytes",
+            )
             .map_err(compiler_diagnostic)?;
-        let bytes = self.builder
-            .build_select(no_element_bytes, self.size_type.const_int(1, false), bytes, "buffer.clone.physical.element.bytes")
-            .map_err(compiler_diagnostic)?.into_int_value();
-        let bytes = self.builder
-            .build_int_add(bytes, self.size_type.const_int(offset, false), "buffer.clone.allocation.bytes")
+        let bytes = self
+            .builder
+            .build_select(
+                no_element_bytes,
+                self.size_type.const_int(1, false),
+                bytes,
+                "buffer.clone.physical.element.bytes",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let bytes = self
+            .builder
+            .build_int_add(
+                bytes,
+                self.size_type.const_int(offset, false),
+                "buffer.clone.allocation.bytes",
+            )
             .map_err(compiler_diagnostic)?;
-        let destination = self.build_gc_allocation(bytes, "buffer.clone.allocate", call.syntax.span.clone())?;
+        let destination =
+            self.build_gc_allocation(bytes, "buffer.clone.allocate", call.syntax.span.clone())?;
         self.builder
-            .build_memset(destination, self.target_data.get_abi_alignment(&header), self.context.i8_type().const_zero(), bytes)
+            .build_memset(
+                destination,
+                self.target_data.get_abi_alignment(&header),
+                self.context.i8_type().const_zero(),
+                bytes,
+            )
             .map_err(compiler_diagnostic)?;
-        let destination_capacity_slot = self.builder
-            .build_struct_gep(header, destination, 1, "buffer.clone.destination.capacity.slot")
+        let destination_capacity_slot = self
+            .builder
+            .build_struct_gep(
+                header,
+                destination,
+                1,
+                "buffer.clone.destination.capacity.slot",
+            )
             .map_err(compiler_diagnostic)?;
-        self.builder.build_store(destination_capacity_slot, capacity).map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(destination_capacity_slot, capacity)
+            .map_err(compiler_diagnostic)?;
         if self.typed_module.type_needs_drop(&element) {
             let finalizer = self.ensure_buffer_finalizer(&element)?;
             self.set_gc_finalizer(destination, finalizer)?;
         }
 
-        let clone_trait = self.typed_module.resolved().standard_trait("Clone")
-            .ok_or_else(|| Diagnostic::new(Span::Compiler, "standard library has no Clone trait"))?;
-        let clone_method = self.typed_module.resolved().traits().get(&clone_trait)
-            .and_then(|trait_| trait_.methods.first()).copied()
+        let clone_trait = self
+            .typed_module
+            .resolved()
+            .standard_trait("Clone")
+            .ok_or_else(|| {
+                Diagnostic::new(Span::Compiler, "standard library has no Clone trait")
+            })?;
+        let clone_method = self
+            .typed_module
+            .resolved()
+            .traits()
+            .get(&clone_trait)
+            .and_then(|trait_| trait_.methods.first())
+            .copied()
             .ok_or_else(|| Diagnostic::new(Span::Compiler, "Clone trait has no clone method"))?;
         let clone_function = self.trait_method_code(
             clone_trait,
@@ -9454,34 +9517,114 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         )?;
         let source_data = self.buffer_data_pointer(source, llvm_element)?;
         let destination_data = self.buffer_data_pointer(destination, llvm_element)?;
-        let destination_length_slot = self.builder
-            .build_struct_gep(header, destination, 0, "buffer.clone.destination.length.slot")
+        let destination_length_slot = self
+            .builder
+            .build_struct_gep(
+                header,
+                destination,
+                0,
+                "buffer.clone.destination.length.slot",
+            )
             .map_err(compiler_diagnostic)?;
-        let index_slot = self.builder.build_alloca(self.size_type, "buffer.clone.index.slot").map_err(compiler_diagnostic)?;
-        self.builder.build_store(index_slot, self.size_type.const_zero()).map_err(compiler_diagnostic)?;
-        let function = self.builder.get_insert_block().and_then(|block| block.get_parent()).expect("buffer clone function");
-        let condition = self.context.append_basic_block(function, "buffer.clone.condition");
-        let body = self.context.append_basic_block(function, "buffer.clone.body");
-        let done = self.context.append_basic_block(function, "buffer.clone.done");
-        self.builder.build_unconditional_branch(condition).map_err(compiler_diagnostic)?;
+        let index_slot = self
+            .builder
+            .build_alloca(self.size_type, "buffer.clone.index.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(index_slot, self.size_type.const_zero())
+            .map_err(compiler_diagnostic)?;
+        let function = self
+            .builder
+            .get_insert_block()
+            .and_then(|block| block.get_parent())
+            .expect("buffer clone function");
+        let condition = self
+            .context
+            .append_basic_block(function, "buffer.clone.condition");
+        let body = self
+            .context
+            .append_basic_block(function, "buffer.clone.body");
+        let done = self
+            .context
+            .append_basic_block(function, "buffer.clone.done");
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(compiler_diagnostic)?;
         self.builder.position_at_end(condition);
-        let index = self.builder.build_load(self.size_type, index_slot, "buffer.clone.index").map_err(compiler_diagnostic)?.into_int_value();
-        let has_element = self.builder.build_int_compare(inkwell::IntPredicate::ULT, index, length, "buffer.clone.has.element").map_err(compiler_diagnostic)?;
-        self.builder.build_conditional_branch(has_element, body, done).map_err(compiler_diagnostic)?;
+        let index = self
+            .builder
+            .build_load(self.size_type, index_slot, "buffer.clone.index")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let has_element = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::ULT,
+                index,
+                length,
+                "buffer.clone.has.element",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(has_element, body, done)
+            .map_err(compiler_diagnostic)?;
         self.builder.position_at_end(body);
-        let source_slot = unsafe { self.builder.build_gep(llvm_element, source_data, &[index], "buffer.clone.source.slot") }.map_err(compiler_diagnostic)?;
-        let source_element = self.builder.build_load(llvm_element, source_slot, "buffer.clone.source.element").map_err(compiler_diagnostic)?;
+        let source_slot = unsafe {
+            self.builder.build_gep(
+                llvm_element,
+                source_data,
+                &[index],
+                "buffer.clone.source.slot",
+            )
+        }
+        .map_err(compiler_diagnostic)?;
+        let source_element = self
+            .builder
+            .build_load(llvm_element, source_slot, "buffer.clone.source.element")
+            .map_err(compiler_diagnostic)?;
         let closure_environment = self.context.ptr_type(AddressSpace::default()).const_null();
-        let cloned = self.builder
-            .build_direct_call(clone_function, &[closure_environment.into(), source_element.into()], "buffer.clone.element")
-            .map_err(compiler_diagnostic)?.try_as_basic_value().basic()
-            .ok_or_else(|| Diagnostic::new(call.syntax.span.clone(), "Clone result is not first-class"))?;
-        let destination_slot = unsafe { self.builder.build_gep(llvm_element, destination_data, &[index], "buffer.clone.destination.slot") }.map_err(compiler_diagnostic)?;
-        self.builder.build_store(destination_slot, cloned).map_err(compiler_diagnostic)?;
-        let next = self.builder.build_int_add(index, self.size_type.const_int(1, false), "buffer.clone.next").map_err(compiler_diagnostic)?;
-        self.builder.build_store(destination_length_slot, next).map_err(compiler_diagnostic)?;
-        self.builder.build_store(index_slot, next).map_err(compiler_diagnostic)?;
-        self.builder.build_unconditional_branch(condition).map_err(compiler_diagnostic)?;
+        let cloned = self
+            .builder
+            .build_direct_call(
+                clone_function,
+                &[closure_environment.into(), source_element.into()],
+                "buffer.clone.element",
+            )
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| {
+                Diagnostic::new(call.syntax.span.clone(), "Clone result is not first-class")
+            })?;
+        let destination_slot = unsafe {
+            self.builder.build_gep(
+                llvm_element,
+                destination_data,
+                &[index],
+                "buffer.clone.destination.slot",
+            )
+        }
+        .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(destination_slot, cloned)
+            .map_err(compiler_diagnostic)?;
+        let next = self
+            .builder
+            .build_int_add(
+                index,
+                self.size_type.const_int(1, false),
+                "buffer.clone.next",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(destination_length_slot, next)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(index_slot, next)
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_unconditional_branch(condition)
+            .map_err(compiler_diagnostic)?;
         self.builder.position_at_end(done);
         Ok(destination.as_any_value_enum())
     }
