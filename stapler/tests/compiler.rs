@@ -1431,7 +1431,9 @@ fn parameter_markers_must_match_explicit_function_and_trait_effects() {
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err_diagnostics("parameter markers and declared mutation permissions must match");
+            .expect_err_diagnostics(
+                "parameter markers and declared mutation permissions must match",
+            );
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic
                 .message
@@ -1796,7 +1798,9 @@ fn rejects_structural_iteration_for_non_copy_products() {
             "  count\n",
             "}\n",
         )))
-        .expect_err_diagnostics("a product containing a move-only element cannot derive IntoIterator");
+        .expect_err_diagnostics(
+            "a product containing a move-only element cannot derive IntoIterator",
+        );
     assert!(
         diagnostics
             .iter()
@@ -5970,10 +5974,12 @@ fn default_type_bound_does_not_fire_when_a_later_parameter_lacks_one() {
         "type alias Weird (A = I32) B = (A, B)\n",
         "let bad: Weird = (1, 2)\n",
     ));
-    let diagnostics = TypeChecker::new().check(module).expect_err_diagnostics(concat!(
-        "`Weird`'s `B` parameter has no default, so the defaulted `A` ",
-        "cannot fill in for a fully bare `Weird` either"
-    ));
+    let diagnostics = TypeChecker::new()
+        .check(module)
+        .expect_err_diagnostics(concat!(
+            "`Weird`'s `B` parameter has no default, so the defaulted `A` ",
+            "cannot fill in for a fully bare `Weird` either"
+        ));
     assert!(
         diagnostics
             .iter()
@@ -6759,7 +6765,9 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
             "let secret = Secret 1\n",
             "let text = Formatter.debug secret\n",
         )))
-        .expect_err_diagnostics("a nominal type must not inherit its representation's Debug implementation");
+        .expect_err_diagnostics(
+            "a nominal type must not inherit its representation's Debug implementation",
+        );
     assert!(
         diagnostics
             .iter()
@@ -7231,7 +7239,9 @@ fn rejects_generic_trait_implementation_dispatch_when_bound_is_unmet() {
             "impl <T where Bound T> Target T { def act = value => value }\n",
             "let answer: I32 = Target.act 41\n",
         )))
-        .expect_err_diagnostics("I32 does not implement Bound, so the conditional impl must not apply");
+        .expect_err_diagnostics(
+            "I32 does not implement Bound, so the conditional impl must not apply",
+        );
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7248,7 +7258,9 @@ fn rejects_alpha_equivalent_duplicate_generic_trait_implementations() {
             "impl <T where Bound T> Target T { def act = value => value }\n",
             "impl <U where Bound U> Target U { def act = value => value }\n",
         )))
-        .expect_err_diagnostics("alpha-equivalent generic implementations must be rejected as duplicates");
+        .expect_err_diagnostics(
+            "alpha-equivalent generic implementations must be rejected as duplicates",
+        );
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7290,7 +7302,9 @@ fn cyclic_trait_implementation_bound_fails_without_hanging() {
             "impl <T where Cyclic T> Cyclic T { def check = value => True }\n",
             "let answer: Bool = Cyclic.check 41\n",
         )))
-        .expect_err_diagnostics("a self-referential bound must fail rather than being accepted coinductively");
+        .expect_err_diagnostics(
+            "a self-referential bound must fail rather than being accepted coinductively",
+        );
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7885,7 +7899,9 @@ fn infers_copy_and_enforces_affine_moves() {
             "use std.cinterop.*\n",
             "def invalid = (value: CString) => { let moved = value; value }\n",
         )))
-        .expect_err_diagnostics("a plain non-Copy parameter is an implicit borrow and cannot be moved out of");
+        .expect_err_diagnostics(
+            "a plain non-Copy parameter is an implicit borrow and cannot be moved out of",
+        );
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -8502,7 +8518,9 @@ fn rejects_const_float_initializers_that_fold_to_non_finite_values() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err_diagnostics("dividing by zero at compile time should not fold to an infinite constant");
+        .expect_err_diagnostics(
+            "dividing by zero at compile time should not fold to an infinite constant",
+        );
     assert!(
         diagnostics
             .iter()
@@ -8569,9 +8587,9 @@ fn resolves_local_const_names_before_their_textual_position_like_def() {
     let resolved = NameResolver::new()
         .resolve_program(program)
         .expect("a hoisted local const's name should resolve, like a local def's");
-    let diagnostics = TypeChecker::new()
-        .check(resolved)
-        .expect_err_diagnostics("reading a local binding before its initializer still fails to type-check");
+    let diagnostics = TypeChecker::new().check(resolved).expect_err_diagnostics(
+        "reading a local binding before its initializer still fails to type-check",
+    );
     assert!(
         diagnostics
             .iter()
@@ -8613,7 +8631,9 @@ fn a_non_copy_type_can_implement_clone_manually() {
 fn rejects_a_concrete_clone_impl_that_overlaps_the_blanket_copy_implementation() {
     let diagnostics = TypeChecker::new()
         .check(resolve("impl Clone I32 { def clone = value => value }\n"))
-        .expect_err_diagnostics("`I32` already gets `Clone` from the blanket `Copy` implementation");
+        .expect_err_diagnostics(
+            "`I32` already gets `Clone` from the blanket `Copy` implementation",
+        );
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -8629,7 +8649,9 @@ fn rejects_a_blanket_bounded_impl_that_overlaps_an_earlier_concrete_one() {
             "impl Greet I32 { def greet = value => \"hi\" }\n",
             "impl<T where Copy T> Greet T { def greet = value => \"hi\" }\n",
         )))
-        .expect_err_diagnostics("the blanket impl also covers `I32`, already implemented concretely above");
+        .expect_err_diagnostics(
+            "the blanket impl also covers `I32`, already implemented concretely above",
+        );
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message

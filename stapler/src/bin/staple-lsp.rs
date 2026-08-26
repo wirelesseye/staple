@@ -201,20 +201,23 @@ impl Server {
                     let successful = document.last_successful.as_ref()?;
                     let previous_offset =
                         TextChange::between(&successful.source, &document.text).old_offset(offset);
-                    let completion_receiver =
-                        completion_receiver(&document.text, offset).map(|(receiver, qualified, name)| {
+                    let completion_receiver = completion_receiver(&document.text, offset).map(
+                        |(receiver, qualified, name)| {
                             (
                                 TextChange::between(&successful.source, &document.text)
                                     .old_offset(receiver),
                                 qualified,
                                 name,
                             )
-                        });
+                        },
+                    );
                     Some(match completion_receiver {
                         Some((receiver, true, name)) => {
                             let indexed = successful.completion_index.qualifier_items(receiver);
                             if indexed.is_empty() {
-                                successful.completion_index.named_qualifier_items(name, previous_offset)
+                                successful
+                                    .completion_index
+                                    .named_qualifier_items(name, previous_offset)
                             } else {
                                 indexed
                             }
@@ -222,7 +225,9 @@ impl Server {
                         Some((receiver, false, name)) => {
                             let indexed = successful.completion_index.method_items(receiver);
                             if indexed.is_empty() {
-                                successful.completion_index.named_method_items(name, previous_offset)
+                                successful
+                                    .completion_index
+                                    .named_method_items(name, previous_offset)
                             } else {
                                 indexed
                             }
@@ -713,9 +718,15 @@ fn completion_receiver(text: &str, offset: usize) -> Option<(usize, bool, &str)>
     {
         let receiver = line[..separator]
             .trim_end()
-            .rsplit_once(|character: char| !(character == '_' || character == '.' || character.is_alphanumeric()))
+            .rsplit_once(|character: char| {
+                !(character == '_' || character == '.' || character.is_alphanumeric())
+            })
             .map_or(line[..separator].trim_end(), |(_, receiver)| receiver);
-        Some((line_start + separator, line.as_bytes()[separator] == b'.', receiver))
+        Some((
+            line_start + separator,
+            line.as_bytes()[separator] == b'.',
+            receiver,
+        ))
     } else {
         None
     }
@@ -1212,7 +1223,8 @@ mod tests {
             panic!("expected initialize response")
         };
         assert_eq!(response.id, 1.into());
-        let result: InitializeResult = serde_json::from_value(response.result.unwrap()).unwrap();
+        let result: InitializeResult =
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
         assert_eq!(
             result.capabilities.position_encoding,
             Some(PositionEncodingKind::UTF16)
@@ -1274,7 +1286,7 @@ mod tests {
             panic!("expected token response")
         };
         let result: SemanticTokensResult =
-            serde_json::from_value(response.result.unwrap()).unwrap();
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
         assert!(matches!(result, SemanticTokensResult::Tokens(tokens) if !tokens.data.is_empty()));
 
         client
@@ -1317,7 +1329,8 @@ mod tests {
             panic!("expected hover response")
         };
         assert_eq!(response.id, 4.into());
-        let hover: Option<Hover> = serde_json::from_value(response.result.unwrap()).unwrap();
+        let hover: Option<Hover> =
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
         assert!(
             matches!(hover, Some(Hover { contents: HoverContents::Markup(content), .. }) if content.value.contains("I32"))
         );
@@ -1342,7 +1355,7 @@ mod tests {
             panic!("expected completion response")
         };
         let completion: CompletionResponse =
-            serde_json::from_value(response.result.unwrap()).unwrap();
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
         assert!(matches!(
             completion,
             CompletionResponse::Array(items)
@@ -1370,7 +1383,7 @@ mod tests {
             panic!("expected definition response")
         };
         let definition: Option<GotoDefinitionResponse> =
-            serde_json::from_value(response.result.unwrap()).unwrap();
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
         assert!(
             matches!(
                 &definition,
@@ -1420,7 +1433,8 @@ mod tests {
         let Message::Response(response) = recv(&client) else {
             panic!("expected preserved hover response")
         };
-        let hover: Option<Hover> = serde_json::from_value(response.result.unwrap()).unwrap();
+        let hover: Option<Hover> =
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
         assert!(
             matches!(hover, Some(Hover { contents: HoverContents::Markup(content), .. }) if content.value.contains("let okay: I32"))
         );
@@ -1445,7 +1459,7 @@ mod tests {
             panic!("expected preserved definition response")
         };
         let definition: Option<GotoDefinitionResponse> =
-            serde_json::from_value(response.result.unwrap()).unwrap();
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
         assert!(
             matches!(
                 &definition,
@@ -1477,7 +1491,7 @@ mod tests {
             panic!("expected preserved completion response")
         };
         let completion: CompletionResponse =
-            serde_json::from_value(response.result.unwrap()).unwrap();
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
         assert!(matches!(
             completion,
             CompletionResponse::Array(items) if items.iter().any(|item| item.label == "okay")

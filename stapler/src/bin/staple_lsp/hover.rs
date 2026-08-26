@@ -1764,9 +1764,8 @@ mod tests {
 
     #[test]
     fn function_type_hover_shows_mut_and_move_markers_together() {
-        let source = concat!(
-            "def mutate_and_consume: (mut I32, move I32) -> () = (first, second) => ()\n",
-        );
+        let source =
+            concat!("def mutate_and_consume: (mut I32, move I32) -> () = (first, second) => ()\n",);
         let path = std::env::temp_dir().join("staple-hover-mut-move-test.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
@@ -1780,8 +1779,7 @@ mod tests {
         assert!(
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "mutate_and_consume"
-                    && entry.signature
-                        == "def mutate_and_consume: (mut I32, move I32) -> ()"
+                    && entry.signature == "def mutate_and_consume: (mut I32, move I32) -> ()"
             }),
             "entries: {entries:?}"
         );

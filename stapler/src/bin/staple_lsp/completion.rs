@@ -177,7 +177,9 @@ impl CompletionIndex {
             .map(|module| module.id);
         self.named_qualifiers
             .iter()
-            .find(|qualifier| qualifier.module == module.unwrap_or(qualifier.module) && qualifier.name == name)
+            .find(|qualifier| {
+                qualifier.module == module.unwrap_or(qualifier.module) && qualifier.name == name
+            })
             .map(|qualifier| qualifier.items.clone())
             .unwrap_or_default()
     }
@@ -265,12 +267,7 @@ impl Collector<'_> {
         }
     }
 
-    fn register_named_method(
-        &mut self,
-        owner: ModuleId,
-        name: &str,
-        definitions: &[DefinitionId],
-    ) {
+    fn register_named_method(&mut self, owner: ModuleId, name: &str, definitions: &[DefinitionId]) {
         let mut items = Vec::new();
         for definition in definitions {
             let DefinitionId::Symbol(receiver) = definition else {
@@ -279,11 +276,7 @@ impl Collector<'_> {
             let Some(ty) = self.typed.companion_type_of_symbol(*receiver) else {
                 continue;
             };
-            for (member, symbol) in self
-                .typed
-                .resolved()
-                .companion_members(ty, Some(owner))
-            {
+            for (member, symbol) in self.typed.resolved().companion_members(ty, Some(owner)) {
                 if self.typed.is_companion_method(symbol, ty)
                     && let Some(candidate) =
                         self.definition(member, DefinitionId::Symbol(symbol), 0)
@@ -317,22 +310,39 @@ impl Collector<'_> {
         for definition in definitions {
             match *definition {
                 DefinitionId::Type(ty) => items.extend(
-                    self.typed.resolved().companion_members(ty, Some(owner)).into_iter().filter_map(
-                        |(member, symbol)| self.definition(member, DefinitionId::Symbol(symbol), 0).map(|candidate| candidate.item),
-                    ),
+                    self.typed
+                        .resolved()
+                        .companion_members(ty, Some(owner))
+                        .into_iter()
+                        .filter_map(|(member, symbol)| {
+                            self.definition(member, DefinitionId::Symbol(symbol), 0)
+                                .map(|candidate| candidate.item)
+                        }),
                 ),
                 DefinitionId::Trait(trait_id) => items.extend(
-                    self.typed.resolved().trait_methods(trait_id).into_iter().filter_map(|method| {
-                        let member = self.typed.resolved().trait_method(method)?;
-                        self.definition(&member.name, DefinitionId::TraitMethod(method), 0).map(|candidate| candidate.item)
-                    }),
+                    self.typed
+                        .resolved()
+                        .trait_methods(trait_id)
+                        .into_iter()
+                        .filter_map(|method| {
+                            let member = self.typed.resolved().trait_method(method)?;
+                            self.definition(&member.name, DefinitionId::TraitMethod(method), 0)
+                                .map(|candidate| candidate.item)
+                        }),
                 ),
                 DefinitionId::Module(module) => {
-                    if let Some(exports) = self.typed.resolved().exported_definitions(module).cloned() {
+                    if let Some(exports) =
+                        self.typed.resolved().exported_definitions(module).cloned()
+                    {
                         self.add_module_items(module, &mut items);
                         if visited.insert(module) {
                             for (child, child_definitions) in exports {
-                                self.register_named_qualifier(owner, &format!("{name}.{child}"), &child_definitions, visited);
+                                self.register_named_qualifier(
+                                    owner,
+                                    &format!("{name}.{child}"),
+                                    &child_definitions,
+                                    visited,
+                                );
                             }
                             visited.remove(&module);
                         }
@@ -1140,14 +1150,18 @@ mod tests {
         let module = parse(source).unwrap();
         let index = index(&module, &typed);
 
-        assert!(index
-            .named_qualifier_items("List", 0)
-            .iter()
-            .any(|item| item.label == "singleton"));
-        assert!(index
-            .named_qualifier_items("ToString", 0)
-            .iter()
-            .any(|item| item.label == "to_string"));
+        assert!(
+            index
+                .named_qualifier_items("List", 0)
+                .iter()
+                .any(|item| item.label == "singleton")
+        );
+        assert!(
+            index
+                .named_qualifier_items("ToString", 0)
+                .iter()
+                .any(|item| item.label == "to_string")
+        );
     }
 
     #[test]
@@ -1164,9 +1178,11 @@ mod tests {
         let index = index(&module, &typed);
 
         let items = index.named_method_items("numbers", source.len());
-        assert!(items
-            .iter()
-            .any(|item| item.label == "push" && item.kind == Some(CompletionItemKind::METHOD)));
+        assert!(
+            items
+                .iter()
+                .any(|item| item.label == "push" && item.kind == Some(CompletionItemKind::METHOD))
+        );
         assert!(!items.iter().any(|item| item.label == "new"));
     }
 }

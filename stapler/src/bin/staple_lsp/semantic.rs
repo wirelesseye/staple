@@ -836,7 +836,11 @@ impl<'a> Classifier<'a> {
                             .copied()
                             .unwrap_or_else(|| self.value_symbol_kind(symbol))
                     })
-                    .unwrap_or(if is_bare_trait_method { FUNCTION } else { VARIABLE });
+                    .unwrap_or(if is_bare_trait_method {
+                        FUNCTION
+                    } else {
+                        VARIABLE
+                    });
                 let usage_modifiers = symbol
                     .map(|symbol| {
                         let resolved = resolved.unwrap();
@@ -1772,8 +1776,7 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(labels.contains(&("1", NUMBER)), "labels: {labels:?}");
         assert!(labels.contains(&("2", NUMBER)), "labels: {labels:?}");
-        assert!(labels.contains(&("+", OPERATOR)), "labels: {labels:?}"
-        );
+        assert!(labels.contains(&("+", OPERATOR)), "labels: {labels:?}");
     }
 
     #[test]
