@@ -909,7 +909,7 @@ mod tests {
             "type Wrapper T = (value: T)\n",
             "trait Identity T { identity: T -> T }\n",
             "impl Identity I32 { def identity = value => value }\n",
-            "def wrap: <T> move T -> Wrapper T = value => Wrapper (value: value)\n",
+            "def wrap: <T> move T -> Wrapper T = move value => Wrapper (value: value)\n",
             "def apply = () => identity 1\n",
             "let (first, second) = (1, 2)\n",
             "first\n",
@@ -1021,7 +1021,7 @@ mod tests {
             "trait Bound T { check: T -> Bool }\n",
             "trait Target T { act: move T -> T }\n",
             "impl Bound I32 { def check = value => True }\n",
-            "impl <T where Bound T> Target T { def act = value => value }\n",
+            "impl <T where Bound T> Target T { def act = move value => value }\n",
         );
         let path = std::env::temp_dir().join("staple-definition-generic-impl-test.sta");
         let program = ProgramLoader::new()

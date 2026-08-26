@@ -18,8 +18,8 @@ impl Label Bool {
     }
 }
 
-def identity: <T> move T -> T = value => value
-def first: <A, B> move Pair (A, B) -> A = (left, _) => left
+def identity: <T> move T -> T = move value => value
+def first: <A, B> move Pair (A, B) -> A = move (left, _) => left
 def labeled: <T where Label T> T -> String = value => Label.label value
 
 // Generic functions become first-class values when context fixes their type.

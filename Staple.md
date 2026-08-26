@@ -1638,10 +1638,10 @@ function may write into. It is separate from callable effects such as `IO` and
 `state`:
 
 ```staple
-def f1: mut A -> () = a => { ... }                   // may mutate the whole parameter
-def f2: (mut A, B) -> () = (a, b) => { ... }        // may mutate parameter 0 only
-def f3: (mut a: A, b: B) -> () = (a, b) => { ... }  // same, named
-def f4: (mut a: A, b: B) ->{IO} () = (a, b) => { ... }
+def f1: mut A -> () = mut a => { ... }                   // may mutate the whole parameter
+def f2: (mut A, B) -> () = (mut a, b) => { ... }        // may mutate parameter 0 only
+def f3: (mut a: A, b: B) -> () = (mut a, b) => { ... }  // same, named
+def f4: (mut a: A, b: B) ->{IO} () = (mut a, b) => { ... }
 ```
 
 Prefixing the whole parameter type permits mutation of the complete argument.
@@ -1656,17 +1656,32 @@ def f3 = (a: A, mut b: B) => { ... }          // (A, mut B) -> ...
 ```
 
 Markers are allowed only on a whole parameter binding or a direct binding in
-the top-level parameter product. If a function has both parameter markers and
-an explicit annotation, their mutation targets must match exactly. The marker
-does not introduce an ordinary mutable local; it declares the function
-parameter position that is passed by address.
+the top-level parameter product. When a function has an explicit type
+annotation, its parameter markers are not optional: the pattern must repeat a
+`mut` for every position the annotation declares mutable, and their mutation
+targets must match exactly. The marker does not introduce an ordinary mutable
+local; it declares the function parameter position that is passed by address.
+
+`mut` may also prefix a parenthesized product pattern, marking the whole
+destructured parameter mutable as one unit rather than by individual element:
+
+```staple
+def f5: mut (A, B) -> () = mut (a, b) => { ... }  // whole parameter, destructured
+```
+
+This differs from `f2` above (`mut` on one element) in that every element is
+part of the same by-address parameter; it is equivalent to binding the whole
+parameter and destructuring it in the body (`mut pair => { let (a, b) = pair; ... }`),
+written directly in the pattern. This form exists only at a function's own
+parameter position — `let` and `match` patterns still reject `mut`/`move`
+before `(`.
 
 The effect permits both writing through a parameter and replacing the
 parameter value itself. A mutable argument is passed by address, so either
 kind of change is visible in the caller:
 
 ```staple
-def clear: mut Ref (I32, I32) -> () = cell => { cell.0 = 0 }
+def clear: mut Ref (I32, I32) -> () = mut cell => { cell.0 = 0 }
 
 let mut counter: Ref (I32, I32) = Ref (1, 2)
 clear counter
@@ -1674,7 +1689,7 @@ clear counter
 let fixed: Ref (I32, I32) = Ref (1, 2)
 clear fixed // error: `fixed` is not declared `mut`
 
-def replace: mut I32 -> () = value => { value = 42 }
+def replace: mut I32 -> () = mut value => { value = 42 }
 let mut answer = 0
 replace answer // answer is now 42
 ```
@@ -1726,7 +1741,7 @@ store it, return it, or let it drop at scope exit, and the caller can no
 longer use the argument afterward:
 
 ```staple
-def close_file: move File -> () = file => drop file
+def close_file: move File -> () = move file => drop file
 
 let handle: File = open "log.txt"
 close_file handle
@@ -1739,17 +1754,31 @@ top-level product parameter, and a `move` marker on a parameter binding
 declares the same effect without requiring a function type annotation:
 
 ```staple
-def f1: move A -> () = a => { ... }                    // owns the whole parameter
-def f2: (A, move B) -> () = (a, b) => { ... }          // owns parameter 1 only
+def f1: move A -> () = move a => { ... }               // owns the whole parameter
+def f2: (A, move B) -> () = (a, move b) => { ... }     // owns parameter 1 only
 def f3 = (a: A, move b: B) => { ... }                  // same, from the binding
 ```
 
-If a function has both parameter markers and an explicit annotation, their
-`move` targets must match exactly, the same as for `mut`. A parameter cannot
-be marked both `mut` and `move`: a mutable borrow and an ownership transfer
-are different effects. `move` and `mut` never change the parameter's exposed
-type — it stays `T`, never `Ref T` — only its ownership and calling
-convention.
+When a function has an explicit annotation, its parameter markers must
+repeat and match the annotation's `move` targets exactly, the same as for
+`mut`. A parameter cannot be marked both `mut` and `move`: a mutable borrow
+and an ownership transfer are different effects. `move` and `mut` never
+change the parameter's exposed type — it stays `T`, never `Ref T` — only its
+ownership and calling convention.
+
+Like `mut`, `move` may prefix a parenthesized product pattern to own the
+whole destructured parameter as one unit:
+
+```staple
+def f4: <A, B> move (A, B) -> A = move (a, _) => a
+```
+
+Every destructured binding is owned, exactly as if the whole parameter were
+bound and destructured in the body. This is the only way to destructure a
+parameter whose type is not itself a literal product — for example, an
+aliased pair `type alias Pair (A, B) = (A, B)` — directly in the pattern,
+since `move`/`mut` on the aliased type is necessarily a whole-parameter
+marker rather than one over individual elements.
 
 `move` is always legal on a `Copy` parameter, where it is a no-op: copying
 and moving a `Copy` value are indistinguishable, so `move T` and plain `T`
@@ -1760,7 +1789,7 @@ is conservatively treated as non-`Copy`, since no `Copy T` bound is known —
 must mark a parameter `move` before moving, returning, or storing it:
 
 ```staple
-def identity: <T> move T -> T = value => value
+def identity: <T> move T -> T = move value => value
 ```
 
 Constructs that consume a value outright — `drop`, a match expression's

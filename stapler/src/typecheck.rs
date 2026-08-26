@@ -2889,7 +2889,7 @@ impl TypeChecker {
                 .insert(function.id, parameter_symbols.clone());
 
             if let Some(expected) = self.impl_function_types.get(&function.id).cloned() {
-                if !parameter_mutations.is_empty() && parameter_mutations != expected.mutations {
+                if parameter_mutations != expected.mutations {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
                         format!(
@@ -2905,7 +2905,7 @@ impl TypeChecker {
                         ),
                     ));
                 }
-                if !parameter_moves.is_empty() && parameter_moves != expected.moves {
+                if parameter_moves != expected.moves {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
                         format!(
@@ -3021,8 +3021,8 @@ impl TypeChecker {
                 .as_ref()
                 .map(|function| function.mutations.clone())
                 .unwrap_or_default();
-            if !parameter_mutations.is_empty() {
-                if function.binding_annotation.is_some() && parameter_mutations != mutations {
+            if function.binding_annotation.is_some() {
+                if parameter_mutations != mutations {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
                         format!(
@@ -3031,16 +3031,16 @@ impl TypeChecker {
                             format_mutable_checked_parameter(&parameter, &mutations),
                         ),
                     ));
-                } else {
-                    mutations = parameter_mutations.clone();
                 }
+            } else {
+                mutations = parameter_mutations.clone();
             }
             let mut moves = annotated_function
                 .as_ref()
                 .map(|function| function.moves.clone())
                 .unwrap_or_default();
-            if !parameter_moves.is_empty() {
-                if function.binding_annotation.is_some() && parameter_moves != moves {
+            if function.binding_annotation.is_some() {
+                if parameter_moves != moves {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
                         format!(
@@ -3049,9 +3049,9 @@ impl TypeChecker {
                             format_move_checked_parameter(&parameter, &moves),
                         ),
                     ));
-                } else {
-                    moves = parameter_moves.clone();
                 }
+            } else {
+                moves = parameter_moves.clone();
             }
             for symbol in mutation_parameter_symbols(&parameter_symbols, &mutations) {
                 self.mutable_parameter_symbols.insert(symbol);
@@ -8130,6 +8130,8 @@ impl TypeChecker {
             pattern: Pattern::Product(crate::ProductPattern {
                 syntax: Syntax::compiler(),
                 elements: Vec::new(),
+                mutable: false,
+                moved: false,
             }),
             result_annotation: None,
             binding_annotation: None,
@@ -10479,6 +10481,7 @@ fn pattern_parameter_mutations(pattern: &Pattern) -> Vec<CheckedMutation> {
     let mutations = match pattern {
         Pattern::Binding(binding) if binding.mutable => vec![CheckedMutation::Whole],
         Pattern::At(at) if at.binding.mutable => vec![CheckedMutation::Whole],
+        Pattern::Product(product) if product.mutable => vec![CheckedMutation::Whole],
         Pattern::Product(product) => product
             .elements
             .iter()
@@ -10500,6 +10503,7 @@ fn pattern_parameter_moves(pattern: &Pattern) -> Vec<CheckedMutation> {
     let moves = match pattern {
         Pattern::Binding(binding) if binding.moved => vec![CheckedMutation::Whole],
         Pattern::At(at) if at.binding.moved => vec![CheckedMutation::Whole],
+        Pattern::Product(product) if product.moved => vec![CheckedMutation::Whole],
         Pattern::Product(product) => product
             .elements
             .iter()

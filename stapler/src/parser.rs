@@ -1648,7 +1648,7 @@ impl Grammar {
     /// Parses a function parameter pattern and body.
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
-        let pattern = self.parse_pattern()?;
+        let pattern = self.parse_top_level_parameter_pattern()?;
         if parameter_has_nested_mutable(&pattern) {
             return Err(self.error(
                 "`mut` is only allowed on a whole parameter binding or a direct element of a \
@@ -1668,6 +1668,25 @@ impl Grammar {
             pattern,
             body,
         })
+    }
+
+    /// Parses a function's own top-level parameter pattern. This is like
+    /// `parse_pattern`, but additionally allows `mut`/`move` to prefix a
+    /// parenthesized product pattern (`mut (a, b) => ...`), marking the
+    /// whole destructured parameter as a single mutable/moved unit. That
+    /// form only makes sense at a function's own parameter position, so it
+    /// is not part of `parse_pattern` itself: a `let` or `match` pattern
+    /// still rejects `mut`/`move` before `(`.
+    fn parse_top_level_parameter_pattern(&mut self) -> Result<Pattern, ParseError> {
+        let checkpoint = self.position;
+        let start = self.position;
+        let mutable = self.eat(TokenKind::Mut);
+        let moved = !mutable && self.eat(TokenKind::Move);
+        if (mutable || moved) && self.at(TokenKind::LParen) {
+            return self.parse_product_pattern(start, mutable, moved);
+        }
+        self.position = checkpoint;
+        self.parse_pattern()
     }
 
     /// Parses either a binding pattern or a nested product pattern.
@@ -1721,21 +1740,8 @@ impl Grammar {
                 syntax: self.syntax(start),
                 literal,
             })
-        } else if self.eat(TokenKind::LParen) {
-            let mut elements = Vec::new();
-            if !self.at(TokenKind::RParen) {
-                loop {
-                    elements.push(self.parse_pattern()?);
-                    if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
-                        break;
-                    }
-                }
-            }
-            self.expect(TokenKind::RParen, "expected `)` after parameter")?;
-            Pattern::Product(ProductPattern {
-                syntax: self.syntax(start),
-                elements,
-            })
+        } else if self.at(TokenKind::LParen) {
+            self.parse_product_pattern(start, false, false)?
         } else {
             self.parse_named_pattern()?
         };
@@ -1751,6 +1757,45 @@ impl Grammar {
             });
         }
         Ok(pattern)
+    }
+
+    /// Parses a parenthesized product pattern. When `mutable`/`moved` is
+    /// set, the whole destructured parameter is being marked as a single
+    /// unit (e.g. `mut (a, b) => ...`), which cannot be combined with `mut`
+    /// or `move` on the pattern's own direct elements.
+    fn parse_product_pattern(
+        &mut self,
+        start: usize,
+        mutable: bool,
+        moved: bool,
+    ) -> Result<Pattern, ParseError> {
+        self.expect(TokenKind::LParen, "expected `(`")?;
+        let mut elements = Vec::new();
+        if !self.at(TokenKind::RParen) {
+            loop {
+                elements.push(self.parse_pattern()?);
+                if !self.eat(TokenKind::Comma) || self.at(TokenKind::RParen) {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen, "expected `)` after parameter")?;
+        if mutable && elements.iter().any(pattern_element_marks_mutable) {
+            return Err(self.error(
+                "a whole mutable parameter cannot also mark individual product elements `mut`",
+            ));
+        }
+        if moved && elements.iter().any(pattern_element_marks_moved) {
+            return Err(self.error(
+                "a whole move parameter cannot also mark individual product elements `move`",
+            ));
+        }
+        Ok(Pattern::Product(ProductPattern {
+            syntax: self.syntax(start),
+            elements,
+            mutable,
+            moved,
+        }))
     }
 
     fn parse_named_pattern(&mut self) -> Result<Pattern, ParseError> {
@@ -1787,6 +1832,8 @@ impl Grammar {
             let argument = Box::new(Pattern::Product(ProductPattern {
                 syntax: self.syntax(start),
                 elements: Vec::new(),
+                mutable: false,
+                moved: false,
             }));
             return Ok(Pattern::Nominal(NominalPattern {
                 syntax: self.syntax(start),
@@ -3443,6 +3490,22 @@ impl Grammar {
             line,
             column: self.source[line_start..offset].chars().count() + 1,
         }
+    }
+}
+
+fn pattern_element_marks_mutable(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(binding) => binding.mutable,
+        Pattern::At(at) => at.binding.mutable,
+        _ => false,
+    }
+}
+
+fn pattern_element_marks_moved(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(binding) => binding.moved,
+        Pattern::At(at) => at.binding.moved,
+        _ => false,
     }
 }
 

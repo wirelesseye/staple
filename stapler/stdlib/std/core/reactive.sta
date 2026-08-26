@@ -13,4 +13,4 @@ pub def reaction: <effect E> (() ->{E} ()) ->{Reactive, E} () = callback => ()
 pub def batch: <effect E> (() ->{E} ()) ->{E} () = callback => ()
 
 /// Reads an expression eagerly without retaining or recording reactive dependencies.
-pub def snapshot: <T> move T -> T = value => value
+pub def snapshot: <T> move T -> T = move value => value

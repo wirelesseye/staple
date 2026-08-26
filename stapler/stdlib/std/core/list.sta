@@ -12,7 +12,7 @@ impl<T where Clone T> Clone (List T) {
 
 // Doubles capacity (minimum 4 on first growth) and moves every element
 // across in one Buffer.transfer call.
-def grow: <T> mut List T -> () = list => {
+def grow: <T> mut List T -> () = mut list => {
     let List(mut source) = list
     let old_capacity = Buffer.capacity source
     let new_capacity: USize = match old_capacity == 0 {
@@ -32,7 +32,7 @@ companion<T> List T {
     pub def capacity: List T -> USize = list => list.*^capacity
 
     /// Appends a value, growing the list when necessary.
-    pub def push: mut List T -> move T -> () = list => value => {
+    pub def push: mut List T -> move T -> () = mut list => move value => {
         match list.*^length < list.*^capacity {
             True() => list.*^push value,
             False() => {
@@ -43,7 +43,7 @@ companion<T> List T {
     }
 
     /// Removes and returns the final value, or `None` when empty.
-    pub def pop: mut List T -> Option T = list => list.*^pop
+    pub def pop: mut List T -> Option T = mut list => list.*^pop
 
     /// Returns a reference to the value at an index, or `None` when out of bounds.
     pub def get_ref: List T -> USize -> Option (Ref T) = List buffer => index => {
@@ -75,7 +75,7 @@ companion<T> List T {
 
 companion<T> List T {
     /// Creates a list containing one value.
-    pub def singleton: move T -> List T = value => {
+    pub def singleton: move T -> List T = move value => {
         let mut list: List T = List.with_capacity 1
         list^push value
         list
@@ -92,7 +92,7 @@ companion<T> List T {
     // `List.of` threads the list handle through nested calls to this
     // instead.
     /// Appends a value and returns the list handle.
-    pub def push_and_return: mut List T -> move T -> List T = list => value => {
+    pub def push_and_return: mut List T -> move T -> List T = mut list => move value => {
         list^push value
         list
     }
@@ -167,7 +167,7 @@ impl<T where Copy T> Index (List T) USize T {
 }
 
 impl<T> MutateIndex (List T) USize T {
-    def mutate_index = (list, position, value) => {
+    def mutate_index = (mut list, position, move value) => {
         let mut reference = List.get_ref_unchecked list position
         Ref.replace (reference, value)
         ()

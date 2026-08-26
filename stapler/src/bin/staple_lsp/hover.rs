@@ -1769,8 +1769,9 @@ mod tests {
 
     #[test]
     fn function_type_hover_shows_mut_and_move_markers_together() {
-        let source =
-            concat!("def mutate_and_consume: (mut I32, move I32) -> () = (first, second) => ()\n",);
+        let source = concat!(
+            "def mutate_and_consume: (mut I32, move I32) -> () = (mut first, move second) => ()\n",
+        );
         let path = std::env::temp_dir().join("staple-hover-mut-move-test.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
@@ -1843,7 +1844,7 @@ mod tests {
             "trait Bound T { check: T -> Bool }\n",
             "trait Target T { act: move T -> T }\n",
             "impl Bound I32 { def check = value => True }\n",
-            "impl <T where Bound T> Target T { def act = value => value }\n",
+            "impl <T where Bound T> Target T { def act = move value => value }\n",
         );
         let path = std::env::temp_dir().join("staple-hover-generic-impl-test.sta");
         let program = ProgramLoader::new()

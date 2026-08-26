@@ -1484,7 +1484,7 @@ mod tests {
             "trait Bound T { check: T -> Bool }\n",
             "trait Target T { act: move T -> T }\n",
             "impl Bound I32 { def check = value => True }\n",
-            "impl <T where Bound T> Target T { def act = value => value }\n",
+            "impl <T where Bound T> Target T { def act = move value => value }\n",
         );
         let path = std::env::temp_dir().join("staple-semantic-generic-impl.sta");
         let program = ProgramLoader::new()

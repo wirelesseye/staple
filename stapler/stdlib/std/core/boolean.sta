@@ -5,14 +5,14 @@ pub typegroup Bool {
 pub use Bool.*
 
 impl Display Bool {
-    def fmt = (value, formatter) => Formatter.write (formatter, match value {
+    def fmt = (value, mut formatter) => Formatter.write (formatter, match value {
         True() => "True",
         False() => "False",
     })
 }
 
 impl Debug Bool {
-    def fmt = (value, formatter) => Display.fmt (value, formatter)
+    def fmt = (value, mut formatter) => Display.fmt (value, formatter)
 }
 
 impl Eq Bool {

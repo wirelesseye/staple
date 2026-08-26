@@ -973,6 +973,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
                 Ok(())
             }
+            // A whole `mut`/`move`-marked product pattern (`mut (a, b) => ...`):
+            // the whole parameter is passed as a single value (by address for
+            // `mut`, collapsed via `build_product_value` otherwise), so it
+            // must be destructured from that one value rather than zipped
+            // element-by-element against a matching `values` slice.
+            Pattern::Product(_) if values.len() == 1 => {
+                self.bind_pattern_value(environment, pattern, values[0])
+            }
             _ => Err(Diagnostic::new(
                 pattern.syntax().span.clone(),
                 "function pattern layout does not match its declared type",

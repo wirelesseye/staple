@@ -480,7 +480,7 @@ fn passing_a_captured_cell_to_a_mutating_parameter_is_a_state_write() {
     use stapler::CheckedStateEffect;
 
     let module = type_check(concat!(
-        "def replace: mut I32 -> () = value => { value = 2 }\n",
+        "def replace: mut I32 -> () = mut value => { value = 2 }\n",
         "def make = () => {\n",
         "  let mut value = 1\n",
         "  let update = () => replace value\n",
@@ -591,7 +591,7 @@ fn rejects_invalid_resource_contracts_and_types() {
 fn standard_io_is_a_compiler_provided_resource_and_propagates_to_main() {
     let module = type_check(concat!(
         "use std.io.(IO, print, println)\n",
-        "def identity: <T> move T -> T = value => value\n",
+        "def identity: <T> move T -> T = move value => value\n",
         "def explicit: String ->{IO} () = value => print value\n",
         "def inferred = value: String => println value\n",
         "def main = () => { explicit \"one\"; inferred (identity \"two\") }\n",
@@ -1096,11 +1096,11 @@ fn type_checks_the_two_binding_mutability_forms() {
     type_check(concat!(
         "type Box = I32\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
-        "def field_write: mut Ref (x: I32, y: I32) -> () = value => { value.x = 1 }\n",
+        "def field_write: mut Ref (x: I32, y: I32) -> () = mut value => { value.x = 1 }\n",
         "def matched = (value: Box) => match value { Box (mut inner) => { inner = 2; inner } }\n",
     ));
 
-    type_check("def by_value: mut (x: I32, y: I32) -> () = value => { value.x = 1 }\n");
+    type_check("def by_value: mut (x: I32, y: I32) -> () = mut value => { value.x = 1 }\n");
 
     // A `pub` global follows the same rules from another module as it does locally.
     let diagnostics = TypeChecker::new()
@@ -1210,9 +1210,9 @@ fn rejects_a_declared_mutation_target_the_body_does_not_write() {
 #[test]
 fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
     let by_index =
-        type_check("def f: (mut a: Ref (I32, I32), b: I32) -> () = (a, b) => { a.0 = 1 }\n");
+        type_check("def f: (mut a: Ref (I32, I32), b: I32) -> () = (mut a, b) => { a.0 = 1 }\n");
     let by_name =
-        type_check("def f: (mut a: Ref (I32, I32), b: I32) -> () = (a, b) => { a.0 = 1 }\n");
+        type_check("def f: (mut a: Ref (I32, I32), b: I32) -> () = (mut a, b) => { a.0 = 1 }\n");
     assert_eq!(
         function_mutations(&by_index, "f"),
         function_mutations(&by_name, "f"),
@@ -1221,14 +1221,14 @@ fn resolves_named_and_positional_mutation_targets_to_the_same_type() {
 
 #[test]
 fn a_whole_parameter_declaration_covers_writing_a_single_element() {
-    type_check("def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n");
+    type_check("def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n");
 }
 
 #[test]
 fn call_site_mutation_requires_an_explicit_caller_marker() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
+            "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n",
             "def g = (q: Ref (I32, I32)) => { f q }\n",
         )))
         .expect_err_diagnostics("mutation permissions must not propagate into callers");
@@ -1239,7 +1239,7 @@ fn call_site_mutation_requires_an_explicit_caller_marker() {
     );
 
     let module = type_check(concat!(
-        "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
+        "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n",
         "def g = (mut q: Ref (I32, I32)) => { f q }\n",
     ));
     assert_eq!(
@@ -1295,7 +1295,7 @@ fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
 fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
     let module = type_check(concat!(
         "type MyInt = Ref I32\n",
-        "def mutate_my_int: (mut MyInt, I32) -> () = (my_int, value) => {\n",
+        "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
         "  let MyInt mut inner = my_int\n",
         "  Ref.replace (inner, value)\n",
         "  ()\n",
@@ -1310,7 +1310,7 @@ fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "type MyInt = Ref I32\n",
-            "def mutate_my_int: (mut MyInt, I32) -> () = (my_int, value) => {\n",
+            "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
             "  let MyInt mut inner = my_int\n",
             "  Ref.replace (inner, value)\n",
             "  ()\n",
@@ -1346,8 +1346,8 @@ fn llvm_parameter_count(llvm: &str, function: &str) -> usize {
 fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
     let module = type_check(concat!(
         "type Clock = I32\n",
-        "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
-        "def g: mut Ref (I32, I32) ->{Clock} () = p => { p.0 = 1 }\n",
+        "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n",
+        "def g: mut Ref (I32, I32) ->{Clock} () = mut p => { p.0 = 1 }\n",
     ));
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
@@ -1364,7 +1364,7 @@ fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
 #[test]
 fn a_mutated_ref_parameter_lowers_and_the_caller_observes_the_write() {
     let module = type_check(concat!(
-        "def f: mut Ref (I32, I32) -> () = p => { p.0 = p.0 + 1 }\n",
+        "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = p.0 + 1 }\n",
         "def use_it = () => { let mut pair: Ref (I32, I32) = Ref (1, 2); f pair; pair.0 }\n",
     ));
     let context = Context::create();
@@ -1376,7 +1376,7 @@ fn a_mutated_ref_parameter_lowers_and_the_caller_observes_the_write() {
 #[test]
 fn a_mut_parameter_can_replace_the_callers_value() {
     let module = type_check(concat!(
-        "def update_data: mut I32 -> () = data => { data = 42 }\n",
+        "def update_data: mut I32 -> () = mut data => { data = 42 }\n",
         "let mut data: I32 = 1\n",
         "update_data data\n",
     ));
@@ -1461,8 +1461,8 @@ fn resource_inference_preserves_parameter_declared_mutation() {
 #[test]
 fn whole_and_positional_product_parameters_can_be_replaced() {
     let module = type_check(concat!(
-        "def replace_pair: mut (I32, I32) -> () = pair => { pair = (3, 4) }\n",
-        "def replace_first: (mut I32, I32) -> () = (first, _) => { first = 9 }\n",
+        "def replace_pair: mut (I32, I32) -> () = mut pair => { pair = (3, 4) }\n",
+        "def replace_first: (mut I32, I32) -> () = (mut first, _) => { first = 9 }\n",
         "let mut pair = (1, 2)\n",
         "replace_pair pair\n",
         "let mut first = 0\n",
@@ -1477,7 +1477,7 @@ fn whole_and_positional_product_parameters_can_be_replaced() {
 #[test]
 fn a_first_class_mutating_function_preserves_writeback() {
     let module = type_check(concat!(
-        "def replace: mut I32 -> () = value => { value = 7 }\n",
+        "def replace: mut I32 -> () = mut value => { value = 7 }\n",
         "let operation: mut I32 -> () = replace\n",
         "let mut value = 1\n",
         "operation value\n",
@@ -1491,7 +1491,7 @@ fn a_first_class_mutating_function_preserves_writeback() {
 #[test]
 fn a_mut_call_materializes_and_discards_a_temporary_argument() {
     let module = type_check(concat!(
-        "def update_data: mut I32 -> () = data => { data = 42 }\n",
+        "def update_data: mut I32 -> () = mut data => { data = 42 }\n",
         "update_data (1 + 2)\n",
     ));
     let context = Context::create();
@@ -1505,7 +1505,7 @@ fn a_mut_call_materializes_and_discards_a_temporary_argument() {
 fn a_move_only_mut_temporary_drops_replaced_and_final_values() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
-        "def replace: mut CString -> () = value => { value = c_string \"replacement\" }\n",
+        "def replace: mut CString -> () = mut value => { value = c_string \"replacement\" }\n",
         "replace (c_string \"initial\")\n",
     ));
     let context = Context::create();
@@ -1666,7 +1666,7 @@ fn derives_trait_delegated_product_indexing() {
 fn delegates_brackets_to_explicit_indexing_implementations() {
     let source = concat!(
         "impl Index I32 String I32 { def index = (target, position) => target }\n",
-        "impl MutateIndex I32 String I32 { def mutate_index = (target, position, value) => () }\n",
+        "impl MutateIndex I32 String I32 { def mutate_index = (mut target, position, move value) => () }\n",
         "let selected: I32 = 4[\"key\"]\n",
         "4[\"key\"] = 5\n",
     );
@@ -2199,7 +2199,7 @@ fn matches_values_of_any_runtime_type() {
         "def identity = value: I32 => value\n",
         "def function = value: (I32 -> I32) => match value { callable => callable 4 }\n",
         "def nominal = value: Wrapped => match value { Wrapped number => number }\n",
-        "def generic: <T> move T -> T = value => match value { same: T => same }\n",
+        "def generic: <T> move T -> T = move value => match value { same: T => same }\n",
         "integer 1\n",
         "float 1.5\n",
         "function identity\n",
@@ -2422,7 +2422,7 @@ fn supports_arbitrary_sized_sum_alternatives_and_typed_matches() {
         "let applied: Ok I32 | Ok String = Ok(3)\n",
         "def small: () -> I32 | String = () => 7\n",
         "let widened: I32 | String | F64 = small()\n",
-        "def generic: <T> move T -> T | String = value => value\n",
+        "def generic: <T> move T -> T | String = move value => value\n",
         "generic 9\n",
         "select(integer)\n",
         "select(text)\n",
@@ -3404,7 +3404,7 @@ fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_t
         "trait Convert Source Target where Source ~> Target { convert: move Source -> Target }\n",
         "impl Bound I32 { def check = value => True }\n",
         "impl <T where Bound T> Convert T T {\n",
-        "    def convert = value => value\n",
+        "    def convert = move value => value\n",
         "}\n",
         "let result: I32 = Convert.convert (5 satisfies I32)\n",
     ));
@@ -3462,7 +3462,7 @@ fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
     // the residual type at that specific depth. Only the argument in the
     // buffer's own position should ever need to be `mut`.
     let module = type_check(concat!(
-        "def push_value: (mut Buffer I32, I32) -> () = (buffer, value) => {\n",
+        "def push_value: (mut Buffer I32, I32) -> () = (mut buffer, value) => {\n",
         "  Buffer.push buffer value\n",
         "}\n",
         "def exercise: () -> () = () => {\n",
@@ -4220,7 +4220,7 @@ fn resolves_and_merges_type_companion_items() {
     ));
     type_check(concat!(
         "type alias Box T = (value: T)\n",
-        "companion<T> Box T { pub def box_identity: move Box T -> Box T = box => box }\n",
+        "companion<T> Box T { pub def box_identity: move Box T -> Box T = move box => box }\n",
         "let identity: Box I32 -> Box I32 = Box.box_identity\n",
     ));
 }
@@ -5156,7 +5156,7 @@ fn generates_generic_conditional_trait_implementation_items() {
         "trait Target T { act: move T -> T }\n",
         "impl Bound I32 { def check = value => True }\n",
         "macro define_impl = _: Expr => parse_quote {\n",
-        "    impl <T where Bound T> Target T { def act = value => value }\n",
+        "    impl <T where Bound T> Target T { def act = move value => value }\n",
         "}\n",
         "define_impl ()\n",
         "let answer: I32 = Target.act 41\n",
@@ -5839,7 +5839,7 @@ fn rejects_bare_literal_identifier_macro_parameters() {
 #[test]
 fn subtype_bound_call_preserves_string_literal_type() {
     let module = type_check(concat!(
-        "def string_identity: <T where T <: String> move T -> T = x => x\n",
+        "def string_identity: <T where T <: String> move T -> T = move x => x\n",
         "string_identity \"foo\"\n",
     ));
     let item = &module.syntax().items[1];
@@ -5855,7 +5855,7 @@ fn subtype_bound_call_preserves_string_literal_type() {
 #[test]
 fn subtype_bound_rejects_non_string_arguments() {
     let module = resolve(concat!(
-        "def string_identity: <T where T <: String> move T -> T = x => x\n",
+        "def string_identity: <T where T <: String> move T -> T = move x => x\n",
         "string_identity 1\n",
     ));
     let diagnostics = TypeChecker::new()
@@ -5869,7 +5869,7 @@ fn subtype_bound_rejects_non_string_arguments() {
 #[test]
 fn subtype_bound_reflexivity() {
     type_check(concat!(
-        "def echo: <T where T <: T> move T -> T = x => x\n",
+        "def echo: <T where T <: T> move T -> T = move x => x\n",
         "echo \"hello\"\n",
         "echo 1\n",
     ));
@@ -6560,7 +6560,7 @@ fn decodes_source_string_literals_before_llvm_generation() {
 fn type_checks_generic_aliases_and_functions() {
     let module = type_check(concat!(
         "type alias Pair (A, B) = (A, B)\n",
-        "def identity: <T> move T -> T = x => x\n",
+        "def identity: <T> move T -> T = move x => x\n",
         "let pair: Pair (String, I32) = (\"answer\", 42)\n",
         "let answer: I32 = identity 42\n",
         "let text: String = identity \"hello\"\n",
@@ -6627,7 +6627,7 @@ fn provides_formatter_display_debug_and_structural_product_debug() {
     let module = type_check(concat!(
         "type Point = (x: I32, y: I32)\n",
         "impl Debug Point {\n",
-        "  def fmt = (Point (x, y), formatter) => {\n",
+        "  def fmt = (Point (x, y), mut formatter) => {\n",
         "    Formatter.write (formatter, \"Point \" )\n",
         "    Debug.fmt ((x: x, y: y), formatter)\n",
         "  }\n",
@@ -6708,9 +6708,9 @@ fn type_checks_and_generates_string_templates() {
     let module = type_check(concat!(
         "type Label = String\n",
         "impl Display Label {\n",
-        "  def fmt = (Label value, formatter) => Formatter.write (formatter, value)\n",
+        "  def fmt = (Label value, mut formatter) => Formatter.write (formatter, value)\n",
         "}\n",
-        "def render: <T where Display T> move T -> String = value => \"value=$value\"\n",
+        "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
         "let name: String = \"world\"\n",
         "let answer: I32 = 42\n",
         "let product = (answer, name)\n",
@@ -6798,8 +6798,8 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
 fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
     let module = type_check(concat!(
         "trait Same T where Eq T { same: (T, T) -> Bool = (left, right) => Eq.equal left right }\n",
-        "trait Select Value { select: (Bool, move Value, move Value) -> Value = (condition, left, right) => if { condition => left, else => right } }\n",
-        "trait First (Left, Right) { first: (move Left, Right) -> Left = (left, right) => left }\n",
+        "trait Select Value { select: (Bool, move Value, move Value) -> Value = (condition, move left, move right) => if { condition => left, else => right } }\n",
+        "trait First (Left, Right) { first: (move Left, Right) -> Left = (move left, right) => left }\n",
         "impl Same I32 {}\n",
         "impl Select I32 {}\n",
         "impl First (I32, String) {}\n",
@@ -6816,8 +6816,8 @@ fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
 #[test]
 fn explicit_trait_members_override_defaults() {
     let module = type_check(concat!(
-        "trait Identity T { identity: move T -> T = value => value }\n",
-        "impl Identity I32 { def identity = value => value + 1 }\n",
+        "trait Identity T { identity: move T -> T = move value => value }\n",
+        "impl Identity I32 { def identity = move value => value + 1 }\n",
         "let answer: I32 = Identity.identity 41\n",
     ));
     let context = Context::create();
@@ -6898,7 +6898,7 @@ fn infers_trait_functional_dependency_arguments() {
         "impl ConvertPair (I32, String) { def convert_pair = value => \"pair\" }\n",
         "def requires_iterator: <T where Iterator T> T -> () = value => ()\n",
         "def requires_iterator_explicit: <T where Iterator T _> T -> () = value => ()\n",
-        "def requires_add: <T where AddTo T T> move T -> T = value => value\n",
+        "def requires_add: <T where AddTo T T> move T -> T = move value => value\n",
         "def requires_pair: <T where ConvertPair (T, _)> T -> () = value => ()\n",
         "trait UsesIterator Iter where Iterator Iter { use_iterator: Iter -> Iter }\n",
         "impl UsesIterator I32 { def use_iterator = value => value }\n",
@@ -7403,7 +7403,7 @@ fn opaque_types_do_not_introduce_values_and_singletons_are_not_callable() {
 #[test]
 fn contextually_specializes_first_class_generic_functions() {
     let module = type_check(concat!(
-        "def identity: <T> move T -> T = x => x\n",
+        "def identity: <T> move T -> T = move x => x\n",
         "def apply: (I32 -> I32) -> I32 = f => f 42\n",
         "let int_identity: I32 -> I32 = identity\n",
         "let answer: I32 = apply identity\n",
@@ -7560,9 +7560,9 @@ fn rejects_non_nominal_and_mismatched_nominal_patterns() {
 #[test]
 fn monomorphizes_nested_and_recursive_generic_calls() {
     let module = type_check(concat!(
-        "def identity: <T> move T -> T = x => x\n",
-        "def copy: <U> move U -> U = x => identity x\n",
-        "def recur: <V> move V -> V = x => recur x\n",
+        "def identity: <T> move T -> T = move x => x\n",
+        "def copy: <U> move U -> U = move x => identity x\n",
+        "def recur: <V> move V -> V = move x => recur x\n",
         "let answer: I32 = copy 42\n",
         "let recurse: I32 = recur 1\n",
     ));
@@ -7590,7 +7590,7 @@ fn monomorphizes_generic_closures_with_captures() {
 #[test]
 fn infers_product_and_result_only_compile_time_parameters() {
     let module = type_check(concat!(
-        "def first: <A, B> (move A, B) -> A = (a, b) => a\n",
+        "def first: <A, B> (move A, B) -> A = (move a, b) => a\n",
         "type Phantom T = I32\n",
         "def make: <T> I32 -> Phantom T = x => Phantom x\n",
         "let answer: I32 = first (42, \"ignored\")\n",

@@ -114,6 +114,12 @@ pub struct BindingPattern {
 pub struct ProductPattern {
     pub syntax: Syntax,
     pub elements: Vec<Pattern>,
+    /// Whether the whole product was marked `mut`/`move` as a single unit
+    /// (e.g. `mut (a, b) => ...`), rather than destructured with markers on
+    /// individual elements. Only meaningful at a function's top-level
+    /// parameter position; mutually exclusive with per-element markers.
+    pub mutable: bool,
+    pub moved: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

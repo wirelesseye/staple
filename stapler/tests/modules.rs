@@ -1285,7 +1285,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
         "values.sta",
         concat!(
             "pub type UserId = I32\n",
-            "pub def identity: <T> move T -> T = x => x\n",
+            "pub def identity: <T> move T -> T = move x => x\n",
         ),
     );
     fixture.write(
