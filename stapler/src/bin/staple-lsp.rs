@@ -102,7 +102,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(false),
-            trigger_characters: Some(vec!["^".to_owned()]),
+            trigger_characters: Some(vec!["^".to_owned(), ".".to_owned()]),
             all_commit_characters: None,
             work_done_progress_options: WorkDoneProgressOptions::default(),
             completion_item: None,
@@ -201,13 +201,27 @@ impl Server {
                     let successful = document.last_successful.as_ref()?;
                     let previous_offset =
                         TextChange::between(&successful.source, &document.text).old_offset(offset);
-                    let method_receiver =
-                        method_completion_receiver(&document.text, offset).map(|receiver| {
-                            TextChange::between(&successful.source, &document.text)
-                                .old_offset(receiver)
+                    let completion_receiver =
+                        completion_receiver(&document.text, offset).map(|(receiver, qualified, name)| {
+                            (
+                                TextChange::between(&successful.source, &document.text)
+                                    .old_offset(receiver),
+                                qualified,
+                                name,
+                            )
                         });
-                    Some(match method_receiver {
-                        Some(receiver) => successful.completion_index.method_items(receiver),
+                    Some(match completion_receiver {
+                        Some((receiver, true, name)) => {
+                            let indexed = successful.completion_index.qualifier_items(receiver);
+                            if indexed.is_empty() {
+                                successful.completion_index.named_qualifier_items(name, previous_offset)
+                            } else {
+                                indexed
+                            }
+                        }
+                        Some((receiver, false, _)) => {
+                            successful.completion_index.method_items(receiver)
+                        }
                         None => successful.completion_index.items(previous_offset),
                     })
                 })
@@ -681,18 +695,22 @@ struct TextChange {
     new_suffix_start: usize,
 }
 
-fn method_completion_receiver(text: &str, offset: usize) -> Option<usize> {
+fn completion_receiver(text: &str, offset: usize) -> Option<(usize, bool, &str)> {
     let before_cursor = text.get(..offset)?;
     let line_start = before_cursor.rfind('\n').map_or(0, |index| index + 1);
     let line = &before_cursor[line_start..];
-    let caret = line.rfind('^')?;
-    let prefix = &line[caret + 1..];
+    let separator = line.rfind(['^', '.'])?;
+    let prefix = &line[separator + 1..];
     if prefix
         .chars()
         .all(|character| character == '_' || character.is_alphanumeric())
-        && caret > 0
+        && separator > 0
     {
-        Some(line_start + caret)
+        let receiver = line[..separator]
+            .trim_end()
+            .rsplit_once(|character: char| !(character == '_' || character == '.' || character.is_alphanumeric()))
+            .map_or(line[..separator].trim_end(), |(_, receiver)| receiver);
+        Some((line_start + separator, line.as_bytes()[separator] == b'.', receiver))
     } else {
         None
     }

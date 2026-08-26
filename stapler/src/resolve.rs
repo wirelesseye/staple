@@ -361,6 +361,7 @@ pub struct ResolvedModule {
     trait_modules: HashMap<TraitId, ModuleId>,
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
+    exported_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
     compile_time_bindings: HashMap<SyntaxId, CompileTimeBindingInfo>,
     companion_members: HashMap<TypeId, HashMap<String, ResolvedCompanionMember>>,
     companion_type_for_module: HashMap<ModuleId, TypeId>,
@@ -525,6 +526,20 @@ impl ResolvedModule {
         module: ModuleId,
     ) -> Option<&HashMap<String, Vec<DefinitionId>>> {
         self.visible_module_definitions.get(module.0)
+    }
+
+    pub fn exported_definitions(
+        &self,
+        module: ModuleId,
+    ) -> Option<&HashMap<String, Vec<DefinitionId>>> {
+        self.exported_module_definitions.get(module.0)
+    }
+
+    pub fn trait_methods(&self, trait_id: TraitId) -> Vec<TraitMethodId> {
+        self.trait_method_traits
+            .iter()
+            .filter_map(|(method, owner)| (*owner == trait_id).then_some(*method))
+            .collect()
     }
 
     pub fn declaration_syntax(&self, definition: DefinitionId) -> Option<SyntaxId> {
@@ -1165,6 +1180,44 @@ impl NameResolver {
                 })
             })
             .collect();
+        let exported_module_definitions = self
+            .interfaces
+            .iter()
+            .map(|interface| {
+                let mut definitions = HashMap::<String, Vec<DefinitionId>>::new();
+                for (name, symbol) in &interface.values {
+                    definitions
+                        .entry(name.clone())
+                        .or_default()
+                        .push(DefinitionId::Symbol(*symbol));
+                }
+                for (name, ty) in &interface.types {
+                    definitions
+                        .entry(name.clone())
+                        .or_default()
+                        .push(DefinitionId::Type(*ty));
+                }
+                for (name, trait_id) in &interface.traits {
+                    definitions
+                        .entry(name.clone())
+                        .or_default()
+                        .push(DefinitionId::Trait(*trait_id));
+                }
+                for (name, macros) in &interface.macros {
+                    definitions
+                        .entry(name.clone())
+                        .or_default()
+                        .extend(macros.iter().copied().map(DefinitionId::Macro));
+                }
+                for (name, module) in &interface.namespaces {
+                    definitions
+                        .entry(name.clone())
+                        .or_default()
+                        .push(DefinitionId::Module(*module));
+                }
+                definitions
+            })
+            .collect();
         let mut resolved = ResolvedModule {
             program,
             functions: self.functions,
@@ -1212,6 +1265,7 @@ impl NameResolver {
             symbol_declarations: self.symbol_declarations,
             import_definitions: self.import_definitions,
             visible_module_definitions: self.visible_module_definitions,
+            exported_module_definitions,
             compile_time_bindings,
             companion_members,
             companion_type_for_module,

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
 use lsp_types::{CompletionItem, CompletionItemKind};
@@ -68,11 +68,20 @@ struct ModuleIndex {
 pub struct CompletionIndex {
     modules: Vec<ModuleIndex>,
     methods: Vec<MethodSite>,
+    qualifiers: Vec<MethodSite>,
+    named_qualifiers: Vec<NamedQualifier>,
 }
 
 #[derive(Debug, Clone)]
 struct MethodSite {
     receiver_end: usize,
+    items: Vec<CompletionItem>,
+}
+
+#[derive(Debug, Clone)]
+struct NamedQualifier {
+    module: ModuleId,
+    name: String,
     items: Vec<CompletionItem>,
 }
 
@@ -148,6 +157,29 @@ impl CompletionIndex {
             .map(|site| site.items.clone())
             .unwrap_or_default()
     }
+
+    pub fn qualifier_items(&self, receiver_end: usize) -> Vec<CompletionItem> {
+        self.qualifiers
+            .iter()
+            .filter(|site| site.receiver_end == receiver_end)
+            .max_by_key(|site| site.items.len())
+            .map(|site| site.items.clone())
+            .unwrap_or_default()
+    }
+
+    pub fn named_qualifier_items(&self, name: &str, offset: usize) -> Vec<CompletionItem> {
+        let module = self
+            .modules
+            .iter()
+            .filter(|module| contains(&module.range, offset))
+            .min_by_key(|module| module.range.end.saturating_sub(module.range.start))
+            .map(|module| module.id);
+        self.named_qualifiers
+            .iter()
+            .find(|qualifier| qualifier.module == module.unwrap_or(qualifier.module) && qualifier.name == name)
+            .map(|qualifier| qualifier.items.clone())
+            .unwrap_or_default()
+    }
 }
 
 struct Collector<'a> {
@@ -162,13 +194,16 @@ impl Collector<'_> {
             range: range.clone(),
             candidates: Vec::new(),
         };
-        if let Some(definitions) = self.typed.resolved().visible_definitions(id) {
-            for (name, definitions) in definitions {
+        if let Some(definitions) = self.typed.resolved().visible_definitions(id).cloned() {
+            for (name, definitions) in &definitions {
                 for definition in definitions {
                     if let Some(candidate) = self.definition(name, *definition, range.start) {
                         root.candidates.push(candidate);
                     }
                 }
+            }
+            for (name, definitions) in definitions {
+                self.register_named_qualifier(id, &name, &definitions, &mut HashSet::new());
             }
         }
         self.sequential_items(&module.items, &mut root.candidates, range.start);
@@ -180,6 +215,52 @@ impl Collector<'_> {
         let module_index = self.index.modules.len() - 1;
         for item in &module.items {
             self.item(item, module_index);
+        }
+    }
+
+    fn register_named_qualifier(
+        &mut self,
+        owner: ModuleId,
+        name: &str,
+        definitions: &[DefinitionId],
+        visited: &mut HashSet<ModuleId>,
+    ) {
+        let mut items = Vec::new();
+        for definition in definitions {
+            match *definition {
+                DefinitionId::Type(ty) => items.extend(
+                    self.typed.resolved().companion_members(ty, Some(owner)).into_iter().filter_map(
+                        |(member, symbol)| self.definition(member, DefinitionId::Symbol(symbol), 0).map(|candidate| candidate.item),
+                    ),
+                ),
+                DefinitionId::Trait(trait_id) => items.extend(
+                    self.typed.resolved().trait_methods(trait_id).into_iter().filter_map(|method| {
+                        let member = self.typed.resolved().trait_method(method)?;
+                        self.definition(&member.name, DefinitionId::TraitMethod(method), 0).map(|candidate| candidate.item)
+                    }),
+                ),
+                DefinitionId::Module(module) => {
+                    if let Some(exports) = self.typed.resolved().exported_definitions(module).cloned() {
+                        self.add_module_items(module, &mut items);
+                        if visited.insert(module) {
+                            for (child, child_definitions) in exports {
+                                self.register_named_qualifier(owner, &format!("{name}.{child}"), &child_definitions, visited);
+                            }
+                            visited.remove(&module);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !items.is_empty() {
+            items.sort_by(|left, right| left.label.cmp(&right.label));
+            items.dedup_by(|left, right| left.label == right.label && left.kind == right.kind);
+            self.index.named_qualifiers.push(NamedQualifier {
+                module: owner,
+                name: name.to_owned(),
+                items,
+            });
         }
     }
 
@@ -342,6 +423,7 @@ impl Collector<'_> {
     }
 
     fn expression(&mut self, expression: &Expression, module_index: usize) {
+        self.qualified_items(expression, module_index);
         if let Some(ty) = self.typed.companion_type_of_expression(expression) {
             let accessing_module = Some(self.index.modules[module_index].id);
             let mut items = self
@@ -449,6 +531,59 @@ impl Collector<'_> {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
+        }
+    }
+
+    fn qualified_items(&mut self, expression: &Expression, module_index: usize) {
+        let resolved = self.typed.resolved();
+        let accessing_module = Some(self.index.modules[module_index].id);
+        let mut items = Vec::new();
+        let definitions = resolved.definitions_for(expression.syntax().id);
+        if let Some(module) = resolved.namespace_for(expression.syntax().id) {
+            self.add_module_items(module, &mut items);
+        }
+        for definition in definitions {
+            match definition {
+                DefinitionId::Type(ty) => items.extend(
+                    resolved
+                        .companion_members(ty, accessing_module)
+                        .into_iter()
+                        .filter_map(|(name, symbol)| {
+                            self.definition(name, DefinitionId::Symbol(symbol), 0)
+                                .map(|candidate| candidate.item)
+                        }),
+                ),
+                DefinitionId::Trait(trait_id) => {
+                    items.extend(resolved.trait_methods(trait_id).into_iter().filter_map(
+                        |method| {
+                            let member = resolved.trait_method(method)?;
+                            self.definition(&member.name, DefinitionId::TraitMethod(method), 0)
+                                .map(|candidate| candidate.item)
+                        },
+                    ))
+                }
+                DefinitionId::Module(module) => self.add_module_items(module, &mut items),
+                _ => {}
+            }
+        }
+        items.sort_by(|left, right| left.label.cmp(&right.label));
+        items.dedup_by(|left, right| left.label == right.label && left.kind == right.kind);
+        if !items.is_empty() {
+            self.index.qualifiers.push(MethodSite {
+                receiver_end: syntax_range(expression.syntax()).end,
+                items,
+            });
+        }
+    }
+
+    fn add_module_items(&self, module: ModuleId, items: &mut Vec<CompletionItem>) {
+        if let Some(exports) = self.typed.resolved().exported_definitions(module) {
+            for (name, definitions) in exports {
+                items.extend(definitions.iter().filter_map(|definition| {
+                    self.definition(name, *definition, 0)
+                        .map(|candidate| candidate.item)
+                }));
+            }
         }
     }
 
@@ -873,5 +1008,57 @@ mod tests {
         );
         assert!(!items.iter().any(|item| item.label == "new"));
         assert!(!items.iter().any(|item| item.label == "grow"));
+    }
+
+    #[test]
+    fn completes_qualified_modules_companions_and_trait_members() {
+        let source = concat!(
+            "trait Local T { render: T -> String }\n",
+            "impl Local I32 { def render = value => \"\" }\n",
+            "let print = std.io.println\n",
+            "let list: List I32 = List.new ()\n",
+            "let render = Local.render\n",
+        );
+        let path = std::env::temp_dir().join("staple-completion-qualified.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let index = index(&module, &typed);
+
+        for (receiver, expected) in [("std.io", "println"), ("List", "new"), ("Local", "render")] {
+            let receiver_end = source.rfind(receiver).unwrap() + receiver.len();
+            let items = index.qualifier_items(receiver_end);
+            assert!(
+                items.iter().any(|item| item.label == expected),
+                "missing {expected} after {receiver}. in {items:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn completes_a_typed_qualifier_when_the_indexed_source_is_empty() {
+        let source = "";
+        let path = std::env::temp_dir().join("staple-completion-empty-qualified.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let index = index(&module, &typed);
+
+        assert!(index
+            .named_qualifier_items("List", 0)
+            .iter()
+            .any(|item| item.label == "singleton"));
+        assert!(index
+            .named_qualifier_items("ToString", 0)
+            .iter()
+            .any(|item| item.label == "to_string"));
     }
 }
