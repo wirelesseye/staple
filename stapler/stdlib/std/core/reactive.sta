@@ -9,5 +9,8 @@ pub def reactive_scope: () -> Reactive = () => __reactive_scope ()
 /// Runs a callback immediately and again whenever one of its signal reads changes.
 pub def reaction: <effect E> (() ->{E} ()) ->{Reactive, E} () = callback => ()
 
+/// Runs a callback immediately while deferring reactions until the outermost batch exits.
+pub def batch: <effect E> (() ->{E} ()) ->{E} () = callback => ()
+
 /// Reads an expression eagerly without retaining or recording reactive dependencies.
 pub def snapshot: <T> move T -> T = value => value

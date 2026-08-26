@@ -38,8 +38,9 @@ reactive relationships directly.
 
 The reactive runtime provides writable `let signal` bindings, lazily cached
 derived `let` bindings, synchronous reactions, dynamic dependency tracking, and
-lexical reaction ownership through the `Reactive` resource. Batching and
-alternative schedulers remain future work.
+lexical reaction ownership through the `Reactive` resource. A FIFO executor
+drains reactions to quiescence and supports explicit batching. Coroutine and
+alternative scheduling policies remain future work.
 
 ### Metaprogramming
 
@@ -1494,9 +1495,20 @@ count = count + 1
 ```
 
 `reaction` accepts a zero-argument callback (and therefore benefits from
-call-site implicit thunking), runs it immediately, and reruns it synchronously
-after every assignment to a signal read by its previous run. Dependencies are
-recollected on every run. Assigning the same value still notifies dependents.
+call-site implicit thunking). Its initial run and every rerun are scheduled on
+the reactive executor. Outside a batch, the executor drains synchronously to
+quiescence before ordinary execution continues, so a reaction still runs
+immediately when created and has completed before a signal assignment returns.
+Dependencies are recollected on every run. Assigning the same value still
+notifies dependents.
+
+Reaction work is FIFO. Reactions made runnable by one propagation are appended
+in creation order, and work made runnable while a reaction runs is appended to
+the queue tail. Duplicate scheduling is coalesced. A reaction is never invoked
+recursively: if it changes one of its own dependencies, it runs again after its
+current invocation returns. If one synchronous drain reaches 100,000 reaction
+executions without stabilizing, the runtime reports that the reactive update
+did not stabilize and traps.
 
 Reactions belong to the innermost `Reactive` resource and are disposed when its
 `with` scope exits, including through `return`, `break`, or `continue`:
@@ -1537,9 +1549,26 @@ let frozen = snapshot (count * 2)
 
 The runtime propagates derived invalidation before synchronously flushing
 reactions, preventing intermediate values in derived chains and diamonds.
-Separate assignments remain unbatched. A reaction that synchronously triggers
-itself, or a derived binding that reads itself while evaluating, traps instead
-of recurring indefinitely.
+Separate assignments remain unbatched. A derived binding that reads itself
+while evaluating still traps.
+
+`batch` evaluates a zero-argument callback synchronously while deferring
+reaction execution until the outermost batch exits:
+
+```staple
+batch {
+    count = 1
+    count = 2
+    count = 3
+}
+```
+
+Signal writes and reads take effect immediately inside the callback, and
+derived bindings are invalidated normally. Each dependent reaction is queued
+at most once and observes the resulting state when the batch finishes. Nested
+batches share the outer batch. A reaction created inside a batch also defers
+its initial run; if its owning `Reactive` scope exits first, the queued run is
+discarded safely.
 
 ### Call-site implicit thunking
 

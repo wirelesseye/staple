@@ -2748,6 +2748,7 @@ impl TypeChecker {
                     .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::ReactiveScope
                 | crate::IntrinsicFunction::Reaction
+                | crate::IntrinsicFunction::Batch
                 | crate::IntrinsicFunction::Snapshot => self
                     .symbol_types
                     .get(symbol)

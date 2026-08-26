@@ -332,7 +332,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .replace("{{SCOPE_BYTES}}", &pointer_bytes.to_string())
             .replace("{{SIGNAL_BYTES}}", &pointer_bytes.to_string())
             .replace("{{REACTION_BYTES}}", &(pointer_bytes * 8).to_string())
-            .replace("{{DEP_BYTES}}", &(pointer_bytes * 5).to_string());
+            .replace("{{DEP_BYTES}}", &(pointer_bytes * 5).to_string())
+            .replace("{{WORK_BYTES}}", &(pointer_bytes * 3).to_string());
         let buffer =
             MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-reactive");
         let module = self
@@ -6267,6 +6268,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             IntrinsicFunction::Reaction => {
                 return self.compile_reaction(environment, call);
             }
+            IntrinsicFunction::Batch => {
+                return self.compile_batch(environment, call);
+            }
             IntrinsicFunction::ToString { value } => {
                 return self.compile_numeric_to_string(environment, call, value);
             }
@@ -6574,6 +6578,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             | IntrinsicFunction::Drop
             | IntrinsicFunction::ReactiveScope
             | IntrinsicFunction::Reaction
+            | IntrinsicFunction::Batch
             | IntrinsicFunction::Snapshot => {
                 unreachable!()
             }
@@ -6759,6 +6764,85 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             ],
             None,
             "reaction.create",
+            call.syntax.span.clone(),
+        )?;
+        Ok(self.unit_value())
+    }
+
+    fn compile_batch(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let implicit = self
+            .typed_module
+            .implicit_thunk_for(call.argument.syntax().id)
+            .cloned();
+        let callback = if let Some(thunk) = &implicit {
+            self.build_closure(environment, thunk.id, call.argument.syntax().span.clone())?
+                .as_any_value_enum()
+        } else {
+            self.compile_expression(environment, &call.argument)?
+        };
+        let AnyValueEnum::StructValue(callback) = callback else {
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "batch callback is not a closure",
+            ));
+        };
+        let callback_type = if let Some(thunk) = &implicit {
+            self.typed_module.type_of_function(thunk.id).cloned()
+        } else {
+            self.concrete_expression_type(&call.argument)
+                .and_then(|ty| match ty {
+                    CheckedType::Function(function) => Some(function),
+                    _ => None,
+                })
+        }
+        .ok_or_else(|| {
+            Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "batch callback has no function type",
+            )
+        })?;
+        let resources = self.compile_resource_arguments(
+            environment,
+            &callback_type.effects,
+            call.syntax.span.clone(),
+        )?;
+
+        self.build_reactive_runtime_call(
+            "__staple_batch_begin",
+            &[],
+            None,
+            "batch.begin",
+            call.syntax.span.clone(),
+        )?;
+        let code = self
+            .builder
+            .build_extract_value(callback, 0, "batch.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let closure_environment = self
+            .builder
+            .build_extract_value(callback, 1, "batch.environment")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let mut arguments = vec![closure_environment.into()];
+        arguments.extend(resources);
+        self.builder
+            .build_indirect_call(
+                self.compile_closure_function_type(&callback_type)?,
+                code,
+                &arguments,
+                "batch.call",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_reactive_runtime_call(
+            "__staple_batch_end",
+            &[],
+            None,
+            "batch.end",
             call.syntax.span.clone(),
         )?;
         Ok(self.unit_value())

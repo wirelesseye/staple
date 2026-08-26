@@ -12,8 +12,12 @@ reaction {
     println "count: $count, doubled: $doubled"
 }
 
-count = 1
-count = 2
-count = 3
+// Writes are immediate inside a batch, while duplicate reaction runs are
+// coalesced until the outermost batch exits. This reaction observes count == 3.
+batch {
+    count = 1
+    count = 2
+    count = 3
+}
 
 println "initial snapshot: $initial, current count: $count"

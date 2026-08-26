@@ -288,6 +288,7 @@ pub enum IntrinsicFunction {
     Drop,
     ReactiveScope,
     Reaction,
+    Batch,
     Snapshot,
 }
 
@@ -1462,6 +1463,7 @@ impl NameResolver {
             ("__buffer_clone", IntrinsicFunction::BufferClone),
             ("__reactive_scope", IntrinsicFunction::ReactiveScope),
             ("reaction", IntrinsicFunction::Reaction),
+            ("batch", IntrinsicFunction::Batch),
             ("snapshot", IntrinsicFunction::Snapshot),
         ] {
             let symbol = program

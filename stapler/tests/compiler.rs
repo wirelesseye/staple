@@ -164,6 +164,23 @@ fn signals_and_scoped_reactions_type_check_and_lower() {
 }
 
 #[test]
+fn reactive_batches_type_check_and_lower_through_implicit_thunking() {
+    let module = type_check(concat!(
+        "let signal count = 0\n",
+        "batch { count = 1; count = 2; () }\n",
+    ));
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("reactive batches should lower");
+    assert!(llvm.contains("__staple_batch_begin"));
+    assert!(llvm.contains("__staple_batch_end"));
+    assert!(llvm.contains("implicit_thunk"));
+    assert!(llvm.contains("__staple_executor_checkpoint"));
+}
+
+#[test]
 fn infers_persistent_signal_derivations_and_respects_snapshot() {
     let module = type_check(concat!(
         "let signal count = 1\n",

@@ -1569,6 +1569,203 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn batches_reactions_in_creation_order_and_coalesces_nested_writes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-batch-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-batch-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { exit: I32 -> () }\n",
+                "let signal value = 0\n",
+                "let mut order = 0\n",
+                "let mut first_runs = 0\n",
+                "let mut second_runs = 0\n",
+                "let mut observed = 0\n",
+                "let mut during = 0\n",
+                "with Reactive = reactive_scope () {\n",
+                "  reaction { let current = value; observed = current; first_runs = first_runs + 1; order = order * 10 + 1; () }\n",
+                "  reaction { let current = value; observed = current; second_runs = second_runs + 1; order = order * 10 + 2; () }\n",
+                "  order = 0\n",
+                "  first_runs = 0\n",
+                "  second_runs = 0\n",
+                "  batch {\n",
+                "    value = 1\n",
+                "    batch { value = 2; value = 3; () }\n",
+                "    during = order + value\n",
+                "    ()\n",
+                "  }\n",
+                "}\n",
+                "exit ((order - 12) + (first_runs - 1) * 10 + (second_runs - 1) * 100 + (observed - 3) * 1000 + (during - 3) * 10000)\n",
+            ),
+        )
+        .expect("temporary batch source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("batched reaction executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("batched reaction executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "batch executable exited with {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reruns_self_triggering_reactions_iteratively() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-self-reaction-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-self-reaction-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { exit: I32 -> () }\n",
+                "let signal count = 0\n",
+                "let mut runs = 0\n",
+                "def update = () => {\n",
+                "  let current = count\n",
+                "  runs = runs + 1\n",
+                "  match current < 10 { True() => { count = current + 1; () }, False() => (), }\n",
+                "}\n",
+                "reaction update\n",
+                "exit ((count - 10) + (runs - 11) * 100)\n",
+            ),
+        )
+        .expect("temporary self-triggering source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("self-triggering reaction executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("self-triggering reaction executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(
+            status.success(),
+            "self-triggering reaction executable exited with {status}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn keeps_queued_reaction_captures_rooted_and_skips_disposed_work() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-queued-reaction-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-queued-reaction-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { exit: I32 -> () }\n",
+                "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Ref n; churn (n - 1) } }\n",
+                "let mut disposed_runs = 0\n",
+                "let mut observed = 0\n",
+                "let captured = Ref 42\n",
+                "batch {\n",
+                "  with Reactive = reactive_scope () { reaction { disposed_runs = disposed_runs + 1; () } }\n",
+                "  ()\n",
+                "}\n",
+                "with Reactive = reactive_scope () {\n",
+                "  batch {\n",
+                "    reaction { let Ref value = captured; observed = value; () }\n",
+                "    churn 40000\n",
+                "    churn 40000\n",
+                "    ()\n",
+                "  }\n",
+                "}\n",
+                "exit (disposed_runs + (observed - 42) * 10)\n",
+            ),
+        )
+        .expect("temporary queued reaction source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("queued reaction executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("queued reaction executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(
+            status.success(),
+            "queued reaction executable exited with {status}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn reports_reactive_nonconvergence() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-nonconvergent-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-nonconvergent-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "let signal count = 0\n",
+                "reaction { let current = count; count = current + 1; () }\n",
+            ),
+        )
+        .expect("temporary nonconvergent source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("nonconvergent reaction executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("nonconvergent reaction executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(!result.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr),
+            "reactive update did not stabilize after 100000 executions\n"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_top_level_signals_and_reactions_in_the_entry_module() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
