@@ -273,7 +273,14 @@ impl Collector<'_> {
             }
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.typed.symbol_for(binding.syntax.id) {
-                    let prefix = if binding.mutable {
+                    // A binding inside a whole-`mut`-marked product pattern
+                    // (`mut (x, y) => ...`) carries the mutation permission
+                    // on the enclosing `Pattern::Product`, not on itself, so
+                    // `binding.mutable` alone misses it — fall back to the
+                    // checked parameter-mutation set, which already
+                    // flattens a whole marker onto every destructured
+                    // element.
+                    let prefix = if binding.mutable || self.typed.is_mutated_parameter(symbol) {
                         Some("mut".to_owned())
                     } else if is_let_context {
                         Some("let".to_owned())
@@ -1808,11 +1815,41 @@ mod tests {
         let usage_start = source.rfind('x').unwrap();
         for start in [declaration_start, usage_start] {
             assert!(
-                entries.iter().any(|entry| {
-                    entry.range.start == start && entry.signature == "mut x: I32"
-                }),
+                entries
+                    .iter()
+                    .any(|entry| { entry.range.start == start && entry.signature == "mut x: I32" }),
                 "no `mut x: I32` hover at {start}: {entries:?}"
             );
+        }
+    }
+
+    #[test]
+    fn whole_mut_product_pattern_shows_mut_for_every_destructured_element() {
+        let source = "def foo = mut (x: I32, y: I32) => {\n    x = 32\n    y = 64\n}\n";
+        let path = std::env::temp_dir().join("staple-hover-whole-mut-product-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        for (declaration_needle, usage_needle, expected) in [
+            ("x: I32", "x = 32", "mut x: I32"),
+            ("y: I32", "y = 64", "mut y: I32"),
+        ] {
+            let declaration_start = source.find(declaration_needle).unwrap();
+            let usage_start = source.find(usage_needle).unwrap();
+            for start in [declaration_start, usage_start] {
+                assert!(
+                    entries
+                        .iter()
+                        .any(|entry| entry.range.start == start && entry.signature == expected),
+                    "no `{expected}` hover at {start}: {entries:?}"
+                );
+            }
         }
     }
 

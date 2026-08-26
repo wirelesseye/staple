@@ -844,7 +844,19 @@ impl<'a> Classifier<'a> {
                 let usage_modifiers = symbol
                     .map(|symbol| {
                         let resolved = resolved.unwrap();
-                        if resolved.has_mutable_annotation(symbol) || resolved.is_signal_symbol(symbol) {
+                        // `has_mutable_annotation` only sees a `mut` marker
+                        // written directly on this binding; a binding inside
+                        // a whole-`mut`-marked product pattern
+                        // (`mut (x, y) => ...`) carries the permission on
+                        // the enclosing pattern instead, so fall back to the
+                        // checked parameter-mutation set too.
+                        let mutated_parameter = self
+                            .typed
+                            .is_some_and(|typed| typed.is_mutated_parameter(symbol));
+                        if resolved.has_mutable_annotation(symbol)
+                            || resolved.is_signal_symbol(symbol)
+                            || mutated_parameter
+                        {
                             MUTABLE
                         } else if resolved.is_const_symbol(symbol) {
                             READONLY
@@ -903,11 +915,24 @@ impl<'a> Classifier<'a> {
                         CompileTimeBindingKind::Builtin => TYPE,
                     })
                     .unwrap_or(kind);
+                // A binding inside a whole-`mut`-marked product pattern
+                // (`mut (x, y) => ...`) carries the mutation permission on
+                // the enclosing `Pattern::Product`, not on itself, so
+                // `value.mutable` alone misses it — fall back to the
+                // checked parameter-mutation set, which already flattens a
+                // whole marker onto every destructured element.
+                let mutable = value.mutable
+                    || resolved
+                        .and_then(|module| module.symbol_for(value.syntax.id))
+                        .is_some_and(|symbol| {
+                            self.typed
+                                .is_some_and(|typed| typed.is_mutated_parameter(symbol))
+                        });
                 self.mark_last(
                     &value.syntax,
                     &value.name,
                     kind,
-                    DECLARATION | DEFINITION | if value.mutable { MUTABLE } else { 0 },
+                    DECLARATION | DEFINITION | if mutable { MUTABLE } else { 0 },
                     1,
                 );
                 if let Some(symbol) = resolved.and_then(|module| module.symbol_for(value.syntax.id))
@@ -1948,6 +1973,36 @@ mod tests {
                 MUTABLE,
                 "expected `x` at {start} to be marked mutable: {classified:?}"
             );
+        }
+    }
+
+    #[test]
+    fn whole_mut_product_pattern_underlines_every_destructured_element() {
+        let source = "def foo = mut (x: I32, y: I32) => {\n    x = 32\n    y = 64\n}\n";
+        let path = std::env::temp_dir().join("staple-semantic-whole-mut-product.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let classified = entries(source, Some(&module), Some(typed.resolved()), Some(&typed));
+
+        for (declaration_needle, usage_needle) in [("x: I32", "x = 32"), ("y: I32", "y = 64")] {
+            let declaration_start = source.find(declaration_needle).unwrap();
+            let usage_start = source.find(usage_needle).unwrap();
+            for start in [declaration_start, usage_start] {
+                let entry = classified
+                    .iter()
+                    .find(|entry| entry.start == start)
+                    .unwrap_or_else(|| panic!("no entry at {start}: {classified:?}"));
+                assert_eq!(
+                    entry.modifiers & MUTABLE,
+                    MUTABLE,
+                    "expected the binding at {start} to be marked mutable: {classified:?}"
+                );
+            }
         }
     }
 
