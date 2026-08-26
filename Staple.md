@@ -491,18 +491,8 @@ Line comments begin with `//` and continue to the end of the line.
 
 ### Top-level statements
 
-A source file may contain expression statements alongside bindings, type
-declarations, and foreign declarations:
-
-```staple
-use std.cinterop.*
-
-extern "c" {
-    let printf: (CPointer CChar, ...) -> I32
-}
-
-printf (c_string "hello, world!\n")
-```
+A source file may contain expressions alongside items, including bindings,
+declarations, and trait implementations. 
 
 The entry module's top-level statements are the program: `std.io.IO` is
 implicitly available to them, so output can be produced directly, without
