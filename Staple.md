@@ -2947,7 +2947,7 @@ string following `extern`:
 use std.cinterop.*
 
 extern "c" {
-    let printf: (CPointer CChar, ...) -> I32
+    printf: (CPointer CChar, ...) -> I32
 }
 ```
 

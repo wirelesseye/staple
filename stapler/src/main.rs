@@ -732,7 +732,7 @@ mod tests {
             .unwrap_or_default()
             .as_nanos();
         let source = std::env::temp_dir().join(format!("stapler-run-{nonce}.sta"));
-        std::fs::write(&source, "extern \"c\" { let exit: I32 -> () }\nexit 7\n")
+        std::fs::write(&source, "extern \"c\" { exit: I32 -> () }\nexit 7\n")
             .expect("temporary run source should be writable");
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
         let outcome = run([
@@ -769,7 +769,7 @@ mod tests {
                 "        False() => fibonacci (n - 1) + fibonacci (n - 2),\n",
                 "    }\n",
                 "const y = fibonacci 10\n",
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "exit (x + y)\n",
             ),
         )
@@ -915,7 +915,7 @@ mod tests {
             &source,
             concat!(
                 "use std.io.println\n",
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "let mut initialized = 0\n",
                 "initialized = 41\n",
                 "println \"source main\"\n",
@@ -959,7 +959,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "type Clock = (now: () -> I32)\n",
                 "def clock = value: I32 => Clock (now: () => value)\n",
                 "def read = () => (resource Clock).now ()\n",
@@ -1005,7 +1005,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def churn: I32 -> () = n => match n == 0 {\n",
                 "  True() => (),\n",
                 "  False() => { Ref n; churn (n - 1) },\n",
@@ -1054,7 +1054,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def churn: I32 -> () = n => match n == 0 {\n",
                 "  True() => (),\n",
                 "  False() => { Ref n; churn (n - 1) },\n",
@@ -1116,7 +1116,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def run = () => {\n",
                 "let mut from: Buffer I32 = Buffer.with_capacity 3\n",
                 "Buffer.push from 10\n",
@@ -1190,7 +1190,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def run = () => {\n",
                 "let mut values: List I32 = List.new ()\n",
                 "let mut i: I32 = 0\n",
@@ -1261,7 +1261,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def run = () => {\n",
                 "let mut values: List I32 = List.new ()\n",
                 "List.push values 10\n",
@@ -1322,7 +1322,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def run = () => {\n",
                 "let empty: List I32 = List.of ()\n",
                 "let one: List I32 = List.of (42)\n",
@@ -1381,7 +1381,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "let index: USize = 1\n",
                 "let mut product: I32[3] = (10, 20, 30)\n",
                 "product[index] = 21\n",
@@ -1432,7 +1432,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "type Resource = I32\n",
                 "def release = () => { let mut resource = Resource 1; resource = Resource 2 }\n",
                 "def abandon = () => { let mut resource = Resource 4; let update = () => { resource = Resource 5 }; update () }\n",
@@ -1492,7 +1492,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def ignore: <effect E> (() ->{E} I32) -> I32 = callback => 0\n",
                 "def twice: (() ->{state} I32) ->{state} I32 = callback => { callback (); callback () }\n",
                 "def test = () => {\n",
@@ -1536,7 +1536,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "let signal count = 0\n",
                 "let mut observed = 0\n",
                 "with Reactive = reactive_scope () {\n",
@@ -1579,7 +1579,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "let signal count = 0\n",
                 "let mut observed = 0\n",
                 "reaction { observed = count; () }\n",
@@ -1619,7 +1619,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "let signal count = 2\n",
                 "let mut observed = 0\n",
                 "let mut runs = 0\n",
@@ -1667,7 +1667,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "type Seed = I32\n",
                 "impl Default Seed { def default = () => Seed 7 }\n",
                 "let integers: I32[3] = default ()\n",
@@ -1709,7 +1709,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def sum: I32[4] -> I32 = (a, b, c, d) => a + b + c + d\n",
                 "let mut calls = 0\n",
                 "def make_pair = () => { calls = calls + 1; (2, 3) }\n",
@@ -1749,7 +1749,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "let dimensions = (height: 600, width: 800)\n",
                 "let config: (width: I32, height: I32, title: String) = (\n",
                 "    ...=dimensions,\n",
@@ -1794,7 +1794,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "let mut calls = 0\n",
                 "def next_value = () => { calls = calls + 1; calls }\n",
                 "let value: (I32, a: I32, b: I32) = (next_value (), .b: next_value (), .a: next_value ())\n",
@@ -1833,7 +1833,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "type Resource = I32\n",
                 "impl Drop Resource {\n",
                 "  def drop = Resource value => exit value\n",
@@ -1879,7 +1879,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "use std.cinterop.(CString)\n",
                 "type Some = String\n",
                 "def roundtrip: String -> String = value => CString.to_string (CString.from_string value)\n",
@@ -1937,7 +1937,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def exercise = () => {\n",
                 "  let mut first: Bool = True\n",
                 "  loop {\n",
@@ -1982,7 +1982,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def run = () => {\n",
                 "let mut total: I32 = 0\n",
                 "for value in (0 ..= 4) {\n",
@@ -2030,7 +2030,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def score_bool: Bool -> I32 = value => match value { True() => 1, False() => 0, }\n",
                 "let nan = 0.0 / 0.0\n",
                 "let partial_score = match (PartialOrd.partial_cmp nan 1.0) { None() => 0, Some _ => 1, }\n",
@@ -2073,7 +2073,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def classify: String -> I32 = value => match value {\n",
                 "  \"-42\" => 1, \"42\" => 2, \"1.5\" => 3,\n",
                 "  \"True\" => 4, \"False\" => 5, \"hé\" => 6, _ => 100,\n",
@@ -2134,7 +2134,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "let name: String = \"wörld\"\n",
                 "let answer: I32 = 42\n",
                 "let pair = (answer, name)\n",
@@ -2181,7 +2181,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
-                "extern \"c\" { let exit: I32 -> () }\n",
+                "extern \"c\" { exit: I32 -> () }\n",
                 "def score: String -> I32 = value => match value {\n",
                 "  \"hello world\" => 0, \"héllo 🌏\" => 0, \"\" => 0, _ => 1,\n",
                 "}\n",

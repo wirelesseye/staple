@@ -1,114 +1,114 @@
 pub use std.core.number.types.*
 
 extern "staple-intrinsic" {
-    let __i8_to_string: I8 -> String
-    let __i16_to_string: I16 -> String
-    let __i32_to_string: I32 -> String
-    let __i64_to_string: I64 -> String
-    let __u8_to_string: U8 -> String
-    let __u16_to_string: U16 -> String
-    let __u32_to_string: U32 -> String
-    let __u64_to_string: U64 -> String
-    let __isize_to_string: ISize -> String
-    let __usize_to_string: USize -> String
-    let __f32_to_string: F32 -> String
-    let __f64_to_string: F64 -> String
-    let __i8_add: (I8, I8) -> I8
-    let __i8_subtract: (I8, I8) -> I8
-    let __i8_multiply: (I8, I8) -> I8
-    let __i8_divide: (I8, I8) -> I8
-    let __i16_add: (I16, I16) -> I16
-    let __i16_subtract: (I16, I16) -> I16
-    let __i16_multiply: (I16, I16) -> I16
-    let __i16_divide: (I16, I16) -> I16
-    let __i32_add: (I32, I32) -> I32
-    let __i32_subtract: (I32, I32) -> I32
-    let __i32_multiply: (I32, I32) -> I32
-    let __i32_divide: (I32, I32) -> I32
-    let __i64_add: (I64, I64) -> I64
-    let __i64_subtract: (I64, I64) -> I64
-    let __i64_multiply: (I64, I64) -> I64
-    let __i64_divide: (I64, I64) -> I64
-    let __u8_add: (U8, U8) -> U8
-    let __u8_subtract: (U8, U8) -> U8
-    let __u8_multiply: (U8, U8) -> U8
-    let __u8_divide: (U8, U8) -> U8
-    let __u16_add: (U16, U16) -> U16
-    let __u16_subtract: (U16, U16) -> U16
-    let __u16_multiply: (U16, U16) -> U16
-    let __u16_divide: (U16, U16) -> U16
-    let __u32_add: (U32, U32) -> U32
-    let __u32_subtract: (U32, U32) -> U32
-    let __u32_multiply: (U32, U32) -> U32
-    let __u32_divide: (U32, U32) -> U32
-    let __u64_add: (U64, U64) -> U64
-    let __u64_subtract: (U64, U64) -> U64
-    let __u64_multiply: (U64, U64) -> U64
-    let __u64_divide: (U64, U64) -> U64
-    let __isize_add: (ISize, ISize) -> ISize
-    let __isize_subtract: (ISize, ISize) -> ISize
-    let __isize_multiply: (ISize, ISize) -> ISize
-    let __isize_divide: (ISize, ISize) -> ISize
-    let __usize_add: (USize, USize) -> USize
-    let __usize_subtract: (USize, USize) -> USize
-    let __usize_multiply: (USize, USize) -> USize
-    let __usize_divide: (USize, USize) -> USize
-    let __i8_equal: (I8, I8) -> Bool
-    let __i8_not_equal: (I8, I8) -> Bool
-    let __i8_lt: (I8, I8) -> Bool
-    let __i8_gt: (I8, I8) -> Bool
-    let __i16_equal: (I16, I16) -> Bool
-    let __i16_not_equal: (I16, I16) -> Bool
-    let __i16_lt: (I16, I16) -> Bool
-    let __i16_gt: (I16, I16) -> Bool
-    let __i32_equal: (I32, I32) -> Bool
-    let __i32_not_equal: (I32, I32) -> Bool
-    let __i32_lt: (I32, I32) -> Bool
-    let __i32_gt: (I32, I32) -> Bool
-    let __i64_equal: (I64, I64) -> Bool
-    let __i64_not_equal: (I64, I64) -> Bool
-    let __i64_lt: (I64, I64) -> Bool
-    let __i64_gt: (I64, I64) -> Bool
-    let __u8_equal: (U8, U8) -> Bool
-    let __u8_not_equal: (U8, U8) -> Bool
-    let __u8_lt: (U8, U8) -> Bool
-    let __u8_gt: (U8, U8) -> Bool
-    let __u16_equal: (U16, U16) -> Bool
-    let __u16_not_equal: (U16, U16) -> Bool
-    let __u16_lt: (U16, U16) -> Bool
-    let __u16_gt: (U16, U16) -> Bool
-    let __u32_equal: (U32, U32) -> Bool
-    let __u32_not_equal: (U32, U32) -> Bool
-    let __u32_lt: (U32, U32) -> Bool
-    let __u32_gt: (U32, U32) -> Bool
-    let __u64_equal: (U64, U64) -> Bool
-    let __u64_not_equal: (U64, U64) -> Bool
-    let __u64_lt: (U64, U64) -> Bool
-    let __u64_gt: (U64, U64) -> Bool
-    let __isize_equal: (ISize, ISize) -> Bool
-    let __isize_not_equal: (ISize, ISize) -> Bool
-    let __isize_lt: (ISize, ISize) -> Bool
-    let __isize_gt: (ISize, ISize) -> Bool
-    let __usize_equal: (USize, USize) -> Bool
-    let __usize_not_equal: (USize, USize) -> Bool
-    let __usize_lt: (USize, USize) -> Bool
-    let __usize_gt: (USize, USize) -> Bool
-    let __f32_add: (F32, F32) -> F32
-    let __f32_subtract: (F32, F32) -> F32
-    let __f32_multiply: (F32, F32) -> F32
-    let __f32_divide: (F32, F32) -> F32
-    let __f32_equal: (F32, F32) -> Bool
-    let __f32_not_equal: (F32, F32) -> Bool
-    let __f32_lt: (F32, F32) -> Bool
-    let __f32_gt: (F32, F32) -> Bool
-    let __f64_add: (F64, F64) -> F64
-    let __f64_subtract: (F64, F64) -> F64
-    let __f64_multiply: (F64, F64) -> F64
-    let __f64_divide: (F64, F64) -> F64
-    let __f64_equal: (F64, F64) -> Bool
-    let __f64_not_equal: (F64, F64) -> Bool
-    let __f64_lt: (F64, F64) -> Bool
-    let __f64_gt: (F64, F64) -> Bool
+    __i8_to_string: I8 -> String
+    __i16_to_string: I16 -> String
+    __i32_to_string: I32 -> String
+    __i64_to_string: I64 -> String
+    __u8_to_string: U8 -> String
+    __u16_to_string: U16 -> String
+    __u32_to_string: U32 -> String
+    __u64_to_string: U64 -> String
+    __isize_to_string: ISize -> String
+    __usize_to_string: USize -> String
+    __f32_to_string: F32 -> String
+    __f64_to_string: F64 -> String
+    __i8_add: (I8, I8) -> I8
+    __i8_subtract: (I8, I8) -> I8
+    __i8_multiply: (I8, I8) -> I8
+    __i8_divide: (I8, I8) -> I8
+    __i16_add: (I16, I16) -> I16
+    __i16_subtract: (I16, I16) -> I16
+    __i16_multiply: (I16, I16) -> I16
+    __i16_divide: (I16, I16) -> I16
+    __i32_add: (I32, I32) -> I32
+    __i32_subtract: (I32, I32) -> I32
+    __i32_multiply: (I32, I32) -> I32
+    __i32_divide: (I32, I32) -> I32
+    __i64_add: (I64, I64) -> I64
+    __i64_subtract: (I64, I64) -> I64
+    __i64_multiply: (I64, I64) -> I64
+    __i64_divide: (I64, I64) -> I64
+    __u8_add: (U8, U8) -> U8
+    __u8_subtract: (U8, U8) -> U8
+    __u8_multiply: (U8, U8) -> U8
+    __u8_divide: (U8, U8) -> U8
+    __u16_add: (U16, U16) -> U16
+    __u16_subtract: (U16, U16) -> U16
+    __u16_multiply: (U16, U16) -> U16
+    __u16_divide: (U16, U16) -> U16
+    __u32_add: (U32, U32) -> U32
+    __u32_subtract: (U32, U32) -> U32
+    __u32_multiply: (U32, U32) -> U32
+    __u32_divide: (U32, U32) -> U32
+    __u64_add: (U64, U64) -> U64
+    __u64_subtract: (U64, U64) -> U64
+    __u64_multiply: (U64, U64) -> U64
+    __u64_divide: (U64, U64) -> U64
+    __isize_add: (ISize, ISize) -> ISize
+    __isize_subtract: (ISize, ISize) -> ISize
+    __isize_multiply: (ISize, ISize) -> ISize
+    __isize_divide: (ISize, ISize) -> ISize
+    __usize_add: (USize, USize) -> USize
+    __usize_subtract: (USize, USize) -> USize
+    __usize_multiply: (USize, USize) -> USize
+    __usize_divide: (USize, USize) -> USize
+    __i8_equal: (I8, I8) -> Bool
+    __i8_not_equal: (I8, I8) -> Bool
+    __i8_lt: (I8, I8) -> Bool
+    __i8_gt: (I8, I8) -> Bool
+    __i16_equal: (I16, I16) -> Bool
+    __i16_not_equal: (I16, I16) -> Bool
+    __i16_lt: (I16, I16) -> Bool
+    __i16_gt: (I16, I16) -> Bool
+    __i32_equal: (I32, I32) -> Bool
+    __i32_not_equal: (I32, I32) -> Bool
+    __i32_lt: (I32, I32) -> Bool
+    __i32_gt: (I32, I32) -> Bool
+    __i64_equal: (I64, I64) -> Bool
+    __i64_not_equal: (I64, I64) -> Bool
+    __i64_lt: (I64, I64) -> Bool
+    __i64_gt: (I64, I64) -> Bool
+    __u8_equal: (U8, U8) -> Bool
+    __u8_not_equal: (U8, U8) -> Bool
+    __u8_lt: (U8, U8) -> Bool
+    __u8_gt: (U8, U8) -> Bool
+    __u16_equal: (U16, U16) -> Bool
+    __u16_not_equal: (U16, U16) -> Bool
+    __u16_lt: (U16, U16) -> Bool
+    __u16_gt: (U16, U16) -> Bool
+    __u32_equal: (U32, U32) -> Bool
+    __u32_not_equal: (U32, U32) -> Bool
+    __u32_lt: (U32, U32) -> Bool
+    __u32_gt: (U32, U32) -> Bool
+    __u64_equal: (U64, U64) -> Bool
+    __u64_not_equal: (U64, U64) -> Bool
+    __u64_lt: (U64, U64) -> Bool
+    __u64_gt: (U64, U64) -> Bool
+    __isize_equal: (ISize, ISize) -> Bool
+    __isize_not_equal: (ISize, ISize) -> Bool
+    __isize_lt: (ISize, ISize) -> Bool
+    __isize_gt: (ISize, ISize) -> Bool
+    __usize_equal: (USize, USize) -> Bool
+    __usize_not_equal: (USize, USize) -> Bool
+    __usize_lt: (USize, USize) -> Bool
+    __usize_gt: (USize, USize) -> Bool
+    __f32_add: (F32, F32) -> F32
+    __f32_subtract: (F32, F32) -> F32
+    __f32_multiply: (F32, F32) -> F32
+    __f32_divide: (F32, F32) -> F32
+    __f32_equal: (F32, F32) -> Bool
+    __f32_not_equal: (F32, F32) -> Bool
+    __f32_lt: (F32, F32) -> Bool
+    __f32_gt: (F32, F32) -> Bool
+    __f64_add: (F64, F64) -> F64
+    __f64_subtract: (F64, F64) -> F64
+    __f64_multiply: (F64, F64) -> F64
+    __f64_divide: (F64, F64) -> F64
+    __f64_equal: (F64, F64) -> Bool
+    __f64_not_equal: (F64, F64) -> Bool
+    __f64_lt: (F64, F64) -> Bool
+    __f64_gt: (F64, F64) -> Bool
 }
 
 impl Display I8 { def fmt = (value, formatter) => Formatter.write (formatter, __i8_to_string value) }

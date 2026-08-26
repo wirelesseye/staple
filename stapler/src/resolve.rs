@@ -3115,12 +3115,6 @@ impl NameResolver {
         }
         if binding.kind == BindingKind::Let {
             self.declare_allocated(binding, Some(binding.visibility == Visibility::Public));
-            if binding.mutable && binding.value.is_none() {
-                self.diagnostics.push(Diagnostic::new(
-                    binding.syntax.span.clone(),
-                    "`mut` bindings require an initializer",
-                ));
-            }
         }
         self.pop_type_parameter_scope();
     }

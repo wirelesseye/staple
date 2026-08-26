@@ -1,10 +1,31 @@
 use inkwell::context::Context;
 use stapler::{
-    CheckedMutation, CheckedType, CodeGenerator, Item, NameResolver, ProgramLoader,
+    CheckedMutation, CheckedType, CodeGenerator, Diagnostic, Item, NameResolver, ProgramLoader,
     RecursiveConstruction, TypeChecker, parse,
 };
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// `Result::expect_err`, but without ever `Debug`-formatting the `Ok` value.
+///
+/// A resolved or checked module embeds the whole `Program`, standard
+/// library included, so if a test's precondition silently flips (the
+/// source unexpectedly resolves/type-checks instead of failing) the
+/// default `expect_err` panic message would try to format hundreds of
+/// megabytes of nested AST into the panic payload instead of failing
+/// fast — this looks exactly like a hang and can take many minutes.
+trait ExpectErrDiagnostics {
+    fn expect_err_diagnostics(self, message: &str) -> Vec<Diagnostic>;
+}
+
+impl<T> ExpectErrDiagnostics for Result<T, Vec<Diagnostic>> {
+    fn expect_err_diagnostics(self, message: &str) -> Vec<Diagnostic> {
+        match self {
+            Err(diagnostics) => diagnostics,
+            Ok(_) => panic!("{message}: expected an error, but resolution/type-checking succeeded"),
+        }
+    }
+}
 
 fn resolve(source: &str) -> stapler::ResolvedModule {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -201,7 +222,7 @@ fn derived_initializers_reject_independent_state_and_writes() {
             "let mut offset = 2\n",
             "let invalid = { offset = offset + 1; count + offset }\n",
         )))
-        .expect_err("effectful derived initializers should be rejected");
+        .expect_err_diagnostics("effectful derived initializers should be rejected");
     assert!(
         diagnostics
             .iter()
@@ -233,7 +254,7 @@ fn implicitly_thunks_fixed_product_argument_positions() {
 fn implicit_thunking_is_not_a_general_value_coercion() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let callback: () -> I32 = 42\n"))
-        .expect_err("non-call contexts must not implicitly thunk values");
+        .expect_err_diagnostics("non-call contexts must not implicitly thunk values");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -429,7 +450,7 @@ fn explicit_state_effects_are_checked_as_upper_bounds() {
             "  bad\n",
             "}\n",
         )))
-        .expect_err("state.write does not cover a captured-state read");
+        .expect_err_diagnostics("state.write does not cover a captured-state read");
     assert!(
         diagnostics
             .iter()
@@ -528,7 +549,7 @@ fn rejects_invalid_resource_contracts_and_types() {
             "type MoveOnly = CString\n",
             "def invalid: () ->{MoveOnly} () = () => ()\n",
         )))
-        .expect_err("move-only resources must be rejected");
+        .expect_err_diagnostics("move-only resources must be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -541,7 +562,7 @@ fn rejects_invalid_resource_contracts_and_types() {
             "def need = () => (resource Clock).now ()\n",
             "def invalid: () ->{} I32 = () => need ()\n",
         )))
-        .expect_err("undeclared resources must be rejected");
+        .expect_err_diagnostics("undeclared resources must be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -589,7 +610,7 @@ fn allows_io_at_entry_module_top_level_but_rejects_non_builtin_opaque_resources(
         .check(resolve(
             "type Token = opaque\ndef use_token: () ->{Token} () = () => ()\n",
         ))
-        .expect_err("only std.io.IO may be an opaque resource");
+        .expect_err_diagnostics("only std.io.IO may be an opaque resource");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -657,7 +678,7 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
             "def need: () ->{Clock} Clock = () => resource Clock\n",
             "let incompatible: () -> Clock = need\n",
         )))
-        .expect_err("resource-bearing and pure function types must compare exactly");
+        .expect_err_diagnostics("resource-bearing and pure function types must compare exactly");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message.contains("expected `() -> Clock`")
             && diagnostic.message.contains("->{Clock}")
@@ -669,13 +690,13 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
             "top-level initialization requires resources",
         ),
         (
-            "type Clock = I32\nextern \"c\" { let read: () ->{Clock} Clock }\n",
+            "type Clock = I32\nextern \"c\" { read: () ->{Clock} Clock }\n",
             "external functions cannot require Staple resources",
         ),
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err("resource boundary must be rejected");
+            .expect_err_diagnostics("resource boundary must be rejected");
         assert!(
             diagnostics
                 .iter()
@@ -861,7 +882,7 @@ fn rejects_invalid_named_product_spreads() {
             "let dimensions = (height: 600, width: 800)\n",
             "let config = (...=dimensions, title: \"Staple\")\n",
         )))
-        .expect_err("a named spread requires a known expected product type");
+        .expect_err_diagnostics("a named spread requires a known expected product type");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -873,7 +894,7 @@ fn rejects_invalid_named_product_spreads() {
             "let dimensions = (height: 600, width: 800)\n",
             "let config: (width: I32, height: I32, title: String) = (...=dimensions)\n",
         )))
-        .expect_err("a required field left unfilled should be rejected");
+        .expect_err_diagnostics("a required field left unfilled should be rejected");
     assert!(
         diagnostics
             .iter()
@@ -885,7 +906,7 @@ fn rejects_invalid_named_product_spreads() {
             "let dimensions = (height: 600, width: 800)\n",
             "let config: (width: I32, height: I32) = (...=dimensions, extra: 1)\n",
         )))
-        .expect_err("a field absent from the expected type should be rejected");
+        .expect_err_diagnostics("a field absent from the expected type should be rejected");
     assert!(
         diagnostics
             .iter()
@@ -897,7 +918,7 @@ fn rejects_invalid_named_product_spreads() {
             "let unnamed = (1, 2)\n",
             "let config: (width: I32, height: I32) = (...=unnamed)\n",
         )))
-        .expect_err("an operand with unnamed elements cannot be named-spread");
+        .expect_err_diagnostics("an operand with unnamed elements cannot be named-spread");
     assert!(
         diagnostics
             .iter()
@@ -909,7 +930,7 @@ fn rejects_invalid_named_product_spreads() {
             "let dimensions = (height: 600, width: 800)\n",
             "let config: (width: I32, height: I32) = (...dimensions, ...=dimensions)\n",
         )))
-        .expect_err("a positional spread cannot combine with a named spread");
+        .expect_err_diagnostics("a positional spread cannot combine with a named spread");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -974,14 +995,14 @@ fn rejects_invalid_contextual_named_initializers_and_labels() {
             "duplicate product field name `a`",
         ),
         (
-            "type alias Pair = (a: I32, b: I32)\nlet value: (...Pair, a: I32)\n",
+            "type alias Pair = (a: I32, b: I32)\ndef value: (...Pair, a: I32)\n",
             "duplicate product field name `a`",
         ),
     ];
     for (source, expected) in cases {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err("invalid product should be rejected");
+            .expect_err_diagnostics("invalid product should be rejected");
         assert!(
             diagnostics
                 .iter()
@@ -1034,7 +1055,7 @@ fn type_checks_the_two_binding_mutability_forms() {
     // `let`: neither reassignable nor mutable.
     let diagnostics = TypeChecker::new()
         .check(resolve("let a = (x: 1, y: 2)\na = (x: 3, y: 4)\n"))
-        .expect_err("`let` cannot be reassigned");
+        .expect_err_diagnostics("`let` cannot be reassigned");
     assert!(
         diagnostics
             .iter()
@@ -1042,7 +1063,7 @@ fn type_checks_the_two_binding_mutability_forms() {
     );
     let diagnostics = TypeChecker::new()
         .check(resolve("let a = (x: 1, y: 2)\na.x = 3\n"))
-        .expect_err("`let` cannot be written through");
+        .expect_err_diagnostics("`let` cannot be written through");
     assert!(
         diagnostics
             .iter()
@@ -1071,7 +1092,7 @@ fn type_checks_the_two_binding_mutability_forms() {
             "pub let a = (x: 1, y: 2)\n",
             "a.x = 3\n",
         )))
-        .expect_err("`pub let` cannot be written through even in its own module");
+        .expect_err_diagnostics("`pub let` cannot be written through even in its own module");
     assert!(
         diagnostics
             .iter()
@@ -1088,7 +1109,7 @@ fn writes_through_a_ref_require_mut_on_a_named_root() {
     ));
     let diagnostics = TypeChecker::new()
         .check(resolve("let cell: Ref I32[2] = Ref (1, 2)\ncell.0 = 3\n"))
-        .expect_err("writing through a `Ref` requires `mut` on the binding");
+        .expect_err_diagnostics("writing through a `Ref` requires `mut` on the binding");
     assert!(
         diagnostics
             .iter()
@@ -1147,7 +1168,7 @@ fn a_parameter_marker_declares_a_positional_mutation() {
 fn rejects_a_declared_empty_effect_set_when_the_body_mutates_a_parameter() {
     let diagnostics = TypeChecker::new()
         .check(resolve("def f: Ref (I32, I32) -> () = p => { p.0 = 1 }\n"))
-        .expect_err("an empty declared effect set forbids mutation");
+        .expect_err_diagnostics("an empty declared effect set forbids mutation");
     assert!(
         diagnostics
             .iter()
@@ -1161,7 +1182,7 @@ fn rejects_a_declared_mutation_target_the_body_does_not_write() {
         .check(resolve(concat!(
             "def f: (mut a: Ref (I32, I32), b: Ref (I32, I32)) -> () = (a, b) => { b.0 = 1 }\n",
         )))
-        .expect_err("writing `b` exceeds the declared `mut a`");
+        .expect_err_diagnostics("writing `b` exceeds the declared `mut a`");
     assert!(
         diagnostics
             .iter()
@@ -1193,7 +1214,7 @@ fn call_site_mutation_requires_an_explicit_caller_marker() {
             "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
             "def g = (q: Ref (I32, I32)) => { f q }\n",
         )))
-        .expect_err("mutation permissions must not propagate into callers");
+        .expect_err_diagnostics("mutation permissions must not propagate into callers");
     assert!(
         diagnostics
             .iter()
@@ -1217,7 +1238,7 @@ fn rejects_passing_a_non_mut_binding_to_a_mutating_parameter() {
             "def f: mut Ref (I32, I32) -> () = p => { p.0 = 1 }\n",
             "def g = () => { let pair: Ref (I32, I32) = Ref (1, 2); f pair }\n",
         )))
-        .expect_err("the caller's binding must be declared `mut`");
+        .expect_err_diagnostics("the caller's binding must be declared `mut`");
     assert!(diagnostics.iter().any(|d| {
         d.message
             .contains("cannot write through `pair`; its binding is not declared `mut`")
@@ -1245,7 +1266,7 @@ fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
             "trait Reset T { reset: T -> () }\n",
             "impl Reset (Ref (I32, I32)) { def reset = p => { p.0 = 0 } }\n",
         )))
-        .expect_err("the impl mutates a parameter its trait does not declare");
+        .expect_err_diagnostics("the impl mutates a parameter its trait does not declare");
     assert!(
         diagnostics
             .iter()
@@ -1282,7 +1303,7 @@ fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
             "  mutate_my_int (my_int, 42)\n",
             "}\n",
         )))
-        .expect_err("the caller's `my_int` must be declared `mut` too");
+        .expect_err_diagnostics("the caller's `my_int` must be declared `mut` too");
     assert!(diagnostics.iter().any(|d| {
         d.message
             .contains("cannot write through `my_int`; its binding is not declared `mut`")
@@ -1368,7 +1389,7 @@ fn a_parameter_marker_adds_mutation_without_a_type_annotation() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("def invalid = (data: I32) => { data = 42 }\n"))
-        .expect_err("an unmarked parameter must not infer mutation");
+        .expect_err_diagnostics("an unmarked parameter must not infer mutation");
     assert!(
         diagnostics
             .iter()
@@ -1393,7 +1414,7 @@ fn parameter_markers_must_match_explicit_function_and_trait_effects() {
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err("parameter markers and declared mutation permissions must match");
+            .expect_err_diagnostics("parameter markers and declared mutation permissions must match");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic
                 .message
@@ -1478,18 +1499,12 @@ fn a_move_only_mut_temporary_drops_replaced_and_final_values() {
 
 #[test]
 fn rejects_invalid_assignment_targets_and_uninitialized_mutable_lets() {
-    let diagnostics = NameResolver::new()
-        .resolve(&parse("let mut value: I32\n").expect("syntax should parse"))
-        .expect_err("mutable lets require an initializer");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("require an initializer"))
-    );
+    let error = parse("let mut value: I32\n").expect_err("`let` bindings require an initializer");
+    assert!(error.message.contains("require an initializer"));
 
     let diagnostics = TypeChecker::new()
         .check(resolve("let value = 1\nvalue = 2\n"))
-        .expect_err("immutable names cannot be reassigned");
+        .expect_err_diagnostics("immutable names cannot be reassigned");
     assert!(
         diagnostics
             .iter()
@@ -1500,7 +1515,7 @@ fn rejects_invalid_assignment_targets_and_uninitialized_mutable_lets() {
         .check(resolve(
             "def product = () => (x: 1, y: 2)\nproduct ().x = 3\n",
         ))
-        .expect_err("by-value temporaries are not writable");
+        .expect_err_diagnostics("by-value temporaries are not writable");
     assert!(
         diagnostics
             .iter()
@@ -1555,7 +1570,7 @@ fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
             "impl Drop Resource { def drop = Resource value => () }\n",
             "def invalid = (value: Ref Resource) => { let Ref (mut inner) = value; inner }\n",
         )))
-        .expect_err("move-only Ref borrows cannot become mutable locals");
+        .expect_err_diagnostics("move-only Ref borrows cannot become mutable locals");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -1566,8 +1581,8 @@ fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
 #[test]
 fn rejects_invalid_product_spreads_and_indices() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("let invalid: (...I32)\n"))
-        .expect_err("a scalar cannot be spread");
+        .check(resolve("def invalid: (...I32)\n"))
+        .expect_err_diagnostics("a scalar cannot be spread");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -1576,7 +1591,7 @@ fn rejects_invalid_product_spreads_and_indices() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("let invalid = (...1, 2)\n"))
-        .expect_err("a scalar value cannot be spread");
+        .expect_err_diagnostics("a scalar value cannot be spread");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -1588,7 +1603,7 @@ fn rejects_invalid_product_spreads_and_indices() {
             "use std.cinterop.CString\n",
             "def invalid = (pair: (CString, I32), position: USize) => pair[position]\n",
         )))
-        .expect_err("a product containing a move-only element cannot derive Index");
+        .expect_err_diagnostics("a product containing a move-only element cannot derive Index");
     assert!(
         diagnostics
             .iter()
@@ -1659,7 +1674,7 @@ fn rejects_by_value_indexed_assignment_without_mut_binding() {
         .check(resolve(
             "let values: I32[2] = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n",
         ))
-        .expect_err("by-value product assignment requires a `mut` binding");
+        .expect_err_diagnostics("by-value product assignment requires a `mut` binding");
     assert!(
         diagnostics
             .iter()
@@ -1670,7 +1685,7 @@ fn rejects_by_value_indexed_assignment_without_mut_binding() {
         .check(resolve(
             "let values: Ref I32[2] = Ref (1, 2)\nvalues[2] = 3\n",
         ))
-        .expect_err("known out-of-bounds MutateIndex must be rejected");
+        .expect_err_diagnostics("known out-of-bounds MutateIndex must be rejected");
     assert!(
         diagnostics
             .iter()
@@ -1703,7 +1718,7 @@ fn rejects_overlapping_structural_indexing_implementations() {
             "  def index = (values, position) => values.0\n",
             "}\n",
         )))
-        .expect_err("structural product Index cannot be overridden");
+        .expect_err_diagnostics("structural product Index cannot be overridden");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -1764,7 +1779,7 @@ fn rejects_structural_iteration_for_non_copy_products() {
             "  count\n",
             "}\n",
         )))
-        .expect_err("a product containing a move-only element cannot derive IntoIterator");
+        .expect_err_diagnostics("a product containing a move-only element cannot derive IntoIterator");
     assert!(
         diagnostics
             .iter()
@@ -1780,7 +1795,7 @@ fn rejects_overlapping_structural_iterator_implementations() {
             "  def into_iterator = value => (value, 0 satisfies USize)\n",
             "}\n",
         )))
-        .expect_err("structural product IntoIterator cannot be overridden");
+        .expect_err_diagnostics("structural product IntoIterator cannot be overridden");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -1791,8 +1806,8 @@ fn rejects_overlapping_structural_iterator_implementations() {
 #[test]
 fn rejects_erased_products_outside_refs_and_ref_destructuring() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("let invalid: I32[]\n"))
-        .expect_err("an erased product cannot be used by value");
+        .check(resolve("def invalid: I32[]\n"))
+        .expect_err_diagnostics("an erased product cannot be used by value");
     assert!(
         diagnostics
             .iter()
@@ -1803,7 +1818,7 @@ fn rejects_erased_products_outside_refs_and_ref_destructuring() {
         .check(resolve(
             "let fixed: Ref I32[2] = Ref (1, 2)\nlet erased: Slice I32 = fixed\nlet Ref values = erased\n",
         ))
-        .expect_err("an erased reference cannot be destructured");
+        .expect_err_diagnostics("an erased reference cannot be destructured");
     assert!(
         diagnostics
             .iter()
@@ -1816,8 +1831,8 @@ fn handles_product_repetition_edges_and_limits() {
     type_check("let value: (...I32[0], ...I32[1], I32) = (1, 2)\n");
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("let too_large: I32[65536]\n"))
-        .expect_err("oversized repeated products must be rejected");
+        .check(resolve("def too_large: I32[65536]\n"))
+        .expect_err_diagnostics("oversized repeated products must be rejected");
     assert!(
         diagnostics
             .iter()
@@ -1828,7 +1843,7 @@ fn handles_product_repetition_edges_and_limits() {
         .check(resolve(
             "let pair: I32[2] = (1, 2)\nlet invalid = pair[2]\n",
         ))
-        .expect_err("known out-of-bounds indices must be rejected");
+        .expect_err_diagnostics("known out-of-bounds indices must be rejected");
     assert!(
         diagnostics
             .iter()
@@ -1853,7 +1868,7 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
             "let fixed: Ref I32[2] = Ref (1, 2)\n",
             "let values: Ref MySlice = fixed\n",
         )))
-        .expect_err("aliasing an unsized array does not let it bypass `Slice`");
+        .expect_err_diagnostics("aliasing an unsized array does not let it bypass `Slice`");
     assert!(
         diagnostics
             .iter()
@@ -1862,9 +1877,9 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "type alias MySlice = I32[]\nlet invalid: MySlice\n",
+            "type alias MySlice = I32[]\ndef invalid: MySlice\n",
         ))
-        .expect_err("unsized aliases cannot be used by value");
+        .expect_err_diagnostics("unsized aliases cannot be used by value");
     assert!(
         diagnostics
             .iter()
@@ -1872,8 +1887,8 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("extern \"c\" { let invalid: Ref I32[] -> I32 }\n"))
-        .expect_err("`Ref I32[]` is rejected before an FFI-specific check even runs");
+        .check(resolve("extern \"c\" { invalid: Ref I32[] -> I32 }\n"))
+        .expect_err_diagnostics("`Ref I32[]` is rejected before an FFI-specific check even runs");
     assert!(
         diagnostics
             .iter()
@@ -1881,8 +1896,8 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("extern \"c\" { let invalid: Slice I32 -> I32 }\n"))
-        .expect_err("erased references must not cross the FFI");
+        .check(resolve("extern \"c\" { invalid: Slice I32 -> I32 }\n"))
+        .expect_err_diagnostics("erased references must not cross the FFI");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -1908,7 +1923,7 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
             "let erased: Slice I32 = fixed\n",
             "let invalid = sized_only erased\n",
         )))
-        .expect_err("ordinary generic parameters have an implicit Sized bound");
+        .expect_err_diagnostics("ordinary generic parameters have an implicit Sized bound");
     assert!(
         diagnostics
             .iter()
@@ -1919,7 +1934,7 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
         .check(resolve(
             "def invalid: <T where ?Sized T> T -> () = value => ()\n",
         ))
-        .expect_err("a relaxed parameter cannot be passed by value");
+        .expect_err_diagnostics("a relaxed parameter cannot be passed by value");
     assert!(
         diagnostics
             .iter()
@@ -1928,7 +1943,7 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("impl Sized I32 {}\n"))
-        .expect_err("Sized is structural");
+        .expect_err_diagnostics("Sized is structural");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -1960,7 +1975,7 @@ fn derives_default_structurally_for_products() {
 fn rejects_default_for_products_with_non_default_elements() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let invalid: (Ref I32)[2] = default ()\n"))
-        .expect_err("Ref has no Default implementation");
+        .expect_err_diagnostics("Ref has no Default implementation");
     assert!(
         diagnostics
             .iter()
@@ -1987,7 +2002,7 @@ fn compiler_diagnostics_report_line_and_column() {
     let syntax = parse("let value = 1\nmissing\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
-        .expect_err("unknown name should not resolve");
+        .expect_err_diagnostics("unknown name should not resolve");
 
     assert_eq!(
         diagnostics[0].to_string(),
@@ -2026,7 +2041,7 @@ fn checks_general_satisfies_expressions_and_contextually_types_functions() {
     let module = resolve("let invalid = \"text\" satisfies I32\n");
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("an expression must satisfy its asserted type");
+        .expect_err_diagnostics("an expression must satisfy its asserted type");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -2185,7 +2200,7 @@ fn rejects_invalid_match_patterns_and_coverage() {
             "  _ => 1,\n",
             "}\n",
         )))
-        .expect_err("an incompatible typed pattern should fail");
+        .expect_err_diagnostics("an incompatible typed pattern should fail");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -2199,7 +2214,7 @@ fn rejects_invalid_match_patterns_and_coverage() {
             "  second => second,\n",
             "}\n",
         )))
-        .expect_err("an arm after a scalar catch-all should be unreachable");
+        .expect_err_diagnostics("an arm after a scalar catch-all should be unreachable");
     assert!(
         diagnostics
             .iter()
@@ -2212,7 +2227,7 @@ fn rejects_invalid_match_patterns_and_coverage() {
             "def invalid = result: Ok I32 | IOError => match result { Ok value => value, }\n",
             "invalid (Ok 1)\n",
         )))
-        .expect_err("non-exhaustive matches should fail");
+        .expect_err_diagnostics("non-exhaustive matches should fail");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message.contains("non-exhaustive match")
             && diagnostic.message.contains("IOError")
@@ -2229,7 +2244,7 @@ fn rejects_invalid_match_patterns_and_coverage() {
             "}\n",
             "invalid (Ok 1)\n",
         )))
-        .expect_err("unreachable match arms should fail");
+        .expect_err_diagnostics("unreachable match arms should fail");
     assert!(
         diagnostics
             .iter()
@@ -2286,7 +2301,7 @@ fn checks_product_match_coverage_and_reachability() {
             "}\n",
             "incomplete (True, True)\n",
         )))
-        .expect_err("incomplete product match should fail");
+        .expect_err_diagnostics("incomplete product match should fail");
     assert!(
         diagnostics
             .iter()
@@ -2302,7 +2317,7 @@ fn checks_product_match_coverage_and_reachability() {
             "}\n",
             "duplicate (True, True)\n",
         )))
-        .expect_err("duplicate product arm should fail");
+        .expect_err_diagnostics("duplicate product arm should fail");
     assert!(
         diagnostics
             .iter()
@@ -2400,7 +2415,7 @@ fn supports_arbitrary_sized_sum_alternatives_and_typed_matches() {
 #[test]
 fn rejects_unsized_sum_alternatives_and_ambiguous_nominal_patterns() {
     for (source, expected) in [
-        ("let value: I32[] | String\n", "must be a sized type"),
+        ("def value: I32[] | String\n", "must be a sized type"),
         (
             concat!(
                 "def inspect = value: Ok I32 | Ok String => match value {\n",
@@ -2413,7 +2428,7 @@ fn rejects_unsized_sum_alternatives_and_ambiguous_nominal_patterns() {
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err("invalid sum should be rejected");
+            .expect_err_diagnostics("invalid sum should be rejected");
         assert!(
             diagnostics
                 .iter()
@@ -2430,7 +2445,7 @@ fn rejects_invalid_propagation_and_sum_ffi() {
             "pub(repr) type IOError = String\n",
             "def invalid = () => { let Ok(value)? = Ok(1); Ok(value) }\n",
         )))
-        .expect_err("propagation requires a sum");
+        .expect_err_diagnostics("propagation requires a sum");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -2443,7 +2458,7 @@ fn rejects_invalid_propagation_and_sum_ffi() {
             "def read: () -> Ok I32 | IOError = () => Ok(1)\n",
             "def invalid: () -> Ok I32 = () => { let Ok(value)? = read(); Ok(value) }\n",
         )))
-        .expect_err("explicit result should contain propagated variants");
+        .expect_err_diagnostics("explicit result should contain propagated variants");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -2453,9 +2468,9 @@ fn rejects_invalid_propagation_and_sum_ffi() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "pub(repr) type IOError = String\n",
-            "extern \"c\" { let invalid: () -> Ok I32 | IOError }\n",
+            "extern \"c\" { invalid: () -> Ok I32 | IOError }\n",
         )))
-        .expect_err("sum ABI should remain internal");
+        .expect_err_diagnostics("sum ABI should remain internal");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -2479,7 +2494,7 @@ fn rejects_propagation_outside_functions_and_non_nominal_roots() {
         .expect("source should load");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("invalid propagation contexts should not resolve");
+        .expect_err_diagnostics("invalid propagation contexts should not resolve");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -2520,7 +2535,7 @@ fn rejects_an_immediate_read_before_a_def_initializer() {
     let syntax = parse("value\ndef value = 10\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
-        .expect_err("an immediate forward read must fail");
+        .expect_err_diagnostics("an immediate forward read must fail");
     assert!(
         diagnostics
             .iter()
@@ -2592,7 +2607,7 @@ fn rejects_an_incorrect_function_result_type() {
     let module = resolve("use std.cinterop.*\nlet answer = () => 42 satisfies CString\n");
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("incorrect return type should fail");
+        .expect_err_diagnostics("incorrect return type should fail");
 
     assert!(
         diagnostics[0]
@@ -2606,7 +2621,7 @@ fn rejects_incorrect_call_arguments() {
     let module = resolve("let identity = (value: I32) => value\nidentity (\"wrong\")\n");
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("incorrect argument type should fail");
+        .expect_err_diagnostics("incorrect argument type should fail");
 
     assert!(
         diagnostics[0]
@@ -2720,7 +2735,7 @@ fn at_patterns_require_copy_runtime_values_and_honor_copy_bounds() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("def invalid: <T> T -> T = value@_ => value\n"))
-        .expect_err("an unconstrained generic at-pattern should not be Copy");
+        .expect_err_diagnostics("an unconstrained generic at-pattern should not be Copy");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -2732,7 +2747,7 @@ fn at_patterns_require_copy_runtime_values_and_honor_copy_bounds() {
             "use std.cinterop.CString\n",
             "def invalid = value: CString => { let whole@_ = value; () }\n",
         )))
-        .expect_err("a move-only concrete at-pattern should be rejected");
+        .expect_err_diagnostics("a move-only concrete at-pattern should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -2816,7 +2831,7 @@ fn compares_all_standard_library_integer_types() {
 #[test]
 fn supports_contextual_float_literals_arithmetic_and_partial_ordering() {
     let module = type_check(concat!(
-        "extern \"c\" { let scale_float: F64 -> F64 }\n",
+        "extern \"c\" { scale_float: F64 -> F64 }\n",
         "def single = () => { let a: F32 = 1.5; let b: F32 = .5; (a + b) * b - a / b; } satisfies F32\n",
         "def double = () => { let a: F64 = 1e3; let b: F64 = 2.; (a + b) / b; } satisfies F64\n",
         "def defaulted = () => 1.25\n",
@@ -2866,7 +2881,7 @@ fn supports_contextual_float_literals_arithmetic_and_partial_ordering() {
 fn rejects_invalid_float_contexts_and_float_ord() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let value: F32 = 1e100\n"))
-        .expect_err("overflowing F32 literal should fail");
+        .expect_err_diagnostics("overflowing F32 literal should fail");
     assert!(
         diagnostics
             .iter()
@@ -2875,12 +2890,12 @@ fn rejects_invalid_float_contexts_and_float_ord() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("let value: F32 = 1\n"))
-        .expect_err("integer literals should not become floats");
+        .expect_err_diagnostics("integer literals should not become floats");
     assert!(!diagnostics.is_empty());
 
     let diagnostics = TypeChecker::new()
         .check(resolve("let value = 1e+\n"))
-        .expect_err("an incomplete exponent should fail type checking");
+        .expect_err_diagnostics("an incomplete exponent should fail type checking");
     assert!(
         diagnostics
             .iter()
@@ -2889,7 +2904,7 @@ fn rejects_invalid_float_contexts_and_float_ord() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("def compare: <T where Ord T> T -> T -> Ordering = left => right => Ord.cmp left right\nlet invalid = compare 1.0 2.0\n"))
-        .expect_err("floats should not implement Ord");
+        .expect_err_diagnostics("floats should not implement Ord");
     assert!(!diagnostics.is_empty());
 }
 
@@ -2897,7 +2912,7 @@ fn rejects_invalid_float_contexts_and_float_ord() {
 fn requires_only_the_core_ordering_methods() {
     let diagnostics = TypeChecker::new()
         .check(resolve("impl PartialOrd String {}\n"))
-        .expect_err("partial_cmp is required");
+        .expect_err_diagnostics("partial_cmp is required");
     assert!(
         diagnostics
             .iter()
@@ -2906,7 +2921,7 @@ fn requires_only_the_core_ordering_methods() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("impl Ord String {}\n"))
-        .expect_err("cmp is required");
+        .expect_err_diagnostics("cmp is required");
     assert!(
         diagnostics
             .iter()
@@ -2940,7 +2955,7 @@ fn lowercase_i32_is_an_ordinary_unresolved_type_name() {
         .expect("source should load");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("lowercase i32 should not name the builtin");
+        .expect_err_diagnostics("lowercase i32 should not name the builtin");
 
     assert!(
         diagnostics
@@ -2982,11 +2997,11 @@ fn lowercase_bool_is_an_ordinary_unresolved_type_name() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("let predicate: bool\n", root)
+        .load_source("def predicate: bool\n", root)
         .expect("source should load");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("lowercase bool should not name the builtin");
+        .expect_err_diagnostics("lowercase bool should not name the builtin");
 
     assert!(
         diagnostics
@@ -3000,11 +3015,11 @@ fn cinterop_types_require_an_explicit_import() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("let text: CString\n", root)
+        .load_source("def text: CString\n", root)
         .expect("source should load");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("CString should not be in the prelude");
+        .expect_err_diagnostics("CString should not be in the prelude");
     assert!(
         diagnostics
             .iter()
@@ -3013,9 +3028,9 @@ fn cinterop_types_require_an_explicit_import() {
 
     type_check(concat!(
         "use std.cinterop.*\n",
-        "let character: CChar\n",
-        "let pointer: CPointer CChar\n",
-        "let text: CString\n",
+        "def character: CChar\n",
+        "def pointer: CPointer CChar\n",
+        "def text: CString\n",
     ));
 }
 
@@ -3029,7 +3044,7 @@ fn syntax_types_and_quote_require_an_explicit_import() {
         .expect("source should load without importing syntax names");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("syntax types should not be in the core prelude");
+        .expect_err_diagnostics("syntax types should not be in the core prelude");
     assert!(
         diagnostics
             .iter()
@@ -3046,7 +3061,7 @@ fn syntax_types_and_quote_require_an_explicit_import() {
         .expect("quote syntax should parse before import resolution");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("quote should require an explicit import");
+        .expect_err_diagnostics("quote should require an explicit import");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "`quote` requires an explicit import from `std.syntax`"
     }));
@@ -3077,12 +3092,12 @@ fn syntax_types_and_quote_require_an_explicit_import() {
 fn c_pointer_preserves_its_pointee_type() {
     let module = resolve(concat!(
         "use std.cinterop.*\n",
-        "extern \"c\" { let consume: (CPointer I32) -> I32 }\n",
+        "extern \"c\" { consume: (CPointer I32) -> I32 }\n",
         "consume (c_string \"wrong pointee\")\n",
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("CString should only coerce to CPointer CChar");
+        .expect_err_diagnostics("CString should only coerce to CPointer CChar");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -3098,7 +3113,7 @@ fn generic_opaque_arguments_are_part_of_type_identity() {
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("opaque applications with different arguments must differ");
+        .expect_err_diagnostics("opaque applications with different arguments must differ");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -3212,7 +3227,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err("moved containers must not remain usable");
+            .expect_err_diagnostics("moved containers must not remain usable");
         assert!(
             diagnostics
                 .iter()
@@ -3226,7 +3241,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
             "impl !Copy Resource {}\n",
             "def invalid: Buffer Resource -> Buffer Resource = buffer => Clone.clone buffer\n",
         )))
-        .expect_err("Buffer cloning should require Clone elements");
+        .expect_err_diagnostics("Buffer cloning should require Clone elements");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message.contains("trait implementation")
             || diagnostic.message.contains("trait bound")
@@ -3522,7 +3537,7 @@ fn c_string_rejects_non_literal_arguments() {
         .expect("source should load");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("c_string should require a literal during expansion");
+        .expect_err_diagnostics("c_string should require a literal during expansion");
     assert!(
         diagnostics
             .iter()
@@ -3536,7 +3551,7 @@ fn c_string_rejects_interior_nul_bytes() {
     let context = Context::create();
     let diagnostics = CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect_err("interior NUL should fail code generation");
+        .expect_err_diagnostics("interior NUL should fail code generation");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "C string literals cannot contain an interior NUL byte"
     }));
@@ -3631,7 +3646,7 @@ fn bare_ident_and_explicit_ident_string_are_the_same_type() {
         .expect("unsupported contextual quote source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("narrow syntax nodes are not supported parse_quote contexts");
+        .expect_err_diagnostics("narrow syntax nodes are not supported parse_quote contexts");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "Ident String is not a supported `parse_quote` context"
     }));
@@ -3756,7 +3771,7 @@ fn diagnoses_invalid_structured_syntax_operations() {
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("invalid structured syntax operation should fail expansion");
+            .expect_err_diagnostics("invalid structured syntax operation should fail expansion");
         assert!(
             diagnostics
                 .iter()
@@ -3771,7 +3786,7 @@ fn rejects_structured_syntax_values_at_runtime() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for (source, expected) in [
         (
-            "let generated: CallExpr\n",
+            "let generated: CallExpr = 1\n",
             "`Syntax` values are compile-time-only",
         ),
         (
@@ -3798,7 +3813,7 @@ fn rejects_structured_syntax_values_at_runtime() {
         };
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("runtime syntax values should fail expansion");
+            .expect_err_diagnostics("runtime syntax values should fail expansion");
         assert!(
             diagnostics
                 .iter()
@@ -4021,7 +4036,7 @@ fn block_modifiers_reject_unsupported_and_public_outputs() {
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("invalid block modifier output should be rejected");
+            .expect_err_diagnostics("invalid block modifier output should be rejected");
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.message == "item is not supported in a block expression"
@@ -4331,7 +4346,7 @@ fn parse_quote_rejects_spliced_delimited_result() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("splicing into a delimited-result quotation should be rejected");
+        .expect_err_diagnostics("splicing into a delimited-result quotation should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -4357,7 +4372,7 @@ fn parse_quote_rejects_spliced_visibility_result() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("splicing a whole Visibility value should be rejected");
+        .expect_err_diagnostics("splicing a whole Visibility value should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -4379,7 +4394,7 @@ fn rejects_legacy_typegroup_call_syntax() {
             .expect("legacy syntax should still parse as an ordinary call");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("legacy typegroup syntax should not expand");
+            .expect_err_diagnostics("legacy typegroup syntax should not expand");
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.message.contains("macro `typegroup` requires")
@@ -4408,7 +4423,7 @@ fn typegroup_variants_require_an_explicit_reexport() {
         .expect("typegroup source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("unqualified variants should require an explicit use");
+        .expect_err_diagnostics("unqualified variants should require an explicit use");
     assert!(
         diagnostics
             .iter()
@@ -4465,7 +4480,7 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("invalid typegroup infrastructure use should fail");
+            .expect_err_diagnostics("invalid typegroup infrastructure use should fail");
         assert!(
             diagnostics
                 .iter()
@@ -4542,7 +4557,7 @@ fn diagnoses_invalid_visibility_macro_uses() {
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("invalid visibility syntax should fail expansion");
+            .expect_err_diagnostics("invalid visibility syntax should fail expansion");
         assert!(
             diagnostics
                 .iter()
@@ -4566,7 +4581,7 @@ fn implicit_macro_call_visibility_can_make_overloads_ambiguous() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("equal-consumption overloads should be ambiguous");
+        .expect_err_diagnostics("equal-consumption overloads should be ambiguous");
     assert!(
         diagnostics
             .iter()
@@ -4658,7 +4673,7 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
         };
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("invalid modifier use should fail expansion");
+            .expect_err_diagnostics("invalid modifier use should fail expansion");
         assert!(
             diagnostics
                 .iter()
@@ -4765,7 +4780,7 @@ fn quote_never_validates_or_reinterprets_its_result_unlike_parse_quote() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("an item template is not a valid `Expr`");
+        .expect_err_diagnostics("an item template is not a valid `Expr`");
     assert!(
         diagnostics
             .iter()
@@ -4804,7 +4819,7 @@ fn quote_result_excludes_syntax_which_remains_quotes_alone() {
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("`Syntax` is `quote`'s result, not a `parse_quote` target");
+            .expect_err_diagnostics("`Syntax` is `quote`'s result, not a `parse_quote` target");
         assert!(
             diagnostics.iter().any(|diagnostic| diagnostic.message
                 == "Syntax is not a supported `parse_quote` context"),
@@ -4829,7 +4844,7 @@ fn parse_quote_without_a_contextual_type_is_an_error() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("an untyped helper leaves `parse_quote` without a contextual type");
+        .expect_err_diagnostics("an untyped helper leaves `parse_quote` without a contextual type");
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic
@@ -4852,7 +4867,7 @@ fn macro_declaring_a_concrete_syntax_result_rejects_a_bare_quote_tail() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("`quote` always returns `Syntax`, not the declared `Expr` result");
+        .expect_err_diagnostics("`quote` always returns `Syntax`, not the declared `Expr` result");
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.message
@@ -4912,7 +4927,7 @@ fn syntax_node_quotation_requires_one_shortest_structural_node() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("two shortest nodes must not satisfy SyntaxNode");
+        .expect_err_diagnostics("two shortest nodes must not satisfy SyntaxNode");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "quotation does not contain exactly one structural syntax node"
     }));
@@ -4947,7 +4962,7 @@ fn generic_user_macros_and_unsupported_parse_quote_contexts_are_rejected() {
         .expect("generic macro syntax should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("generic user macros remain unsupported");
+        .expect_err_diagnostics("generic user macros remain unsupported");
     assert!(diagnostics
         .iter()
         .any(|diagnostic| diagnostic.message == "generic user-defined macros are not supported"));
@@ -4967,7 +4982,7 @@ fn generic_user_macros_and_unsupported_parse_quote_contexts_are_rejected() {
         .expect("unsupported contextual quote source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("narrow syntax nodes are not supported parse_quote contexts");
+        .expect_err_diagnostics("narrow syntax nodes are not supported parse_quote contexts");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "Ident String is not a supported `parse_quote` context"
     }));
@@ -5011,7 +5026,7 @@ fn type_and_pattern_overlaps_with_expression_overloads_are_ambiguous() {
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("overlapping syntax categories should be ambiguous");
+            .expect_err_diagnostics("overlapping syntax categories should be ambiguous");
         assert!(
             diagnostics
                 .iter()
@@ -5047,7 +5062,7 @@ fn diagnoses_invalid_type_and_pattern_macro_inputs_and_splices() {
             .expect("source should parse losslessly");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("invalid category syntax should fail expansion or resolution");
+            .expect_err_diagnostics("invalid category syntax should fail expansion or resolution");
         assert!(
             diagnostics
                 .iter()
@@ -5094,7 +5109,7 @@ fn expands_macros_and_splices_inside_generated_items() {
 fn generates_extern_trait_and_implementation_items() {
     let module = type_check(concat!(
         "macro define_extern = _: Expr => parse_quote {\n",
-        "    extern \"c\" { let generated_external: I32 -> I32 }\n",
+        "    extern \"c\" { generated_external: I32 -> I32 }\n",
         "}\n",
         "macro define_trait = _: Expr => parse_quote {\n",
         "    trait GeneratedTrait T { transform: T -> T }\n",
@@ -5182,7 +5197,7 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
             .expect("source should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("invalid item macro use should fail expansion");
+            .expect_err_diagnostics("invalid item macro use should fail expansion");
         assert!(
             diagnostics
                 .iter()
@@ -5303,7 +5318,7 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("bare Sequence should be rejected");
+        .expect_err_diagnostics("bare Sequence should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message
             == "a top-level `Sequence` parameter must be followed by a parameter that always consumes source syntax"
@@ -5318,7 +5333,7 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("bare Separated should be rejected");
+        .expect_err_diagnostics("bare Separated should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message
             == "`Separated` may only be the entire contents of `Parenthesized`, `Bracketed`, or `Braced`"
@@ -5333,7 +5348,7 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("opaque Syntax has no canonical sequence partition");
+        .expect_err_diagnostics("opaque Syntax has no canonical sequence partition");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -5425,7 +5440,7 @@ fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguou
         .expect("ambiguous macro source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("incomparable repeated categories should be ambiguous");
+        .expect_err_diagnostics("incomparable repeated categories should be ambiguous");
     assert!(
         diagnostics
             .iter()
@@ -5464,7 +5479,7 @@ fn rejects_invalid_top_level_macro_sequence_signatures() {
             .expect("invalid macro declaration should parse");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("invalid top-level sequence should be rejected");
+            .expect_err_diagnostics("invalid top-level sequence should be rejected");
         assert!(
             diagnostics
                 .iter()
@@ -5553,7 +5568,7 @@ fn rejects_malformed_separated_syntax() {
             .expect("source should parse");
         NameResolver::new()
             .resolve_program(program)
-            .expect_err("malformed separated syntax should be rejected");
+            .expect_err_diagnostics("malformed separated syntax should be rejected");
     }
 
     let program = ProgramLoader::new()
@@ -5570,7 +5585,7 @@ fn rejects_malformed_separated_syntax() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("an empty separated value cannot have a trailing comma");
+        .expect_err_diagnostics("an empty separated value cannot have a trailing comma");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "an empty `Separated` value cannot have a trailing separator"
     }));
@@ -5602,7 +5617,7 @@ fn requires_else_to_be_the_last_braced_if_clause() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("a non-final else clause should be rejected");
+        .expect_err_diagnostics("a non-final else clause should be rejected");
     assert!(
         diagnostics
             .iter()
@@ -5706,7 +5721,7 @@ fn rejects_legacy_standard_if_syntax() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("legacy if syntax should be rejected");
+        .expect_err_diagnostics("legacy if syntax should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -5729,7 +5744,7 @@ fn diagnoses_duplicate_and_ambiguous_macro_overloads() {
         .expect("duplicate overload source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(duplicate)
-        .expect_err("identical overload patterns should fail");
+        .expect_err_diagnostics("identical overload patterns should fail");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -5749,7 +5764,7 @@ fn diagnoses_duplicate_and_ambiguous_macro_overloads() {
         .expect("ambiguous overload source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(ambiguous)
-        .expect_err("incomparable overloads should be ambiguous");
+        .expect_err_diagnostics("incomparable overloads should be ambiguous");
     assert!(
         diagnostics
             .iter()
@@ -5772,7 +5787,7 @@ fn rejects_a_mismatched_literal_identifier_macro_argument() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("literal identifier mismatch should fail expansion");
+        .expect_err_diagnostics("literal identifier mismatch should fail expansion");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -5792,7 +5807,7 @@ fn rejects_bare_literal_identifier_macro_parameters() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("bare literal identifier parameters should fail");
+        .expect_err_diagnostics("bare literal identifier parameters should fail");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -5824,7 +5839,7 @@ fn subtype_bound_rejects_non_string_arguments() {
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("`I32` does not satisfy `T <: String`");
+        .expect_err_diagnostics("`I32` does not satisfy `T <: String`");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "subtype bound is not satisfied: `I32` is not a subtype of `String`"
     }));
@@ -5861,11 +5876,11 @@ fn subtype_bound_union_elimination() {
 fn ident_rejects_non_string_spelling_types() {
     let module = resolve(concat!(
         "type alias InvalidIdent = Ident I32\n",
-        "let invalid: InvalidIdent\n",
+        "def invalid: InvalidIdent\n",
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("Ident's spelling argument must satisfy `Spelling <: String`");
+        .expect_err_diagnostics("Ident's spelling argument must satisfy `Spelling <: String`");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "subtype bound is not satisfied: `I32` is not a subtype of `String`"
     }));
@@ -5892,7 +5907,7 @@ fn default_type_bound_rejects_mismatched_default_value() {
     ));
     TypeChecker::new()
         .check(module)
-        .expect_err("defaulted `Box` should require a `String` value, not `I32`");
+        .expect_err_diagnostics("defaulted `Box` should require a `String` value, not `I32`");
 }
 
 #[test]
@@ -5915,18 +5930,18 @@ fn default_type_bound_referencing_an_earlier_parameter_rejects_mismatch() {
     ));
     TypeChecker::new()
         .check(module)
-        .expect_err("`B` should default to `I32`, not accept a `String`");
+        .expect_err_diagnostics("`B` should default to `I32`, not accept a `String`");
 }
 
 #[test]
 fn default_type_bound_is_checked_against_subtype_bound() {
     let module = resolve(concat!(
         "type alias Constrained (T = I32) where T <: String = T\n",
-        "let bad: Constrained\n",
+        "def bad: Constrained\n",
     ));
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("`I32` default should not satisfy `T <: String`");
+        .expect_err_diagnostics("`I32` default should not satisfy `T <: String`");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "subtype bound is not satisfied: `I32` is not a subtype of `String`"
     }));
@@ -5938,7 +5953,7 @@ fn default_type_bound_does_not_fire_when_a_later_parameter_lacks_one() {
         "type alias Weird (A = I32) B = (A, B)\n",
         "let bad: Weird = (1, 2)\n",
     ));
-    let diagnostics = TypeChecker::new().check(module).expect_err(concat!(
+    let diagnostics = TypeChecker::new().check(module).expect_err_diagnostics(concat!(
         "`Weird`'s `B` parameter has no default, so the defaulted `A` ",
         "cannot fill in for a fully bare `Weird` either"
     ));
@@ -6014,7 +6029,7 @@ fn rejects_duplicate_default_type_bound_for_the_same_parameter() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("`T` cannot have two conflicting defaults");
+        .expect_err_diagnostics("`T` cannot have two conflicting defaults");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message == "duplicate default type bound for compile-time parameter `T`"
     }));
@@ -6084,7 +6099,7 @@ fn diagnoses_incomplete_and_non_syntax_macros() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(incomplete)
-        .expect_err("incomplete macro call should fail");
+        .expect_err_diagnostics("incomplete macro call should fail");
     assert!(
         diagnostics
             .iter()
@@ -6097,7 +6112,7 @@ fn diagnoses_incomplete_and_non_syntax_macros() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(invalid)
-        .expect_err("non-Syntax macro result should fail without invocation");
+        .expect_err_diagnostics("non-Syntax macro result should fail without invocation");
     assert!(
         diagnostics
             .iter()
@@ -6110,11 +6125,11 @@ fn rejects_runtime_syntax_values() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("let generated: Syntax\n", root)
+        .load_source("let generated: Syntax = 1\n", root)
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("Syntax should not reach runtime checking");
+        .expect_err_diagnostics("Syntax should not reach runtime checking");
     assert!(
         diagnostics
             .iter()
@@ -6136,7 +6151,7 @@ fn diagnoses_recursive_macro_expansion() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("recursive expansion should fail");
+        .expect_err_diagnostics("recursive expansion should fail");
     assert!(
         diagnostics
             .iter()
@@ -6156,7 +6171,7 @@ fn rejects_repeated_splices_with_a_specific_diagnostic() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("repeated splice should be reserved");
+        .expect_err_diagnostics("repeated splice should be reserved");
     assert!(
         diagnostics
             .iter()
@@ -6166,7 +6181,7 @@ fn rejects_repeated_splices_with_a_specific_diagnostic() {
 
 #[test]
 fn type_checks_function_declarations_without_values() {
-    type_check("let add: (x: I32, y: I32) -> I32\n");
+    type_check("def add: (x: I32, y: I32) -> I32\n");
 }
 
 #[test]
@@ -6174,7 +6189,7 @@ fn reports_unknown_names_without_panicking() {
     let syntax = parse("missing\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
-        .expect_err("unknown name should fail resolution");
+        .expect_err_diagnostics("unknown name should fail resolution");
 
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].message, "unknown name `missing`");
@@ -6185,7 +6200,7 @@ fn reports_duplicate_definitions() {
     let syntax = parse("def value = 1\ndef value = 2\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
-        .expect_err("duplicate name should fail resolution");
+        .expect_err_diagnostics("duplicate name should fail resolution");
 
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(diagnostics[0].message, "duplicate definition of `value`");
@@ -6219,7 +6234,7 @@ fn rejects_a_name_bound_more_than_once_in_the_same_pattern() {
     let syntax = parse("let (a, a) = (1, 2)\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
-        .expect_err("a pattern must not bind the same name twice");
+        .expect_err_diagnostics("a pattern must not bind the same name twice");
 
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
@@ -6233,13 +6248,13 @@ fn rejects_a_def_colliding_with_a_let_of_the_same_name_regardless_of_order() {
     let syntax = parse("let x = 1\ndef x = () => x\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
-        .expect_err("a `let` must not be shadowed by a `def`");
+        .expect_err_diagnostics("a `let` must not be shadowed by a `def`");
     assert_eq!(diagnostics[0].message, "duplicate definition of `x`");
 
     let syntax = parse("def x = () => x\nlet x = 1\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
-        .expect_err("a `def` must not be shadowed by a `let`");
+        .expect_err_diagnostics("a `def` must not be shadowed by a `let`");
     assert_eq!(diagnostics[0].message, "duplicate definition of `x`");
 }
 
@@ -6248,7 +6263,7 @@ fn rejects_two_pub_bindings_of_the_same_name_but_allows_pub_and_private_to_shado
     let syntax = parse("pub let value = 1\npub let value = 2\n").expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
-        .expect_err("two `pub` bindings of the same name must stay an error");
+        .expect_err_diagnostics("two `pub` bindings of the same name must stay an error");
     assert_eq!(diagnostics[0].message, "duplicate definition of `value`");
 
     let syntax = parse("pub let value = 1\nlet value = 2\n").expect("source should parse");
@@ -6376,13 +6391,13 @@ fn preserves_literal_nominal_ref_container_semantics() {
 #[test]
 fn rejects_incomplete_and_overapplied_ref_types() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("let value: Ref\n"))
-        .expect_err("Ref requires a payload type");
+        .check(resolve("def value: Ref\n"))
+        .expect_err_diagnostics("Ref requires a payload type");
     assert!(!diagnostics.is_empty());
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("let value: Ref I32 I32\n"))
-        .expect_err("Ref accepts exactly one payload type");
+        .check(resolve("def value: Ref I32 I32\n"))
+        .expect_err_diagnostics("Ref accepts exactly one payload type");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -6442,7 +6457,7 @@ fn rejects_untyped_parameters_without_a_function_annotation() {
     let module = resolve("def identity = value => value\n");
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("an untyped parameter needs context");
+        .expect_err_diagnostics("an untyped parameter needs context");
     assert!(
         diagnostics
             .iter()
@@ -6476,7 +6491,7 @@ fn lowers_transitive_captures_across_curried_layers() {
 fn adapts_non_variadic_externs_used_as_function_values() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
-        "extern \"c\" { let puts: (CPointer CChar) -> I32 }\n",
+        "extern \"c\" { puts: (CPointer CChar) -> I32 }\n",
         "def apply: ((CPointer CChar) -> I32, CPointer CChar) -> I32 = (f, value) => f value\n",
         "apply (puts, c_string \"hello\")\n",
     ));
@@ -6505,7 +6520,7 @@ fn compiles_builtin_arithmetic_via_trait_dispatch() {
 fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
         "use std.cinterop.*\n",
-        "extern \"c\" { let puts: (CPointer CChar) -> I32 }\n",
+        "extern \"c\" { puts: (CPointer CChar) -> I32 }\n",
         "puts (c_string \"hello\\n\")\n",
     );
     let module = type_check(source);
@@ -6697,7 +6712,7 @@ fn string_templates_require_the_selected_formatting_trait() {
             "let secret = Secret 1\n",
             "let message = \"$secret\"\n",
         )))
-        .expect_err("Display is required for ordinary interpolation");
+        .expect_err_diagnostics("Display is required for ordinary interpolation");
     assert!(
         diagnostics
             .iter()
@@ -6714,7 +6729,7 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
             "let product = (secret,)\n",
             "let text = Formatter.debug product\n",
         )))
-        .expect_err("a product element without Debug must be rejected");
+        .expect_err_diagnostics("a product element without Debug must be rejected");
     assert!(
         diagnostics
             .iter()
@@ -6727,7 +6742,7 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
             "let secret = Secret 1\n",
             "let text = Formatter.debug secret\n",
         )))
-        .expect_err("a nominal type must not inherit its representation's Debug implementation");
+        .expect_err_diagnostics("a nominal type must not inherit its representation's Debug implementation");
     assert!(
         diagnostics
             .iter()
@@ -6805,7 +6820,7 @@ fn rejects_invalid_default_trait_member_bodies() {
         .check(resolve(
             "trait Invalid T { identity: T -> T = value => \"wrong\" }\n",
         ))
-        .expect_err("default bodies must match their member type");
+        .expect_err_diagnostics("default bodies must match their member type");
     assert!(
         diagnostics
             .iter()
@@ -6819,7 +6834,7 @@ fn rejects_invalid_default_trait_member_bodies() {
         .expect("invalid default source should load");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("default bodies must be function values");
+        .expect_err_diagnostics("default bodies must be function values");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -6885,7 +6900,7 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
             "impl Convert I32 String { def convert = value => \"one\" }\n",
             "impl Convert I32 I32 { def convert = value => value }\n",
         )))
-        .expect_err("functional dependencies must make implementations coherent");
+        .expect_err_diagnostics("functional dependencies must make implementations coherent");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -6897,7 +6912,7 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
             "trait AddTo Left Right Output where {Left, Right} ~> Output { add_to: Left -> Right -> Output }\n",
             "def invalid: <T where AddTo T _ T> T -> T = value => value\n",
         )))
-        .expect_err("non-dependent arguments cannot be inferred");
+        .expect_err_diagnostics("non-dependent arguments cannot be inferred");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -6909,7 +6924,7 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
             "trait Convert From To where From ~> To { convert: From -> To }\n",
             "impl Convert I32 { def convert = value => value }\n",
         )))
-        .expect_err("implementation headers remain exact-arity");
+        .expect_err_diagnostics("implementation headers remain exact-arity");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -6921,7 +6936,7 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
             "trait Iterator Iter Item where Iter ~> Item { next: Iter -> Item }\n",
             "def invalid: <Iter, Item where Iterator Iter Item, Iterator Iter String> Iter -> Iter = value => value\n",
         )))
-        .expect_err("active bounds must respect functional dependencies");
+        .expect_err_diagnostics("active bounds must respect functional dependencies");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -6952,7 +6967,7 @@ fn rejects_invalid_functional_dependency_declarations() {
             .expect("invalid dependency source should load");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err("invalid functional dependency must not resolve");
+            .expect_err_diagnostics("invalid functional dependency must not resolve");
         assert!(
             diagnostics
                 .iter()
@@ -7001,7 +7016,7 @@ fn enforces_and_propagates_transitive_trait_prerequisites() {
             "trait Derived T where Base T { derived: T -> T }\n",
             "impl Derived I32 { def derived = value => value }\n",
         )))
-        .expect_err("implementations must satisfy trait prerequisites");
+        .expect_err_diagnostics("implementations must satisfy trait prerequisites");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7044,7 +7059,7 @@ fn rejects_cyclic_trait_prerequisites() {
         .expect("cyclic prerequisite source should load");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("prerequisite cycles must be rejected");
+        .expect_err_diagnostics("prerequisite cycles must be rejected");
     assert!(
         diagnostics
             .iter()
@@ -7059,7 +7074,7 @@ fn rejects_invalid_multi_parameter_trait_uses_and_members() {
             "trait Add Left Right Output { add: (Left, Right) -> Output }\n",
             "impl Add I32 I32 { def add = pair => 0 }\n",
         )))
-        .expect_err("trait implementation arity must match the declaration");
+        .expect_err_diagnostics("trait implementation arity must match the declaration");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7070,7 +7085,7 @@ fn rejects_invalid_multi_parameter_trait_uses_and_members() {
         .check(resolve(
             "trait Invalid Left Right { keep_left: Left -> Left }\n",
         ))
-        .expect_err("every member must mention every trait parameter");
+        .expect_err_diagnostics("every member must mention every trait parameter");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7082,7 +7097,7 @@ fn rejects_invalid_multi_parameter_trait_uses_and_members() {
             "trait Convert (From, To) { convert: From -> To }\n",
             "impl Convert I32 { def convert = value => value }\n",
         )))
-        .expect_err("product binders require product arguments");
+        .expect_err_diagnostics("product binders require product arguments");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7097,7 +7112,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
             "trait Increment T { increment: T -> T }\n",
             "impl Increment I32 { }\n",
         )))
-        .expect_err("implementations must be complete");
+        .expect_err_diagnostics("implementations must be complete");
     assert!(
         diagnostics
             .iter()
@@ -7111,7 +7126,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
             "impl Increment I32 { def increment = value => value }\n",
             "impl Increment Number { def increment = value => value }\n",
         )))
-        .expect_err("aliases may not create overlapping implementations");
+        .expect_err_diagnostics("aliases may not create overlapping implementations");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7123,7 +7138,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
             "trait Increment T { increment: T -> T }\n",
             "impl Increment I32 { def increment = value => \"wrong\" }\n",
         )))
-        .expect_err("implementation bodies must match their trait member types");
+        .expect_err_diagnostics("implementation bodies must match their trait member types");
     assert!(
         diagnostics.iter().any(|diagnostic| diagnostic
             .message
@@ -7137,7 +7152,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
             "impl Increment I32 { def increment = value => value }\n",
             "def invalid: <T> T -> T = value => increment value\n",
         )))
-        .expect_err("generic callers must propagate trait bounds");
+        .expect_err_diagnostics("generic callers must propagate trait bounds");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7149,7 +7164,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
 fn rejects_invalid_trait_member_signatures_and_non_concrete_targets() {
     let diagnostics = TypeChecker::new()
         .check(resolve("trait Invalid T { value: I32 }\n"))
-        .expect_err("trait members must be functions that mention the parameter");
+        .expect_err_diagnostics("trait members must be functions that mention the parameter");
     assert!(
         diagnostics
             .iter()
@@ -7166,7 +7181,7 @@ fn rejects_invalid_trait_member_signatures_and_non_concrete_targets() {
             "trait Increment T { increment: T -> T }\n",
             "impl Increment _ { def increment = value => value }\n",
         )))
-        .expect_err("implementation targets must be concrete");
+        .expect_err_diagnostics("implementation targets must be concrete");
     assert!(
         diagnostics
             .iter()
@@ -7199,7 +7214,7 @@ fn rejects_generic_trait_implementation_dispatch_when_bound_is_unmet() {
             "impl <T where Bound T> Target T { def act = value => value }\n",
             "let answer: I32 = Target.act 41\n",
         )))
-        .expect_err("I32 does not implement Bound, so the conditional impl must not apply");
+        .expect_err_diagnostics("I32 does not implement Bound, so the conditional impl must not apply");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7216,7 +7231,7 @@ fn rejects_alpha_equivalent_duplicate_generic_trait_implementations() {
             "impl <T where Bound T> Target T { def act = value => value }\n",
             "impl <U where Bound U> Target U { def act = value => value }\n",
         )))
-        .expect_err("alpha-equivalent generic implementations must be rejected as duplicates");
+        .expect_err_diagnostics("alpha-equivalent generic implementations must be rejected as duplicates");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7240,7 +7255,7 @@ fn rejects_a_blanket_implementation_that_overlaps_an_earlier_concrete_one_before
             "impl Target I32 { def act = value => value }\n",
             "impl <T where Bound T> Target T { def act = value => value }\n",
         )))
-        .expect_err(
+        .expect_err_diagnostics(
             "a concrete impl and an applicable blanket impl must be rejected as overlapping",
         );
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -7258,7 +7273,7 @@ fn cyclic_trait_implementation_bound_fails_without_hanging() {
             "impl <T where Cyclic T> Cyclic T { def check = value => True }\n",
             "let answer: Bool = Cyclic.check 41\n",
         )))
-        .expect_err("a self-referential bound must fail rather than being accepted coinductively");
+        .expect_err_diagnostics("a self-referential bound must fail rather than being accepted coinductively");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7279,7 +7294,7 @@ fn requires_qualification_for_ambiguous_trait_methods() {
     );
     let diagnostics = TypeChecker::new()
         .check(resolve(source))
-        .expect_err("unqualified overlapping method names must be ambiguous");
+        .expect_err_diagnostics("unqualified overlapping method names must be ambiguous");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7337,7 +7352,7 @@ fn constructs_and_propagates_singleton_nominal_values() {
 fn opaque_types_do_not_introduce_values_and_singletons_are_not_callable() {
     let diagnostics = NameResolver::new()
         .resolve(&parse("pub type Secret = opaque\nSecret\n").expect("source should parse"))
-        .expect_err("opaque type should not introduce a value");
+        .expect_err_diagnostics("opaque type should not introduce a value");
     assert!(
         diagnostics
             .iter()
@@ -7346,7 +7361,7 @@ fn opaque_types_do_not_introduce_values_and_singletons_are_not_callable() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("pub type Foo;\nFoo()\n"))
-        .expect_err("singleton value should not be callable");
+        .expect_err_diagnostics("singleton value should not be callable");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7436,7 +7451,7 @@ fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer
             "let invalid: String = outer.name\n",
             "let also_invalid = (42).*\n",
         )))
-        .expect_err("invalid representation projections should be rejected");
+        .expect_err_diagnostics("invalid representation projections should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7489,7 +7504,7 @@ fn rejects_non_nominal_and_mismatched_nominal_patterns() {
     .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve(&syntax)
-        .expect_err("aliases cannot be used as nominal patterns");
+        .expect_err_diagnostics("aliases cannot be used as nominal patterns");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7503,7 +7518,7 @@ fn rejects_non_nominal_and_mismatched_nominal_patterns() {
             "let right: Right = Right 42\n",
             "let Left value = right\n",
         )))
-        .expect_err("a nominal pattern must match the same nominal type");
+        .expect_err_diagnostics("a nominal pattern must match the same nominal type");
     assert!(
         diagnostics
             .iter()
@@ -7609,7 +7624,7 @@ fn rejects_unconstrained_generic_values_and_non_function_schemes() {
             "def copied = identity\n",
             "def invalid: <U> U = 42\n",
         )))
-        .expect_err("generic values require a concrete use or function scheme");
+        .expect_err_diagnostics("generic values require a concrete use or function scheme");
     let messages = diagnostics
         .iter()
         .map(|diagnostic| diagnostic.message.as_str())
@@ -7630,7 +7645,7 @@ fn rejects_unconstrained_generic_values_and_non_function_schemes() {
 fn rejects_polymorphic_recursion() {
     let diagnostics = TypeChecker::new()
         .check(resolve("def grow: <T> T -> T = x => grow (x, x)\n"))
-        .expect_err("recursive calls may not change their specialization");
+        .expect_err_diagnostics("recursive calls may not change their specialization");
     assert!(
         diagnostics
             .iter()
@@ -7723,7 +7738,7 @@ fn rejects_returns_outside_functions_and_incompatible_return_values() {
     let outside = parse("return 1\n").expect("return item should parse");
     let diagnostics = NameResolver::new()
         .resolve(&outside)
-        .expect_err("top-level return should not resolve");
+        .expect_err_diagnostics("top-level return should not resolve");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7733,7 +7748,7 @@ fn rejects_returns_outside_functions_and_incompatible_return_values() {
     let module = resolve("def invalid = () => { return 42; } satisfies String\n");
     let diagnostics = TypeChecker::new()
         .check(module)
-        .expect_err("return value should match the function result");
+        .expect_err_diagnostics("return value should match the function result");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7792,7 +7807,7 @@ fn supports_contextual_literals_and_arithmetic_for_all_integer_types() {
 fn rejects_out_of_range_and_mixed_integer_arithmetic() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let too_large: U8 = 256\n"))
-        .expect_err("an out-of-range literal should fail");
+        .expect_err_diagnostics("an out-of-range literal should fail");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7804,7 +7819,7 @@ fn rejects_out_of_range_and_mixed_integer_arithmetic() {
             "def mixed = (left: I8, right: I16) => left + right\n",
             "mixed (1, 2)\n",
         )))
-        .expect_err("mixed integer arithmetic should require an explicit conversion");
+        .expect_err_diagnostics("mixed integer arithmetic should require an explicit conversion");
     assert!(!diagnostics.is_empty());
 }
 
@@ -7841,7 +7856,7 @@ fn infers_copy_and_enforces_affine_moves() {
             "use std.cinterop.*\n",
             "def invalid = (move value: CString) => { let moved = value; value }\n",
         )))
-        .expect_err("CString must be move-only");
+        .expect_err_diagnostics("CString must be move-only");
     assert!(
         diagnostics
             .iter()
@@ -7853,7 +7868,7 @@ fn infers_copy_and_enforces_affine_moves() {
             "use std.cinterop.*\n",
             "def invalid = (value: CString) => { let moved = value; value }\n",
         )))
-        .expect_err("a plain non-Copy parameter is an implicit borrow and cannot be moved out of");
+        .expect_err_diagnostics("a plain non-Copy parameter is an implicit borrow and cannot be moved out of");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7868,7 +7883,7 @@ fn exposes_copy_but_rejects_explicit_implementations() {
             "type Value = I32\n",
             "impl Copy Value {}\n",
         )))
-        .expect_err("Copy implementations must be inferred");
+        .expect_err_diagnostics("Copy implementations must be inferred");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7884,7 +7899,7 @@ fn negative_copy_impl_opts_a_nominal_type_out_of_copy_without_drop() {
             "impl !Copy Handle {}\n",
             "def invalid = (move value: Handle) => { let moved = value; value }\n",
         )))
-        .expect_err("a `!Copy` type must be move-only");
+        .expect_err_diagnostics("a `!Copy` type must be move-only");
     assert!(
         diagnostics
             .iter()
@@ -7907,7 +7922,7 @@ fn rejects_negative_impl_for_traits_other_than_copy() {
             "type Handle = I32\n",
             "impl !Drop Handle {}\n",
         )))
-        .expect_err("only `Copy` can be negated");
+        .expect_err_diagnostics("only `Copy` can be negated");
     assert!(
         diagnostics
             .iter()
@@ -7919,7 +7934,7 @@ fn rejects_negative_impl_for_traits_other_than_copy() {
 fn rejects_negative_copy_impl_for_non_nominal_types() {
     let diagnostics = TypeChecker::new()
         .check(resolve("impl !Copy I32 {}\n"))
-        .expect_err("`!Copy` requires a represented nominal type");
+        .expect_err_diagnostics("`!Copy` requires a represented nominal type");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -7950,9 +7965,9 @@ fn rejects_partial_moves_and_cstring_returns_from_c() {
     let ffi_diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.cinterop.*\n",
-            "extern \"c\" { let invalid_return: () -> CString }\n",
+            "extern \"c\" { invalid_return: () -> CString }\n",
         )))
-        .expect_err("C must not manufacture owned CStrings");
+        .expect_err_diagnostics("C must not manufacture owned CStrings");
     assert!(
         ffi_diagnostics
             .iter()
@@ -7964,7 +7979,7 @@ fn rejects_partial_moves_and_cstring_returns_from_c() {
             "use std.cinterop.*\n",
             "def partial = (pair: (CString, I32)) => pair.0\n",
         )))
-        .expect_err("unsupported ownership operations should be rejected");
+        .expect_err_diagnostics("unsupported ownership operations should be rejected");
     assert!(
         diagnostics
             .iter()
@@ -7996,7 +8011,7 @@ fn rejects_moving_a_move_only_global_out_of_top_level_statements() {
             "let mut data: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
             "let frozen: Slice I32 = Buffer.freeze data\n",
         )))
-        .expect_err("moving a global out at top level should be rejected");
+        .expect_err_diagnostics("moving a global out at top level should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -8011,7 +8026,7 @@ fn rejects_moving_a_move_only_global_out_of_a_function() {
             "let mut data: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
             "def take = () => Buffer.freeze data\n",
         )))
-        .expect_err("moving a global out of a function should be rejected");
+        .expect_err_diagnostics("moving a global out of a function should be rejected");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -8023,7 +8038,7 @@ fn rejects_moving_a_move_only_global_out_of_a_function() {
 fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
-        "extern \"c\" { let inspect: CString -> I32 }\n",
+        "extern \"c\" { inspect: CString -> I32 }\n",
         "def make = (move value: CString) => { let callback = () => inspect value; callback }\n",
     ));
     let context = Context::create();
@@ -8035,7 +8050,7 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
     for source in [
         concat!(
             "use std.cinterop.*\n",
-            "extern \"c\" { let inspect: CString -> I32 }\n",
+            "extern \"c\" { inspect: CString -> I32 }\n",
             "def invalid = (move value: CString) => { let callback = () => inspect value; value }\n",
         ),
         concat!(
@@ -8045,7 +8060,7 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err("captured and Ref-owned resources cannot be moved again");
+            .expect_err_diagnostics("captured and Ref-owned resources cannot be moved again");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.message.contains("moved value")
                 || diagnostic
@@ -8117,7 +8132,7 @@ fn rejects_invalid_string_literal_narrowing() {
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err("invalid literal refinement should be rejected");
+            .expect_err_diagnostics("invalid literal refinement should be rejected");
         assert!(
             diagnostics
                 .iter()
@@ -8168,7 +8183,7 @@ fn checks_literal_match_exhaustiveness_and_reachability() {
             "  \"yes\" => \"only\",\n",
             "}\n",
         )))
-        .expect_err("a literal alternative is missing");
+        .expect_err_diagnostics("a literal alternative is missing");
     assert!(
         missing
             .iter()
@@ -8183,7 +8198,7 @@ fn checks_literal_match_exhaustiveness_and_reachability() {
             "  _ => \"other\",\n",
             "}\n",
         )))
-        .expect_err("a duplicate literal arm is unreachable");
+        .expect_err_diagnostics("a duplicate literal arm is unreachable");
     assert!(
         duplicate
             .iter()
@@ -8197,7 +8212,7 @@ fn rejects_refutable_string_literal_binding_patterns() {
         .check(resolve(concat!(
             "def invalid: String -> String = \"yes\" => \"matched\"\n",
         )))
-        .expect_err("literal function patterns must be irrefutable");
+        .expect_err_diagnostics("literal function patterns must be irrefutable");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -8272,7 +8287,7 @@ fn rejects_invalid_loop_control_and_break_types() {
     ] {
         let diagnostics = NameResolver::new()
             .resolve(&parse(source).expect("invalid loop control should still parse"))
-            .expect_err("loop control should fail resolution");
+            .expect_err_diagnostics("loop control should fail resolution");
         assert!(
             diagnostics
                 .iter()
@@ -8283,7 +8298,7 @@ fn rejects_invalid_loop_control_and_break_types() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve("def invalid: () -> I32 = () => loop { break }\n"))
-        .expect_err("unit break should not satisfy I32");
+        .expect_err_diagnostics("unit break should not satisfy I32");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.message.contains("expected `I32`") && diagnostic.message.contains("found `()`")
     }));
@@ -8350,7 +8365,7 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
             "  continue\n",
             "}\n",
         )))
-        .expect_err("an outer move-only value cannot be consumed before a back-edge");
+        .expect_err_diagnostics("an outer move-only value cannot be consumed before a back-edge");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -8395,7 +8410,7 @@ fn checks_and_generates_short_circuiting_logical_operators() {
 fn rejects_non_bool_logical_operands() {
     let diagnostics = TypeChecker::new()
         .check(resolve("def bad: (I32, I32) -> I32 = (a, b) => a && b\n"))
-        .expect_err("`&&` requires `Bool` operands, and is not overloadable for `I32`");
+        .expect_err_diagnostics("`&&` requires `Bool` operands, and is not overloadable for `I32`");
     assert!(
         diagnostics
             .iter()
@@ -8470,7 +8485,7 @@ fn rejects_const_float_initializers_that_fold_to_non_finite_values() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("dividing by zero at compile time should not fold to an infinite constant");
+        .expect_err_diagnostics("dividing by zero at compile time should not fold to an infinite constant");
     assert!(
         diagnostics
             .iter()
@@ -8487,7 +8502,7 @@ fn rejects_const_initializers_that_cannot_be_folded_to_a_compile_time_constant()
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("a function value cannot be a compile-time constant");
+        .expect_err_diagnostics("a function value cannot be a compile-time constant");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -8504,7 +8519,7 @@ fn rejects_self_referential_const_bindings() {
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err("a self-referential const should be rejected, not hang or crash");
+        .expect_err_diagnostics("a self-referential const should be rejected, not hang or crash");
     assert!(
         diagnostics
             .iter()
@@ -8539,7 +8554,7 @@ fn resolves_local_const_names_before_their_textual_position_like_def() {
         .expect("a hoisted local const's name should resolve, like a local def's");
     let diagnostics = TypeChecker::new()
         .check(resolved)
-        .expect_err("reading a local binding before its initializer still fails to type-check");
+        .expect_err_diagnostics("reading a local binding before its initializer still fails to type-check");
     assert!(
         diagnostics
             .iter()
@@ -8581,7 +8596,7 @@ fn a_non_copy_type_can_implement_clone_manually() {
 fn rejects_a_concrete_clone_impl_that_overlaps_the_blanket_copy_implementation() {
     let diagnostics = TypeChecker::new()
         .check(resolve("impl Clone I32 { def clone = value => value }\n"))
-        .expect_err("`I32` already gets `Clone` from the blanket `Copy` implementation");
+        .expect_err_diagnostics("`I32` already gets `Clone` from the blanket `Copy` implementation");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -8597,7 +8612,7 @@ fn rejects_a_blanket_bounded_impl_that_overlaps_an_earlier_concrete_one() {
             "impl Greet I32 { def greet = value => \"hi\" }\n",
             "impl<T where Copy T> Greet T { def greet = value => \"hi\" }\n",
         )))
-        .expect_err("the blanket impl also covers `I32`, already implemented concretely above");
+        .expect_err_diagnostics("the blanket impl also covers `I32`, already implemented concretely above");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message

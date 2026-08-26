@@ -1474,7 +1474,7 @@ fn comments_and_crlf_are_preserved() {
 #[test]
 fn parses_named_product_types_values_and_access() {
     let source = concat!(
-        "let args: (name: String, int)\n",
+        "def args: (name: String, int)\n",
         "type user_id = int\n",
         "def value = (name: \"staple\", 1)\n",
         "def by_name = args.name\n",
@@ -1588,7 +1588,7 @@ fn parses_compile_time_parameters_and_type_application() {
         "type alias Pair (A, B) = (A, B)\n",
         "type Box T = (value: T)\n",
         "def identity: <T> T -> T = x => x\n",
-        "let pair: Pair (String, I32)\n",
+        "def pair: Pair (String, I32)\n",
     );
     let root = parse(source).expect("generic syntax should parse");
     assert_eq!(root.text(), source);
@@ -1832,7 +1832,7 @@ fn parses_returns_and_semicolon_separated_items_losslessly() {
     let source = concat!(
         "use std.core.*;",
         "type alias Number = I32;",
-        "extern \"c\" { let exit: I32 -> (); };",
+        "extern \"c\" { exit: I32 -> (); };",
         "def answer = () => { let value = 42; return value; };",
         "answer ();",
     );
@@ -1904,9 +1904,9 @@ fn parses_sum_types_and_propagating_patterns_losslessly() {
 #[test]
 fn parses_repeated_spread_erased_and_variable_index_syntax() {
     let source = concat!(
-        "let fixed: Ref I32[3]\n",
-        "let erased: Ref I32[]\n",
-        "let mixed: (String, ...I32[3], ...(I32, I32))\n",
+        "def fixed: Ref I32[3]\n",
+        "def erased: Ref I32[]\n",
+        "def mixed: (String, ...I32[3], ...(I32, I32))\n",
         "let expanded = (prefix: \"value\", ...mixed, suffix: 1)\n",
         "let value = erased[index].0\n",
     );
@@ -1989,7 +1989,7 @@ fn parses_mutable_patterns_and_assignment_items_losslessly() {
         unmodified_item(&module.items[3]),
         Item::Assignment(_)
     ));
-    assert!(parse("extern \"c\" { let mut value: I32 }\n").is_err());
+    assert!(parse("extern \"c\" { mut value: I32 }\n").is_err());
     let parameter = parse("def update = (mut parameter: I32) => { parameter = 4 }\n")
         .expect("a direct parameter binding may declare mutation permission");
     let Item::Binding(update) = unmodified_item(&parameter.items[0]) else {

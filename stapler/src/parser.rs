@@ -1218,7 +1218,10 @@ impl Grammar {
         })
     }
 
-    /// Parses an `extern` block and each binding declared within it.
+    /// Parses an `extern` block and each binding declared within it. Like
+    /// trait members, external bindings are written as a bare `name: Type`
+    /// — no `let` keyword, since they can never be mutable, signal, generic,
+    /// or carry an initializer.
     fn parse_extern_block(
         &mut self,
         visibility: Visibility,
@@ -1236,18 +1239,27 @@ impl Grammar {
             }
             let binding_start = self.position;
             let docs = self.parse_member_docs(binding_start)?;
-            let mut binding = self.parse_binding(Visibility::Private, Some(binding_start))?;
-            binding.docs = docs;
-            if binding.mutable {
-                return Err(self.error("external bindings cannot be mutable"));
-            }
-            if binding.signal {
-                return Err(self.error("external bindings cannot be signals"));
-            }
-            if !binding.type_parameters.is_empty() {
-                return Err(self.error("external bindings cannot have compile-time parameters"));
-            }
-            bindings.push(binding);
+            let name = self.parse_binding_name()?;
+            self.expect(TokenKind::Colon, "expected `:` after external binding name")?;
+            let previous = self.newline_terminates_type;
+            self.newline_terminates_type = true;
+            let annotation = self.parse_type();
+            self.newline_terminates_type = previous;
+            let annotation = annotation?;
+            bindings.push(Binding {
+                syntax: self.syntax(binding_start),
+                docs,
+                visibility: Visibility::Private,
+                kind: BindingKind::Let,
+                mutable: false,
+                signal: false,
+                name,
+                type_parameters: Vec::new(),
+                trait_bounds: Vec::new(),
+                subtype_bounds: Vec::new(),
+                annotation: Some(annotation),
+                value: None,
+            });
             self.eat(TokenKind::Semicolon);
         }
         self.expect(TokenKind::RBrace, "expected `}`")?;
@@ -1386,11 +1398,16 @@ impl Grammar {
         } else {
             None
         };
-        if value.is_none() && kind == BindingKind::Const {
-            return Err(self.error("`const` bindings require an initializer"));
-        }
-        if signal && value.is_none() {
-            return Err(self.error("signal bindings require an initializer"));
+        if value.is_none() {
+            match kind {
+                BindingKind::Const => {
+                    return Err(self.error("`const` bindings require an initializer"));
+                }
+                BindingKind::Let => {
+                    return Err(self.error("`let` bindings require an initializer"));
+                }
+                BindingKind::Def => {}
+            }
         }
         Ok(Binding {
             syntax: self.syntax(start),

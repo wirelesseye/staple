@@ -4,7 +4,7 @@ use std.cinterop.*
 pub type IO = opaque
 
 extern "c" {
-    let printf: (CPointer CChar, ...) -> I32
+    printf: (CPointer CChar, ...) -> I32
 }
 
 /// Writes a string to standard output without a trailing newline.

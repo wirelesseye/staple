@@ -1787,7 +1787,7 @@ fn imports_public_extern_bindings() {
     );
     fixture.write(
         "ffi.sta",
-        "use std.cinterop.*\npub extern \"c\" { let puts: (CPointer CChar) -> I32 }\n",
+        "use std.cinterop.*\npub extern \"c\" { puts: (CPointer CChar) -> I32 }\n",
     );
 
     let llvm = fixture.compile().expect("public extern should import");
@@ -2022,7 +2022,7 @@ fn rejects_user_declarations_with_the_intrinsic_abi() {
     let fixture = Fixture::new();
     fixture.write(
         "main.sta",
-        "extern \"staple-intrinsic\" { let fake: (I32, I32) -> I32 }\n",
+        "extern \"staple-intrinsic\" { fake: (I32, I32) -> I32 }\n",
     );
 
     let error = fixture

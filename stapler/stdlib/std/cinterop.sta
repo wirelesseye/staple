@@ -10,8 +10,8 @@ pub type CString = opaque
 pub macro c_string: Expr -> Expr
 
 extern "staple-intrinsic" {
-    let __string_from_c_string: CString -> String
-    let __string_to_c_string: String -> CString
+    __string_from_c_string: CString -> String
+    __string_to_c_string: String -> CString
 }
 
 companion CString {

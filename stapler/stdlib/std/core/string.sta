@@ -2,7 +2,7 @@
 pub type String = Slice U8
 
 extern "staple-intrinsic" {
-    let __string_add: (String, String) -> String
+    __string_add: (String, String) -> String
 }
 
 /// Converts a value to its string representation.
