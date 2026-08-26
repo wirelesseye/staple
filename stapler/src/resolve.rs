@@ -355,6 +355,14 @@ pub struct ResolvedModule {
     mutable_symbols: HashSet<SymbolId>,
     signal_symbols: HashSet<SymbolId>,
     const_symbols: HashSet<SymbolId>,
+    /// Symbols whose binding carries a `mut` marker in source, regardless of
+    /// whether the resolver later treats that marker as ordinary mutable
+    /// local storage. A `mut` function parameter is stripped from
+    /// `mutable_symbols` (see the comment at its removal site) because it
+    /// denotes a by-address write effect, not an ordinary mutable local -
+    /// but it should still read and highlight as `mut` everywhere it's
+    /// named, so this set is never pruned the way `mutable_symbols` is.
+    mutable_annotations: HashSet<SymbolId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
@@ -731,6 +739,16 @@ impl ResolvedModule {
         self.const_symbols.contains(&symbol)
     }
 
+    /// Whether `symbol`'s binding carries a `mut` marker in source. Unlike
+    /// [`is_mutable_symbol`](Self::is_mutable_symbol), this stays true for a
+    /// `mut` function parameter even though that marker denotes a by-address
+    /// write effect rather than ordinary mutable local storage - it's meant
+    /// for callers that only care how the binding reads in source (e.g.
+    /// hover text, highlighting), not how it's compiled.
+    pub fn has_mutable_annotation(&self, symbol: SymbolId) -> bool {
+        self.mutable_annotations.contains(&symbol)
+    }
+
     pub fn is_module_symbol(&self, symbol: SymbolId) -> bool {
         self.symbol_owners.get(&symbol) == Some(&None)
     }
@@ -939,6 +957,7 @@ pub struct NameResolver {
     mutable_symbols: HashSet<SymbolId>,
     signal_symbols: HashSet<SymbolId>,
     const_symbols: HashSet<SymbolId>,
+    mutable_annotations: HashSet<SymbolId>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
@@ -1260,6 +1279,7 @@ impl NameResolver {
             mutable_symbols: self.mutable_symbols,
             signal_symbols: self.signal_symbols,
             const_symbols: self.const_symbols,
+            mutable_annotations: self.mutable_annotations,
             symbol_owners: self.symbol_owners,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
@@ -2148,6 +2168,7 @@ impl NameResolver {
         self.symbol_modules.insert(symbol, self.current_module);
         if binding.mutable {
             self.mutable_symbols.insert(symbol);
+            self.mutable_annotations.insert(symbol);
         }
         if binding.signal {
             self.signal_symbols.insert(symbol);
@@ -2171,6 +2192,7 @@ impl NameResolver {
                 self.symbol_modules.insert(symbol, self.current_module);
                 if binding.mutable {
                     self.mutable_symbols.insert(symbol);
+                    self.mutable_annotations.insert(symbol);
                 }
             }
             Pattern::At(at) => {
@@ -2184,6 +2206,7 @@ impl NameResolver {
                 self.symbol_modules.insert(symbol, self.current_module);
                 if binding.mutable {
                     self.mutable_symbols.insert(symbol);
+                    self.mutable_annotations.insert(symbol);
                 }
                 self.allocate_pattern_symbols(&at.pattern);
             }
@@ -4444,6 +4467,7 @@ impl NameResolver {
                 if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
                     if binding.mutable {
                         self.mutable_symbols.insert(symbol);
+                        self.mutable_annotations.insert(symbol);
                     }
                 }
             }
@@ -4478,6 +4502,7 @@ impl NameResolver {
                 if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
                     if binding.mutable {
                         self.mutable_symbols.insert(symbol);
+                        self.mutable_annotations.insert(symbol);
                     }
                 }
                 self.declare_pattern(&at.pattern, shadow, seen);
@@ -4534,6 +4559,7 @@ impl NameResolver {
         if let Some(symbol) = self.symbols.get(&binding.syntax.id).copied() {
             if binding.mutable {
                 self.mutable_symbols.insert(symbol);
+                self.mutable_annotations.insert(symbol);
             }
             if binding.signal {
                 self.signal_symbols.insert(symbol);

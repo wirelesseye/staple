@@ -844,7 +844,7 @@ impl<'a> Classifier<'a> {
                 let usage_modifiers = symbol
                     .map(|symbol| {
                         let resolved = resolved.unwrap();
-                        if resolved.has_mutable_storage(symbol) {
+                        if resolved.has_mutable_annotation(symbol) || resolved.is_signal_symbol(symbol) {
                             MUTABLE
                         } else if resolved.is_const_symbol(symbol) {
                             READONLY
@@ -1919,6 +1919,34 @@ mod tests {
                     .map(|entry| entry.token_type),
                 Some(expected),
                 "entries: {classified:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mutable_parameter_is_underlined_at_every_usage() {
+        let source = "def foo = (mut x: I32, mut y: Bool) => {\n    x\n}\n";
+        let path = std::env::temp_dir().join("staple-semantic-mutable-parameter.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let classified = entries(source, Some(&module), Some(typed.resolved()), Some(&typed));
+
+        let declaration_start = source.find("x:").unwrap();
+        let usage_start = source.rfind('x').unwrap();
+        for start in [declaration_start, usage_start] {
+            let entry = classified
+                .iter()
+                .find(|entry| entry.start == start)
+                .unwrap_or_else(|| panic!("no entry at {start}: {classified:?}"));
+            assert_eq!(
+                entry.modifiers & MUTABLE,
+                MUTABLE,
+                "expected `x` at {start} to be marked mutable: {classified:?}"
             );
         }
     }

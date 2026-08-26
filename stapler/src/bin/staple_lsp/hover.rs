@@ -273,8 +273,13 @@ impl Collector<'_> {
             }
             Pattern::Binding(binding) => {
                 if let Some(symbol) = self.typed.symbol_for(binding.syntax.id) {
-                    let prefix = is_let_context
-                        .then(|| if binding.mutable { "mut" } else { "let" }.to_owned());
+                    let prefix = if binding.mutable {
+                        Some("mut".to_owned())
+                    } else if is_let_context {
+                        Some("let".to_owned())
+                    } else {
+                        None
+                    };
                     self.declarations.insert(
                         symbol,
                         Declaration {
@@ -1783,6 +1788,31 @@ mod tests {
             }),
             "entries: {entries:?}"
         );
+    }
+
+    #[test]
+    fn mutable_parameter_hover_shows_mut_at_every_usage() {
+        let source = "def foo = (mut x: I32, mut y: Bool) => {\n    x\n}\n";
+        let path = std::env::temp_dir().join("staple-hover-mutable-parameter-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let declaration_start = source.find("x:").unwrap();
+        let usage_start = source.rfind('x').unwrap();
+        for start in [declaration_start, usage_start] {
+            assert!(
+                entries.iter().any(|entry| {
+                    entry.range.start == start && entry.signature == "mut x: I32"
+                }),
+                "no `mut x: I32` hover at {start}: {entries:?}"
+            );
+        }
     }
 
     #[test]
