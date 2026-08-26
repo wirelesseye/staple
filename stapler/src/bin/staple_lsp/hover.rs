@@ -1738,6 +1738,31 @@ mod tests {
     }
 
     #[test]
+    fn formats_extern_binding_declarations() {
+        let source = concat!(
+            "use std.cinterop.*\n",
+            "extern \"c\" { printf: (CPointer CChar, ...) -> I32 }\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-extern-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "printf"
+                    && entry.signature.starts_with("<extern> printf: ")
+            }),
+            "entries: {entries:?}"
+        );
+    }
+
+    #[test]
     fn function_type_hover_shows_mut_and_move_markers_together() {
         let source = concat!(
             "def mutate_and_consume: (mut I32, move I32) -> () = (first, second) => ()\n",

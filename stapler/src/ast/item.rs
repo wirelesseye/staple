@@ -294,6 +294,9 @@ pub struct Binding {
     pub kind: BindingKind,
     pub mutable: bool,
     pub signal: bool,
+    /// Whether this binding is a member of an `extern` block, written as a
+    /// bare `name: Type` with no `let`/`def`/`const` keyword in source.
+    pub external: bool,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
@@ -312,6 +315,9 @@ impl Binding {
     }
 
     pub fn declaration_prefix(&self) -> String {
+        if self.external {
+            return "<extern>".to_owned();
+        }
         let mut prefix = self.keyword().to_owned();
         if self.mutable {
             prefix.push_str(" mut");
