@@ -775,6 +775,31 @@ mod tests {
     }
 
     #[test]
+    fn completes_bare_trait_function() {
+        let source = concat!(
+            "type Wrapper = I32\n",
+            "impl ToString Wrapper { def to_string = value => \"\" }\n",
+            "def f: Wrapper -> String = to_string\n",
+        );
+        let path = std::env::temp_dir().join("staple-completion-trait-bare.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let items = index(&module, &typed).items(source.len());
+
+        let matches = items
+            .iter()
+            .filter(|item| item.label == "to_string")
+            .collect::<Vec<_>>();
+        assert_eq!(matches.len(), 1, "items: {items:?}");
+        assert_eq!(matches[0].kind, Some(CompletionItemKind::METHOD));
+    }
+
+    #[test]
     fn maps_imported_definition_namespaces_to_completion_kinds() {
         let root =
             std::env::temp_dir().join(format!("staple-completion-kinds-{}", std::process::id()));

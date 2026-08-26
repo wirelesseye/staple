@@ -2667,6 +2667,11 @@ impl NameResolver {
         for (name, id) in self.namespaces.iter().flatten() {
             insert(name, DefinitionId::Module(*id));
         }
+        for (name, ids) in &self.visible_trait_methods {
+            for id in ids {
+                insert(name, DefinitionId::TraitMethod(*id));
+            }
+        }
         self.visible_module_definitions[module.0] = visible;
     }
 

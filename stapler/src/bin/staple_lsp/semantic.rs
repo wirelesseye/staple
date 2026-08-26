@@ -819,6 +819,16 @@ impl<'a> Classifier<'a> {
                     return;
                 }
                 let symbol = resolved.and_then(|module| module.symbol_for(value.syntax.id));
+                // A bare trait function reference, e.g. `to_string` used
+                // unqualified: it has no ordinary symbol (trait methods
+                // aren't materialized until an impl is picked at type-check
+                // time), but it is always a function.
+                let is_bare_trait_method = symbol.is_none()
+                    && resolved.is_some_and(|module| {
+                        !module
+                            .trait_methods_for_expression(value.syntax.id)
+                            .is_empty()
+                    });
                 let kind = symbol
                     .map(|symbol| {
                         self.symbols
@@ -826,7 +836,7 @@ impl<'a> Classifier<'a> {
                             .copied()
                             .unwrap_or_else(|| self.value_symbol_kind(symbol))
                     })
-                    .unwrap_or(VARIABLE);
+                    .unwrap_or(if is_bare_trait_method { FUNCTION } else { VARIABLE });
                 let usage_modifiers = symbol
                     .map(|symbol| {
                         let resolved = resolved.unwrap();
@@ -838,7 +848,7 @@ impl<'a> Classifier<'a> {
                             0
                         }
                     })
-                    .unwrap_or(0);
+                    .unwrap_or(if is_bare_trait_method { READONLY } else { 0 });
                 self.mark_last(
                     &value.syntax,
                     &value.name,
@@ -1798,6 +1808,34 @@ mod tests {
             classified
                 .iter()
                 .find(|entry| entry.start == member_start)
+                .map(|entry| entry.token_type),
+            Some(FUNCTION),
+            "entries: {classified:?}"
+        );
+    }
+
+    #[test]
+    fn classifies_bare_trait_function() {
+        let source = concat!(
+            "type Wrapper = I32\n",
+            "impl ToString Wrapper { def to_string = value => \"\" }\n",
+            "def f: Wrapper -> String = to_string\n",
+        );
+        let path = std::env::temp_dir().join("staple-semantic-trait-bare.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let classified = entries(source, Some(&module), Some(typed.resolved()), Some(&typed));
+
+        let use_site = source.rfind("= to_string").unwrap() + "= ".len();
+        assert_eq!(
+            classified
+                .iter()
+                .find(|entry| entry.start == use_site)
                 .map(|entry| entry.token_type),
             Some(FUNCTION),
             "entries: {classified:?}"
