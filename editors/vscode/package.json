@@ -48,6 +48,15 @@
           "description": "Optional path to the Staple standard-library root."
         }
       }
+    },
+    "configurationDefaults": {
+      "editor.semanticTokenColorCustomizations": {
+        "rules": {
+          "*.mutable": {
+            "fontStyle": "underline"
+          }
+        }
+      }
     }
   },
   "dependencies": {

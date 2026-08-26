@@ -23,6 +23,7 @@ const DECLARATION: u32 = 1 << 0;
 const DEFINITION: u32 = 1 << 1;
 const READONLY: u32 = 1 << 2;
 const MODIFICATION: u32 = 1 << 3;
+const MUTABLE: u32 = 1 << 4;
 
 pub fn legend() -> SemanticTokensLegend {
     SemanticTokensLegend {
@@ -47,6 +48,7 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenModifier::DEFINITION,
             SemanticTokenModifier::READONLY,
             SemanticTokenModifier::MODIFICATION,
+            SemanticTokenModifier::new("mutable"),
         ],
     }
 }
@@ -576,6 +578,8 @@ impl<'a> Classifier<'a> {
         let modifiers = DECLARATION
             | DEFINITION
             | if binding.mutable || binding.signal {
+                MUTABLE
+            } else if binding.kind == BindingKind::Let {
                 0
             } else {
                 READONLY
@@ -809,13 +813,13 @@ impl<'a> Classifier<'a> {
                         &value.syntax,
                         &value.name,
                         kind,
-                        modifiers | if info.mutable { 0 } else { READONLY },
+                        modifiers | if info.mutable { MUTABLE } else { READONLY },
                         2,
                     );
                     return;
                 }
-                let kind = resolved
-                    .and_then(|module| module.symbol_for(value.syntax.id))
+                let symbol = resolved.and_then(|module| module.symbol_for(value.syntax.id));
+                let kind = symbol
                     .map(|symbol| {
                         self.symbols
                             .get(&symbol)
@@ -823,14 +827,23 @@ impl<'a> Classifier<'a> {
                             .unwrap_or_else(|| self.value_symbol_kind(symbol))
                     })
                     .unwrap_or(VARIABLE);
-                let readonly = resolved
-                    .and_then(|module| module.symbol_for(value.syntax.id))
-                    .is_some_and(|symbol| !resolved.unwrap().has_mutable_storage(symbol));
+                let usage_modifiers = symbol
+                    .map(|symbol| {
+                        let resolved = resolved.unwrap();
+                        if resolved.has_mutable_storage(symbol) {
+                            MUTABLE
+                        } else if resolved.is_const_symbol(symbol) {
+                            READONLY
+                        } else {
+                            0
+                        }
+                    })
+                    .unwrap_or(0);
                 self.mark_last(
                     &value.syntax,
                     &value.name,
                     kind,
-                    modifiers | if readonly { READONLY } else { 0 },
+                    modifiers | usage_modifiers,
                     2,
                 );
             }
@@ -880,7 +893,7 @@ impl<'a> Classifier<'a> {
                     &value.syntax,
                     &value.name,
                     kind,
-                    DECLARATION | DEFINITION | if value.mutable { 0 } else { READONLY },
+                    DECLARATION | DEFINITION | if value.mutable { MUTABLE } else { 0 },
                     1,
                 );
                 if let Some(symbol) = resolved.and_then(|module| module.symbol_for(value.syntax.id))

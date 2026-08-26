@@ -354,6 +354,7 @@ pub struct ResolvedModule {
     checked_initialization_reads: HashSet<SyntaxId>,
     mutable_symbols: HashSet<SymbolId>,
     signal_symbols: HashSet<SymbolId>,
+    const_symbols: HashSet<SymbolId>,
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
@@ -711,6 +712,10 @@ impl ResolvedModule {
         self.signal_symbols.contains(&symbol)
     }
 
+    pub fn is_const_symbol(&self, symbol: SymbolId) -> bool {
+        self.const_symbols.contains(&symbol)
+    }
+
     pub fn is_module_symbol(&self, symbol: SymbolId) -> bool {
         self.symbol_owners.get(&symbol) == Some(&None)
     }
@@ -918,6 +923,7 @@ pub struct NameResolver {
     syntax_modules: HashMap<SyntaxId, ModuleId>,
     mutable_symbols: HashSet<SymbolId>,
     signal_symbols: HashSet<SymbolId>,
+    const_symbols: HashSet<SymbolId>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
@@ -1200,6 +1206,7 @@ impl NameResolver {
             checked_initialization_reads: HashSet::new(),
             mutable_symbols: self.mutable_symbols,
             signal_symbols: self.signal_symbols,
+            const_symbols: self.const_symbols,
             symbol_owners: self.symbol_owners,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
@@ -2090,6 +2097,9 @@ impl NameResolver {
         }
         if binding.signal {
             self.signal_symbols.insert(symbol);
+        }
+        if binding.kind == BindingKind::Const {
+            self.const_symbols.insert(symbol);
         }
         symbol
     }
