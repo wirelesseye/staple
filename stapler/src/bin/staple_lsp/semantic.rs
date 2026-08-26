@@ -141,9 +141,9 @@ fn lexical_kind(kind: TokenKind) -> Option<u32> {
         | TokenKind::Alias
         | TokenKind::Opaque
         | TokenKind::Where
+        | TokenKind::Satisfies
         | TokenKind::Underscore => Some(KEYWORD),
-        TokenKind::Satisfies
-        | TokenKind::Operator
+        TokenKind::Operator
         | TokenKind::Equals
         | TokenKind::Arrow
         | TokenKind::FatArrow
