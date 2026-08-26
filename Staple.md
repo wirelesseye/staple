@@ -821,17 +821,6 @@ def increment = (value: I32) => {
 }
 ```
 
-An external declaration may omit its value because its implementation is
-provided outside staple:
-
-```staple
-use std.cinterop.*
-
-extern "c" {
-    let printf: (CPointer CChar, ...) -> I32
-}
-```
-
 A function declaration may omit its value when its complete function type is
 given. Whether other ordinary, non-external `let` declarations may omit their
 value is currently unspecified.

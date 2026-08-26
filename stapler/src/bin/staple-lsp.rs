@@ -219,8 +219,13 @@ impl Server {
                                 indexed
                             }
                         }
-                        Some((receiver, false, _)) => {
-                            successful.completion_index.method_items(receiver)
+                        Some((receiver, false, name)) => {
+                            let indexed = successful.completion_index.method_items(receiver);
+                            if indexed.is_empty() {
+                                successful.completion_index.named_method_items(name, previous_offset)
+                            } else {
+                                indexed
+                            }
                         }
                         None => successful.completion_index.items(previous_offset),
                     })

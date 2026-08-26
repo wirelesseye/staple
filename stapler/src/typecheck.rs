@@ -1155,6 +1155,13 @@ impl TypedModule {
         self.symbol_types.get(&symbol)
     }
 
+    pub fn companion_type_of_symbol(&self, symbol: SymbolId) -> Option<TypeId> {
+        self.symbol_companion_types
+            .get(&symbol)
+            .copied()
+            .or_else(|| self.type_of_symbol(symbol).and_then(checked_type_id))
+    }
+
     pub fn is_companion_method(&self, symbol: SymbolId, receiver: TypeId) -> bool {
         matches!(
             self.type_of_symbol(symbol),

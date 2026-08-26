@@ -70,6 +70,7 @@ pub struct CompletionIndex {
     methods: Vec<MethodSite>,
     qualifiers: Vec<MethodSite>,
     named_qualifiers: Vec<NamedQualifier>,
+    named_methods: Vec<NamedQualifier>,
 }
 
 #[derive(Debug, Clone)]
@@ -180,6 +181,31 @@ impl CompletionIndex {
             .map(|qualifier| qualifier.items.clone())
             .unwrap_or_default()
     }
+
+    pub fn named_method_items(&self, name: &str, offset: usize) -> Vec<CompletionItem> {
+        self.named_items(&self.named_methods, name, offset)
+    }
+
+    fn named_items(
+        &self,
+        candidates: &[NamedQualifier],
+        name: &str,
+        offset: usize,
+    ) -> Vec<CompletionItem> {
+        let module = self
+            .modules
+            .iter()
+            .filter(|module| contains(&module.range, offset))
+            .min_by_key(|module| module.range.end.saturating_sub(module.range.start))
+            .map(|module| module.id);
+        candidates
+            .iter()
+            .find(|candidate| {
+                candidate.module == module.unwrap_or(candidate.module) && candidate.name == name
+            })
+            .map(|candidate| candidate.items.clone())
+            .unwrap_or_default()
+    }
 }
 
 struct Collector<'a> {
@@ -204,9 +230,13 @@ impl Collector<'_> {
             }
             for (name, definitions) in definitions {
                 self.register_named_qualifier(id, &name, &definitions, &mut HashSet::new());
+                self.register_named_method(id, &name, &definitions);
             }
         }
         self.sequential_items(&module.items, &mut root.candidates, range.start);
+        for item in &module.items {
+            self.register_item_method(id, item);
+        }
         self.index.modules.push(ModuleIndex {
             id,
             range: range.clone(),
@@ -215,6 +245,64 @@ impl Collector<'_> {
         let module_index = self.index.modules.len() - 1;
         for item in &module.items {
             self.item(item, module_index);
+        }
+    }
+
+    fn register_item_method(&mut self, owner: ModuleId, item: &Item) {
+        match item {
+            Item::Modified(value) => self.register_item_method(owner, &value.item),
+            Item::VisibilitySplice(value) => self.register_item_method(owner, &value.item),
+            Item::Binding(binding) => {
+                if let Some(symbol) = self.typed.symbol_for(binding.syntax.id) {
+                    self.register_named_method(
+                        owner,
+                        &binding.name,
+                        &[DefinitionId::Symbol(symbol)],
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn register_named_method(
+        &mut self,
+        owner: ModuleId,
+        name: &str,
+        definitions: &[DefinitionId],
+    ) {
+        let mut items = Vec::new();
+        for definition in definitions {
+            let DefinitionId::Symbol(receiver) = definition else {
+                continue;
+            };
+            let Some(ty) = self.typed.companion_type_of_symbol(*receiver) else {
+                continue;
+            };
+            for (member, symbol) in self
+                .typed
+                .resolved()
+                .companion_members(ty, Some(owner))
+            {
+                if self.typed.is_companion_method(symbol, ty)
+                    && let Some(candidate) =
+                        self.definition(member, DefinitionId::Symbol(symbol), 0)
+                {
+                    items.push(CompletionItem {
+                        kind: Some(CompletionItemKind::METHOD),
+                        ..candidate.item
+                    });
+                }
+            }
+        }
+        items.sort_by(|left, right| left.label.cmp(&right.label));
+        items.dedup_by(|left, right| left.label == right.label);
+        if !items.is_empty() {
+            self.index.named_methods.push(NamedQualifier {
+                module: owner,
+                name: name.to_owned(),
+                items,
+            });
         }
     }
 
@@ -1060,5 +1148,25 @@ mod tests {
             .named_qualifier_items("ToString", 0)
             .iter()
             .any(|item| item.label == "to_string"));
+    }
+
+    #[test]
+    fn completes_a_new_method_receiver_from_the_indexed_scope() {
+        let source = "let mut numbers: List I32 = List.new ()\n";
+        let path = std::env::temp_dir().join("staple-completion-new-method-receiver.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let index = index(&module, &typed);
+
+        let items = index.named_method_items("numbers", source.len());
+        assert!(items
+            .iter()
+            .any(|item| item.label == "push" && item.kind == Some(CompletionItemKind::METHOD)));
+        assert!(!items.iter().any(|item| item.label == "new"));
     }
 }
