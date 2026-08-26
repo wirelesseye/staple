@@ -110,72 +110,89 @@ pub fn entries_at_path(
     classifier.finish()
 }
 
+fn lexical_kind(kind: TokenKind) -> Option<u32> {
+    match kind {
+        TokenKind::LineComment => Some(COMMENT),
+        TokenKind::String => Some(STRING),
+        TokenKind::Integer | TokenKind::Float => Some(NUMBER),
+        TokenKind::Use
+        | TokenKind::As
+        | TokenKind::Pub
+        | TokenKind::Let
+        | TokenKind::Mut
+        | TokenKind::Move
+        | TokenKind::Signal
+        | TokenKind::Return
+        | TokenKind::Loop
+        | TokenKind::Break
+        | TokenKind::Continue
+        | TokenKind::Def
+        | TokenKind::Const
+        | TokenKind::Extern
+        | TokenKind::Type
+        | TokenKind::Mod
+        | TokenKind::Companion
+        | TokenKind::Macro
+        | TokenKind::Trait
+        | TokenKind::Impl
+        | TokenKind::Match
+        | TokenKind::Alias
+        | TokenKind::Opaque
+        | TokenKind::Where
+        | TokenKind::Underscore => Some(KEYWORD),
+        TokenKind::Satisfies
+        | TokenKind::Operator
+        | TokenKind::Equals
+        | TokenKind::Arrow
+        | TokenKind::FatArrow
+        | TokenKind::Ellipsis
+        | TokenKind::Dollar
+        | TokenKind::Bang
+        | TokenKind::Star
+        | TokenKind::Plus
+        | TokenKind::Minus
+        | TokenKind::Slash => Some(OPERATOR),
+        _ => None,
+    }
+}
+
 struct Classifier<'a> {
     tokens: HashMap<(usize, usize), RawToken>,
     symbols: HashMap<SymbolId, u32>,
     typed: Option<&'a TypedModule>,
     path: &'a Path,
     priority_boost: u8,
+    source: &'a str,
 }
 
 impl<'a> Classifier<'a> {
-    fn new(source: &str, path: &'a Path, typed: Option<&'a TypedModule>) -> Self {
+    fn new(source: &'a str, path: &'a Path, typed: Option<&'a TypedModule>) -> Self {
         let mut this = Self {
             tokens: HashMap::new(),
             symbols: HashMap::new(),
             typed,
             path,
             priority_boost: 0,
+            source,
         };
         for token in lex(source) {
-            let kind = match token.kind {
-                TokenKind::LineComment => Some(COMMENT),
-                TokenKind::String => Some(STRING),
-                TokenKind::Integer | TokenKind::Float => Some(NUMBER),
-                TokenKind::Use
-                | TokenKind::As
-                | TokenKind::Pub
-                | TokenKind::Let
-                | TokenKind::Mut
-                | TokenKind::Move
-                | TokenKind::Signal
-                | TokenKind::Return
-                | TokenKind::Loop
-                | TokenKind::Break
-                | TokenKind::Continue
-                | TokenKind::Def
-                | TokenKind::Const
-                | TokenKind::Extern
-                | TokenKind::Type
-                | TokenKind::Mod
-                | TokenKind::Companion
-                | TokenKind::Macro
-                | TokenKind::Trait
-                | TokenKind::Impl
-                | TokenKind::Match
-                | TokenKind::Alias
-                | TokenKind::Opaque
-                | TokenKind::Where
-                | TokenKind::Underscore => Some(KEYWORD),
-                TokenKind::Satisfies
-                | TokenKind::Operator
-                | TokenKind::Equals
-                | TokenKind::Arrow
-                | TokenKind::FatArrow
-                | TokenKind::Ellipsis
-                | TokenKind::Dollar
-                | TokenKind::Bang
-                | TokenKind::Star
-                | TokenKind::Plus
-                | TokenKind::Minus
-                | TokenKind::Slash => Some(OPERATOR),
-                _ => None,
-            };
-            if let Some(kind) = kind {
+            if let Some(kind) = lexical_kind(token.kind) {
                 this.insert(token.span.start, token.span.end, kind, 0, 0);
             }
         }
         this
+    }
+
+    /// Re-lexes a sub-range of the source (e.g. the `1 + 2` inside a string
+    /// template's `${1 + 2}`) so number/operator/keyword tokens that the
+    /// outer lexer pass couldn't see - it treats the whole template literal
+    /// as one opaque `String` token - still get their fallback highlighting.
+    fn classify_lexically(&mut self, start: usize, end: usize) {
+        for token in lex(&self.source[start..end]) {
+            if let Some(kind) = lexical_kind(token.kind) {
+                self.insert(start + token.span.start, start + token.span.end, kind, 0, 0);
+            }
+        }
     }
 
     fn module(&mut self, module: &Module, resolved: Option<&ResolvedModule>) {
@@ -663,6 +680,9 @@ impl<'a> Classifier<'a> {
             Expression::StringTemplate(value) => {
                 for part in &value.parts {
                     if let StringTemplatePart::Interpolation(value) = part {
+                        if let Span::User { range, .. } = &value.expression.syntax().span {
+                            self.classify_lexically(range.start, range.end);
+                        }
                         self.expression(&value.expression, resolved);
                     }
                 }
@@ -1702,6 +1722,34 @@ mod tests {
         assert!(
             labels.contains(&("doubled", VARIABLE)),
             "labels: {labels:?}"
+        );
+    }
+
+    #[test]
+    fn brace_interpolations_classify_their_inner_expression() {
+        let source = "\"1 + 2 = ${1 + 2}\"\n";
+        let module = parse(source).unwrap();
+        let classified = entries(source, Some(&module), None, None);
+
+        for a in &classified {
+            for b in &classified {
+                if a.start == b.start && a.end == b.end {
+                    continue;
+                }
+                assert!(
+                    a.start >= b.end || b.start >= a.end,
+                    "overlapping entries: {a:?} vs {b:?}"
+                );
+            }
+        }
+
+        let labels = classified
+            .iter()
+            .map(|entry| (&source[entry.start..entry.end], entry.token_type))
+            .collect::<Vec<_>>();
+        assert!(labels.contains(&("1", NUMBER)), "labels: {labels:?}");
+        assert!(labels.contains(&("2", NUMBER)), "labels: {labels:?}");
+        assert!(labels.contains(&("+", OPERATOR)), "labels: {labels:?}"
         );
     }
 
