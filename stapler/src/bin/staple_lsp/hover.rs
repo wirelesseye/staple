@@ -1481,7 +1481,7 @@ mod tests {
             ("test", "def test: () ->{state.read, IO, Reactive} ()"),
             (
                 "reaction",
-                "def reaction: () ->{state.read, IO} () ->{state.read, IO, Reactive} ()",
+                "def reaction: (() ->{state.read, IO} ()) ->{state.read, IO, Reactive} ()",
             ),
         ] {
             assert!(
@@ -1732,6 +1732,53 @@ mod tests {
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "identity"
                     && entry.signature == "def identity: I32 -> I32"
+            }),
+            "entries: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn function_type_hover_shows_mut_and_move_markers_together() {
+        let source = concat!(
+            "def mutate_and_consume: (mut I32, move I32) -> () = (first, second) => ()\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-mut-move-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "mutate_and_consume"
+                    && entry.signature
+                        == "def mutate_and_consume: (mut I32, move I32) -> ()"
+            }),
+            "entries: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn function_type_hover_parenthesizes_a_function_parameter() {
+        let source = concat!("def foo: (() -> I32) -> I32 = x => x ()\n",);
+        let path = std::env::temp_dir().join("staple-hover-nested-function-param-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "foo"
+                    && entry.signature == "def foo: (() -> I32) -> I32"
             }),
             "entries: {entries:?}"
         );

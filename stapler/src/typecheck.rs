@@ -440,16 +440,27 @@ fn format_move_checked_parameter(parameter: &CheckedType, moves: &[CheckedMutati
     format_checked_parameter_with_marker(parameter, moves, "move")
 }
 
+/// A bare `A -> B` printed as a function parameter is ambiguous with the
+/// arrow that follows it (`->` is right-associative), so a nested function
+/// type must be parenthesized when it appears in parameter position.
+fn format_checked_parameter_type(value_type: &CheckedType) -> String {
+    if matches!(value_type, CheckedType::Function(_)) {
+        format!("({value_type})")
+    } else {
+        value_type.to_string()
+    }
+}
+
 fn format_checked_parameter_with_marker(
     parameter: &CheckedType,
     targets: &[CheckedMutation],
     keyword: &str,
 ) -> String {
     if targets.contains(&CheckedMutation::Whole) {
-        return format!("{keyword} {parameter}");
+        return format!("{keyword} {}", format_checked_parameter_type(parameter));
     }
     let CheckedType::Product(product) = parameter else {
-        return parameter.to_string();
+        return format_checked_parameter_type(parameter);
     };
     let mut result = String::from("(");
     for (index, element) in product.elements.iter().enumerate() {
@@ -464,7 +475,47 @@ fn format_checked_parameter_with_marker(
             result.push_str(name);
             result.push_str(": ");
         }
-        result.push_str(&element.value_type.to_string());
+        result.push_str(&format_checked_parameter_type(&element.value_type));
+    }
+    if product.variadic {
+        if !product.elements.is_empty() {
+            result.push_str(", ");
+        }
+        result.push_str("...");
+    }
+    result.push(')');
+    result
+}
+
+fn format_mutable_and_moved_checked_parameter(
+    parameter: &CheckedType,
+    mutations: &[CheckedMutation],
+    moves: &[CheckedMutation],
+) -> String {
+    if mutations.contains(&CheckedMutation::Whole) {
+        return format!("mut {}", format_checked_parameter_type(parameter));
+    }
+    if moves.contains(&CheckedMutation::Whole) {
+        return format!("move {}", format_checked_parameter_type(parameter));
+    }
+    let CheckedType::Product(product) = parameter else {
+        return format_checked_parameter_type(parameter);
+    };
+    let mut result = String::from("(");
+    for (index, element) in product.elements.iter().enumerate() {
+        if index > 0 {
+            result.push_str(", ");
+        }
+        if mutations.contains(&CheckedMutation::Element(index)) {
+            result.push_str("mut ");
+        } else if moves.contains(&CheckedMutation::Element(index)) {
+            result.push_str("move ");
+        }
+        if let Some(name) = &element.name {
+            result.push_str(name);
+            result.push_str(": ");
+        }
+        result.push_str(&format_checked_parameter_type(&element.value_type));
     }
     if product.variadic {
         if !product.elements.is_empty() {
@@ -702,8 +753,11 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::Function(function) => {
-                let parameter =
-                    format_mutable_checked_parameter(&function.parameter, &function.mutations);
+                let parameter = format_mutable_and_moved_checked_parameter(
+                    &function.parameter,
+                    &function.mutations,
+                    &function.moves,
+                );
                 if function.effects.is_empty() {
                     write!(formatter, "{parameter} -> {}", function.result)
                 } else {

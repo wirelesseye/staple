@@ -132,7 +132,7 @@
         },
         {
           "name": "storage.modifier.staple",
-          "match": "\\b(?:alias|mut|opaque|pub)\\b"
+          "match": "\\b(?:alias|move|mut|opaque|pub)\\b"
         },
         {
           "name": "keyword.operator.expression.staple",
