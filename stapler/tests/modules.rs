@@ -1697,6 +1697,51 @@ fn uses_root_qualified_package_items_without_imports() {
 }
 
 #[test]
+fn package_root_owns_items_and_entry_has_its_relative_module_name() {
+    let fixture = Fixture::new();
+    fixture.write("src/root.sta", "pub def root_value: () -> I32 = () => 40\n");
+    fixture.write(
+        "src/main.sta",
+        "pub def entry_value: () -> I32 = () => 2\nuse package.helper.total\ntotal ()\n",
+    );
+    fixture.write(
+        "src/helper.sta",
+        "pub def total: () -> I32 = () => package.root_value () + package.main.entry_value ()\n",
+    );
+
+    let program = ProgramLoader::new()
+        .with_module_root(fixture.root.join("src"))
+        .with_package_root(fixture.root.join("src/root.sta"))
+        .load_path(&fixture.root.join("src/main.sta"))
+        .expect("configured package root and entry should load");
+    let resolved = NameResolver::new().resolve_program(program).unwrap();
+    TypeChecker::new()
+        .check(resolved)
+        .expect("root and entry items should resolve through distinct package paths");
+}
+
+#[test]
+fn missing_package_root_still_anchors_entry_and_sibling_modules() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        "pub def entry_value: () -> I32 = () => 2\nuse package.helper.total\ntotal ()\n",
+    );
+    fixture.write(
+        "src/helper.sta",
+        "pub def total: () -> I32 = () => package.main.entry_value ()\n",
+    );
+
+    let program = ProgramLoader::new()
+        .with_package_root(fixture.root.join("src/root.sta"))
+        .load_path(&fixture.root.join("src/main.sta"))
+        .expect("an absent root module should remain a valid package anchor");
+    assert!(program.package_root().is_none());
+    let resolved = NameResolver::new().resolve_program(program).unwrap();
+    TypeChecker::new().check(resolved).unwrap();
+}
+
+#[test]
 fn root_qualified_items_establish_initialization_dependencies() {
     let fixture = Fixture::new();
     fixture.write("main.sta", "dependency.value\n");

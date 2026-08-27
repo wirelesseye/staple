@@ -124,7 +124,7 @@
         },
         {
           "name": "keyword.control.import.staple",
-          "match": "\\b(?:use|as)\\b"
+          "match": "\\b(?:use|as|package)\\b"
         },
         {
           "name": "keyword.declaration.staple",

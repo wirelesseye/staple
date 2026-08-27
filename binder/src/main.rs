@@ -408,20 +408,36 @@ fn load_package(manifest: &Path) -> Result<Package, String> {
         .parent()
         .expect("canonical manifest path always has a parent")
         .to_owned();
-    let root = resolve_relative_directory(
-        &directory,
-        root.as_deref().unwrap_or_else(|| Path::new("src")),
-        "root",
-    )?;
-    let entry_setting = entry.as_deref().unwrap_or_else(|| Path::new("main.sta"));
-    if entry_setting.extension() != Some(OsStr::new("sta")) {
+    let root_setting = root.as_deref().unwrap_or_else(|| Path::new("src/root.sta"));
+    let entry_setting = entry
+        .as_deref()
+        .unwrap_or_else(|| Path::new("src/main.sta"));
+    for (label, setting) in [("root", root_setting), ("entry", entry_setting)] {
+        if setting.extension() != Some(OsStr::new("sta")) {
+            return Err(format!(
+                "{}: {label} `{}` must use the `.sta` extension",
+                manifest.display(),
+                setting.display()
+            ));
+        }
+    }
+    let root_parent_setting = root_setting.parent().unwrap_or_else(|| Path::new("."));
+    let root_parent =
+        resolve_relative_directory(&directory, root_parent_setting, "root directory")?;
+    let root = root_parent.join(
+        root_setting
+            .file_name()
+            .expect("validated root module path has a file name"),
+    );
+    let entry = resolve_relative_file(&directory, entry_setting, "entry")?;
+    if !entry.starts_with(&root_parent) {
         return Err(format!(
-            "{}: entry `{}` must use the `.sta` extension",
+            "{}: entry `{}` is outside package root directory `{}`",
             manifest.display(),
-            entry_setting.display()
+            entry.display(),
+            root_parent.display()
         ));
     }
-    let entry = resolve_relative_file(&root, entry_setting, "entry")?;
 
     Ok(Package {
         name,
@@ -590,7 +606,18 @@ fn stapler_arguments(package: &Package, options: &Options, output: Option<&Path>
         arguments.push("check".into());
     }
     arguments.push("--module-root".into());
+    arguments.push(
+        package
+            .root
+            .parent()
+            .expect("package root has a parent")
+            .as_os_str()
+            .to_owned(),
+    );
+    arguments.push("--package-root".into());
     arguments.push(package.root.clone().into_os_string());
+    arguments.push("--package-name".into());
+    arguments.push(package.name.clone().into());
     if let Some(output) = output {
         arguments.extend([OsString::from("--emit"), OsString::from("exe")]);
         arguments.push("-o".into());
@@ -785,7 +812,7 @@ mod tests {
         let package = load_package(&manifest).expect("manifest should parse");
 
         assert_eq!(package.name, "hello");
-        assert_eq!(package.root, fixture.root.join("src"));
+        assert_eq!(package.root, fixture.root.join("src/root.sta"));
         assert_eq!(package.entry, fixture.root.join("src/main.sta"));
     }
 
@@ -794,11 +821,12 @@ mod tests {
         let fixture = Fixture::new();
         std::fs::create_dir_all(fixture.root.join("source/bin")).unwrap();
         std::fs::write(fixture.root.join("source/bin/app.sta"), "42\n").unwrap();
-        let manifest = fixture
-            .manifest("package \"hello\" {\n  root \"source\"\n  entry \"bin/app.sta\"\n}\n");
+        let manifest = fixture.manifest(
+            "package \"hello\" {\n  root \"source/root.sta\"\n  entry \"source/bin/app.sta\"\n}\n",
+        );
         let package = load_package(&manifest).expect("manifest should parse");
 
-        assert_eq!(package.root, fixture.root.join("source"));
+        assert_eq!(package.root, fixture.root.join("source/root.sta"));
         assert_eq!(package.entry, fixture.root.join("source/bin/app.sta"));
     }
 
@@ -842,10 +870,11 @@ mod tests {
         let fixture = Fixture::new();
         let outside = fixture.root.parent().unwrap().join("main.sta");
         std::fs::write(&outside, "42\n").unwrap();
-        let error = load_package(
-            &fixture.manifest("package \"hello\" { root \"src\"; entry \"../../main.sta\" }\n"),
-        )
-        .expect_err("escaping entry should fail");
+        let error =
+            load_package(&fixture.manifest(
+                "package \"hello\" { root \"src/root.sta\"; entry \"../../main.sta\" }\n",
+            ))
+            .expect_err("escaping entry should fail");
         let _ = std::fs::remove_file(outside);
 
         assert!(error.contains("escapes") || error.contains("could not resolve"));
@@ -978,9 +1007,9 @@ mod tests {
         let arguments = stapler_arguments(&package, &options, Some(&output));
 
         assert_eq!(arguments[0], "--module-root");
-        assert_eq!(arguments[1], package.root);
+        assert_eq!(arguments[1], package.root.parent().unwrap());
         assert_eq!(
-            arguments[2..6],
+            arguments[6..10],
             ["--emit", "exe", "-o", output.to_str().unwrap()]
         );
         assert_eq!(arguments.last().unwrap(), package.entry.as_os_str());

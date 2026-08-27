@@ -94,6 +94,9 @@ impl std::error::Error for LoadDiagnostic {}
 #[derive(Debug, Clone)]
 pub struct Program {
     entry: ModuleId,
+    package_name: String,
+    package_root: Option<ModuleId>,
+    package_root_path: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
@@ -114,6 +117,9 @@ impl Program {
         let visibility = module.visibility;
         let mut program = Self {
             entry: ModuleId(0),
+            package_name: "package".to_owned(),
+            package_root: None,
+            package_root_path: None,
             standard_library_core: None,
             standard_library_syntax: None,
             standard_library_cinterop: None,
@@ -358,6 +364,18 @@ impl Program {
         self.entry
     }
 
+    pub fn package_name(&self) -> &str {
+        &self.package_name
+    }
+
+    pub fn package_root(&self) -> Option<ModuleId> {
+        self.package_root
+    }
+
+    pub fn package_root_path(&self) -> Option<&Path> {
+        self.package_root_path.as_deref()
+    }
+
     pub fn standard_library_core(&self) -> Option<ModuleId> {
         self.standard_library_core
     }
@@ -538,6 +556,9 @@ pub struct ProgramLoader {
     loaded_imports: HashSet<ModuleId>,
     next_syntax_id: usize,
     module_root: Option<PathBuf>,
+    package_root_path: Option<PathBuf>,
+    package_root: Option<ModuleId>,
+    package_name: String,
     package_entry: Option<ModuleId>,
     standard_library_root: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
@@ -565,6 +586,16 @@ impl ProgramLoader {
         self
     }
 
+    pub fn with_package_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.package_root_path = Some(root.into());
+        self
+    }
+
+    pub fn with_package_name(mut self, name: impl Into<String>) -> Self {
+        self.package_name = name.into();
+        self
+    }
+
     pub fn load_path(mut self, entry: &Path) -> Result<Program, String> {
         self.load_path_diagnostic(entry)
             .map_err(|error| error.to_string())
@@ -576,13 +607,20 @@ impl ProgramLoader {
         // legacy implicit-root mode, `main.sta` likewise denotes a package;
         // arbitrary standalone files must not cause their entire containing
         // directory (notably the system temp directory) to be indexed.
-        let discover_companions =
-            self.module_root.is_some() || entry.file_name().is_some_and(|name| name == "main.sta");
-        let root = match &self.module_root {
-            Some(root) => {
+        let discover_companions = self.module_root.is_some()
+            || self.package_root_path.is_some()
+            || entry.file_name().is_some_and(|name| name == "main.sta");
+        let configured_package_root = self.package_root_path.clone();
+        let root = match (&self.module_root, &configured_package_root) {
+            (Some(root), _) => {
                 canonical_directory(root, "module root").map_err(LoadDiagnostic::compiler)?
             }
-            None => entry.parent().unwrap_or_else(|| Path::new(".")).to_owned(),
+            (None, Some(package_root)) => canonical_directory(
+                package_root.parent().unwrap_or_else(|| Path::new(".")),
+                "package root directory",
+            )
+            .map_err(LoadDiagnostic::compiler)?,
+            (None, None) => entry.parent().unwrap_or_else(|| Path::new(".")).to_owned(),
         };
         if !entry.starts_with(&root) {
             return Err(LoadDiagnostic::compiler(format!(
@@ -592,6 +630,23 @@ impl ProgramLoader {
             )));
         }
         self.module_root = Some(root.clone());
+        if let Some(package_root) = configured_package_root {
+            let file_name = package_root
+                .file_name()
+                .ok_or_else(|| LoadDiagnostic::compiler("package root path has no file name"))?;
+            let package_root = root.join(file_name);
+            self.package_root_path = Some(package_root.clone());
+            if package_root.is_file() {
+                let source = std::fs::read_to_string(&package_root).map_err(|error| {
+                    LoadDiagnostic::source(
+                        &package_root,
+                        None,
+                        format!("could not read `{}`: {error}", package_root.display()),
+                    )
+                })?;
+                self.package_root = Some(self.insert_source(package_root, &source)?);
+            }
+        }
         let source = std::fs::read_to_string(&entry).map_err(|error| {
             LoadDiagnostic::source(
                 &entry,
@@ -601,6 +656,9 @@ impl ProgramLoader {
         })?;
         let entry_id = self.insert_source(entry, &source)?;
         self.package_entry = Some(entry_id);
+        if let Some(package_root) = self.package_root {
+            self.load_imports(package_root, &root)?;
+        }
         self.load_imports(entry_id, &root)?;
         self.load_standard_library()?;
         if discover_companions {
@@ -637,9 +695,19 @@ impl ProgramLoader {
     /// Loads an entry module from in-memory text while retaining its real path.
     /// Imported modules are loaded from the configured module root, or from the
     /// entry module's directory when no root was configured.
-    pub fn load_source_at(mut self, path: &Path, source: &str) -> Result<Program, LoadDiagnostic> {
+    pub fn load_source_at(self, path: &Path, source: &str) -> Result<Program, LoadDiagnostic> {
+        self.load_package_source_at(path, source, path)
+    }
+
+    /// Loads a package entry while overlaying one editor-owned source file.
+    pub fn load_package_source_at(
+        mut self,
+        path: &Path,
+        source: &str,
+        entry_path: &Path,
+    ) -> Result<Program, LoadDiagnostic> {
         let parent = path.parent().unwrap_or_else(|| Path::new("."));
-        let root = std::fs::canonicalize(parent).map_err(|error| {
+        let source_directory = std::fs::canonicalize(parent).map_err(|error| {
             LoadDiagnostic::source(
                 path,
                 None,
@@ -652,26 +720,60 @@ impl ProgramLoader {
         let module_root = match &self.module_root {
             Some(module_root) => canonical_directory(module_root, "module root")
                 .map_err(|error| LoadDiagnostic::source(path, None, error))?,
-            None => root.clone(),
+            None => source_directory.clone(),
         };
         let file_name = path
             .file_name()
             .ok_or_else(|| LoadDiagnostic::source(path, None, "source path has no file name"))?;
-        let entry_path = root.join(file_name);
-        if !entry_path.starts_with(&module_root) {
+        let source_path = source_directory.join(file_name);
+        if !source_path.starts_with(&module_root) {
             return Err(LoadDiagnostic::source(
                 path,
                 None,
                 format!(
-                    "entry module `{}` is outside module root `{}`",
-                    entry_path.display(),
+                    "source module `{}` is outside module root `{}`",
+                    source_path.display(),
                     module_root.display()
                 ),
             ));
         }
         self.module_root = Some(module_root.clone());
-        let entry = self.insert_source(entry_path, source)?;
+        let edited = self.insert_source(source_path.clone(), source)?;
+        if let Some(configured_root) = self.package_root_path.clone() {
+            let root_name = configured_root.file_name().ok_or_else(|| {
+                LoadDiagnostic::source(path, None, "package root path has no file name")
+            })?;
+            let root_path = module_root.join(root_name);
+            self.package_root_path = Some(root_path.clone());
+            if root_path == source_path {
+                self.package_root = Some(edited);
+            } else if root_path.is_file() {
+                let root_source = std::fs::read_to_string(&root_path)
+                    .map_err(|error| LoadDiagnostic::source(&root_path, None, error.to_string()))?;
+                self.package_root = Some(self.insert_source(root_path, &root_source)?);
+            }
+        }
+        let entry = if entry_path == path || source_path == entry_path {
+            edited
+        } else {
+            let entry_path = canonical_file(entry_path)
+                .map_err(|error| LoadDiagnostic::source(entry_path, None, error))?;
+            if !entry_path.starts_with(&module_root) {
+                return Err(LoadDiagnostic::source(
+                    entry_path,
+                    None,
+                    "entry module is outside module root",
+                ));
+            }
+            let entry_source = std::fs::read_to_string(&entry_path)
+                .map_err(|error| LoadDiagnostic::source(&entry_path, None, error.to_string()))?;
+            self.insert_source(entry_path, &entry_source)?
+        };
         self.package_entry = Some(entry);
+        if let Some(package_root) = self.package_root {
+            self.load_imports(package_root, &module_root)?;
+        }
+        self.load_imports(edited, &module_root)?;
         self.load_imports(entry, &module_root)?;
         self.load_standard_library()?;
         Ok(self.finish_ref(entry))
@@ -1018,7 +1120,7 @@ impl ProgramLoader {
             // Binder dependency aliases can become additional recognized roots
             // here once the loader receives a per-package alias-to-root table.
             // Keep aliases logical: do not merge dependency files into `root`.
-            if token.kind != TokenKind::Identifier
+            if !matches!(token.kind, TokenKind::Identifier | TokenKind::Package)
                 || !matches!(token.text.as_str(), "std" | "package")
             {
                 index += 1;
@@ -1029,9 +1131,9 @@ impl ProgramLoader {
             while tokens
                 .get(end)
                 .is_some_and(|token| token.kind == TokenKind::Dot)
-                && tokens
-                    .get(end + 1)
-                    .is_some_and(|token| token.kind == TokenKind::Identifier)
+                && tokens.get(end + 1).is_some_and(|token| {
+                    matches!(token.kind, TokenKind::Identifier | TokenKind::Package)
+                })
             {
                 parts.push(tokens[end + 1].text.clone());
                 end += 2;
@@ -1154,7 +1256,7 @@ impl ProgramLoader {
                 load_diagnostic_at(&declaration.syntax.span, "package entry module is not set")
             })?;
             if parts.len() == 1 {
-                return Ok(entry);
+                return Ok(self.package_root.unwrap_or(entry));
             }
             return self.resolve_file_import(module, &parts[1..], root, declaration);
         }
@@ -1310,6 +1412,13 @@ impl ProgramLoader {
         );
         Program {
             entry,
+            package_name: if self.package_name.is_empty() {
+                "package".to_owned()
+            } else {
+                self.package_name
+            },
+            package_root: self.package_root,
+            package_root_path: self.package_root_path,
             standard_library_core: self.standard_library_core,
             standard_library_syntax: self.standard_library_syntax,
             standard_library_cinterop: self.standard_library_cinterop,

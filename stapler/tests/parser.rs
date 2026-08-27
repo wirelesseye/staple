@@ -2182,3 +2182,18 @@ fn rejects_malformed_const_bindings() {
     assert!(parse("const mut x = 1\n").is_err());
     assert!(parse("const x<T> = 1\n").is_err());
 }
+
+#[test]
+fn reserves_package_while_allowing_package_qualified_paths() {
+    let source = "use package.utils.add\nlet value: package.models.Value = package.utils.add 1\n";
+    let module = parse(source).expect("package-qualified paths should parse");
+    assert_eq!(module.syntax.text(), source);
+    assert!(
+        module
+            .syntax
+            .tokens()
+            .iter()
+            .any(|token| token.kind == TokenKind::Package)
+    );
+    assert!(parse("let package = 1\n").is_err());
+}

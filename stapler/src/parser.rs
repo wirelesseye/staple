@@ -1258,10 +1258,24 @@ impl Grammar {
         start: usize,
     ) -> Result<UseDeclaration, ParseError> {
         self.expect(TokenKind::Use, "expected `use`")?;
-        let mut path = vec![self.parse_quoted_identifier("expected module path after `use`")?];
-        while self.at(TokenKind::Dot) && self.peek_n(1) == Some(TokenKind::Identifier) {
+        let first = if self.at(TokenKind::Package) {
+            self.bump_token().expect("peeked package keyword").text
+        } else {
+            self.parse_quoted_identifier("expected module path after `use`")?
+        };
+        let mut path = vec![first];
+        while self.at(TokenKind::Dot)
+            && matches!(
+                self.peek_n(1),
+                Some(TokenKind::Identifier | TokenKind::Package)
+            )
+        {
             self.eat(TokenKind::Dot);
-            path.push(self.parse_value_name("expected module path component after `.`")?);
+            path.push(if self.at(TokenKind::Package) {
+                self.bump_token().expect("peeked package keyword").text
+            } else {
+                self.parse_value_name("expected module path component after `.`")?
+            });
         }
         let kind = if self.has_newline_before_next_token() {
             if path.len() > 1 && !path.iter().all(|part| part == "super") {
@@ -2342,7 +2356,11 @@ impl Grammar {
                 variadic,
             }));
         }
-        let first = self.expect(TokenKind::Identifier, "expected type")?.text;
+        let first = if self.at(TokenKind::Package) {
+            self.bump_token().expect("peeked package keyword").text
+        } else {
+            self.expect(TokenKind::Identifier, "expected type")?.text
+        };
         let (namespace, name) =
             self.parse_qualified_name_from(first, "expected type name after namespace")?;
         Ok(Type::Named(NamedType {
@@ -2725,7 +2743,7 @@ impl Grammar {
                     Accessor::Representation
                 } else {
                     match self.peek() {
-                        Some(TokenKind::Identifier) => {
+                        Some(TokenKind::Identifier | TokenKind::Package) => {
                             Accessor::Name(self.bump_token().expect("peeked name").text)
                         }
                         Some(TokenKind::Integer) => {
@@ -2818,7 +2836,7 @@ impl Grammar {
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
             Some(TokenKind::LBracket) => self.parse_syntax_argument(),
             Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
-            Some(TokenKind::Identifier | TokenKind::Underscore) => {
+            Some(TokenKind::Identifier | TokenKind::Package | TokenKind::Underscore) => {
                 let start = self.position;
                 let name = self.bump_token().expect("peeked name").text;
                 Ok(Expression::Name(NameExpression {
@@ -3362,9 +3380,14 @@ impl Grammar {
         message: &'static str,
     ) -> Result<(Option<String>, String), ParseError> {
         let mut parts = vec![first];
-        while self.peek() == Some(TokenKind::Dot) && self.peek_n(1) == Some(TokenKind::Identifier) {
+        while self.peek() == Some(TokenKind::Dot)
+            && matches!(
+                self.peek_n(1),
+                Some(TokenKind::Identifier | TokenKind::Package)
+            )
+        {
             self.eat(TokenKind::Dot);
-            parts.push(self.expect(TokenKind::Identifier, message)?.text);
+            parts.push(self.bump_token().ok_or_else(|| self.error(message))?.text);
         }
         let name = parts.pop().expect("qualified name has a first component");
         Ok(((!parts.is_empty()).then(|| parts.join(".")), name))

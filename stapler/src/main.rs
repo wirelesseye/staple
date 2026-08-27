@@ -40,6 +40,8 @@ struct Options {
     linker: Option<OsString>,
     standard_library: Option<PathBuf>,
     module_root: Option<PathBuf>,
+    package_root: Option<PathBuf>,
+    package_name: Option<String>,
     program_arguments: Vec<OsString>,
 }
 
@@ -80,6 +82,12 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
     };
     if let Some(root) = &options.module_root {
         loader = loader.with_module_root(root);
+    }
+    if let Some(root) = &options.package_root {
+        loader = loader.with_package_root(root);
+    }
+    if let Some(name) = &options.package_name {
+        loader = loader.with_package_name(name);
     }
     let module = if options.input == "-" {
         let source = read_source(&options.input)?;
@@ -175,6 +183,8 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         linker: None,
         standard_library: None,
         module_root: None,
+        package_root: None,
+        package_name: None,
         program_arguments: Vec::new(),
     };
     let mut positional_only = false;
@@ -217,6 +227,18 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.module_root = Some(PathBuf::from(next_value(&mut arguments, "--module-root")?));
             continue;
         }
+        if !positional_only && argument == "--package-root" {
+            options.package_root =
+                Some(PathBuf::from(next_value(&mut arguments, "--package-root")?));
+            continue;
+        }
+        if !positional_only && argument == "--package-name" {
+            options.package_name = Some(utf8_value(
+                next_value(&mut arguments, "--package-name")?,
+                "--package-name",
+            )?);
+            continue;
+        }
         if !positional_only && argument == "-L" {
             options
                 .library_paths
@@ -240,6 +262,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.standard_library = Some(PathBuf::from(value));
         } else if !positional_only && let Some(value) = text.strip_prefix("--module-root=") {
             options.module_root = Some(PathBuf::from(value));
+        } else if !positional_only && let Some(value) = text.strip_prefix("--package-root=") {
+            options.package_root = Some(PathBuf::from(value));
+        } else if !positional_only && let Some(value) = text.strip_prefix("--package-name=") {
+            options.package_name = Some(value.to_owned());
         } else if !positional_only && text.starts_with("-L") && text.len() > 2 {
             options.library_paths.push(PathBuf::from(&text[2..]));
         } else if !positional_only && text.starts_with("-l") && text.len() > 2 {
@@ -484,7 +510,9 @@ fn usage() -> String {
         "  --target <triple>         LLVM target triple\n",
         "  --linker <command>        linker driver (default: $CC or cc)\n",
         "  --stdlib <path>           Staple standard-library root\n",
-        "  --module-root <path>      package source root (default: entry directory)\n",
+        "  --module-root <path>      package module directory (default: entry directory)\n",
+        "  --package-root <path>     optional package root module\n",
+        "  --package-name <name>     package name used by tooling\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         stop parsing options\n",
@@ -501,7 +529,9 @@ fn run_usage() -> String {
         "  -h, --help                print this help\n",
         "  --linker <command>        linker driver (default: $CC or cc)\n",
         "  --stdlib <path>           Staple standard-library root\n",
-        "  --module-root <path>      package source root (default: entry directory)\n",
+        "  --module-root <path>      package module directory (default: entry directory)\n",
+        "  --package-root <path>     optional package root module\n",
+        "  --package-name <name>     package name used by tooling\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         pass remaining arguments to the program\n",
@@ -517,7 +547,9 @@ fn check_usage() -> String {
         "options:\n",
         "  -h, --help                print this help\n",
         "  --stdlib <path>           Staple standard-library root\n",
-        "  --module-root <path>      package source root (default: entry directory)\n",
+        "  --module-root <path>      package module directory (default: entry directory)\n",
+        "  --package-root <path>     optional package root module\n",
+        "  --package-name <name>     package name used by tooling\n",
         "  --                         stop parsing options",
     )
     .to_owned()

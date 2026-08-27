@@ -12,14 +12,14 @@ A project is described by `binder.kdl`:
 
 ```kdl
 package "hello" {
-    root "src"
-    entry "main.sta"
+    root "src/root.sta"
+    entry "src/main.sta"
 }
 ```
 
-`root` is relative to the manifest directory and defaults to `src`. `entry` is
-relative to that source root and defaults to `main.sta`, so the minimal manifest
-is:
+`root` and `entry` are relative to the manifest directory and default to
+`src/root.sta` and `src/main.sta`. The root module is optional; its parent
+directory still anchors package module paths. The minimal manifest is:
 
 ```kdl
 package "hello"
@@ -49,7 +49,7 @@ hello/
     └── main.sta
 ```
 
-The manifest uses the default source root and entry path, `main.sta` contains a
+The manifest uses the default root module and entry path; `main.sta` contains a
 hello-world program, and `.gitignore` ignores `/build`. Binder refuses to create
 the project if the destination already exists and does not initialize a Git
 repository.

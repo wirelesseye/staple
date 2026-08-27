@@ -529,6 +529,16 @@ impl Collector<'_> {
         let rooted = components
             .first()
             .is_some_and(|name| matches!(name.as_str(), "std" | "package"));
+        if components.first().is_some_and(|name| name == "package")
+            && let Some(root) = self.resolved.program().package_root()
+        {
+            self.add(
+                &declaration.syntax,
+                "package",
+                &[DefinitionId::Module(root)],
+                false,
+            );
+        }
         let Some(target) = self
             .resolved
             .program()
@@ -1407,6 +1417,36 @@ mod tests {
                 "missing definition for {keyword}: {entries:?}"
             );
         }
+    }
+
+    #[test]
+    fn package_definition_targets_the_configured_root_module() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-definition-package-root-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let root_path = root.join("root.sta");
+        std::fs::write(&root_path, "pub mod\npub let answer = 42\n").unwrap();
+        let source = "use package.answer\nanswer\n";
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_module_root(&root)
+            .with_package_root(&root_path)
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &resolved, None);
+        let canonical_root = std::fs::canonicalize(&root_path).unwrap();
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "package"
+                && entry
+                    .targets
+                    .iter()
+                    .any(|target| target.path == canonical_root)
+        }));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     fn assert_target(source: &str, entries: &[DefinitionEntry], origin: &str, target: &str) {

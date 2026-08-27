@@ -62,6 +62,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
         if kind == TokenKind::Identifier {
             kind = match text {
                 "use" => TokenKind::Use,
+                "package" => TokenKind::Package,
                 "as" => TokenKind::As,
                 "satisfies" => TokenKind::Satisfies,
                 "pub" => TokenKind::Pub,

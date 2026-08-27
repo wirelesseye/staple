@@ -544,9 +544,10 @@ modifier list as another declaration. It must precede ordinary module items and
 may appear at most once. It is distinct from `pub mod api { ... }`, which
 declares a public child named `api` in the current module.
 
-Each compilation has a module root. A dotted
-module path is resolved from that root by replacing dots with path separators
-and adding `.sta`:
+Each package has a root module. Binder defaults it to `src/root.sta`; the file
+is optional, but its directory still anchors dotted module paths. Paths are
+resolved relative to that directory by replacing dots with path separators and
+adding `.sta`:
 
 ```staple
 use tools.format
@@ -559,16 +560,19 @@ provides core numbers, booleans, strings, references, results, syntax,
 equality, copying, dropping, defaults, and indexing traits. Interoperability features are
 available through `std.cinterop`.
 
-The contextual leading component `package` always selects the current package
-root, bypassing inline children with the same name:
+The keyword `package` always selects the current package root, bypassing inline
+children with the same name:
 
 ```staple
 use package.models.User
 ```
 
-Here `models` loads `<module-root>/models.sta`. A bare `use package` refers to
-the entry module. A file named `package.sta` is addressed as
-`use package.package`.
+Here `models` loads `src/models.sta` with the default root. Public items declared
+by an existing root module are available directly as `package.item`. The entry
+remains `src/main.sta` by default and is addressed by its relative module path,
+so its public items are available as `package.main.item`. Custom entry paths use
+the same relative mapping. A file named `package.sta` is addressed as `use
+package.package`.
 
 Public items may also be used through a root-qualified name without a `use`
 declaration:

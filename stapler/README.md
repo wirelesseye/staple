@@ -29,11 +29,11 @@ and libraries for executable output.
 ## Checking
 
 `stpl check` stops after loading, name resolution, and type checking. An
-explicit module root allows an entry file to live in a nested directory while
-imports remain rooted at the package's source directory:
+explicit package root module allows an entry file to live in a nested directory
+while imports remain rooted at the package root's directory:
 
 ```text
-stpl check --module-root src src/bin/main.sta
+stpl check --module-root src --package-root src/root.sta src/bin/main.sta
 ```
 
 ## Running

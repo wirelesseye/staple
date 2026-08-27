@@ -535,12 +535,17 @@ impl Collector<'_> {
             .is_some_and(|name| matches!(name.as_str(), "std" | "package"));
         if rooted {
             let name = &components[0];
-            self.named_with_docs(
-                &declaration.syntax,
-                name,
-                format!("package {name}"),
-                Vec::new(),
-            );
+            let program = self.typed.resolved().program();
+            let (signature, docs) = if name == "package" {
+                let docs = program
+                    .package_root()
+                    .map(|root| program.module(root).syntax.docs.clone())
+                    .unwrap_or_default();
+                (format!("package {}", program.package_name()), docs)
+            } else {
+                (format!("package {name}"), Vec::new())
+            };
+            self.named_with_docs(&declaration.syntax, name, signature, docs);
         }
 
         let Some(target) = self
@@ -1445,6 +1450,37 @@ impl Declaration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn package_hover_uses_configured_name_and_root_docs() {
+        let root =
+            std::env::temp_dir().join(format!("staple-hover-package-root-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root_path = root.join("root.sta");
+        std::fs::write(
+            &root_path,
+            "@doc(\"Root package documentation.\")\npub mod\npub let answer = 42\n",
+        )
+        .unwrap();
+        let source = "use package.answer\nanswer\n";
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_module_root(&root)
+            .with_package_root(&root_path)
+            .with_package_name("example")
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "package"
+                && entry.signature == "package example"
+                && entry.documentation == ["Root package documentation."]
+        }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
     use std::path::PathBuf;
 
     #[test]

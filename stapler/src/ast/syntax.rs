@@ -17,6 +17,7 @@ impl SyntaxId {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TokenKind {
     Use,
+    Package,
     As,
     Satisfies,
     Pub,

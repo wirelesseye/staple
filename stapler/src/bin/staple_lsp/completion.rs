@@ -21,6 +21,7 @@ const KEYWORDS: &[&str] = &[
     "companion",
     "mut",
     "opaque",
+    "package",
     "parse_quote",
     "pub",
     "quote",
