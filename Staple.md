@@ -113,7 +113,7 @@ String)` accepts `(left right)`. `Parenthesized`, `Bracketed`, and `Braced` may
 instead contain `Sequence T`, which accepts zero or more consecutive values of
 `T`; for example, `Bracketed (Sequence Ident String)` accepts `[]` and `[one
 two]`. A function-style macro may also use one `Sequence T` as a top-level
-parameter when a later parameter is guaranteed to consume source syntax:
+parameter:
 
 ```staple
 macro collect =
@@ -126,10 +126,14 @@ The sequence consumes zero or more consecutive top-level arguments. Matching
 starts greedily and backs up until the remaining parameters match, so the
 following `Equals` terminates `values`. `Visibility` and
 `MacroCallVisibility` do not count as terminators because they may supply an
-implicit `Private` value without consuming source. A top-level sequence may
-not be the last parameter, appear more than once in a signature, or be used by
-a modifier macro. `Sequence` inside delimiters remains restricted to the
-entire contents of one of the three delimiter types.
+implicit `Private` value without consuming source. A top-level sequence may be
+the final parameter, in which case it has no required suffix and simply
+consumes the maximal run of consecutive matching arguments; a longer complete
+overload still wins the atom-count comparison, and any arguments left after the
+run apply to the expanded expression as an ordinary call. A top-level sequence
+may not appear more than once in a signature or be used by a modifier macro.
+`Sequence` inside delimiters remains restricted to the entire contents of one
+of the three delimiter types.
 Captured sequences may be passed through compile-time helpers and destructured
 as `Sequence ()` or `Sequence (first: T, rest: Sequence T)`. `Sequence
 SyntaxNode` uses shortest structural atoms, treating a nested balanced delimiter
@@ -441,8 +445,9 @@ definition module's environment and receive a fresh expansion identity, while
 spliced expressions retain their caller environment. A macro normally consumes
 the number of arguments described by its curried syntax-node parameter types;
 a top-level `Sequence` instead consumes as many matching arguments as possible
-while preserving a match for its required suffix. Further call arguments apply
-to the expanded expression.
+while preserving a match for any following parameters. When it is the final
+parameter it has no such suffix and consumes the whole remaining run. Further
+call arguments apply to the expanded expression.
 
 Macros may be overloaded by declaring the same name more than once in one
 module. An invocation selects the complete matching overload that consumes the

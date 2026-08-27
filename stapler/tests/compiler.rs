@@ -5386,21 +5386,6 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro invalid = value: Sequence Ident => parse_quote { 0 }\n",
-            root,
-        )
-        .expect("source should parse");
-    let diagnostics = NameResolver::new()
-        .resolve_program(program)
-        .expect_err_diagnostics("bare Sequence should be rejected");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message
-            == "a top-level `Sequence` parameter must be followed by a parameter that always consumes source syntax"
-    }));
-
-    let program = ProgramLoader::new()
-        .with_standard_library_root(root.join("stdlib"))
-        .load_source(
             "macro invalid = value: Separated (Ident String) Comma => parse_quote { 0 }\n",
             root,
         )
@@ -5474,6 +5459,40 @@ fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
 }
 
 #[test]
+fn top_level_macro_sequence_may_be_the_final_parameter() {
+    let module = type_check(concat!(
+        "macro tail = _: Ident \"marker\" => name: Ident String => values: Sequence (Ident String) => match values {\n",
+        "    Sequence () => quote { let $name: I32 = 0 },\n",
+        "    Sequence (first: Ident String, rest: Sequence Ident String) => match rest {\n",
+        "        Sequence () => quote { let $name: I32 = 1 },\n",
+        "        _ => quote { let $name: I32 = 3 },\n",
+        "    },\n",
+        "}\n",
+        "tail marker zero\n",
+        "tail marker one alpha\n",
+        "tail marker three alpha beta gamma\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a trailing top-level sequence should greedily capture the remaining arguments");
+}
+
+#[test]
+fn longer_complete_overload_still_beats_a_trailing_sequence_overload() {
+    let module = type_check(concat!(
+        "macro pick = value: Ident String => _: Sequence (Ident String) => quote { let $value: I32 = 0 }\n",
+        "macro pick = value: Ident String => _: Sequence (Ident String) => _: Equals => _: Braced Syntax => quote { let $value: I32 = 1 }\n",
+        "pick alpha one two\n",
+        "pick beta one two = {}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("the longer overload wins when its suffix is present, the trailing sequence matches otherwise");
+}
+
+#[test]
 fn fixed_and_more_specific_overloads_beat_top_level_sequences() {
     let module = type_check(concat!(
         "macro choose = _: Sequence Expr => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => quote { let $name: String = \"wrong\" }\n",
@@ -5527,16 +5546,8 @@ fn rejects_invalid_top_level_macro_sequence_signatures() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for (source, expected) in [
         (
-            "macro invalid = values: Sequence (Ident String) => parse_quote { 0 }\n",
-            "a top-level `Sequence` parameter must be followed by a parameter that always consumes source syntax",
-        ),
-        (
             "macro invalid = first: Sequence (Ident String) => second: Sequence Expr => _: Equals => parse_quote { 0 }\n",
             "a macro signature may contain at most one top-level `Sequence` parameter",
-        ),
-        (
-            "macro invalid = values: Sequence (Ident String) => _: Visibility => parse_quote { 0 }\n",
-            "a top-level `Sequence` parameter must be followed by a parameter that always consumes source syntax",
         ),
         (
             "macro @invalid: Sequence (Ident String) -> Item -> Item = values => item => item\n",

@@ -5146,21 +5146,10 @@ fn validate_top_level_sequence(definition: &MacroDefinition, diagnostics: &mut V
                 format_meta_type(element)
             ),
         ));
-        return;
     }
-    if !definition.parameters[position + 1..]
-        .iter()
-        .any(meta_type_guarantees_source_consumption)
-    {
-        diagnostics.push(Diagnostic::new(
-            definition.declaration.syntax.span.clone(),
-            "a top-level `Sequence` parameter must be followed by a parameter that always consumes source syntax",
-        ));
-    }
-}
-
-fn meta_type_guarantees_source_consumption(meta: &MetaType) -> bool {
-    !matches!(meta, MetaType::Visibility | MetaType::MacroCallVisibility)
+    // A top-level `Sequence` may be the final parameter: with no required suffix
+    // it greedily consumes the maximal run of consecutive matching arguments,
+    // and a longer complete overload still wins the atom-count comparison.
 }
 
 fn macro_is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId) -> bool {
