@@ -704,6 +704,27 @@ fn parses_current_module_declarations_losslessly() {
 }
 
 #[test]
+fn parses_package_visibility_losslessly() {
+    let source = concat!(
+        "pub(package) mod internal { pub(package) def value = 1 }\n",
+        "pub(package) use internal.value\n",
+        "pub(package) type Hidden = I32\n",
+        "pub(repr(package)) type Shared = I32\n",
+    );
+    let root = parse(source).expect("package visibility should parse");
+    assert_eq!(root.text(), source);
+    assert!(matches!(&root.items[0], Item::Submodule(module) if module.visibility == Visibility::Package));
+    assert!(matches!(&root.items[1], Item::UseDeclaration(use_) if use_.visibility == Visibility::Package));
+    assert!(matches!(&root.items[2], Item::TypeDeclaration(declaration) if declaration.visibility == Visibility::Package));
+    assert!(matches!(&root.items[3], Item::TypeDeclaration(declaration)
+        if declaration.visibility == Visibility::Public
+            && declaration.representation_visibility == Visibility::Package));
+
+    assert!(parse("pub(repr(package)) def invalid = 1\n").is_err());
+    assert!(parse("pub(package(repr)) type Invalid = I32\n").is_err());
+}
+
+#[test]
 fn parses_block_scoped_submodules_losslessly() {
     let source = "let x = {\n    mod foo { pub def value = 42 }\n    0\n}\n";
     let root = parse(source).expect("block-scoped submodules should parse");

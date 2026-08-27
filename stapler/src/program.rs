@@ -1513,7 +1513,7 @@ impl ProgramLoader {
                 })?;
                 index += 1;
             }
-            return self.traverse_children(target, &parts[index..], true, declaration);
+            return self.traverse_children(module, target, &parts[index..], true, declaration);
         }
 
         if parts.first().is_some_and(|part| part == "package") {
@@ -1555,7 +1555,7 @@ impl ProgramLoader {
         if let Some(first) = parts.first()
             && let Some(child) = self.children[module.0].get(first).copied()
         {
-            return self.traverse_children(child, &parts[1..], true, declaration);
+            return self.traverse_children(module, child, &parts[1..], true, declaration);
         }
 
         let import_root = if parts.first().is_some_and(|part| part == "std") {
@@ -1583,13 +1583,19 @@ impl ProgramLoader {
                 continue;
             };
             let file = self.load_file(&path)?;
-            if file != importing_module && self.modules[file.0].visibility != Visibility::Public {
+            if file != importing_module && !self.module_visible_from(file, importing_module) {
                 return Err(load_diagnostic_at(
                     &declaration.syntax.span,
                     format!("module `{}` is private", parts[..prefix_len].join(".")),
                 ));
             }
-            return self.traverse_children(file, &parts[prefix_len..], false, declaration);
+            return self.traverse_children(
+                importing_module,
+                file,
+                &parts[prefix_len..],
+                false,
+                declaration,
+            );
         }
         Err(load_diagnostic_at(
             &declaration.syntax.span,
@@ -1599,6 +1605,7 @@ impl ProgramLoader {
 
     fn traverse_children(
         &self,
+        importing_module: ModuleId,
         mut module: ModuleId,
         parts: &[String],
         allow_private: bool,
@@ -1611,7 +1618,9 @@ impl ProgramLoader {
                     format!("module has no submodule named `{part}`"),
                 )
             })?;
-            if !allow_private && self.modules[child.0].visibility != Visibility::Public {
+            if !allow_private
+                && !self.module_visible_from(child, importing_module)
+            {
                 return Err(load_diagnostic_at(
                     &declaration.syntax.span,
                     format!("submodule `{part}` is private"),
@@ -1620,6 +1629,16 @@ impl ProgramLoader {
             module = child;
         }
         Ok(module)
+    }
+
+    fn module_visible_from(&self, target: ModuleId, importing: ModuleId) -> bool {
+        match self.modules[target.0].visibility {
+            Visibility::Public => true,
+            Visibility::Package => self.module_packages[target.0]
+                .zip(self.module_packages[importing.0])
+                .is_some_and(|(target, importing)| target == importing),
+            Visibility::Private => false,
+        }
     }
 
     fn load_standard_library(&mut self) -> Result<(), LoadDiagnostic> {

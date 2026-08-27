@@ -607,14 +607,27 @@ impl ResolvedModule {
     }
 
     pub fn representation_visible_from(&self, id: TypeId, module: ModuleId) -> bool {
-        if self.type_declarations[&id].kind == crate::TypeDeclarationKind::Singleton
-            || self.type_declarations[&id].representation_visibility == Visibility::Public
-        {
+        let declaration = &self.type_declarations[&id];
+        let visibility = if declaration.kind == crate::TypeDeclarationKind::Singleton {
+            declaration.visibility
+        } else {
+            declaration.representation_visibility
+        };
+        if visibility == Visibility::Public {
             return true;
         }
         let Some(defining_module) = self.type_modules.get(&id).copied() else {
             return false;
         };
+        if visibility == Visibility::Package
+            && self
+                .program
+                .package_of(defining_module)
+                .zip(self.program.package_of(module))
+                .is_some_and(|(left, right)| left == right)
+        {
+            return true;
+        }
         let mut current = Some(module);
         while let Some(candidate) = current {
             if candidate == defining_module {
@@ -836,6 +849,28 @@ fn unknown_item_message(
     }
 }
 
+fn item_uses_package_visibility(item: &Item) -> bool {
+    let is_package = |visibility| visibility == Visibility::Package;
+    match item {
+        Item::ExternBlock(item) => is_package(item.visibility),
+        Item::TypeDeclaration(item) => {
+            is_package(item.visibility) || is_package(item.representation_visibility)
+        }
+        Item::MacroDeclaration(item) => is_package(item.visibility),
+        Item::TraitDeclaration(item) => is_package(item.visibility),
+        Item::Binding(item) => is_package(item.visibility),
+        Item::Submodule(item) => is_package(item.visibility),
+        Item::UseDeclaration(item) => is_package(item.visibility),
+        Item::Modified(item) => item_uses_package_visibility(&item.item),
+        Item::VisibilitySplice(item) => item_uses_package_visibility(&item.item),
+        Item::VisibilityMacroInvocation(item) => matches!(
+            item.visibility.kind,
+            crate::VisibilityKind::Package | crate::VisibilityKind::PublicReprPackage
+        ),
+        _ => false,
+    }
+}
+
 fn extend_interface(exported: &mut Interface, imported: &Interface) -> bool {
     let mut changed = false;
     for name in imported.values.keys() {
@@ -888,6 +923,56 @@ fn export_interface_item(
             .is_none();
     }
     changed
+}
+
+fn reexport_declaration(
+    program: &Program,
+    declaration: &UseDeclaration,
+    interfaces: &[Interface],
+    exported: &mut Interface,
+) -> bool {
+    let Some(imported_module) = program.imported_module(declaration.syntax.id) else {
+        return false;
+    };
+    let imported = &interfaces[imported_module.0];
+    match &declaration.kind {
+        UseKind::Dotted => {
+            let Some(candidates) = program.dotted_import(declaration.syntax.id) else {
+                return false;
+            };
+            let Some(item_module) = candidates.item_module else {
+                return false;
+            };
+            let item = declaration.path.last().expect("dotted import has a final component");
+            let imported = &interfaces[item_module.0];
+            if let Some(namespace) = candidates.namespace {
+                let different_namespace = imported
+                    .namespaces
+                    .get(item)
+                    .is_some_and(|module| *module != namespace);
+                let compatible_item = imported.types.contains_key(item)
+                    || imported.traits.contains_key(item);
+                let conflicts = imported.values.contains_key(item)
+                    || imported.macros.contains_key(item)
+                    || different_namespace;
+                if compatible_item && !conflicts {
+                    return export_interface_item(exported, imported, item, item)
+                        | exported.namespaces.insert(item.clone(), namespace).is_none();
+                }
+                false
+            } else {
+                export_interface_item(exported, imported, item, item)
+            }
+        }
+        UseKind::Namespace => false,
+        UseKind::Glob => extend_interface(exported, imported),
+        UseKind::Selected(names) => names.iter().fold(false, |changed, name| {
+            export_interface_item(exported, imported, name, name) | changed
+        }),
+        UseKind::Renamed { item, alias } => {
+            export_interface_item(exported, imported, item, alias)
+        }
+    }
 }
 
 #[derive(Default)]
@@ -962,6 +1047,8 @@ pub struct NameResolver {
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
     interfaces: Vec<Interface>,
+    package_interfaces: Vec<Interface>,
+    module_packages: Vec<Option<binder::PackageId>>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
     module_values: Vec<HashMap<String, SymbolId>>,
@@ -1021,6 +1108,21 @@ impl NameResolver {
         self.standard_library_syntax = program.standard_library_syntax();
         self.standard_library_cinterop = program.standard_library_cinterop();
         self.standard_library_io = program.standard_library_io();
+        self.module_packages = program
+            .modules()
+            .iter()
+            .map(|module| program.package_of(module.id))
+            .collect();
+        for module in program.modules() {
+            for item in &module.syntax.items {
+                if item_uses_package_visibility(item) && program.package_of(module.id).is_none() {
+                    self.diagnostics.push(Diagnostic::new(
+                        item.syntax().span.clone(),
+                        "package visibility requires a Binder manifest",
+                    ));
+                }
+            }
+        }
         let standard_library_directory = self
             .standard_library_core
             .and_then(|core| program.module(core).path.parent());
@@ -1590,70 +1692,46 @@ impl NameResolver {
                     if declaration.visibility != Visibility::Public {
                         continue;
                     }
-                    let Some(imported) = program.imported_module(declaration.syntax.id) else {
-                        continue;
-                    };
-                    let imported = &previous[imported.0];
                     let exported = &mut self.interfaces[source_module.id.0];
-                    match &declaration.kind {
-                        UseKind::Dotted => {
-                            let Some(candidates) = program.dotted_import(declaration.syntax.id)
-                            else {
-                                continue;
-                            };
-                            let Some(item_module) = candidates.item_module else {
-                                continue;
-                            };
-                            let item = declaration
-                                .path
-                                .last()
-                                .expect("dotted import has a final component");
-                            if let Some(namespace) = candidates.namespace {
-                                let imported = &previous[item_module.0];
-                                let different_namespace = imported
-                                    .namespaces
-                                    .get(item)
-                                    .is_some_and(|module| *module != namespace);
-                                let compatible_item = imported.types.contains_key(item)
-                                    || imported.traits.contains_key(item);
-                                let conflicts = imported.values.contains_key(item)
-                                    || imported.macros.contains_key(item)
-                                    || different_namespace;
-                                if compatible_item && !conflicts {
-                                    changed |=
-                                        export_interface_item(exported, imported, item, item);
-                                    changed |= exported
-                                        .namespaces
-                                        .insert(item.clone(), namespace)
-                                        .is_none();
-                                }
-                            } else {
-                                changed |= export_interface_item(
-                                    exported,
-                                    &previous[item_module.0],
-                                    item,
-                                    item,
-                                );
-                            }
-                        }
-                        UseKind::Namespace => {}
-                        UseKind::Glob => {
-                            changed |= extend_interface(exported, imported);
-                        }
-                        UseKind::Selected(names) => {
-                            for name in names {
-                                changed |= export_interface_item(exported, imported, name, name);
-                            }
-                        }
-                        UseKind::Renamed { item, alias } => {
-                            changed |= export_interface_item(exported, imported, item, alias);
-                        }
-                    }
+                    changed |= reexport_declaration(program, declaration, &previous, exported);
                 }
             }
             if !changed {
                 break;
             }
+        }
+        for module in program.modules() {
+            extend_interface(
+                &mut self.package_interfaces[module.id.0],
+                &self.interfaces[module.id.0],
+            );
+        }
+        loop {
+            let previous = self.package_interfaces.clone();
+            let mut changed = false;
+            for source_module in program.modules() {
+                for item in &source_module.syntax.items {
+                    let Item::UseDeclaration(declaration) = item else { continue };
+                    if declaration.visibility != Visibility::Package {
+                        continue;
+                    }
+                    let Some(imported) = program.imported_module(declaration.syntax.id) else {
+                        continue;
+                    };
+                    let visible = if self.same_package(source_module.id, imported) {
+                        &previous
+                    } else {
+                        &self.interfaces
+                    };
+                    changed |= reexport_declaration(
+                        program,
+                        declaration,
+                        visible,
+                        &mut self.package_interfaces[source_module.id.0],
+                    );
+                }
+            }
+            if !changed { break; }
         }
     }
 
@@ -1800,6 +1878,9 @@ impl NameResolver {
         self.interfaces = (0..program.modules().len())
             .map(|_| Interface::default())
             .collect();
+        self.package_interfaces = (0..program.modules().len())
+            .map(|_| Interface::default())
+            .collect();
         self.declared_types = (0..program.modules().len())
             .map(|_| HashMap::new())
             .collect();
@@ -1821,11 +1902,12 @@ impl NameResolver {
                             let symbol = self.allocate_symbol(binding);
                             self.module_values[source_module.id.0]
                                 .insert(binding.name.clone(), symbol);
-                            if block.visibility == Visibility::Public {
-                                self.insert_public_value(
+                            if block.visibility != Visibility::Private {
+                                self.insert_visible_value(
                                     source_module.id,
                                     &binding.name,
                                     symbol,
+                                    block.visibility,
                                     binding.syntax.span.clone(),
                                 );
                             }
@@ -1843,12 +1925,19 @@ impl NameResolver {
                             .entry(declaration.name.clone())
                             .or_default()
                             .push(id);
-                        if declaration.visibility == Visibility::Public {
-                            self.interfaces[source_module.id.0]
+                        if declaration.visibility != Visibility::Private {
+                            self.package_interfaces[source_module.id.0]
                                 .macros
                                 .entry(declaration.name.clone())
                                 .or_default()
                                 .push(id);
+                            if declaration.visibility == Visibility::Public {
+                                self.interfaces[source_module.id.0]
+                                    .macros
+                                    .entry(declaration.name.clone())
+                                    .or_default()
+                                    .push(id);
+                            }
                         }
                     }
                     Item::TraitDeclaration(declaration) => {
@@ -1897,21 +1986,27 @@ impl NameResolver {
                                 default_methods: HashMap::new(),
                             },
                         );
-                        if declaration.visibility == Visibility::Public {
-                            self.interfaces[source_module.id.0]
+                        if declaration.visibility != Visibility::Private {
+                            self.package_interfaces[source_module.id.0]
                                 .traits
                                 .insert(declaration.name.clone(), id);
+                            if declaration.visibility == Visibility::Public {
+                                self.interfaces[source_module.id.0]
+                                    .traits
+                                    .insert(declaration.name.clone(), id);
+                            }
                         }
                     }
                     Item::TraitImplementation(_) => {}
                     Item::Binding(binding) => {
                         let symbol = self.allocate_symbol(binding);
                         self.module_values[source_module.id.0].insert(binding.name.clone(), symbol);
-                        if binding.visibility == Visibility::Public {
-                            self.insert_public_value(
+                        if binding.visibility != Visibility::Private {
+                            self.insert_visible_value(
                                 source_module.id,
                                 &binding.name,
                                 symbol,
+                                binding.visibility,
                                 binding.syntax.span.clone(),
                             );
                         }
@@ -1925,12 +2020,17 @@ impl NameResolver {
                     | Item::Continue(_)
                     | Item::Expression(_) => {}
                     Item::Submodule(submodule) => {
-                        if submodule.visibility == Visibility::Public
+                        if submodule.visibility != Visibility::Private
                             && let Some(child) = program.child_module(submodule.syntax.id)
                         {
-                            self.interfaces[source_module.id.0]
+                            self.package_interfaces[source_module.id.0]
                                 .namespaces
                                 .insert(submodule.name.clone(), child);
+                            if submodule.visibility == Visibility::Public {
+                                self.interfaces[source_module.id.0]
+                                    .namespaces
+                                    .insert(submodule.name.clone(), child);
+                            }
                         }
                     }
                     Item::Modified(_)
@@ -2004,14 +2104,18 @@ impl NameResolver {
             } else {
                 self.constructors.insert(symbol, id);
             }
-            if declaration.representation_visibility == Visibility::Public
-                || (declaration.kind == crate::TypeDeclarationKind::Singleton
-                    && declaration.visibility == Visibility::Public)
+            let constructor_visibility = if declaration.kind == crate::TypeDeclarationKind::Singleton {
+                declaration.visibility
+            } else {
+                declaration.representation_visibility
+            };
+            if constructor_visibility != Visibility::Private
             {
-                self.insert_public_value(
+                self.insert_visible_value(
                     module,
                     &declaration.name,
                     symbol,
+                    constructor_visibility,
                     declaration.syntax.span.clone(),
                 );
             }
@@ -2022,10 +2126,15 @@ impl NameResolver {
             declaration.name.clone()
         };
         self.type_names.insert(id, qualified);
-        if declaration.visibility == Visibility::Public {
-            self.interfaces[module.0]
+        if declaration.visibility != Visibility::Private {
+            self.package_interfaces[module.0]
                 .types
                 .insert(declaration.name.clone(), id);
+            if declaration.visibility == Visibility::Public {
+                self.interfaces[module.0]
+                    .types
+                    .insert(declaration.name.clone(), id);
+            }
         }
         id
     }
@@ -2096,13 +2205,7 @@ impl NameResolver {
                 let Some(imported) = program.imported_module(use_.syntax.id) else {
                     continue;
                 };
-                let interface = if use_.visibility == Visibility::Private
-                    && self.is_ancestor(imported, module.id)
-                {
-                    self.local_interface(imported)
-                } else {
-                    self.interfaces[imported.0].clone()
-                };
+                let interface = self.visible_interface(module.id, imported, use_.visibility);
                 match self.use_kind(use_) {
                     UseKind::Dotted => {}
                     UseKind::Glob => {
@@ -2219,6 +2322,23 @@ impl NameResolver {
         }
     }
 
+    fn insert_visible_value(
+        &mut self,
+        module: ModuleId,
+        name: &str,
+        symbol: SymbolId,
+        visibility: Visibility,
+        span: Span,
+    ) {
+        self.package_interfaces[module.0]
+            .values
+            .insert(name.to_owned(), symbol);
+        if visibility != Visibility::Public {
+            return;
+        }
+        self.insert_public_value(module, name, symbol, span);
+    }
+
     fn insert_public_value(&mut self, module: ModuleId, name: &str, symbol: SymbolId, span: Span) {
         if self.interfaces[module.0]
             .values
@@ -2250,6 +2370,53 @@ impl NameResolver {
         false
     }
 
+    fn same_package(&self, left: ModuleId, right: ModuleId) -> bool {
+        self.module_packages[left.0]
+            .zip(self.module_packages[right.0])
+            .is_some_and(|(left, right)| left == right)
+    }
+
+    fn representation_visible(&self, id: TypeId, from: ModuleId) -> bool {
+        let declaration = &self.type_declarations[&id];
+        let visibility = if declaration.kind == crate::TypeDeclarationKind::Singleton {
+            declaration.visibility
+        } else {
+            declaration.representation_visibility
+        };
+        let Some(defining) = self.type_modules.get(&id).copied() else {
+            return false;
+        };
+        visibility == Visibility::Public
+            || (visibility == Visibility::Package && self.same_package(defining, from))
+            || defining == from
+            || self.is_ancestor(defining, from)
+    }
+
+    fn visible_interface(
+        &self,
+        importing: ModuleId,
+        imported: ModuleId,
+        import_visibility: Visibility,
+    ) -> Interface {
+        if import_visibility == Visibility::Public {
+            self.interfaces[imported.0].clone()
+        } else if self.is_ancestor(imported, importing) {
+            self.local_interface(imported)
+        } else if self.same_package(importing, imported) {
+            self.package_interfaces[imported.0].clone()
+        } else {
+            self.interfaces[imported.0].clone()
+        }
+    }
+
+    fn qualified_interface(&self, module: ModuleId) -> &Interface {
+        if self.same_package(self.current_module, module) {
+            &self.package_interfaces[module.0]
+        } else {
+            &self.interfaces[module.0]
+        }
+    }
+
     fn install_import(&mut self, declaration: &UseDeclaration) {
         let Some(imported) = self
             .imported_module_ids
@@ -2258,13 +2425,11 @@ impl NameResolver {
         else {
             return;
         };
-        let interface = if declaration.visibility == Visibility::Private
-            && self.is_ancestor(imported, self.current_module)
-        {
-            self.local_interface(imported)
-        } else {
-            self.interfaces[imported.0].clone()
-        };
+        let interface = self.visible_interface(
+            self.current_module,
+            imported,
+            declaration.visibility,
+        );
         if self.use_kind(declaration) == UseKind::Glob {
             self.record_private_glob_items(imported, declaration, &interface);
         }
@@ -2813,8 +2978,8 @@ impl NameResolver {
         }
         if let Some(underlying) = &declaration.underlying {
             self.resolve_type(underlying);
-            if declaration.representation_visibility == Visibility::Public {
-                self.validate_public_representation(underlying);
+            if declaration.representation_visibility != Visibility::Private {
+                self.validate_representation(underlying, declaration.representation_visibility);
             }
         }
         self.pop_type_parameter_scope();
@@ -2950,7 +3115,7 @@ impl NameResolver {
                 for member in &declaration.members {
                     self.resolve_type(&member.annotation);
                     if declaration.visibility == Visibility::Public {
-                        self.validate_public_representation(&member.annotation);
+                        self.validate_representation(&member.annotation, Visibility::Public);
                     }
                     let Some(default) = &member.default else {
                         continue;
@@ -3492,7 +3657,7 @@ impl NameResolver {
                     && let Some(module) = definition_module
                         .map(ModuleId)
                         .or_else(|| self.lookup_namespace(&namespace))
-                    && let Some(symbol) = self.interfaces[module.0].values.get(&item).copied()
+                    && let Some(symbol) = self.qualified_interface(module).values.get(&item).copied()
                 {
                     self.symbols.insert(value.syntax.id, symbol);
                 } else {
@@ -3964,9 +4129,9 @@ impl NameResolver {
                         self.namespace_references.insert(*syntax_id, current);
                         segment_module = self.module_parents.get(&current).copied();
                     }
-                    if let Some(symbol) = self.interfaces[module.0].values.get(&item).copied() {
+                    if let Some(symbol) = self.qualified_interface(module).values.get(&item).copied() {
                         self.symbols.insert(access.syntax.id, symbol);
-                    } else if self.interfaces[module.0].macros.contains_key(&item) {
+                    } else if self.qualified_interface(module).macros.contains_key(&item) {
                         self.diagnostics.push(Diagnostic::new(
                             access.syntax.span.clone(),
                             format!("macro `{item}` must be invoked"),
@@ -4118,7 +4283,7 @@ impl NameResolver {
                                 .copied()
                         })
                         .or_else(|| self.lookup_namespace(namespace))
-                        .and_then(|module| self.interfaces[module.0].types.get(&named.name))
+                        .and_then(|module| self.qualified_interface(module).types.get(&named.name))
                         .copied()
                 } else {
                     named
@@ -4196,7 +4361,7 @@ impl NameResolver {
         let resolved = if let Some(namespace) = &name.namespace {
             self.lookup_namespace(namespace)
                 .as_ref()
-                .and_then(|module| self.interfaces[module.0].traits.get(&name.name))
+                .and_then(|module| self.qualified_interface(*module).traits.get(&name.name))
                 .copied()
         } else {
             self.declared_traits[self.current_module.0]
@@ -4236,7 +4401,7 @@ impl NameResolver {
                 let (namespace, name, _, _) = qualified_access_path(access)?;
                 self.lookup_namespace(&namespace)
                     .as_ref()
-                    .and_then(|module| self.interfaces[module.0].traits.get(&name))
+                    .and_then(|module| self.qualified_interface(*module).traits.get(&name))
                     .copied()
             }
             _ => None,
@@ -4313,46 +4478,53 @@ impl NameResolver {
         }
     }
 
-    fn validate_public_representation(&mut self, ty: &Type) {
+    fn validate_representation(&mut self, ty: &Type, required: Visibility) {
         match ty {
             Type::Named(named) => {
                 if self.type_parameters.contains_key(&named.syntax.id) {
                     return;
                 }
                 if let Some(id) = self.named_types.get(&named.syntax.id).copied()
-                    && self.type_declarations[&id].visibility != Visibility::Public
+                    && !self.type_declarations[&id].visibility.meets(required)
                 {
                     self.diagnostics.push(Diagnostic::new(
                         named.syntax.span.clone(),
-                        format!(
-                            "public representation references private type `{}`",
-                            named.name
-                        ),
+                        if required == Visibility::Public {
+                            format!(
+                                "public representation references private type `{}`",
+                                named.name
+                            )
+                        } else {
+                            format!(
+                                "package representation references private type `{}`",
+                                named.name
+                            )
+                        },
                     ));
                 }
             }
             Type::Product(product) => {
                 for element in &product.elements {
-                    self.validate_public_representation(&element.ty);
+                    self.validate_representation(&element.ty, required);
                 }
             }
             Type::Sum(sum) => {
                 for alternative in &sum.alternatives {
-                    self.validate_public_representation(alternative);
+                    self.validate_representation(alternative, required);
                 }
             }
             Type::Function(function) => {
-                self.validate_public_representation(&function.parameter);
+                self.validate_representation(&function.parameter, required);
                 for resource in &function.effects.resources {
-                    self.validate_public_representation(resource);
+                    self.validate_representation(resource, required);
                 }
-                self.validate_public_representation(&function.result);
+                self.validate_representation(&function.result, required);
             }
             Type::Application(application) => {
-                self.validate_public_representation(&application.callee);
-                self.validate_public_representation(&application.argument);
+                self.validate_representation(&application.callee, required);
+                self.validate_representation(&application.argument, required);
             }
-            Type::Repeated(repeated) => self.validate_public_representation(&repeated.element),
+            Type::Repeated(repeated) => self.validate_representation(&repeated.element, required),
             Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
         }
     }
@@ -4545,13 +4717,7 @@ impl NameResolver {
                             pattern.syntax.span.clone(),
                             format!("`{}` is not a represented nominal type", pattern.name),
                         ));
-                    } else if declaration.kind != crate::TypeDeclarationKind::Singleton
-                        && declaration.representation_visibility != Visibility::Public
-                        && self.type_modules.get(&id).copied() != Some(self.current_module)
-                        && !self
-                            .type_modules
-                            .get(&id)
-                            .is_some_and(|module| self.is_ancestor(*module, self.current_module))
+                    } else if !self.representation_visible(id, self.current_module)
                     {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
@@ -4723,7 +4889,7 @@ impl NameResolver {
                             .copied()
                     })
                     .or_else(|| self.lookup_namespace(&namespace))
-                    .and_then(|module| self.interfaces[module.0].macros.get(&item))
+                    .and_then(|module| self.qualified_interface(module).macros.get(&item))
                     .cloned()
             }
             _ => None,

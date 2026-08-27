@@ -48,6 +48,13 @@ per-package dependency aliases from the resolved graph. It cannot be combined
 with a positional input or `--module-root`, `--package-root`, or
 `--package-name`.
 
+Package manifests also enable package-scoped visibility. `pub(package)` exposes
+a declaration to every module owned by the same canonical Binder package while
+keeping it out of dependency-facing interfaces. `pub(repr(package))` keeps a
+type name public but limits construction, destructuring, and representation
+access to its package. Standalone source checking rejects these forms because
+there is no package identity without a Binder graph.
+
 ## Running
 
 `stpl run` runs a source file without leaving a compiled executable next to

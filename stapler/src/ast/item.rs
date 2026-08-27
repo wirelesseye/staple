@@ -92,7 +92,9 @@ pub struct VisibilitySplice {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VisibilityKind {
     Private,
+    Package,
     Public,
+    PublicReprPackage,
     PublicRepr,
 }
 
@@ -146,7 +148,19 @@ pub struct Submodule {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Visibility {
     Private,
+    Package,
     Public,
+}
+
+impl Visibility {
+    pub fn meets(self, required: Self) -> bool {
+        let rank = |visibility| match visibility {
+            Self::Private => 0,
+            Self::Package => 1,
+            Self::Public => 2,
+        };
+        rank(self) >= rank(required)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

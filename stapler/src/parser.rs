@@ -323,7 +323,9 @@ impl Grammar {
             while self.at(TokenKind::At) {
                 self.parse_modifier_invocation().ok()?;
             }
-            self.eat(TokenKind::Pub);
+            if self.eat(TokenKind::Pub) {
+                self.parse_visibility_after_pub().ok()?;
+            }
             let mod_token = self.expect(TokenKind::Mod, "expected `mod`").ok()?;
             let next = self.next_non_trivia(self.position);
             let newline = self.source[mod_token.span.end
@@ -362,7 +364,11 @@ impl Grammar {
             modifiers.push(self.parse_modifier_invocation()?);
         }
         let visibility = if self.eat(TokenKind::Pub) {
-            Visibility::Public
+            let (visibility, representation, _) = self.parse_visibility_after_pub()?;
+            if representation != Visibility::Private {
+                return Err(self.error("representation visibility cannot modify a module"));
+            }
+            visibility
         } else {
             Visibility::Private
         };
@@ -435,34 +441,19 @@ impl Grammar {
                 item,
             }));
         }
-        let visibility = if self.eat(TokenKind::Pub) {
-            Visibility::Public
+        let (visibility, representation_visibility, visibility_kind) = if self.eat(TokenKind::Pub) {
+            self.parse_visibility_after_pub()?
         } else {
-            Visibility::Private
+            (
+                Visibility::Private,
+                Visibility::Private,
+                VisibilityKind::Private,
+            )
         };
-        let representation_visibility =
-            if visibility == Visibility::Public && self.eat(TokenKind::LParen) {
-                let modifier = self.expect(
-                    TokenKind::Identifier,
-                    "expected `repr` in visibility modifier",
-                )?;
-                if modifier.text != "repr" {
-                    return Err(self.error("expected `repr` in visibility modifier"));
-                }
-                self.expect(TokenKind::RParen, "expected `)` after `repr`")?;
-                Visibility::Public
-            } else {
-                Visibility::Private
-            };
-        let visibility_syntax = if representation_visibility == Visibility::Public {
+        let visibility_syntax = if visibility_kind != VisibilityKind::Private {
             Some(VisibilitySyntax {
                 syntax: self.syntax(item_start),
-                kind: VisibilityKind::PublicRepr,
-            })
-        } else if visibility == Visibility::Public {
-            Some(VisibilitySyntax {
-                syntax: self.syntax(item_start),
-                kind: VisibilityKind::Public,
+                kind: visibility_kind,
             })
         } else {
             None
@@ -482,8 +473,8 @@ impl Grammar {
                 expression,
             }));
         }
-        if representation_visibility == Visibility::Public && self.peek() != Some(TokenKind::Type) {
-            return Err(self.error("`pub(repr)` may only modify a type declaration"));
+        if representation_visibility != Visibility::Private && self.peek() != Some(TokenKind::Type) {
+            return Err(self.error("representation visibility may only modify a type declaration"));
         }
         let item = match self.peek() {
             Some(TokenKind::Extern) => self
@@ -503,6 +494,42 @@ impl Grammar {
         };
         self.newline_terminates_expression = previous;
         item
+    }
+
+    fn parse_visibility_after_pub(
+        &mut self,
+    ) -> Result<(Visibility, Visibility, VisibilityKind), ParseError> {
+        if !self.eat(TokenKind::LParen) {
+            return Ok((
+                Visibility::Public,
+                Visibility::Private,
+                VisibilityKind::Public,
+            ));
+        }
+        if self.eat(TokenKind::Package) {
+            self.expect(TokenKind::RParen, "expected `)` after `package`")?;
+            return Ok((
+                Visibility::Package,
+                Visibility::Private,
+                VisibilityKind::Package,
+            ));
+        }
+        let modifier = self.expect(
+            TokenKind::Identifier,
+            "expected `package` or `repr` in visibility modifier",
+        )?;
+        if modifier.text != "repr" {
+            return Err(self.error("expected `package` or `repr` in visibility modifier"));
+        }
+        let (representation, kind) = if self.eat(TokenKind::LParen) {
+            self.expect(TokenKind::Package, "expected `package` after `repr(`")?;
+            self.expect(TokenKind::RParen, "expected `)` after `package`")?;
+            (Visibility::Package, VisibilityKind::PublicReprPackage)
+        } else {
+            (Visibility::Public, VisibilityKind::PublicRepr)
+        };
+        self.expect(TokenKind::RParen, "expected `)` after visibility modifier")?;
+        Ok((Visibility::Public, representation, kind))
     }
 
     fn parse_modifier_invocation(&mut self) -> Result<ModifierInvocation, ParseError> {
@@ -1427,13 +1454,13 @@ impl Grammar {
             self.any_newline_terminates_type = previous_any;
             (kind, Some(underlying?))
         };
-        if representation_visibility == Visibility::Public
+        if representation_visibility != Visibility::Private
             && !matches!(
                 kind,
                 TypeDeclarationKind::Distinct | TypeDeclarationKind::Singleton
             )
         {
-            return Err(self.error("`pub(repr)` requires a represented distinct type"));
+            return Err(self.error("representation visibility requires a represented distinct type"));
         }
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
@@ -2815,19 +2842,7 @@ impl Grammar {
             Some(TokenKind::Pub) => {
                 let start = self.position;
                 self.expect(TokenKind::Pub, "expected `pub`")?;
-                let kind = if self.eat(TokenKind::LParen) {
-                    let repr = self.expect(
-                        TokenKind::Identifier,
-                        "expected `repr` in visibility argument",
-                    )?;
-                    if repr.text != "repr" {
-                        return Err(self.error("expected `repr` in visibility argument"));
-                    }
-                    self.expect(TokenKind::RParen, "expected `)` after `repr`")?;
-                    VisibilityKind::PublicRepr
-                } else {
-                    VisibilityKind::Public
-                };
+                let (_, _, kind) = self.parse_visibility_after_pub()?;
                 Ok(Expression::VisibilityArgument(VisibilitySyntax {
                     syntax: self.syntax(start),
                     kind,

@@ -4,19 +4,25 @@ use std.syntax.*
 
 def typegroup_public_visibility: Visibility -> Visibility = visibility => match visibility {
     Private => Private,
+    Package => Package,
     Public => Public,
+    PublicReprPackage => Public,
     PublicRepr => Public,
 }
 
 def typegroup_variant_visibility: Visibility -> Visibility = visibility => match visibility {
     Private => PublicRepr,
+    Package => PublicReprPackage,
     Public => Public,
+    PublicReprPackage => PublicReprPackage,
     PublicRepr => PublicRepr,
 }
 
 def typegroup_visibility_syntax: Visibility -> Syntax = visibility => match visibility {
     Private => quote {},
+    Package => quote { pub(package) },
     Public => quote { pub },
+    PublicReprPackage => quote { pub(repr(package)) },
     PublicRepr => quote { pub(repr) },
 }
 

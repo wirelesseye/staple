@@ -35,6 +35,7 @@ impl Fixture {
         let source = with_syntax_imports(source);
         let source = if source.trim_start().starts_with("mod\n")
             || source.trim_start().starts_with("pub mod\n")
+            || source.trim_start().starts_with("pub(package) mod\n")
         {
             source
         } else {
@@ -2200,6 +2201,131 @@ fn resolves_recursive_binder_dependencies_with_per_package_aliases() {
         .check(resolved)
         .map_err(format_diagnostics)
         .expect("transitive dependency should type-check");
+}
+
+#[test]
+fn resolves_package_visible_items_within_a_binder_package() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        "use package.bridge.answer\nlet result: I32 = answer\n",
+    );
+    fixture.write(
+        "src/bridge.sta",
+        "pub(package) mod\npub(package) use package.internal.answer\n",
+    );
+    fixture.write("src/internal.sta", "pub(package) mod\npub(package) let answer: I32 = 42\n");
+    fs::write(
+        fixture.root.join("binder.kdl"),
+        "package \"app\" { root \"src/main.sta\" }\n",
+    )
+    .unwrap();
+
+    let graph = binder::load_package_graph(&fixture.root.join("binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("package-visible modules should load within their package");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("package re-export should resolve within its package");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("package-visible value should type-check");
+}
+
+#[test]
+fn rejects_package_visibility_without_a_binder_manifest() {
+    let fixture = Fixture::new();
+    fixture.write("main.sta", "pub(package) let secret = 42\nsecret\n");
+    let error = fixture.compile().expect_err("standalone package visibility must fail");
+    assert!(error.contains("package visibility requires a Binder manifest"));
+}
+
+#[test]
+fn rejects_package_visible_dependency_modules() {
+    let fixture = Fixture::new();
+    fixture.write("app/src/main.sta", "use lib.internal.secret\nsecret\n");
+    fixture.write("lib/src/internal.sta", "pub(package) mod\npub(package) let secret = 42\n");
+    fs::write(
+        fixture.root.join("app/binder.kdl"),
+        "package \"app\" { dependencies { lib path=\"../lib\" } }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("lib/binder.kdl"),
+        "package \"lib\" { kind \"library\" }\n",
+    )
+    .unwrap();
+
+    let graph = binder::load_package_graph(&fixture.root.join("app/binder.kdl")).unwrap();
+    let error = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect_err("dependency package modules must not expose package visibility");
+    assert!(error.to_string().contains("private"));
+}
+
+#[test]
+fn rejects_promoting_a_package_visible_reexport() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        "pub use package.internal.secret\nlet local = package.internal.secret\n",
+    );
+    fixture.write(
+        "src/internal.sta",
+        "pub(package) mod\npub(package) let secret = 42\n",
+    );
+    fs::write(
+        fixture.root.join("binder.kdl"),
+        "package \"app\" { root \"src/main.sta\" }\n",
+    )
+    .unwrap();
+    let graph = binder::load_package_graph(&fixture.root.join("binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .unwrap();
+    let error = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("public use must not promote package-visible items");
+    assert!(format_diagnostics(error).contains("secret"));
+}
+
+#[test]
+fn package_representation_is_usable_locally_but_not_by_a_dependency() {
+    let fixture = Fixture::new();
+    fixture.write("app/src/main.sta", "let shared: lib.Shared = lib.Shared 42\n");
+    fixture.write(
+        "lib/src/root.sta",
+        "pub(repr(package)) type Shared = I32\nlet local: Shared = Shared 1\n",
+    );
+    fs::write(
+        fixture.root.join("app/binder.kdl"),
+        "package \"app\" { dependencies { lib path=\"../lib\" } }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("lib/binder.kdl"),
+        "package \"lib\" { kind \"library\"; root \"src/root.sta\" }\n",
+    )
+    .unwrap();
+    let graph = binder::load_package_graph(&fixture.root.join("app/binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .unwrap();
+    let error = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("dependency must not construct a package-represented type");
+    assert!(format_diagnostics(error).contains("Shared"));
 }
 
 #[test]

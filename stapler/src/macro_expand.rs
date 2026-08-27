@@ -904,6 +904,75 @@ impl MacroExpander {
             }
         }
 
+        let mut package_macros = public_macros.clone();
+        for definition in definitions
+            .values()
+            .filter(|definition| definition.declaration.visibility == Visibility::Package)
+        {
+            package_macros
+                .entry((definition.key.module, definition.key.name.clone(), definition.key.modifier))
+                .or_default()
+                .push(definition.key.clone());
+        }
+        let mut package_helpers = public_helpers.clone();
+        for module in program.modules() {
+            for (name, helper) in &scopes[module.id.0].helpers {
+                if helper.binding.visibility == Visibility::Package {
+                    package_helpers.insert((module.id, name.clone()), helper.clone());
+                }
+            }
+        }
+        let mut package_namespaces = public_namespaces.clone();
+        for module in program.modules() {
+            for item in &module.syntax.items {
+                if let Item::Submodule(submodule) = item
+                    && submodule.visibility == Visibility::Package
+                    && let Some(child) = program.child_module(submodule.syntax.id)
+                {
+                    package_namespaces.insert((module.id, submodule.name.clone()), child);
+                }
+            }
+        }
+        loop {
+            let previous_macros = package_macros.clone();
+            let previous_helpers = package_helpers.clone();
+            let previous_namespaces = package_namespaces.clone();
+            let mut changed = false;
+            for source_module in program.modules() {
+                for item in &source_module.syntax.items {
+                    let Item::UseDeclaration(use_) = item else { continue };
+                    if use_.visibility != Visibility::Package { continue; }
+                    let Some(imported) = program.imported_module(use_.syntax.id) else { continue };
+                    if !macro_same_package(program, source_module.id, imported) { continue; }
+                    let names = match provisional_use_kind(program, use_) {
+                        UseKind::Dotted | UseKind::Namespace => Vec::new(),
+                        UseKind::Glob => previous_macros.keys()
+                            .filter(|(module, _, _)| *module == imported)
+                            .map(|(_, name, _)| (name.clone(), name.clone()))
+                            .chain(previous_helpers.keys().filter(|(module, _)| *module == imported).map(|(_, name)| (name.clone(), name.clone())))
+                            .chain(previous_namespaces.keys().filter(|(module, _)| *module == imported).map(|(_, name)| (name.clone(), name.clone())))
+                            .collect(),
+                        UseKind::Selected(names) => names.iter().map(|name| (name.clone(), name.clone())).collect(),
+                        UseKind::Renamed { item, alias } => vec![(item.clone(), alias.clone())],
+                    };
+                    for (item, alias) in names {
+                        for modifier in [false, true] {
+                            if let Some(keys) = previous_macros.get(&(imported, item.clone(), modifier)) {
+                                changed |= package_macros.insert((source_module.id, alias.clone(), modifier), keys.clone()).is_none();
+                            }
+                        }
+                        if let Some(helper) = previous_helpers.get(&(imported, item.clone())) {
+                            changed |= package_helpers.insert((source_module.id, alias.clone()), helper.clone()).is_none();
+                        }
+                        if let Some(namespace) = previous_namespaces.get(&(imported, item)) {
+                            changed |= package_namespaces.insert((source_module.id, alias), *namespace).is_none();
+                        }
+                    }
+                }
+            }
+            if !changed { break; }
+        }
+
         let mut all_macros = HashMap::<(ModuleId, String, bool), Vec<MacroKey>>::new();
         for definition in definitions.values() {
             all_macros
@@ -998,6 +1067,10 @@ impl MacroExpander {
                     && macro_is_ancestor(program, imported, source_module.id)
                 {
                     (&all_macros, &all_helpers, &all_namespaces)
+                } else if use_.visibility != Visibility::Public
+                    && macro_same_package(program, imported, source_module.id)
+                {
+                    (&package_macros, &package_helpers, &package_namespaces)
                 } else {
                     (&public_macros, &public_helpers, &public_namespaces)
                 };
@@ -1538,7 +1611,7 @@ impl MacroExpander {
         let Some(keys) = self.resolve_macro(module, head) else {
             self.diagnostics.push(Diagnostic::new(
                 invocation.syntax.span.clone(),
-                "a leading `pub` or `pub(repr)` must prefix a macro whose first parameter is `MacroCallVisibility`",
+                "a visibility prefix must precede a macro whose first parameter is `MacroCallVisibility`",
             ));
             return None;
         };
@@ -2565,7 +2638,9 @@ impl MacroExpander {
                     | "Bracketed"
                     | "Braced"
                     | "Private"
+                    | "Package"
                     | "Public"
+                    | "PublicReprPackage"
                     | "PublicRepr"
             )
         {
@@ -3194,7 +3269,9 @@ impl MacroExpander {
                 }
                 if let Some(kind) = match name.name.as_str() {
                     "Private" => Some(VisibilityKind::Private),
+                    "Package" => Some(VisibilityKind::Package),
                     "Public" => Some(VisibilityKind::Public),
+                    "PublicReprPackage" => Some(VisibilityKind::PublicReprPackage),
                     "PublicRepr" => Some(VisibilityKind::PublicRepr),
                     _ => None,
                 } {
@@ -5180,6 +5257,13 @@ fn macro_is_ancestor(program: &Program, ancestor: ModuleId, mut module: ModuleId
     false
 }
 
+fn macro_same_package(program: &Program, left: ModuleId, right: ModuleId) -> bool {
+    program
+        .package_of(left)
+        .zip(program.package_of(right))
+        .is_some_and(|(left, right)| left == right)
+}
+
 fn expression_arity(expression: &Expression) -> usize {
     match expression {
         Expression::Function(function) => 1 + expression_arity(&function.body),
@@ -6505,7 +6589,9 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Visibility"
                 | "MacroCallVisibility"
                 | "Private"
+                | "Package"
                 | "Public"
+                | "PublicReprPackage"
                 | "PublicRepr"
         ),
         Type::Function(function) => {
@@ -6863,7 +6949,10 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
         }
         Pattern::Binding(binding) => {
             if let Value::Syntax(SyntaxValue::Visibility(visibility)) = &value
-                && matches!(binding.name.as_str(), "Private" | "Public" | "PublicRepr")
+                && matches!(
+                    binding.name.as_str(),
+                    "Private" | "Package" | "Public" | "PublicReprPackage" | "PublicRepr"
+                )
             {
                 return visibility_pattern_matches(&binding.name, visibility.kind);
             }
@@ -7225,7 +7314,9 @@ fn visibility_pattern_matches(name: &str, kind: VisibilityKind) -> bool {
     matches!(
         (name, kind),
         ("Private", VisibilityKind::Private)
+            | ("Package", VisibilityKind::Package)
             | ("Public", VisibilityKind::Public)
+            | ("PublicReprPackage", VisibilityKind::PublicReprPackage)
             | ("PublicRepr", VisibilityKind::PublicRepr)
     )
 }
@@ -8143,25 +8234,36 @@ fn apply_visibility_to_item(
     if let Item::Modified(modified) = item {
         return apply_visibility_to_item(&mut modified.item, kind, span, diagnostics);
     }
-    let public = if kind == VisibilityKind::Private {
-        Visibility::Private
-    } else {
-        Visibility::Public
+    let name_visibility = match kind {
+        VisibilityKind::Private => Visibility::Private,
+        VisibilityKind::Package => Visibility::Package,
+        VisibilityKind::Public
+        | VisibilityKind::PublicReprPackage
+        | VisibilityKind::PublicRepr => Visibility::Public,
     };
+    let representation_visibility = match kind {
+        VisibilityKind::PublicReprPackage => Visibility::Package,
+        VisibilityKind::PublicRepr => Visibility::Public,
+        _ => Visibility::Private,
+    };
+    let representation_modifier = matches!(
+        kind,
+        VisibilityKind::PublicRepr | VisibilityKind::PublicReprPackage
+    );
     match item {
-        Item::ExternBlock(block) if kind != VisibilityKind::PublicRepr => block.visibility = public,
-        Item::Submodule(submodule) => submodule.visibility = public,
-        Item::UseDeclaration(declaration) if kind != VisibilityKind::PublicRepr => {
-            declaration.visibility = public
+        Item::ExternBlock(block) if !representation_modifier => {
+            block.visibility = name_visibility
+        }
+        Item::Submodule(submodule) if !representation_modifier => {
+            submodule.visibility = name_visibility
+        }
+        Item::UseDeclaration(declaration) if !representation_modifier => {
+            declaration.visibility = name_visibility
         }
         Item::TypeDeclaration(declaration) => {
-            declaration.visibility = public;
-            declaration.representation_visibility = if kind == VisibilityKind::PublicRepr {
-                Visibility::Public
-            } else {
-                Visibility::Private
-            };
-            if kind == VisibilityKind::PublicRepr
+            declaration.visibility = name_visibility;
+            declaration.representation_visibility = representation_visibility;
+            if representation_modifier
                 && !matches!(
                     declaration.kind,
                     crate::TypeDeclarationKind::Distinct | crate::TypeDeclarationKind::Singleton
@@ -8169,29 +8271,41 @@ fn apply_visibility_to_item(
             {
                 diagnostics.push(Diagnostic::new(
                     span,
-                    "`PublicRepr` visibility requires a represented distinct type",
+                    if kind == VisibilityKind::PublicRepr {
+                        "`PublicRepr` visibility requires a represented distinct type"
+                    } else {
+                        "`PublicReprPackage` visibility requires a represented distinct type"
+                    },
                 ));
                 return None;
             }
         }
-        Item::TraitDeclaration(declaration) if kind != VisibilityKind::PublicRepr => {
-            declaration.visibility = public
+        Item::TraitDeclaration(declaration) if !representation_modifier => {
+            declaration.visibility = name_visibility
         }
         Item::Binding(binding) => {
-            if kind == VisibilityKind::PublicRepr {
+            if representation_modifier {
                 diagnostics.push(Diagnostic::new(
                     span,
-                    "`PublicRepr` visibility may only be applied to a represented distinct type",
+                    if kind == VisibilityKind::PublicRepr {
+                        "`PublicRepr` visibility may only be applied to a represented distinct type"
+                    } else {
+                        "`PublicReprPackage` visibility may only be applied to a represented distinct type"
+                    },
                 ));
                 return None;
             }
-            binding.visibility = public;
+            binding.visibility = name_visibility;
         }
         _ => {
             diagnostics.push(Diagnostic::new(
                 span,
-                if kind == VisibilityKind::PublicRepr {
-                    "`PublicRepr` visibility may only be applied to a represented distinct type"
+                if representation_modifier {
+                    if kind == VisibilityKind::PublicRepr {
+                        "`PublicRepr` visibility may only be applied to a represented distinct type"
+                    } else {
+                        "`PublicReprPackage` visibility may only be applied to a represented distinct type"
+                    }
                 } else {
                     "visibility may only be spliced onto `let`, `def`, `type`, `extern`, or `trait` declarations"
                 },

@@ -2875,6 +2875,23 @@ including through namespace, selected, renamed, or glob imports. Every named
 type directly referenced by a public representation must also be public.
 `pub(repr)` is rejected on aliases and opaque declarations.
 
+Binder packages add a middle visibility level between private and public:
+
+```staple
+pub(package) def internal_helper = 42
+pub(repr(package)) type Shared = (value: I32)
+```
+
+`pub(package)` names are available from any module with the same canonical
+Binder package identity. `pub(repr(package))` makes the type name public while
+allowing representation access only inside that package. A package-visible
+re-export uses `pub(package) use`; ordinary `pub use` cannot promote a
+package-visible declaration into an external interface. Package visibility is
+rejected when Stapler is run without a Binder manifest. Thus visibility forms
+the lattice `private < package < public`: public representations may reference
+only public types, while package representations may also reference
+package-visible types.
+
 Represented types, aliases, and explicitly opaque declarations may introduce
 compile-time parameters directly after the type name, juxtaposed rather than
 bracketed as with generic functions:

@@ -901,8 +901,17 @@ impl<'a> Classifier<'a> {
 
     fn visibility(&mut self, visibility: &VisibilitySyntax) {
         self.mark_first(&visibility.syntax, "pub", KEYWORD, 0, 1);
-        if visibility.kind == VisibilityKind::PublicRepr {
+        if matches!(
+            visibility.kind,
+            VisibilityKind::PublicRepr | VisibilityKind::PublicReprPackage
+        ) {
             self.mark_last(&visibility.syntax, "repr", KEYWORD, 0, 1);
+        }
+        if matches!(
+            visibility.kind,
+            VisibilityKind::Package | VisibilityKind::PublicReprPackage
+        ) {
+            self.mark_last(&visibility.syntax, "package", KEYWORD, 0, 1);
         }
     }
 

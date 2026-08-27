@@ -93,6 +93,7 @@ fn submodule_header(submodule: &Submodule) -> String {
     } else {
         let visibility = match submodule.visibility {
             Visibility::Public => "pub ",
+            Visibility::Package => "pub(package) ",
             Visibility::Private => "",
         };
         format!("{visibility}mod {} {{", submodule.name)

@@ -97,12 +97,16 @@ pub type alias Item = ModifiedItem | TypeDeclarationItem | UnstructuredItem
 /// marker whose value is usable as `Visibility` in compile-time code.
 /// Private visibility syntax.
 pub type Private
+/// Package-scoped visibility syntax.
+pub type Package
 /// Public visibility syntax.
 pub type Public
+/// Public visibility with package-scoped representation access.
+pub type PublicReprPackage
 /// Public visibility with representation access.
 pub type PublicRepr
 /// The syntax category for visibility markers.
-pub type alias Visibility = Private | Public | PublicRepr
+pub type alias Visibility = Private | Package | Public | PublicReprPackage | PublicRepr
 /// Visibility supplied by a visibility-aware macro invocation.
 pub type MacroCallVisibility = opaque
 
