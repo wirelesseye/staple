@@ -6,7 +6,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use stapler::{
     CodeGenerator, Diagnostic, NameResolver, Program, ProgramLoader, TypeChecker, TypedModule,
+    expand_macros,
 };
+
+mod expansion_render;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitKind {
@@ -20,6 +23,7 @@ enum Mode {
     Compile,
     Check,
     Run,
+    Expand,
 }
 
 #[derive(Debug)]
@@ -74,6 +78,9 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
         if command == "check" {
             return Ok(Outcome::Completed(Some(format!("{}\n", check_usage()))));
         }
+        if command == "expand" {
+            return Ok(Outcome::Completed(Some(format!("{}\n", expand_usage()))));
+        }
     }
     let options = parse_options(arguments)?;
     let mut loader = match &options.standard_library {
@@ -89,19 +96,32 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
     if let Some(name) = &options.package_name {
         loader = loader.with_package_name(name);
     }
-    let module = if options.input == "-" {
+    let program = if options.input == "-" {
         let source = read_source(&options.input)?;
         let root = match &options.module_root {
             Some(root) => root.clone(),
             None => std::env::current_dir()
                 .map_err(|error| format!("could not determine current directory: {error}"))?,
         };
-        let program = loader.load_source(&source, &root)?;
-        compile_program(program)?
+        loader.load_source(&source, &root)?
     } else {
-        let program = loader.load_path(Path::new(&options.input))?;
-        compile_program(program)?
+        loader.load_path(Path::new(&options.input))?
     };
+
+    if options.mode == Mode::Expand {
+        let expanded = expand_macros(program).map_err(format_diagnostics)?;
+        let rendered = expansion_render::render_module(&expanded);
+        return match &options.output {
+            Some(output) => {
+                std::fs::write(output, rendered)
+                    .map_err(|error| format!("could not write `{}`: {error}", output.display()))?;
+                Ok(Outcome::Completed(None))
+            }
+            None => Ok(Outcome::Completed(Some(rendered))),
+        };
+    }
+
+    let module = compile_program(program)?;
     if options.mode == Mode::Check {
         return Ok(Outcome::Completed(None));
     }
@@ -169,6 +189,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         Some("check") => {
             arguments.next();
             Mode::Check
+        }
+        Some("expand") => {
+            arguments.next();
+            Mode::Expand
         }
         _ => Mode::Compile,
     };
@@ -274,6 +298,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             let usage = match options.mode {
                 Mode::Run => run_usage(),
                 Mode::Check => check_usage(),
+                Mode::Expand => expand_usage(),
                 Mode::Compile => usage(),
             };
             return Err(format!("unknown option `{text}`\n{usage}"));
@@ -285,10 +310,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
                 run_usage()
             ));
         } else {
-            return Err(if options.mode == Mode::Check {
-                check_usage()
-            } else {
-                usage()
+            return Err(match options.mode {
+                Mode::Check => check_usage(),
+                Mode::Expand => expand_usage(),
+                _ => usage(),
             });
         }
     }
@@ -297,6 +322,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         return Err(match options.mode {
             Mode::Run => run_usage(),
             Mode::Check => check_usage(),
+            Mode::Expand => expand_usage(),
             Mode::Compile => usage(),
         });
     }
@@ -329,6 +355,20 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             || !options.libraries.is_empty()
         {
             return Err("linker options are not supported by `stpl check`".to_owned());
+        }
+    }
+    if options.mode == Mode::Expand {
+        if emit_specified {
+            return Err("`--emit` is not supported by `stpl expand`".to_owned());
+        }
+        if options.target.is_some() {
+            return Err("`--target` is not supported by `stpl expand`".to_owned());
+        }
+        if options.linker.is_some()
+            || !options.library_paths.is_empty()
+            || !options.libraries.is_empty()
+        {
+            return Err("linker options are not supported by `stpl expand`".to_owned());
         }
     }
     if options.emit != EmitKind::Executable
@@ -502,6 +542,7 @@ fn usage() -> String {
         "usage: stpl [options] <input.sta>\n",
         "       stpl check [options] <input.sta>\n",
         "       stpl run [options] <input.sta> [-- <arguments>...]\n",
+        "       stpl expand [options] <input.sta>\n",
         "\n",
         "options:\n",
         "  -h, --help                print this help\n",
@@ -555,12 +596,131 @@ fn check_usage() -> String {
     .to_owned()
 }
 
+fn expand_usage() -> String {
+    concat!(
+        "usage: stpl expand [options] <input.sta>\n",
+        "\n",
+        "Prints the entry module's source after macro expansion, without\n",
+        "type-checking it. Analogous to \"Expand macro recursively\".\n",
+        "\n",
+        "options:\n",
+        "  -h, --help                print this help\n",
+        "  -o <path>                 write to a file instead of standard output\n",
+        "  --stdlib <path>           Staple standard-library root\n",
+        "  --module-root <path>      package module directory (default: entry directory)\n",
+        "  --package-root <path>     optional package root module\n",
+        "  --package-name <name>     package name used by tooling\n",
+        "  --                         stop parsing options\n",
+        "  -                          read source from standard input",
+    )
+    .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EmitKind, Mode, Outcome, TemporaryArtifact, compile, parse_options, run};
     use std::ffi::{OsStr, OsString};
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn expand_source(name: &str, source: &str) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "stpl-expand-{name}-{}.sta",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, source).expect("temporary expand source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let outcome = run([
+            "expand".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            path.clone().into_os_string(),
+        ]);
+        let _ = std::fs::remove_file(&path);
+        match outcome.expect("expand should succeed") {
+            Outcome::Completed(Some(text)) => text,
+            other => panic!("expand should print to stdout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_expand_subcommand() {
+        let options = parse_options(["expand".into(), "input.sta".into()])
+            .expect("expand should parse");
+        assert_eq!(options.mode, Mode::Expand);
+        assert_eq!(options.input, OsString::from("input.sta"));
+    }
+
+    #[test]
+    fn expand_help_describes_the_subcommand() {
+        let Outcome::Completed(Some(help)) =
+            run(["expand".into(), "--help".into()]).expect("expand help should succeed")
+        else {
+            panic!("expand help should be printed");
+        };
+        assert!(help.starts_with("usage: stpl expand"));
+        assert!(help.contains("macro expansion"));
+    }
+
+    #[test]
+    fn expand_rejects_emit_option() {
+        let error = parse_options(["expand".into(), "--emit=llvm".into(), "input.sta".into()])
+            .expect_err("expand should reject --emit");
+        assert!(error.contains("`--emit` is not supported by `stpl expand`"));
+    }
+
+    #[test]
+    fn expand_rewrites_a_macro_call_in_a_function_body() {
+        let expanded = expand_source(
+            "body",
+            concat!(
+                "use std.syntax.(quote, Expr)\n",
+                "macro double = value: Expr => quote { ($value) + ($value) }\n",
+                "def main: () -> () = () => {\n",
+                "    let x: I32 = double 21\n",
+                "    ()\n",
+                "}\n",
+            ),
+        );
+        assert!(
+            expanded.contains("let x: I32 = (21) + (21)"),
+            "expected the macro call to be expanded, got:\n{expanded}"
+        );
+        assert!(
+            !expanded.contains("double 21"),
+            "the original macro call should be gone, got:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn expand_rewrites_a_top_level_item_macro() {
+        let expanded = expand_source(
+            "item",
+            concat!(
+                "use std.syntax.(parse_quote, Expr, Item, Sequence)\n",
+                "macro pair: Expr -> Sequence Item = value => parse_quote {\n",
+                "    let first: I32 = $value\n",
+                "    let second: I32 = first + 1\n",
+                "}\n",
+                "pair 41\n",
+            ),
+        );
+        assert!(
+            expanded.contains("let first: I32 = 41"),
+            "expected the splice to be substituted, got:\n{expanded}"
+        );
+        assert!(
+            expanded.contains("let second: I32 = first + 1"),
+            "expected both generated items, got:\n{expanded}"
+        );
+        assert!(
+            !expanded.contains("pair 41"),
+            "the original macro invocation should be gone, got:\n{expanded}"
+        );
+    }
 
     #[test]
     fn requires_exactly_one_input() {

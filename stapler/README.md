@@ -52,6 +52,28 @@ Arguments after `--` are forwarded to the process, although Staple does not yet
 provide a source-level API for reading them. `--stdlib`, `--linker`, `-L`, and
 `-l` are supported; `-o`, `--emit`, and cross-target `--target` are not.
 
+## Expanding macros
+
+`stpl expand` runs macro expansion and prints the entry module's source with
+every macro invocation replaced by what it expands to, without type checking it
+— the analogue of an editor's "expand macro recursively":
+
+```text
+stpl expand examples/macros.sta
+stpl expand -o expanded.sta examples/macros.sta
+```
+
+Without `-o` the result goes to standard output. `--stdlib`, `--module-root`,
+`--package-root`, and `--package-name` are supported; `-o` and `-` (read from
+standard input) work as elsewhere; `--emit`, `--target`, and linker options are
+not accepted.
+
+Output is reconstructed from the expanded syntax tree, so spacing is normalized
+rather than preserved. Three cases still render with placeholders or unexpanded:
+a `parse_quote` that splices a name or type into a declaration
+(`type alias $name = $ty`), a non-wholesale expansion nested inside an
+already-generated node, and macros inside a hand-written inline `mod` block.
+
 ## Standard library
 
 Stapler loads the standard library at compile time. Install the repository copy

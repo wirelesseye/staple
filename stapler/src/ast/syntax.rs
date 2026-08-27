@@ -148,6 +148,34 @@ impl Syntax {
         &self.tokens[self.token_range.clone()]
     }
 
+    /// True when this syntax was produced by macro expansion rather than parsed
+    /// directly from user source. Tooling that reconstructs source (for example
+    /// `stpl expand`) uses this to decide whether a node's own token text
+    /// already reflects the expanded result.
+    pub fn is_generated(&self) -> bool {
+        self.expansion_mark.is_some()
+    }
+
+    /// The half-open range this node occupies inside [`Self::token_stream`].
+    /// Only meaningful relative to another node that [`Self::shares_token_stream`]
+    /// with this one.
+    pub fn token_range(&self) -> Range<usize> {
+        self.token_range.clone()
+    }
+
+    /// The full backing token stream this node is a slice of. Nodes parsed
+    /// together share one stream; nodes from different parses (such as a
+    /// macro expansion spliced into user code) do not.
+    pub fn token_stream(&self) -> &[SyntaxToken] {
+        &self.tokens
+    }
+
+    /// Whether `self` and `other` are slices of the same backing token stream,
+    /// so their [`Self::token_range`]s can be compared.
+    pub fn shares_token_stream(&self, other: &Syntax) -> bool {
+        Arc::ptr_eq(&self.tokens, &other.tokens)
+    }
+
     pub fn compiler() -> Self {
         Self {
             id: SyntaxId::COMPILER,

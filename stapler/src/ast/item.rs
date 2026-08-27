@@ -20,6 +20,32 @@ impl Module {
     }
 }
 
+impl Item {
+    /// The syntax node covering this item, whichever variant it is.
+    pub fn syntax(&self) -> &Syntax {
+        match self {
+            Item::Modified(value) => &value.syntax,
+            Item::VisibilityMacroInvocation(value) => &value.syntax,
+            Item::VisibilitySplice(value) => &value.syntax,
+            Item::RepeatedItemSplice(value) => &value.syntax,
+            Item::UseDeclaration(value) => &value.syntax,
+            Item::Submodule(value) => &value.syntax,
+            Item::ExternBlock(value) => &value.syntax,
+            Item::TypeDeclaration(value) => &value.syntax,
+            Item::MacroDeclaration(value) => &value.syntax,
+            Item::TraitDeclaration(value) => &value.syntax,
+            Item::TraitImplementation(value) => &value.syntax,
+            Item::Binding(value) => &value.syntax,
+            Item::PatternBinding(value) => &value.syntax,
+            Item::Assignment(value) => &value.syntax,
+            Item::Return(value) => &value.syntax,
+            Item::Break(value) => &value.syntax,
+            Item::Continue(value) => &value.syntax,
+            Item::Expression(value) => value.syntax(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Item {

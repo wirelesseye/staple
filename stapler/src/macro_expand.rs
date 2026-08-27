@@ -474,6 +474,24 @@ pub(crate) struct MacroAnalysis {
     pub helpers: Vec<(ModuleId, Binding)>,
 }
 
+/// Expand every macro invocation in `program`, returning the program with its
+/// syntax trees rewritten in place. This is the same expansion pass name
+/// resolution runs, exposed on its own for tooling that wants to inspect the
+/// result (for example `stpl expand`).
+///
+/// Runs on a dedicated thread with a large stack for the same reason
+/// [`crate::NameResolver::resolve_program`] does: expansion is a deep recursive
+/// walk over the whole program, standard library included, and helper
+/// evaluation adds further native-stack nesting.
+pub fn expand_macros(program: Program) -> Result<Program, Vec<Diagnostic>> {
+    std::thread::Builder::new()
+        .stack_size(256 * 1024 * 1024)
+        .spawn(move || expand_program(program).map(|(program, _)| program))
+        .expect("macro expansion thread should spawn")
+        .join()
+        .expect("macro expansion should not panic")
+}
+
 pub(crate) fn expand_program(
     mut program: Program,
 ) -> Result<(Program, MacroAnalysis), Vec<Diagnostic>> {

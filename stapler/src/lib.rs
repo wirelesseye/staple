@@ -13,6 +13,7 @@ mod typecheck;
 
 pub use ast::*;
 pub use codegen::*;
+pub use macro_expand::expand_macros;
 pub use diagnostic::*;
 pub use lexer::lex;
 pub use parser::parse;
