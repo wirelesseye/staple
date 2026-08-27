@@ -358,26 +358,51 @@ impl Collector<'_> {
             Item::VisibilitySplice(value) => self.item(&value.item),
             Item::RepeatedItemSplice(_) => {}
             Item::Submodule(submodule) => {
-                let docs = self
-                    .typed
-                    .resolved()
-                    .program()
-                    .modules()
-                    .iter()
-                    .flat_map(|module| &module.syntax.items)
-                    .find_map(|item| match item {
-                        Item::Submodule(resolved) if resolved.syntax.id == submodule.syntax.id => {
-                            Some(resolved.docs.clone())
-                        }
-                        _ => None,
-                    })
-                    .unwrap_or_else(|| submodule.docs.clone());
-                self.named_with_docs(
-                    &submodule.syntax,
-                    &submodule.name,
-                    format!("mod {}", submodule.name),
-                    docs,
-                );
+                // A `companion` header names the type it extends, so it hovers
+                // as the type declaration rather than as `mod Switch`.
+                let companion_type = submodule.companion.then(|| {
+                    let resolved = self.typed.resolved();
+                    resolved
+                        .program()
+                        .child_module(submodule.syntax.id)
+                        .and_then(|module| resolved.companion_type_for_module(module))
+                });
+                let companion_signature = companion_type
+                    .flatten()
+                    .and_then(|ty| Some((ty, self.type_signature(ty, submodule.syntax.id)?)));
+                if let Some((ty, signature)) = companion_signature {
+                    let docs = self
+                        .typed
+                        .resolved()
+                        .type_declarations()
+                        .get(&ty)
+                        .map(|declaration| declaration.docs.clone())
+                        .unwrap_or_default();
+                    self.named_with_docs(&submodule.syntax, &submodule.name, signature, docs);
+                } else {
+                    let docs = self
+                        .typed
+                        .resolved()
+                        .program()
+                        .modules()
+                        .iter()
+                        .flat_map(|module| &module.syntax.items)
+                        .find_map(|item| match item {
+                            Item::Submodule(resolved)
+                                if resolved.syntax.id == submodule.syntax.id =>
+                            {
+                                Some(resolved.docs.clone())
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| submodule.docs.clone());
+                    self.named_with_docs(
+                        &submodule.syntax,
+                        &submodule.name,
+                        format!("mod {}", submodule.name),
+                        docs,
+                    );
+                }
                 for item in &submodule.module.items {
                     self.item(item);
                 }
@@ -1625,6 +1650,68 @@ mod tests {
             });
         assert_eq!(entry.signature, "type Box = I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
+    }
+
+    #[test]
+    fn companion_header_hovers_the_type_declaration() {
+        let source = concat!(
+            "///A boxed integer.\n",
+            "type Box = I32\n",
+            "companion Box {\n",
+            "    pub def create = () => 1\n",
+            "}\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-companion-header.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let header = source.find("companion Box").unwrap() + "companion ".len();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.range.start == header && &source[entry.range.clone()] == "Box")
+            .unwrap_or_else(|| {
+                panic!("no hover entry for the `companion Box` header: {entries:?}")
+            });
+        assert_eq!(entry.signature, "type Box = I32");
+        assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
+    }
+
+    #[test]
+    fn hand_written_companion_header_alongside_typegroup_hovers_the_alias() {
+        let source = concat!(
+            "typegroup Switch {\n",
+            "    Enabled,\n",
+            "    Disabled,\n",
+            "}\n",
+            "companion Switch {}\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-typegroup-companion-header.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let header = source.find("companion Switch").unwrap() + "companion ".len();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.range.start == header && &source[entry.range.clone()] == "Switch")
+            .unwrap_or_else(|| {
+                panic!("no hover entry for the `companion Switch` header: {entries:?}")
+            });
+        assert!(
+            entry.signature.starts_with("type alias Switch = "),
+            "unexpected companion header signature: {entry:?}"
+        );
     }
 
     #[test]

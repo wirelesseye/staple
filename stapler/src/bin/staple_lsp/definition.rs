@@ -399,12 +399,10 @@ impl Collector<'_> {
             Item::UseDeclaration(value) => self.use_declaration(value),
             Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
-                    self.add(
-                        &value.syntax,
-                        &value.name,
-                        &[DefinitionId::Module(id)],
-                        false,
-                    );
+                    // A `companion` header points at the type it extends, not
+                    // at the companion submodule.
+                    let definitions = self.namespace_definitions(id);
+                    self.add(&value.syntax, &value.name, &definitions, false);
                 }
                 self.module(&value.module);
             }
@@ -626,12 +624,8 @@ impl Collector<'_> {
             Item::Expression(value) => self.expression(value),
             Item::Submodule(value) => {
                 if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
-                    self.add(
-                        &value.syntax,
-                        &value.name,
-                        &[DefinitionId::Module(id)],
-                        false,
-                    );
+                    let definitions = self.namespace_definitions(id);
+                    self.add(&value.syntax, &value.name, &definitions, false);
                 }
                 self.module(&value.module);
             }
@@ -1062,6 +1056,53 @@ mod tests {
                 .iter()
                 .all(|target| target.selection_range.start != companion_header_offset),
             "Box.create's `Box` should not resolve to the companion block header: {entry:?}"
+        );
+    }
+
+    #[test]
+    fn companion_header_targets_the_type_declaration() {
+        let source = concat!(
+            "type Box = I32\n",
+            "companion Box {\n",
+            "    pub def create = () => 1\n",
+            "}\n",
+        );
+        let path = std::env::temp_dir().join("staple-definition-companion-header-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, typed.resolved(), Some(&typed));
+
+        let type_declaration_offset = source.find("type Box").unwrap() + "type ".len();
+        let companion_header_offset = source.find("companion Box").unwrap() + "companion ".len();
+
+        let entry = entries
+            .iter()
+            .find(|entry| {
+                entry.range.start == companion_header_offset
+                    && &source[entry.range.clone()] == "Box"
+            })
+            .unwrap_or_else(|| {
+                panic!("no definition entry for the `companion Box` header: {entries:?}")
+            });
+
+        assert!(
+            entry
+                .targets
+                .iter()
+                .any(|target| target.selection_range.start == type_declaration_offset),
+            "expected the `companion Box` header to resolve to the type declaration: {entry:?}"
+        );
+        assert!(
+            entry
+                .targets
+                .iter()
+                .all(|target| target.selection_range.start != companion_header_offset),
+            "the `companion Box` header should not resolve to itself: {entry:?}"
         );
     }
 
