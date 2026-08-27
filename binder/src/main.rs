@@ -2,8 +2,6 @@ use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
 
-use kdl::{KdlDocument, KdlNode};
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
     Build,
@@ -32,7 +30,7 @@ struct Package {
     manifest: PathBuf,
     directory: PathBuf,
     root: PathBuf,
-    entry: PathBuf,
+    entry: Option<PathBuf>,
 }
 
 enum Outcome {
@@ -77,7 +75,16 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
     }
     let manifest = discover_manifest(options.manifest_path.as_deref(), &current_directory)?;
     let package = load_package(&manifest)?;
+    validate_package_options(&package, &options)?;
     let stapler = locate_stapler()?;
+
+    if package.entry.is_none() {
+        let status = Command::new(&stapler)
+            .args(stapler_arguments(&package, &options, None))
+            .status()
+            .map_err(|error| compiler_start_error(&stapler, error))?;
+        return Ok(Outcome::Executed(status));
+    }
 
     match options.mode {
         Mode::Check => {
@@ -281,6 +288,27 @@ fn validate_options(options: &Options) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_package_options(package: &Package, options: &Options) -> Result<(), String> {
+    if package.entry.is_some() {
+        return Ok(());
+    }
+    if options.mode == Mode::Run {
+        return Err(format!(
+            "library package `{}` has no entry module and cannot be run",
+            package.name
+        ));
+    }
+    if options.output.is_some()
+        || options.target.is_some()
+        || options.linker.is_some()
+        || !options.library_paths.is_empty()
+        || !options.libraries.is_empty()
+    {
+        return Err("artifact and linker options are not supported when building a library without an entry module".to_owned());
+    }
+    Ok(())
+}
+
 fn create_project(parent: &Path, name: &str) -> Result<PathBuf, String> {
     validate_package_name(name)?;
     let destination = parent.join(name);
@@ -364,219 +392,19 @@ fn discover_manifest(explicit: Option<&Path>, current: &Path) -> Result<PathBuf,
 }
 
 fn load_package(manifest: &Path) -> Result<Package, String> {
-    let manifest = canonical_file(manifest, "manifest")?;
-    let manifest = manifest.as_path();
-    let source = std::fs::read_to_string(manifest)
-        .map_err(|error| format!("could not read `{}`: {error}", manifest.display()))?;
-    let document = source
-        .parse::<KdlDocument>()
-        .map_err(|error| format!("could not parse `{}`: {error}", manifest.display()))?;
-    let [node] = document.nodes() else {
-        return Err(format!(
-            "{} must contain exactly one `package` node",
-            manifest.display()
-        ));
-    };
-    if node.name().value() != "package" {
-        return Err(format!(
-            "{}: unknown top-level node `{}`; expected `package`",
-            manifest.display(),
-            node.name().value()
-        ));
-    }
-    let name = package_name(node, manifest)?;
-    let mut root = None;
-    let mut entry = None;
-    if let Some(children) = node.children() {
-        for child in children.nodes() {
-            match child.name().value() {
-                "root" => parse_path_child(child, manifest, &mut root)?,
-                "entry" => parse_path_child(child, manifest, &mut entry)?,
-                unknown => {
-                    let detail = if unknown == "dependencies" {
-                        "dependencies are not supported in Binder v1".to_owned()
-                    } else {
-                        format!("unknown package node `{unknown}`")
-                    };
-                    return Err(format!("{}: {detail}", manifest.display()));
-                }
-            }
-        }
-    }
-
-    let directory = manifest
-        .parent()
-        .expect("canonical manifest path always has a parent")
-        .to_owned();
-    let root_setting = root.as_deref().unwrap_or_else(|| Path::new("src/root.sta"));
-    let entry_setting = entry
-        .as_deref()
-        .unwrap_or_else(|| Path::new("src/main.sta"));
-    for (label, setting) in [("root", root_setting), ("entry", entry_setting)] {
-        if setting.extension() != Some(OsStr::new("sta")) {
-            return Err(format!(
-                "{}: {label} `{}` must use the `.sta` extension",
-                manifest.display(),
-                setting.display()
-            ));
-        }
-    }
-    let root_parent_setting = root_setting.parent().unwrap_or_else(|| Path::new("."));
-    let root_parent =
-        resolve_relative_directory(&directory, root_parent_setting, "root directory")?;
-    let root = root_parent.join(
-        root_setting
-            .file_name()
-            .expect("validated root module path has a file name"),
-    );
-    let entry = resolve_relative_file(&directory, entry_setting, "entry")?;
-    if !entry.starts_with(&root_parent) {
-        return Err(format!(
-            "{}: entry `{}` is outside package root directory `{}`",
-            manifest.display(),
-            entry.display(),
-            root_parent.display()
-        ));
-    }
-
+    let graph = binder::load_package_graph(manifest)?;
+    let package = graph.root_package();
     Ok(Package {
-        name,
-        manifest: manifest.to_owned(),
-        directory,
-        root,
-        entry,
+        name: package.name.clone(),
+        manifest: package.manifest.clone(),
+        directory: package.directory.clone(),
+        root: package.root.clone(),
+        entry: package.entry.clone(),
     })
 }
 
-fn package_name(node: &KdlNode, manifest: &Path) -> Result<String, String> {
-    let [entry] = node.entries() else {
-        return Err(format!(
-            "{}: `package` requires exactly one string name",
-            manifest.display()
-        ));
-    };
-    if entry.name().is_some() {
-        return Err(format!(
-            "{}: package properties are not supported",
-            manifest.display()
-        ));
-    }
-    let name = entry
-        .value()
-        .as_string()
-        .ok_or_else(|| format!("{}: `package` name must be a string", manifest.display()))?;
-    validate_package_name(name).map_err(|error| format!("{}: {error}", manifest.display()))?;
-    Ok(name.to_owned())
-}
-
 fn validate_package_name(name: &str) -> Result<(), String> {
-    let mut characters = name.chars();
-    if !characters
-        .next()
-        .is_some_and(|character| character.is_ascii_alphabetic())
-        || !characters
-            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
-    {
-        return Err(format!(
-            "package name `{name}` must start with an ASCII letter and contain only letters, numbers, `_`, or `-`"
-        ));
-    }
-    Ok(())
-}
-
-fn parse_path_child(
-    node: &KdlNode,
-    manifest: &Path,
-    destination: &mut Option<PathBuf>,
-) -> Result<(), String> {
-    let name = node.name().value();
-    if destination.is_some() {
-        return Err(format!("{}: duplicate `{name}` node", manifest.display()));
-    }
-    if node.children().is_some() {
-        return Err(format!(
-            "{}: `{name}` cannot contain child nodes",
-            manifest.display()
-        ));
-    }
-    let [entry] = node.entries() else {
-        return Err(format!(
-            "{}: `{name}` requires exactly one string path",
-            manifest.display()
-        ));
-    };
-    if entry.name().is_some() {
-        return Err(format!(
-            "{}: `{name}` properties are not supported",
-            manifest.display()
-        ));
-    }
-    let value = entry
-        .value()
-        .as_string()
-        .ok_or_else(|| format!("{}: `{name}` path must be a string", manifest.display()))?;
-    let path = PathBuf::from(value);
-    if path.is_absolute() {
-        return Err(format!(
-            "{}: `{name}` path must be relative",
-            manifest.display()
-        ));
-    }
-    *destination = Some(path);
-    Ok(())
-}
-
-fn resolve_relative_directory(
-    parent: &Path,
-    relative: &Path,
-    label: &str,
-) -> Result<PathBuf, String> {
-    if relative.is_absolute() {
-        return Err(format!("`{label}` path must be relative"));
-    }
-    let resolved = std::fs::canonicalize(parent.join(relative)).map_err(|error| {
-        format!(
-            "could not resolve {label} `{}`: {error}",
-            parent.join(relative).display()
-        )
-    })?;
-    if !resolved.starts_with(parent) {
-        return Err(format!(
-            "{label} `{}` escapes `{}`",
-            relative.display(),
-            parent.display()
-        ));
-    }
-    if !resolved.is_dir() {
-        return Err(format!(
-            "{label} `{}` is not a directory",
-            resolved.display()
-        ));
-    }
-    Ok(resolved)
-}
-
-fn resolve_relative_file(parent: &Path, relative: &Path, label: &str) -> Result<PathBuf, String> {
-    if relative.is_absolute() {
-        return Err(format!("`{label}` path must be relative"));
-    }
-    let resolved = std::fs::canonicalize(parent.join(relative)).map_err(|error| {
-        format!(
-            "could not resolve {label} `{}`: {error}",
-            parent.join(relative).display()
-        )
-    })?;
-    if !resolved.starts_with(parent) {
-        return Err(format!(
-            "{label} `{}` escapes `{}`",
-            relative.display(),
-            parent.display()
-        ));
-    }
-    if !resolved.is_file() {
-        return Err(format!("{label} `{}` is not a file", resolved.display()));
-    }
-    Ok(resolved)
+    binder::validate_package_name(name)
 }
 
 fn canonical_file(path: &Path, label: &str) -> Result<PathBuf, String> {
@@ -602,22 +430,11 @@ fn locate_stapler() -> Result<OsString, String> {
 
 fn stapler_arguments(package: &Package, options: &Options, output: Option<&Path>) -> Vec<OsString> {
     let mut arguments = Vec::new();
-    if options.mode == Mode::Check {
+    if options.mode == Mode::Check || package.entry.is_none() {
         arguments.push("check".into());
     }
-    arguments.push("--module-root".into());
-    arguments.push(
-        package
-            .root
-            .parent()
-            .expect("package root has a parent")
-            .as_os_str()
-            .to_owned(),
-    );
-    arguments.push("--package-root".into());
-    arguments.push(package.root.clone().into_os_string());
-    arguments.push("--package-name".into());
-    arguments.push(package.name.clone().into());
+    arguments.push("--manifest-path".into());
+    arguments.push(package.manifest.clone().into_os_string());
     if let Some(output) = output {
         arguments.extend([OsString::from("--emit"), OsString::from("exe")]);
         arguments.push("-o".into());
@@ -643,7 +460,6 @@ fn stapler_arguments(package: &Package, options: &Options, output: Option<&Path>
         arguments.push("-l".into());
         arguments.push(library.clone());
     }
-    arguments.push(package.entry.clone().into_os_string());
     arguments
 }
 
@@ -813,7 +629,7 @@ mod tests {
 
         assert_eq!(package.name, "hello");
         assert_eq!(package.root, fixture.root.join("src/root.sta"));
-        assert_eq!(package.entry, fixture.root.join("src/main.sta"));
+        assert_eq!(package.entry, Some(fixture.root.join("src/main.sta")));
     }
 
     #[test]
@@ -827,13 +643,12 @@ mod tests {
         let package = load_package(&manifest).expect("manifest should parse");
 
         assert_eq!(package.root, fixture.root.join("source/root.sta"));
-        assert_eq!(package.entry, fixture.root.join("source/bin/app.sta"));
+        assert_eq!(package.entry, Some(fixture.root.join("source/bin/app.sta")));
     }
 
     #[test]
     fn rejects_unknown_duplicate_and_unsafe_manifest_values() {
         for source in [
-            "package \"hello\" { dependencies {} }\n",
             "package \"hello\" { root \"src\"; root \"src\" }\n",
             "package \"../hello\"\n",
             "project \"hello\"\n",
@@ -971,7 +786,7 @@ mod tests {
         let package =
             load_package(&destination.join("binder.kdl")).expect("generated manifest should load");
         assert_eq!(package.name, "hello-world");
-        assert_eq!(package.entry, destination.join("src/main.sta"));
+        assert_eq!(package.entry, Some(destination.join("src/main.sta")));
     }
 
     #[test]
@@ -1006,13 +821,13 @@ mod tests {
         let output = fixture.root.join("build/hello");
         let arguments = stapler_arguments(&package, &options, Some(&output));
 
-        assert_eq!(arguments[0], "--module-root");
-        assert_eq!(arguments[1], package.root.parent().unwrap());
+        assert_eq!(arguments[0], "--manifest-path");
+        assert_eq!(arguments[1], package.manifest);
         assert_eq!(
-            arguments[6..10],
+            arguments[2..6],
             ["--emit", "exe", "-o", output.to_str().unwrap()]
         );
-        assert_eq!(arguments.last().unwrap(), package.entry.as_os_str());
+        assert_eq!(arguments[6..], ["--stdlib", "stdlib"]);
     }
 
     #[test]
@@ -1020,5 +835,26 @@ mod tests {
         assert!(parse_options(["run".into(), "--target=other".into()]).is_err());
         assert!(parse_options(["check".into(), "-lm".into()]).is_err());
         assert!(parse_options(["check".into(), "-o".into(), "out".into()]).is_err());
+    }
+
+    #[test]
+    fn pure_library_commands_validate_without_an_artifact() {
+        let fixture = Fixture::new();
+        let package =
+            load_package(&fixture.manifest("package \"library\" { kind \"library\" }\n")).unwrap();
+        assert_eq!(package.entry, None);
+        let check = parse_options(["check".into()]).unwrap();
+        let build = parse_options(["build".into()]).unwrap();
+        assert!(validate_package_options(&package, &check).is_ok());
+        assert!(validate_package_options(&package, &build).is_ok());
+        assert_eq!(stapler_arguments(&package, &build, None)[0], "check");
+        let run = parse_options(["run".into()]).unwrap();
+        assert!(
+            validate_package_options(&package, &run)
+                .unwrap_err()
+                .contains("cannot be run")
+        );
+        let output = parse_options(["build".into(), "-o".into(), "library.o".into()]).unwrap();
+        assert!(validate_package_options(&package, &output).is_err());
     }
 }

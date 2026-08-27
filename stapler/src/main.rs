@@ -46,6 +46,7 @@ struct Options {
     module_root: Option<PathBuf>,
     package_root: Option<PathBuf>,
     package_name: Option<String>,
+    manifest_path: Option<PathBuf>,
     program_arguments: Vec<OsString>,
 }
 
@@ -96,7 +97,16 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
     if let Some(name) = &options.package_name {
         loader = loader.with_package_name(name);
     }
-    let program = if options.input == "-" {
+    let program = if let Some(manifest) = &options.manifest_path {
+        let graph = binder::load_package_graph(manifest)?;
+        if options.mode != Mode::Check && graph.root_package().entry.is_none() {
+            return Err(format!(
+                "library package `{}` has no entry module and cannot emit an executable",
+                graph.root_package().name
+            ));
+        }
+        loader.with_package_graph(graph).load_package_graph()?
+    } else if options.input == "-" {
         let source = read_source(&options.input)?;
         let root = match &options.module_root {
             Some(root) => root.clone(),
@@ -209,6 +219,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         module_root: None,
         package_root: None,
         package_name: None,
+        manifest_path: None,
         program_arguments: Vec::new(),
     };
     let mut positional_only = false;
@@ -263,6 +274,13 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             )?);
             continue;
         }
+        if !positional_only && argument == "--manifest-path" {
+            options.manifest_path = Some(PathBuf::from(next_value(
+                &mut arguments,
+                "--manifest-path",
+            )?));
+            continue;
+        }
         if !positional_only && argument == "-L" {
             options
                 .library_paths
@@ -290,6 +308,8 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.package_root = Some(PathBuf::from(value));
         } else if !positional_only && let Some(value) = text.strip_prefix("--package-name=") {
             options.package_name = Some(value.to_owned());
+        } else if !positional_only && let Some(value) = text.strip_prefix("--manifest-path=") {
+            options.manifest_path = Some(PathBuf::from(value));
         } else if !positional_only && text.starts_with("-L") && text.len() > 2 {
             options.library_paths.push(PathBuf::from(&text[2..]));
         } else if !positional_only && text.starts_with("-l") && text.len() > 2 {
@@ -318,13 +338,24 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         }
     }
 
-    if options.input.is_empty() {
+    if options.input.is_empty() && options.manifest_path.is_none() {
         return Err(match options.mode {
             Mode::Run => run_usage(),
             Mode::Check => check_usage(),
             Mode::Expand => expand_usage(),
             Mode::Compile => usage(),
         });
+    }
+    if options.manifest_path.is_some()
+        && (!options.input.is_empty()
+            || options.module_root.is_some()
+            || options.package_root.is_some()
+            || options.package_name.is_some())
+    {
+        return Err(
+            "`--manifest-path` cannot be combined with an input file or low-level package options"
+                .to_owned(),
+        );
     }
     if options.mode == Mode::Run {
         if options.output.is_some() {
@@ -554,6 +585,7 @@ fn usage() -> String {
         "  --module-root <path>      package module directory (default: entry directory)\n",
         "  --package-root <path>     optional package root module\n",
         "  --package-name <name>     package name used by tooling\n",
+        "  --manifest-path <path>    load a Binder package graph instead of an input\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         stop parsing options\n",
@@ -573,6 +605,7 @@ fn run_usage() -> String {
         "  --module-root <path>      package module directory (default: entry directory)\n",
         "  --package-root <path>     optional package root module\n",
         "  --package-name <name>     package name used by tooling\n",
+        "  --manifest-path <path>    load a Binder package graph instead of an input\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         pass remaining arguments to the program\n",
@@ -591,6 +624,7 @@ fn check_usage() -> String {
         "  --module-root <path>      package module directory (default: entry directory)\n",
         "  --package-root <path>     optional package root module\n",
         "  --package-name <name>     package name used by tooling\n",
+        "  --manifest-path <path>    load a Binder package graph instead of an input\n",
         "  --                         stop parsing options",
     )
     .to_owned()
@@ -620,6 +654,7 @@ fn expand_usage() -> String {
 mod tests {
     use super::{EmitKind, Mode, Outcome, TemporaryArtifact, compile, parse_options, run};
     use std::ffi::{OsStr, OsString};
+    use std::path::PathBuf;
     use std::process::Command;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -773,6 +808,26 @@ mod tests {
             std::path::PathBuf::from("src")
         );
         assert_eq!(options.input, "src/bin/main.sta");
+    }
+
+    #[test]
+    fn parses_manifest_mode_without_a_positional_input() {
+        let options = parse_options([
+            "check".into(),
+            "--manifest-path".into(),
+            "binder.kdl".into(),
+        ])
+        .expect("manifest mode should derive its input from Binder");
+        assert_eq!(options.manifest_path, Some(PathBuf::from("binder.kdl")));
+        assert!(options.input.is_empty());
+        assert!(
+            parse_options([
+                "check".into(),
+                "--manifest-path=binder.kdl".into(),
+                "main.sta".into(),
+            ])
+            .is_err()
+        );
     }
 
     #[test]

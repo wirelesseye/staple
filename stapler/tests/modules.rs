@@ -2156,3 +2156,95 @@ fn imports_resource_types_and_resource_bearing_functions() {
         .expect("imported resource contracts should compile and lower");
     assert!(llvm.contains("__staple_m1_read"));
 }
+
+#[test]
+fn resolves_recursive_binder_dependencies_with_per_package_aliases() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "app/src/main.sta",
+        "let result: I32 = middle.answer\n",
+    );
+    fixture.write("middle/src/root.sta", "pub use package.helper.answer\n");
+    fixture.write(
+        "middle/src/helper.sta",
+        "use renamed_leaf.value.value\npub let answer: I32 = value\n",
+    );
+    fixture.write("leaf/src/value.sta", "pub let value: I32 = 42\n");
+    fs::write(
+        fixture.root.join("app/binder.kdl"),
+        "package \"app\" { dependencies { middle path=\"../middle\" } }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("middle/binder.kdl"),
+        "package \"middle-lib\" { kind \"library\"; dependencies { renamed_leaf path=\"../leaf\" } }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("leaf/binder.kdl"),
+        "package \"leaf-lib\" { kind \"library\" }\n",
+    )
+    .unwrap();
+
+    let graph = binder::load_package_graph(&fixture.root.join("app/binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("package graph should load");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("dependency aliases should resolve");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("transitive dependency should type-check");
+}
+
+#[test]
+fn checks_a_rootless_library_public_surface_without_entry_resources() {
+    let fixture = Fixture::new();
+    fixture.write("src/api.sta", "pub let answer: I32 = 42\n");
+    fs::write(
+        fixture.root.join("src/unused.sta"),
+        "mod\nmissing_private_name\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("binder.kdl"),
+        "package \"library\" { kind \"library\" }\n",
+    )
+    .unwrap();
+    let graph = binder::load_package_graph(&fixture.root.join("binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("rootless library should load");
+    assert_eq!(program.executable_entry(), None);
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("unused private files should not enter the public closure");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("public surface should type-check");
+
+    fixture.write(
+        "src/io_api.sta",
+        "use std.io.println\nprintln \"not an entry\"\n",
+    );
+    let graph = binder::load_package_graph(&fixture.root.join("binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .unwrap();
+    let resolved = NameResolver::new().resolve_program(program).unwrap();
+    let error = TypeChecker::new()
+        .check(resolved)
+        .expect_err("library modules must not receive implicit IO");
+    assert!(format_diagnostics(error).contains("IO"));
+}

@@ -3831,9 +3831,9 @@ impl TypeChecker {
 
         let no_parameters = HashMap::new();
         self.current_effect_function.set(None);
-        let entry_module = module.program().entry();
+        let entry_module = module.program().executable_entry();
         for source_module in module.program().modules() {
-            let is_entry_module = source_module.id == entry_module;
+            let is_entry_module = Some(source_module.id) == entry_module;
             for item in &source_module.syntax.items {
                 let (syntax, resources) = match item {
                     Item::Binding(binding) => binding.value.as_ref().map(|value| {

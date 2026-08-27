@@ -1437,13 +1437,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .iter()
             .map(|module| (module.id, module.syntax.items.clone()))
             .collect::<Vec<_>>();
-        let entry_module = self.typed_module.resolved().program().entry();
+        let entry_module = self.typed_module.resolved().program().executable_entry();
         for (module_id, items) in modules {
             let function = self.initializers[&module_id];
             let entry = self.context.append_basic_block(function, "entry");
             self.builder.position_at_end(entry);
             let mut environment = FunctionEnvironment::default();
-            if module_id == entry_module
+            if Some(module_id) == entry_module
                 && let Some(io_resource) = self.typed_module.io_resource()
             {
                 environment.resources.push((
@@ -1452,7 +1452,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 ));
             }
             let mut entry_reactive_scope_pushed = false;
-            if module_id == entry_module
+            if Some(module_id) == entry_module
                 && self.typed_module.entry_reactive_required()
                 && let Some(reactive_resource) = self.typed_module.reactive_resource()
             {

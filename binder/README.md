@@ -17,9 +17,29 @@ package "hello" {
 }
 ```
 
-`root` and `entry` are relative to the manifest directory and default to
-`src/root.sta` and `src/main.sta`. The root module is optional; its parent
-directory still anchors package module paths. The minimal manifest is:
+Packages default to `kind "executable"`. A consumable package declares itself
+as a library and may omit its entry:
+
+```kdl
+package "geometry" {
+    kind "library"
+    dependencies {
+        math path="../math"
+    }
+}
+```
+
+Dependency paths are relative to the declaring manifest and must name local
+directories containing a library `binder.kdl`. The dependency node name is its
+Staple import alias, so the example is imported with `use math...` even if the
+dependency package has a different name. Dependencies resolve recursively;
+cycles and executable dependency targets are rejected.
+
+`root` and `entry` are relative to the manifest directory. `root` defaults to
+`src/root.sta`, and its file is optional; its parent directory still anchors
+package module paths. Executable entries default to `src/main.sta`. Libraries
+only have an entry when one is explicitly declared. The minimal executable
+manifest is:
 
 ```kdl
 package "hello"
@@ -28,7 +48,8 @@ package "hello"
 Binder discovers the nearest `binder.kdl` in the current directory or its
 ancestors. `--manifest-path <path>` selects one explicitly.
 
-Binder v1 does not support dependencies, workspaces, profiles, incremental
+Binder v1 supports local directory dependencies only. It does not support
+registry or Git dependencies, versions, workspaces, profiles, incremental
 builds, or project lockfiles.
 
 ## Commands
@@ -60,11 +81,18 @@ Check a project without generating code:
 binder check
 ```
 
+For a library, this validates its root plus every public file module and their
+reachable imports. Unused private files are outside that public surface.
+
 Build a native executable:
 
 ```text
 binder build
 ```
+
+For a library without an entry, `build` performs the same validation as
+`check`, produces no artifact, and rejects output, target, and linker options.
+A library with an explicit entry also builds and runs as an executable.
 
 The default output is `build/<package>` beside the manifest. `-o <path>` selects
 a different output. Build also accepts `--target`, `--stdlib`, `--linker`, `-L`,

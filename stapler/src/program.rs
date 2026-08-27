@@ -94,6 +94,9 @@ impl std::error::Error for LoadDiagnostic {}
 #[derive(Debug, Clone)]
 pub struct Program {
     entry: ModuleId,
+    executable_entry: Option<ModuleId>,
+    package_graph: Option<binder::PackageGraph>,
+    module_packages: Vec<Option<binder::PackageId>>,
     package_name: String,
     package_root: Option<ModuleId>,
     package_root_path: Option<PathBuf>,
@@ -117,6 +120,9 @@ impl Program {
         let visibility = module.visibility;
         let mut program = Self {
             entry: ModuleId(0),
+            executable_entry: Some(ModuleId(0)),
+            package_graph: None,
+            module_packages: vec![None],
             package_name: "package".to_owned(),
             package_root: None,
             package_root_path: None,
@@ -192,6 +198,7 @@ impl Program {
                 qualified_name,
                 companion: declaration.companion,
             });
+            self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
             self.children[parent.0].insert(declaration.name, id);
             self.child_modules.insert(declaration.syntax.id, id);
@@ -219,6 +226,7 @@ impl Program {
                 qualified_name,
                 companion: false,
             });
+            self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
             self.child_modules.insert(declaration.syntax.id, id);
             self.collect_single_submodules(id);
@@ -368,6 +376,7 @@ impl Program {
                     qualified_name,
                     companion: declaration.companion,
                 });
+                self.module_packages.push(self.module_packages[parent]);
                 self.children.push(HashMap::new());
                 if top_level {
                     self.children[parent].insert(declaration.name, id);
@@ -393,6 +402,18 @@ impl Program {
 
     pub fn entry(&self) -> ModuleId {
         self.entry
+    }
+
+    pub fn executable_entry(&self) -> Option<ModuleId> {
+        self.executable_entry
+    }
+
+    pub fn package_graph(&self) -> Option<&binder::PackageGraph> {
+        self.package_graph.as_ref()
+    }
+
+    pub fn package_of(&self, module: ModuleId) -> Option<binder::PackageId> {
+        self.module_packages.get(module.0).copied().flatten()
     }
 
     pub fn package_name(&self) -> &str {
@@ -591,6 +612,10 @@ pub struct ProgramLoader {
     package_root: Option<ModuleId>,
     package_name: String,
     package_entry: Option<ModuleId>,
+    executable_entry: Option<ModuleId>,
+    package_graph: Option<binder::PackageGraph>,
+    module_packages: Vec<Option<binder::PackageId>>,
+    package_roots: HashMap<binder::PackageId, ModuleId>,
     standard_library_root: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
@@ -625,6 +650,131 @@ impl ProgramLoader {
     pub fn with_package_name(mut self, name: impl Into<String>) -> Self {
         self.package_name = name.into();
         self
+    }
+
+    pub fn with_package_graph(mut self, graph: binder::PackageGraph) -> Self {
+        self.package_graph = Some(graph);
+        self
+    }
+
+    pub fn load_package_graph(mut self) -> Result<Program, String> {
+        self.load_package_graph_diagnostic(None)
+            .map_err(|error| error.to_string())
+    }
+
+    pub fn load_package_graph_source_at(
+        mut self,
+        path: &Path,
+        source: &str,
+    ) -> Result<Program, LoadDiagnostic> {
+        self.load_package_graph_diagnostic(Some((path, source)))
+    }
+
+    fn load_package_graph_diagnostic(
+        &mut self,
+        overlay: Option<(&Path, &str)>,
+    ) -> Result<Program, LoadDiagnostic> {
+        let graph = self
+            .package_graph
+            .clone()
+            .ok_or_else(|| LoadDiagnostic::compiler("package graph is not configured"))?;
+        let root_package = graph.root_package().clone();
+        self.module_root = Some(root_package.source_root().to_owned());
+        self.package_root_path = Some(root_package.root.clone());
+        self.package_name = root_package.name.clone();
+
+        for (index, package) in graph.packages.iter().enumerate() {
+            let package_id = binder::PackageId(index);
+            let (source, exists) = if package.root.is_file() {
+                (
+                    if overlay.is_some_and(|(path, _)| same_source_path(path, &package.root)) {
+                        overlay.unwrap().1.to_owned()
+                    } else {
+                        std::fs::read_to_string(&package.root).map_err(|error| {
+                            LoadDiagnostic::source(&package.root, None, error.to_string())
+                        })?
+                    },
+                    true,
+                )
+            } else {
+                (String::new(), false)
+            };
+            let root = self.insert_source_for(package.root.clone(), &source, Some(package_id))?;
+            // A missing root is an in-memory namespace anchor, not a private
+            // source module. It is intentionally never written to disk.
+            if !exists {
+                self.modules[root.0].visibility = Visibility::Public;
+            }
+            self.package_roots.insert(package_id, root);
+            if package_id == graph.root && exists {
+                self.package_root = Some(root);
+            }
+        }
+
+        let root_module = self.package_roots[&graph.root];
+        let entry = if let Some(path) = &root_package.entry {
+            let entry = if let Some(entry) = self.paths.get(path).copied() {
+                entry
+            } else if let Some((overlay_path, source)) = overlay
+                && same_source_path(overlay_path, path)
+            {
+                self.insert_source_for(path.clone(), source, Some(graph.root))?
+            } else {
+                self.load_file(path)?
+            };
+            self.package_entry = Some(entry);
+            self.executable_entry = Some(entry);
+            entry
+        } else {
+            self.executable_entry = None;
+            root_module
+        };
+
+        self.load_imports(root_module, root_package.source_root())?;
+        if root_package.kind == binder::PackageKind::Library {
+            let mut files = Vec::new();
+            collect_staple_files(root_package.source_root(), &mut files);
+            files.sort();
+            for path in files {
+                let path = std::fs::canonicalize(&path).unwrap_or(path);
+                if self.paths.contains_key(&path) {
+                    continue;
+                }
+                let source = if overlay
+                    .is_some_and(|(overlay_path, _)| same_source_path(overlay_path, &path))
+                {
+                    overlay.unwrap().1.to_owned()
+                } else {
+                    std::fs::read_to_string(&path)
+                        .map_err(|error| LoadDiagnostic::source(&path, None, error.to_string()))?
+                };
+                let syntax = crate::parse(&source).map_err(|error| {
+                    LoadDiagnostic::source(&path, Some(error.offset..error.offset), error.message)
+                })?;
+                if syntax.visibility == Visibility::Public {
+                    let module = self.insert_source_for(path, &source, Some(graph.root))?;
+                    let module_root = self.module_root_for(module);
+                    self.load_imports(module, &module_root)?;
+                }
+            }
+        }
+        if entry != root_module {
+            self.load_imports(entry, root_package.source_root())?;
+        }
+        if let Some((path, source)) = overlay
+            && !self
+                .paths
+                .keys()
+                .any(|loaded| same_source_path(loaded, path))
+        {
+            let owner = self.infer_package(path).or(Some(graph.root));
+            let edited = self.insert_source_for(path.to_owned(), source, owner)?;
+            let edited_root = self.module_root_for(edited);
+            self.load_imports(edited, &edited_root)?;
+        }
+        self.load_standard_library()?;
+        self.discover_companions()?;
+        Ok(self.finish_ref(entry))
     }
 
     pub fn load_path(mut self, entry: &Path) -> Result<Program, String> {
@@ -687,6 +837,7 @@ impl ProgramLoader {
         })?;
         let entry_id = self.insert_source(entry, &source)?;
         self.package_entry = Some(entry_id);
+        self.executable_entry = Some(entry_id);
         if let Some(package_root) = self.package_root {
             self.load_imports(package_root, &root)?;
         }
@@ -718,6 +869,7 @@ impl ProgramLoader {
         let path = root.join("<stdin>.sta");
         let entry = self.insert_source(path, source)?;
         self.package_entry = Some(entry);
+        self.executable_entry = Some(entry);
         self.load_imports(entry, &root)?;
         self.load_standard_library()?;
         Ok(self.finish_ref(entry))
@@ -801,6 +953,7 @@ impl ProgramLoader {
             self.insert_source(entry_path, &entry_source)?
         };
         self.package_entry = Some(entry);
+        self.executable_entry = Some(entry);
         if let Some(package_root) = self.package_root {
             self.load_imports(package_root, &module_root)?;
         }
@@ -819,6 +972,16 @@ impl ProgramLoader {
         if let Some(root) = &self.standard_library_root {
             roots.push(root.clone());
         }
+        if let Some(graph) = &self.package_graph {
+            roots.extend(
+                graph
+                    .packages
+                    .iter()
+                    .map(|package| package.source_root().to_owned()),
+            );
+        }
+        roots.sort();
+        roots.dedup();
         for root in roots {
             let mut files = Vec::new();
             collect_staple_files(&root, &mut files);
@@ -913,10 +1076,56 @@ impl ProgramLoader {
             qualified_name: qualified_name.clone(),
             companion: true,
         });
+        self.module_packages.push(self.module_packages[parent.0]);
         self.children.push(HashMap::new());
         self.children[parent.0].insert(declaration.name, id);
         self.child_modules.insert(declaration.syntax.id, id);
         self.insert_submodules(id, path, qualified_name)
+    }
+
+    fn infer_package(&self, path: &Path) -> Option<binder::PackageId> {
+        self.package_graph.as_ref().and_then(|graph| {
+            graph
+                .packages
+                .iter()
+                .enumerate()
+                .filter(|(_, package)| path.starts_with(package.source_root()))
+                .max_by_key(|(_, package)| package.source_root().components().count())
+                .map(|(index, _)| binder::PackageId(index))
+        })
+    }
+
+    fn dependency_for(
+        &self,
+        module: ModuleId,
+        alias: &str,
+    ) -> Option<(binder::PackageId, ModuleId, PathBuf)> {
+        let owner = self.module_packages.get(module.0).copied().flatten()?;
+        let graph = self.package_graph.as_ref()?;
+        let dependency = graph
+            .package(owner)
+            .dependencies
+            .iter()
+            .find(|dependency| dependency.alias == alias)?;
+        Some((
+            dependency.package,
+            *self.package_roots.get(&dependency.package)?,
+            graph.package(dependency.package).source_root().to_owned(),
+        ))
+    }
+
+    fn module_root_for(&self, module: ModuleId) -> PathBuf {
+        self.module_packages
+            .get(module.0)
+            .copied()
+            .flatten()
+            .and_then(|package| {
+                self.package_graph
+                    .as_ref()
+                    .map(|graph| graph.package(package).source_root().to_owned())
+            })
+            .or_else(|| self.module_root.clone())
+            .expect("module root is set")
     }
 
     fn load_file(&mut self, path: &Path) -> Result<ModuleId, LoadDiagnostic> {
@@ -931,12 +1140,22 @@ impl ProgramLoader {
             )
         })?;
         let id = self.insert_source(path.to_owned(), &source)?;
-        let root = self.module_root.clone().expect("module root is set");
+        let root = self.module_root_for(id);
         self.load_imports(id, &root)?;
         Ok(id)
     }
 
     fn insert_source(&mut self, path: PathBuf, source: &str) -> Result<ModuleId, LoadDiagnostic> {
+        let package = self.infer_package(&path);
+        self.insert_source_for(path, source, package)
+    }
+
+    fn insert_source_for(
+        &mut self,
+        path: PathBuf,
+        source: &str,
+        package: Option<binder::PackageId>,
+    ) -> Result<ModuleId, LoadDiagnostic> {
         let syntax = parse_with_syntax_ids(
             source,
             &mut self.next_syntax_id,
@@ -962,6 +1181,7 @@ impl ProgramLoader {
             qualified_name: qualified_name.clone(),
             companion: false,
         });
+        self.module_packages.push(package);
         self.children.push(HashMap::new());
         self.insert_submodules(id, path, qualified_name)?;
         Ok(id)
@@ -1017,6 +1237,7 @@ impl ProgramLoader {
                 qualified_name: qualified_name.clone(),
                 companion: declaration.companion,
             });
+            self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
             self.children[parent.0].insert(declaration.name, id);
             self.child_modules.insert(declaration.syntax.id, id);
@@ -1041,6 +1262,7 @@ impl ProgramLoader {
                 qualified_name: qualified_name.clone(),
                 companion: false,
             });
+            self.module_packages.push(self.module_packages[parent.0]);
             self.children.push(HashMap::new());
             self.child_modules.insert(declaration.syntax.id, id);
             self.insert_submodules(id, path.clone(), qualified_name)?;
@@ -1048,10 +1270,11 @@ impl ProgramLoader {
         Ok(())
     }
 
-    fn load_imports(&mut self, module: ModuleId, root: &Path) -> Result<(), LoadDiagnostic> {
+    fn load_imports(&mut self, module: ModuleId, _root: &Path) -> Result<(), LoadDiagnostic> {
         if !self.loaded_imports.insert(module) {
             return Ok(());
         }
+        let root = self.module_root_for(module);
         let mut uses = self.modules[module.0]
             .syntax
             .items
@@ -1064,9 +1287,9 @@ impl ProgramLoader {
         find_block_use_declarations(&self.modules[module.0].syntax.items, &mut uses);
         for declaration in uses {
             let resolution = if declaration.kind == UseKind::Dotted {
-                self.resolve_dotted_import(module, &declaration, root)
+                self.resolve_dotted_import(module, &declaration, &root)
             } else {
-                self.resolve_import(module, &declaration, root).map(Some)
+                self.resolve_import(module, &declaration, &root).map(Some)
             };
             match resolution {
                 Ok(imported) => {
@@ -1079,13 +1302,13 @@ impl ProgramLoader {
                 Err(error) => return Err(error),
             }
         }
-        self.load_root_qualified_references(module, root)?;
+        self.load_root_qualified_references(module, &root)?;
         let children = self.children[module.0]
             .values()
             .copied()
             .collect::<Vec<_>>();
         for child in children {
-            self.load_imports(child, root)?;
+            self.load_imports(child, &root)?;
         }
         Ok(())
     }
@@ -1148,11 +1371,9 @@ impl ProgramLoader {
         let mut index = 0;
         while index < tokens.len() {
             let token = &tokens[index];
-            // Binder dependency aliases can become additional recognized roots
-            // here once the loader receives a per-package alias-to-root table.
-            // Keep aliases logical: do not merge dependency files into `root`.
             if !matches!(token.kind, TokenKind::Identifier | TokenKind::Package)
-                || !matches!(token.text.as_str(), "std" | "package")
+                || (!matches!(token.text.as_str(), "std" | "package")
+                    && self.dependency_for(module, &token.text).is_none())
             {
                 index += 1;
                 continue;
@@ -1296,6 +1517,21 @@ impl ProgramLoader {
         }
 
         if parts.first().is_some_and(|part| part == "package") {
+            if let Some(package) = self.module_packages.get(module.0).copied().flatten()
+                && let Some(root_module) = self.package_roots.get(&package).copied()
+            {
+                if parts.len() == 1 {
+                    return Ok(root_module);
+                }
+                let source_root = self
+                    .package_graph
+                    .as_ref()
+                    .expect("module package requires a graph")
+                    .package(package)
+                    .source_root()
+                    .to_owned();
+                return self.resolve_file_import(module, &parts[1..], &source_root, declaration);
+            }
             let entry = self.package_entry.ok_or_else(|| {
                 load_diagnostic_at(&declaration.syntax.span, "package entry module is not set")
             })?;
@@ -1305,10 +1541,16 @@ impl ProgramLoader {
             return self.resolve_file_import(module, &parts[1..], root, declaration);
         }
 
-        // A future Binder dependency root should be dispatched here, before
-        // inline-child and package-file lookup, using the current package's
-        // dependency alias map. The resulting ModuleId keeps versioned package
-        // identities separate even when their internal module paths coincide.
+        if let Some(alias) = parts.first()
+            && let Some((package, root_module, source_root)) = self.dependency_for(module, alias)
+        {
+            let _ = package;
+            self.load_imports(root_module, &source_root)?;
+            if parts.len() == 1 {
+                return Ok(root_module);
+            }
+            return self.resolve_file_import(module, &parts[1..], &source_root, declaration);
+        }
 
         if let Some(first) = parts.first()
             && let Some(child) = self.children[module.0].get(first).copied()
@@ -1456,6 +1698,9 @@ impl ProgramLoader {
         );
         Program {
             entry,
+            executable_entry: self.executable_entry,
+            package_graph: self.package_graph,
+            module_packages: self.module_packages,
             package_name: if self.package_name.is_empty() {
                 "package".to_owned()
             } else {
@@ -1519,6 +1764,16 @@ fn collect_staple_files(directory: &Path, files: &mut Vec<PathBuf>) {
 fn canonical_file(path: &Path) -> Result<PathBuf, String> {
     std::fs::canonicalize(path)
         .map_err(|error| format!("could not resolve module `{}`: {error}", path.display()))
+}
+
+fn same_source_path(left: &Path, right: &Path) -> bool {
+    if left == right {
+        return true;
+    }
+    std::fs::canonicalize(left)
+        .ok()
+        .zip(std::fs::canonicalize(right).ok())
+        .is_some_and(|(left, right)| left == right)
 }
 
 fn load_diagnostic_at(span: &Span, message: impl Into<String>) -> LoadDiagnostic {

@@ -36,6 +36,18 @@ while imports remain rooted at the package root's directory:
 stpl check --module-root src --package-root src/root.sta src/bin/main.sta
 ```
 
+Binder manifests, including recursive local library dependencies, can be loaded
+directly without the low-level package flags:
+
+```text
+stpl check --manifest-path binder.kdl
+```
+
+Manifest mode derives the package name, roots, optional executable entry, and
+per-package dependency aliases from the resolved graph. It cannot be combined
+with a positional input or `--module-root`, `--package-root`, or
+`--package-name`.
+
 ## Running
 
 `stpl run` runs a source file without leaving a compiled executable next to

@@ -9,7 +9,6 @@ mod staple_lsp {
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use kdl::KdlDocument;
 use lsp_server::{Connection, Message, Notification, Request, Response};
 use lsp_types::notification::{
     DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument, Notification as _,
@@ -58,48 +57,12 @@ struct Server {
     stdlib: Option<PathBuf>,
 }
 
-struct PackageConfig {
-    name: String,
-    root: PathBuf,
-    entry: PathBuf,
-}
-
-fn package_config(path: &Path) -> Option<PackageConfig> {
+fn package_config(path: &Path) -> Option<binder::PackageGraph> {
     let mut directory = path.parent()?;
     loop {
         let manifest = directory.join("binder.kdl");
         if manifest.is_file() {
-            let source = std::fs::read_to_string(&manifest).ok()?;
-            let document = source.parse::<KdlDocument>().ok()?;
-            let node = document.nodes().first()?;
-            if node.name().value() != "package" {
-                return None;
-            }
-            let name = node.entries().first()?.value().as_string()?.to_owned();
-            let mut root = PathBuf::from("src/root.sta");
-            let mut entry = PathBuf::from("src/main.sta");
-            if let Some(children) = node.children() {
-                for child in children.nodes() {
-                    let Some(value) = child
-                        .entries()
-                        .first()
-                        .and_then(|entry| entry.value().as_string())
-                    else {
-                        continue;
-                    };
-                    match child.name().value() {
-                        "root" => root = value.into(),
-                        "entry" => entry = value.into(),
-                        _ => {}
-                    }
-                }
-            }
-            let directory = std::fs::canonicalize(directory).ok()?;
-            return Some(PackageConfig {
-                name,
-                root: directory.join(root),
-                entry: directory.join(entry),
-            });
+            return binder::load_package_graph(&manifest).ok();
         }
         directory = directory.parent()?;
     }
@@ -522,13 +485,10 @@ impl Server {
             }
             let config = package_config(&path);
             if let Some(config) = &config {
-                loader = loader
-                    .with_module_root(config.root.parent().unwrap_or_else(|| Path::new(".")))
-                    .with_package_root(&config.root)
-                    .with_package_name(&config.name);
+                loader = loader.with_package_graph(config.clone());
             }
             let loaded = match &config {
-                Some(config) => loader.load_package_source_at(&path, &text, &config.entry),
+                Some(_) => loader.load_package_graph_source_at(&path, &text),
                 None => loader.load_source_at(&path, &text),
             };
             match loaded {

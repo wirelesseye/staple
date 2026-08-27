@@ -14,6 +14,7 @@ name = "staple-lsp"
 path = "src/bin/staple-lsp.rs"
 
 [dependencies]
+binder = { path = "../binder" }
 inkwell = { version = "0.10.0", features = ["llvm21-1"] }
 lsp-server = "0.10"
 lsp-types = "0.97"

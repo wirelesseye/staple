@@ -579,6 +579,25 @@ so its public items are available as `package.main.item`. Custom entry paths use
 the same relative mapping. A file named `package.sta` is addressed as `use
 package.package`.
 
+Binder packages may declare `kind "library"` and be used through local path
+dependencies. A dependency declaration's key is a logical Staple root:
+
+```kdl
+package "application" {
+    dependencies {
+        geometry path="../geometry"
+    }
+}
+```
+
+`use geometry.shapes.Circle` resolves from the dependency's source root. The
+alias may differ from its package name, and each dependency module's `package`
+keyword continues to refer to that dependency rather than the consuming
+application. Dependency aliases take precedence over same-named local modules.
+Only public file modules and public items cross a package boundary. A library
+may omit both its entry and its root file; an absent root behaves as an empty
+package namespace while public file modules remain addressable below it.
+
 Public items may also be used through a root-qualified name without a `use`
 declaration:
 
