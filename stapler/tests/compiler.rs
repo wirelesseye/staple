@@ -4251,6 +4251,34 @@ fn resolves_and_merges_type_companion_items() {
 }
 
 #[test]
+fn typegroup_companion_merges_with_a_hand_written_companion_block() {
+    // A generated `companion` from `typegroup` must merge with an explicit
+    // `companion` block for the same type instead of registering a second
+    // module of the same name (which surfaced as `duplicate import`).
+    type_check(concat!(
+        "typegroup Switch {\n",
+        "    Enabled,\n",
+        "    Disabled,\n",
+        "}\n",
+        "companion Switch { pub def flip = switch: Switch => switch }\n",
+        "use Switch.*\n",
+        "let on: Switch = Enabled\n",
+        "let flipped: Switch = Switch.flip on\n",
+    ));
+    // Order-independent: explicit block before the `typegroup`.
+    type_check(concat!(
+        "companion Toggle { pub def flip = toggle: Toggle => toggle }\n",
+        "typegroup Toggle {\n",
+        "    On,\n",
+        "    Off,\n",
+        "}\n",
+        "use Toggle.*\n",
+        "let lit: Toggle = On\n",
+        "let flipped: Toggle = Toggle.flip lit\n",
+    ));
+}
+
+#[test]
 fn type_checks_companion_method_call_syntax() {
     let module = type_check(concat!(
         "type alias Animal = I32\n",

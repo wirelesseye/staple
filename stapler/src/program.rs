@@ -327,7 +327,32 @@ impl Program {
                     .filter(|declaration| !self.child_modules.contains_key(&declaration.syntax.id))
                     .map(|declaration| (declaration, false)),
             );
+            // A merge that folds items into an already-visited module; that
+            // module needs to be rescanned so nested inline items land too.
+            let mut rescan_from: Option<usize> = None;
             for (declaration, top_level) in declarations {
+                // Mirror the companion merge in `collect_single_submodules` /
+                // `insert_submodules`: a generated `companion` block for a type
+                // that already has a companion module extends that module
+                // rather than registering a second one of the same name.
+                if top_level
+                    && declaration.companion
+                    && let Some(existing) =
+                        self.children[parent].get(&declaration.name).copied()
+                    && self.modules[existing.0].companion
+                {
+                    self.modules[existing.0]
+                        .syntax
+                        .items
+                        .extend(declaration.module.items);
+                    self.child_modules.insert(declaration.syntax.id, existing);
+                    if existing.0 < parent {
+                        rescan_from = Some(
+                            rescan_from.map_or(existing.0, |from| from.min(existing.0)),
+                        );
+                    }
+                    continue;
+                }
                 let id = ModuleId(self.modules.len());
                 let qualified_name = format!(
                     "{}.{}",
@@ -349,7 +374,13 @@ impl Program {
                 }
                 self.child_modules.insert(declaration.syntax.id, id);
             }
-            parent += 1;
+            // Already-registered declarations are filtered out above, so a
+            // rescan only picks up items the merge just introduced and always
+            // makes progress toward the end of the module list.
+            parent = match rescan_from {
+                Some(from) => from,
+                None => parent + 1,
+            };
         }
         self.resolve_single_inline_imports();
         self.initialization_order = initialization_order(
