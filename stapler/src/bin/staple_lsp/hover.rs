@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ops::Range;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use stapler::*;
 
@@ -46,6 +46,37 @@ pub fn entries_at_path(path: &Path, module: &Module, typed: &TypedModule) -> Vec
     });
     collector.entries.dedup();
     collector.entries
+}
+
+fn module_docs_from_file(path: &Path) -> Vec<String> {
+    let Ok(source) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(module) = parse(&source) else {
+        return Vec::new();
+    };
+    module
+        .modifiers
+        .iter()
+        .filter(|modifier| modifier.namespace.is_none() && modifier.name == "doc")
+        .filter_map(|modifier| {
+            if let Some(doc) = &modifier.doc {
+                return Some(doc.clone());
+            }
+            let Expression::String(literal) = modifier.argument.as_ref()?.expression.as_ref()?
+            else {
+                return None;
+            };
+            let text = literal.literal.strip_prefix('"')?.strip_suffix('"')?;
+            Some(
+                text.replace("\\n", "\n")
+                    .replace("\\r", "\r")
+                    .replace("\\t", "\t")
+                    .replace("\\\"", "\"")
+                    .replace("\\\\", "\\"),
+            )
+        })
+        .collect()
 }
 
 struct Collector<'a> {
@@ -472,7 +503,14 @@ impl Collector<'_> {
     }
 
     fn use_declaration(&mut self, declaration: &UseDeclaration) {
-        match self.typed.resolved().program().use_kind(declaration) {
+        let resolved_kind = self
+            .typed
+            .resolved()
+            .program()
+            .use_kind(declaration)
+            .clone();
+        self.imported_module_segments(declaration, &resolved_kind);
+        match &resolved_kind {
             UseKind::Selected(names) => {
                 for name in names {
                     self.imported_name(declaration, &name, &name, false);
@@ -483,6 +521,74 @@ impl Collector<'_> {
                 self.imported_name(declaration, &alias, &item, true);
             }
             UseKind::Dotted | UseKind::Namespace | UseKind::Glob => {}
+        }
+    }
+
+    fn imported_module_segments(&mut self, declaration: &UseDeclaration, kind: &UseKind) {
+        let module_components = match (&declaration.kind, kind) {
+            (UseKind::Dotted, UseKind::Selected(_)) => declaration.path.len().saturating_sub(1),
+            _ => declaration.path.len(),
+        };
+        let components = &declaration.path[..module_components];
+        let rooted = components
+            .first()
+            .is_some_and(|name| matches!(name.as_str(), "std" | "package"));
+        if rooted {
+            let name = &components[0];
+            self.named_with_docs(
+                &declaration.syntax,
+                name,
+                format!("package {name}"),
+                Vec::new(),
+            );
+        }
+
+        let Some(target) = self
+            .typed
+            .resolved()
+            .program()
+            .imported_module(declaration.syntax.id)
+        else {
+            return;
+        };
+        let target_path = &self.typed.resolved().program().module(target).path;
+        let physical_components = if components.first().is_some_and(|name| name == "package") {
+            &components[1..]
+        } else {
+            components
+        };
+        let mut root = target_path.as_path();
+        for _ in physical_components {
+            let Some(parent) = root.parent() else { return };
+            root = parent;
+        }
+
+        for index in usize::from(rooted)..components.len() {
+            let physical_end = if components.first().is_some_and(|name| name == "package") {
+                index
+            } else {
+                index + 1
+            };
+            let mut relative = PathBuf::new();
+            for component in &physical_components[..physical_end] {
+                relative.push(component);
+            }
+            relative.set_extension("sta");
+            let path = root.join(relative);
+            if !path.is_file() {
+                continue;
+            }
+            let docs = self
+                .typed
+                .resolved()
+                .program()
+                .modules()
+                .iter()
+                .find(|module| module.parent.is_none() && module.path == path)
+                .map(|module| module.syntax.docs.clone())
+                .unwrap_or_else(|| module_docs_from_file(&path));
+            let name = &components[index];
+            self.named_with_docs(&declaration.syntax, name, format!("mod {name}"), docs);
         }
     }
 
@@ -1983,6 +2089,7 @@ mod tests {
         std::fs::write(
             root.join("dependency.sta"),
             concat!(
+                "@doc(\"Dependency module.\")\n",
                 "pub mod\n",
                 "/// A value.\n",
                 "pub let value = 1\n",
@@ -2015,6 +2122,7 @@ mod tests {
             .collect::<Vec<_>>();
 
         for expected in [
+            ("dependency", "mod dependency", "Dependency module."),
             ("value", "let value: I32", " A value."),
             ("Number", "type alias Number = I32", " A number alias."),
             ("Printable", "trait Printable T", " A printable trait."),
@@ -2033,6 +2141,93 @@ mod tests {
                 "missing {expected:?} in {entries:?}"
             );
         }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn describes_module_segments_in_dotted_use_declarations() {
+        let source = "use std.io.println\n";
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, &root)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        for (name, signature) in [("std", "package std"), ("io", "mod io")] {
+            assert!(
+                entries.iter().any(|entry| {
+                    &source[entry.range.clone()] == name && entry.signature == signature
+                }),
+                "missing module hover for {name}: {entries:?}"
+            );
+        }
+        assert!(!entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "println" && entry.signature == "mod println"
+        }));
+    }
+
+    #[test]
+    fn only_describes_existing_file_module_segments_and_includes_their_docs() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-hover-module-segments-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
+        std::fs::write(
+            root.join("alpha.sta"),
+            "@doc(\"Alpha docs.\")\npub mod\npub let root_value = 1\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("alpha/beta.sta"),
+            "@doc(\"Beta docs.\")\npub mod\npub let value = 1\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(root.join("alpha/missing")).unwrap();
+        std::fs::write(
+            root.join("alpha/missing/leaf.sta"),
+            "pub mod\npub let leaf_value = 1\n",
+        )
+        .unwrap();
+        let source = concat!(
+            "use alpha\n",
+            "use alpha.beta.value\n",
+            "use alpha.missing.leaf.leaf_value\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        for (name, signature, docs) in [
+            ("alpha", "mod alpha", "Alpha docs."),
+            ("beta", "mod beta", "Beta docs."),
+        ] {
+            assert!(
+                entries.iter().any(|entry| {
+                    &source[entry.range.clone()] == name
+                        && entry.signature == signature
+                        && entry.documentation == [docs]
+                }),
+                "missing documented module hover for {name}: {entries:?}"
+            );
+        }
+        assert!(!entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "value" && entry.signature == "mod value"
+        }));
+        assert!(!entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "missing" && entry.signature == "mod missing"
+        }));
 
         std::fs::remove_dir_all(root).unwrap();
     }

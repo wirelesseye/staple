@@ -488,6 +488,8 @@ impl Collector<'_> {
     }
 
     fn use_declaration(&mut self, value: &UseDeclaration) {
+        let resolved_kind = self.resolved.program().use_kind(value).clone();
+        self.use_module_segments(value, &resolved_kind);
         if let Some(name) = value.path.last() {
             let definitions = self
                 .resolved
@@ -495,7 +497,7 @@ impl Collector<'_> {
                 .to_vec();
             self.add(&value.syntax, name, &definitions, false);
         }
-        match self.resolved.program().use_kind(value) {
+        match &resolved_kind {
             UseKind::Selected(names) => {
                 for name in names {
                     let definitions = self
@@ -515,6 +517,81 @@ impl Collector<'_> {
                 }
             }
             UseKind::Dotted | UseKind::Namespace | UseKind::Glob => {}
+        }
+    }
+
+    fn use_module_segments(&mut self, declaration: &UseDeclaration, kind: &UseKind) {
+        let module_components = match (&declaration.kind, kind) {
+            (UseKind::Dotted, UseKind::Selected(_)) => declaration.path.len().saturating_sub(1),
+            _ => declaration.path.len(),
+        };
+        let components = &declaration.path[..module_components];
+        let rooted = components
+            .first()
+            .is_some_and(|name| matches!(name.as_str(), "std" | "package"));
+        let Some(target) = self
+            .resolved
+            .program()
+            .imported_module(declaration.syntax.id)
+        else {
+            return;
+        };
+        let target_path = &self.resolved.program().module(target).path;
+        let physical_components = if components.first().is_some_and(|name| name == "package") {
+            &components[1..]
+        } else {
+            components
+        };
+        let mut root = target_path.as_path();
+        for _ in physical_components {
+            let Some(parent) = root.parent() else { return };
+            root = parent;
+        }
+
+        for index in usize::from(rooted)..components.len() {
+            let physical_end = if components.first().is_some_and(|name| name == "package") {
+                index
+            } else {
+                index + 1
+            };
+            let mut relative = PathBuf::new();
+            for component in &physical_components[..physical_end] {
+                relative.push(component);
+            }
+            relative.set_extension("sta");
+            let path = root.join(relative);
+            if !path.is_file() {
+                continue;
+            }
+            let name = &components[index];
+            if let Some(module) = self
+                .resolved
+                .program()
+                .modules()
+                .iter()
+                .find(|module| module.parent.is_none() && module.path == path)
+            {
+                self.add(
+                    &declaration.syntax,
+                    name,
+                    &[DefinitionId::Module(module.id)],
+                    false,
+                );
+            } else if let Some(range) = crate::staple_lsp::source_projection::named_range(
+                &declaration.syntax,
+                name,
+                false,
+                self.path,
+            ) {
+                self.entries.push(DefinitionEntry {
+                    range,
+                    targets: vec![DefinitionTarget {
+                        path,
+                        range: 0..0,
+                        selection_range: 0..0,
+                    }],
+                });
+            }
         }
     }
 
@@ -1137,6 +1214,33 @@ mod tests {
         }));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn indexes_file_module_segments_in_dotted_item_imports() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let source = "use std.io.println\n";
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, &root)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &resolved, None);
+        let io = std::fs::canonicalize(root.join("stdlib/std/io.sta")).unwrap();
+
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "io"
+                    && entry.targets.iter().any(|target| target.path == io)
+            }),
+            "missing `io` module definition: {entries:?}"
+        );
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| &source[entry.range.clone()] == "std")
+        );
     }
 
     #[test]
