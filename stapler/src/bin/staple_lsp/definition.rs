@@ -1251,6 +1251,27 @@ mod tests {
                 .iter()
                 .any(|entry| &source[entry.range.clone()] == "std")
         );
+
+        // The imported item resolves to its own definition only, never also
+        // to the whole `io` module (whose target range starts at the `pub mod`
+        // line).
+        let println_entries = entries
+            .iter()
+            .filter(|entry| &source[entry.range.clone()] == "println")
+            .collect::<Vec<_>>();
+        assert_eq!(println_entries.len(), 1, "entries: {entries:?}");
+        assert_eq!(
+            println_entries[0].targets.len(),
+            1,
+            "`println` should have a single definition target: {println_entries:?}"
+        );
+        assert!(
+            println_entries[0]
+                .targets
+                .iter()
+                .all(|target| target.selection_range != (0..0)),
+            "`println` should not point at the `io` module header: {println_entries:?}"
+        );
     }
 
     #[test]

@@ -2268,7 +2268,15 @@ impl NameResolver {
         if self.use_kind(declaration) == UseKind::Glob {
             self.record_private_glob_items(imported, declaration, &interface);
         }
-        if let Some(name) = declaration.path.last() {
+        // Only a namespace import's final path component actually names the
+        // imported module (`io` in `use std.io`). For selected, renamed, and
+        // dotted item imports the final component is an item name (`println`
+        // in `use std.io.println`), so associating it with the containing
+        // module would make go-to-definition on the item also jump to that
+        // module's `pub mod` line.
+        if self.use_kind(declaration) == UseKind::Namespace
+            && let Some(name) = declaration.path.last()
+        {
             self.import_definitions
                 .entry((declaration.syntax.id, name.clone()))
                 .or_default()
