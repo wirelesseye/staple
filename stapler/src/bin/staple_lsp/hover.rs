@@ -498,21 +498,23 @@ impl Collector<'_> {
             .resolved()
             .import_definitions(declaration.syntax.id, imported_name)
             .iter()
-            .find_map(|definition| self.definition_signature(*definition, declaration.syntax.id));
-        if let Some(signature) = signature {
+            .find_map(|definition| {
+                self.definition_signature_and_docs(*definition, declaration.syntax.id)
+            });
+        if let Some((signature, docs)) = signature {
             if last {
-                self.named_last(&declaration.syntax, token_name, signature);
+                self.named_last_with_docs(&declaration.syntax, token_name, signature, docs);
             } else {
-                self.named(&declaration.syntax, token_name, signature);
+                self.named_with_docs(&declaration.syntax, token_name, signature, docs);
             }
         }
     }
 
-    fn definition_signature(
+    fn definition_signature_and_docs(
         &self,
         definition: DefinitionId,
         from_syntax: SyntaxId,
-    ) -> Option<String> {
+    ) -> Option<(String, Vec<String>)> {
         let resolved = self.typed.resolved();
         match definition {
             DefinitionId::Symbol(symbol) => {
@@ -520,14 +522,24 @@ impl Collector<'_> {
                     .typed
                     .type_of_symbol(symbol)
                     .map(|ty| self.display_type(ty))?;
-                Some(
-                    self.declarations
-                        .get(&symbol)
-                        .map(|declaration| declaration.signature(&value_type))
-                        .unwrap_or(value_type),
-                )
+                let declaration = self.declarations.get(&symbol);
+                let signature = declaration
+                    .map(|declaration| declaration.signature(&value_type))
+                    .unwrap_or(value_type);
+                let docs = declaration
+                    .map(|declaration| declaration.docs.clone())
+                    .unwrap_or_default();
+                Some((signature, docs))
             }
-            DefinitionId::Type(id) => self.type_signature(id, from_syntax),
+            DefinitionId::Type(id) => {
+                let signature = self.type_signature(id, from_syntax)?;
+                let docs = resolved
+                    .type_declarations()
+                    .get(&id)
+                    .map(|declaration| declaration.docs.clone())
+                    .unwrap_or_default();
+                Some((signature, docs))
+            }
             DefinitionId::Trait(id) => resolved.traits().get(&id).map(|resolved| {
                 let declaration = &resolved.declaration;
                 let (parameters, where_clause) = self.juxtaposed_generic_suffix(
@@ -536,19 +548,27 @@ impl Collector<'_> {
                     &declaration.subtype_bounds,
                     &declaration.functional_dependencies,
                 );
-                format!("trait {}{parameters}{where_clause}", declaration.name)
-            }),
-            DefinitionId::TraitMethod(id) => resolved.trait_method(id).map(|member| {
-                format!(
-                    "<trait member> {}: {}",
-                    member.name,
-                    member.annotation.syntax().text().trim()
+                (
+                    format!("trait {}{parameters}{where_clause}", declaration.name),
+                    declaration.docs.clone(),
                 )
             }),
-            DefinitionId::Macro(id) => resolved.macro_for(id).map(macro_signature),
+            DefinitionId::TraitMethod(id) => resolved.trait_method(id).map(|member| {
+                (
+                    format!(
+                        "<trait member> {}: {}",
+                        member.name,
+                        member.annotation.syntax().text().trim()
+                    ),
+                    member.docs.clone(),
+                )
+            }),
+            DefinitionId::Macro(id) => resolved
+                .macro_for(id)
+                .map(|info| (macro_signature(info), info.docs.clone())),
             DefinitionId::CompileTime(syntax) => resolved
                 .compile_time_binding_for(syntax)
-                .map(compile_time_signature),
+                .map(|info| (compile_time_signature(info), Vec::new())),
             DefinitionId::TypeParameter(_) | DefinitionId::Module(_) => None,
         }
     }
@@ -1963,10 +1983,15 @@ mod tests {
         std::fs::write(
             root.join("dependency.sta"),
             concat!(
+                "/// A value.\n",
                 "pub let value = 1\n",
+                "/// A callable.\n",
                 "pub def callable = () => 1\n",
+                "/// A number alias.\n",
                 "pub type alias Number = I32\n",
+                "/// A printable trait.\n",
                 "pub trait Printable T {}\n",
+                "/// An identity macro.\n",
                 "pub macro identity = value => parse_quote { $value }\n",
             ),
         )
@@ -1985,21 +2010,25 @@ mod tests {
         let module = parse(source).unwrap();
         let entries = entries(&module, &typed)
             .into_iter()
-            .map(|entry| (&source[entry.range], entry.signature))
+            .map(|entry| (&source[entry.range], entry.signature, entry.documentation))
             .collect::<Vec<_>>();
 
         for expected in [
-            ("value", "let value: I32"),
-            ("Number", "type alias Number = I32"),
-            ("Printable", "trait Printable T"),
-            ("identity", "macro identity: SyntaxNode -> Expr"),
-            ("callable", "def callable: () -> I32"),
-            ("invoke", "def callable: () -> I32"),
+            ("value", "let value: I32", " A value."),
+            ("Number", "type alias Number = I32", " A number alias."),
+            ("Printable", "trait Printable T", " A printable trait."),
+            (
+                "identity",
+                "macro identity: SyntaxNode -> Expr",
+                " An identity macro.",
+            ),
+            ("callable", "def callable: () -> I32", " A callable."),
+            ("invoke", "def callable: () -> I32", " A callable."),
         ] {
             assert!(
-                entries
-                    .iter()
-                    .any(|entry| entry.0 == expected.0 && entry.1 == expected.1),
+                entries.iter().any(|entry| entry.0 == expected.0
+                    && entry.1 == expected.1
+                    && entry.2 == [expected.2]),
                 "missing {expected:?} in {entries:?}"
             );
         }
