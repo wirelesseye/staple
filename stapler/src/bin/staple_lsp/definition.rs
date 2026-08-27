@@ -1419,7 +1419,7 @@ mod tests {
             "    let x = 3\n",
             "    let y: I32 = x + 30\n",
             "    let condition: Bool = True\n",
-            "    if {\n",
+            "    when {\n",
             "        condition => { println \"123\" },\n",
             "    }\n",
             "    println \"Hello, world!\"\n",
@@ -1514,7 +1514,7 @@ mod tests {
         let entries = entries(&module, typed.resolved(), Some(&typed));
 
         assert_target(&source, &entries, "otherwise", "otherwise");
-        assert_target(&source, &entries, "if_clauses", "if_clauses");
+        assert_target(&source, &entries, "when_clauses", "when_clauses");
         assert_target(&source, &entries, "body", "body");
         assert!(
             entries.iter().any(|entry| {

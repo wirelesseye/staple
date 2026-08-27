@@ -113,7 +113,7 @@ def list_of_pushes: Expr -> Sequence Expr -> Expr = accumulator => elements => m
 }
 
 // An explicit `-> Expr` result lets the trailing `parse_quote` infer its
-// contextual type, the same way `if`'s `if_clauses` helper (in `flow.sta`)
+// contextual type, the same way `when`'s `when_clauses` helper (in `flow.sta`)
 // does — a `parse_quote` called directly from a macro's own match arm,
 // with no result type in scope, cannot infer what to parse into.
 //

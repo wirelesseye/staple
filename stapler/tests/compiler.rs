@@ -5677,28 +5677,28 @@ fn rejects_malformed_separated_syntax() {
 }
 
 #[test]
-fn expands_standard_braced_if_clauses() {
+fn expands_standard_braced_when_clauses() {
     let module = type_check(concat!(
         "let condition: Bool = True\n",
-        "let clauses: I32 = if {\n",
+        "let clauses: I32 = when {\n",
         "  False => 7,\n",
         "  condition => 8,\n",
         "  else => 9,\n",
         "}\n",
-        "let clauses_without_else = if { False => () }\n",
+        "let clauses_without_else = when { False => () }\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("standard braced if should expand and generate code");
+        .expect("standard braced when should expand and generate code");
 }
 
 #[test]
-fn requires_else_to_be_the_last_braced_if_clause() {
+fn requires_else_to_be_the_last_braced_when_clause() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("let invalid = if { else => (), True => () }\n", root)
+        .load_source("let invalid = when { else => (), True => () }\n", root)
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
@@ -5708,6 +5708,23 @@ fn requires_else_to_be_the_last_braced_if_clause() {
             .iter()
             .any(|diagnostic| { diagnostic.message == "compile-time match was not exhaustive" })
     );
+}
+
+#[test]
+fn expands_if_else_if_chain() {
+    let module = type_check(concat!(
+        "let a: Bool = True\n",
+        "let b: Bool = False\n",
+        "let plain: I32 = if a { 1 } else { 2 }\n",
+        "let bare: I32 = if a 1 else 2\n",
+        "let chained: I32 = if a { 1 } else if b { 2 } else { 3 }\n",
+        "let no_else: () = if b { () }\n",
+        "let nested: I32 = if a { 1 } else (if b { 2 } else { 3 })\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("if/else if/else should expand and generate code");
 }
 
 #[test]
@@ -5795,23 +5812,24 @@ fn macro_overloads_choose_longest_then_most_specific() {
 }
 
 #[test]
-fn rejects_legacy_standard_if_syntax() {
+fn rejects_braced_clause_syntax_for_if_now_that_it_belongs_to_when() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "let condition: Bool = True\nlet invalid = if condition 1 else 2\n",
+            "let condition: Bool = True\nlet invalid = if { condition => 1, else => 2 }\n",
             root,
         )
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
-        .expect_err_diagnostics("legacy if syntax should be rejected");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("argument 1 of macro `if` must be `Braced")
-    }));
+        .expect_err_diagnostics("the braced clause form is now `when`, not `if`");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.message == "no overload of macro `if` matches this invocation"
+        }),
+        "{diagnostics:#?}"
+    );
 }
 
 #[test]
@@ -6862,7 +6880,7 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
 fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
     let module = type_check(concat!(
         "trait Same T where Eq T { same: (T, T) -> Bool = (left, right) => Eq.equal left right }\n",
-        "trait Select Value { select: (Bool, move Value, move Value) -> Value = (condition, move left, move right) => if { condition => left, else => right } }\n",
+        "trait Select Value { select: (Bool, move Value, move Value) -> Value = (condition, move left, move right) => when { condition => left, else => right } }\n",
         "trait First (Left, Right) { first: (move Left, Right) -> Left = (move left, right) => left }\n",
         "impl Same I32 {}\n",
         "impl Select I32 {}\n",

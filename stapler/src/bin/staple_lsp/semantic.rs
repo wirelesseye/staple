@@ -1821,7 +1821,7 @@ mod tests {
         assert!(
             labels
                 .iter()
-                .any(|token| *token == ("if_clauses", FUNCTION)),
+                .any(|token| *token == ("when_clauses", FUNCTION)),
             "{labels:?}"
         );
     }

@@ -2736,7 +2736,7 @@ mod tests {
         assert!(
             signatures
                 .iter()
-                .any(|entry| entry.0 == "if_clauses" && entry.1.starts_with("def if_clauses:")),
+                .any(|entry| entry.0 == "when_clauses" && entry.1.starts_with("def when_clauses:")),
             "{signatures:?}"
         );
         assert!(

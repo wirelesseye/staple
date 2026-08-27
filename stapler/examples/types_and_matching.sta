@@ -32,7 +32,7 @@ let generic_value = unbox boxed
 let singleton_value = switch_number Enabled
 
 println "Nominal patterns, generic constructors, and singleton matches evaluated successfully."
-if {
+when {
     (same_switch (Enabled, Disabled)) => {
         println "same"
     },

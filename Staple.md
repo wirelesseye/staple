@@ -2229,10 +2229,12 @@ the same rules used for inferred function results. Arms which return from the
 enclosing function do not contribute to the match value type. If every arm
 returns, the match itself does not continue.
 
-The standard prelude supplies a braced, clause-oriented `if` form implemented as a macro:
+The standard prelude supplies two conditional forms, both implemented as macros.
+
+`when` is a braced, clause-oriented form:
 
 ```staple
-if {
+when {
     first_condition => first_branch,
     second_condition => second_branch,
     else => fallback,
@@ -2242,6 +2244,22 @@ if {
 It evaluates conditions from top to bottom and evaluates only the branch
 belonging to the first true condition. Its optional final `else` clause supplies
 the fallback; without one, the fallback is `()`. An `else` clause must be last,
+and branch types join normally.
+
+`if` is an infix form: a condition, a branch, then any number of
+`else if` arms and an optional trailing `else`:
+
+```staple
+if first_condition { first_branch }
+else if second_condition { second_branch }
+else { fallback }
+```
+
+Each branch is an ordinary `Expr`, so `if ready { run () } else 0` is also
+valid — braces are just the usual block expression. The condition is a single
+atomic argument: a compound condition is parenthesised, `if (count > 0) { ... }`,
+the same convention `while` and `for` use. Without a trailing `else` the
+fallback is `()`. It lowers to the same first-true-branch semantics as `when`,
 and branch types join normally.
 
 ## Return statements

@@ -5,7 +5,7 @@ use std.core.iterator.(IntoIterator, Iterator)
 use std.core.iterator.IterStep.(Done, Yield)
 use std.syntax.*
 
-def if_clauses:
+def when_clauses:
     Sequence (Expr, FatArrow, Expr) ->
     Expr =
 clauses => match clauses {
@@ -18,7 +18,7 @@ clauses => match clauses {
             Sequence () => fallback,
         },
         (condition, _, branch) => {
-            let otherwise = if_clauses rest
+            let otherwise = when_clauses rest
             parse_quote {
                 match $condition satisfies Bool {
                     True() => $branch,
@@ -29,10 +29,63 @@ clauses => match clauses {
     },
 }
 
-pub macro if =
+pub macro when =
     body: Braced (Separated (Expr, FatArrow, Expr) Comma) => match body {
-        Braced (Separated (_, clauses, _)) => if_clauses clauses,
+        Braced (Separated (_, clauses, _)) => when_clauses clauses,
     }
+
+// `if` takes an infix `if <cond> <then>` form, optionally followed by
+// any number of `else if <cond> <then>` arms and a trailing `else <otherwise>`.
+// Each branch is a plain `Expr` (usually a `{ ... }` block), so braces are not
+// required. The condition is a single atomic argument; a compound condition is
+// parenthesised, matching `while` and `for`. The trailing arms arrive as a flat
+// `Sequence Expr` of `else` / `if` / condition / branch atoms, which this helper
+// walks recursively.
+def if_branches:
+    Expr ->
+    Expr ->
+    Sequence Expr ->
+    Expr =
+condition => consequent => rest => {
+    // `first` and `rest` are the required binding names for a `Sequence`
+    // head/tail destructure, so each level rebinds `first` to a descriptive
+    // local before recursing.
+    let otherwise = match rest {
+        Sequence () => parse_quote { () },
+        Sequence (first: Expr, rest: Sequence Expr) => match first {
+            else_keyword: Ident "else" => match rest {
+                Sequence (first: Expr, rest: Sequence Expr) => match first {
+                    if_keyword: Ident "if" => match rest {
+                        Sequence (first: Expr, rest: Sequence Expr) => {
+                            let elif_condition = first
+                            match rest {
+                                Sequence (first: Expr, rest: Sequence Expr) => {
+                                    let elif_consequent = first
+                                    if_branches elif_condition elif_consequent rest
+                                },
+                            }
+                        },
+                    },
+                    otherwise_branch => match rest {
+                        Sequence () => otherwise_branch,
+                    },
+                },
+            },
+        },
+    }
+    parse_quote {
+        match $condition satisfies Bool {
+            True() => $consequent,
+            False() => $otherwise,
+        }
+    }
+}
+
+pub macro if =
+    condition: Expr =>
+    consequent: Expr =>
+    rest: Sequence Expr =>
+    if_branches condition consequent rest
 
 pub macro while =
     condition: Expr =>

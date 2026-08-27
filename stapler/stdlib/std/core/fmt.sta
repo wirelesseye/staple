@@ -106,7 +106,7 @@ def formatter_write_debug: (mut Formatter, String) -> () = (mut formatter, value
     let mut index: USize = 0
     while (index < Slice.length bytes) {
         let byte = bytes[index]
-        if {
+        when {
             byte == 0 => Formatter.write (formatter, "\\0"),
             byte == 9 => Formatter.write (formatter, "\\t"),
             byte == 10 => Formatter.write (formatter, "\\n"),
