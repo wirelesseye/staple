@@ -1,3 +1,5 @@
+pub mod
+
 /// A UTF-8 byte slice used as Staple's string type.
 pub type String = Slice U8
 

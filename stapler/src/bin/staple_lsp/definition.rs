@@ -1099,6 +1099,7 @@ mod tests {
         std::fs::write(
             &dependency,
             concat!(
+                "pub mod\n",
                 "pub(repr) type Point = (x: I32, y: I32)\n",
                 "pub def origin = () => Point (x: 0, y: 0)\n",
             ),

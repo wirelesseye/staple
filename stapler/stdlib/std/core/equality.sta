@@ -1,3 +1,5 @@
+pub mod
+
 /// Provides equality and inequality comparisons.
 pub trait Eq T where Copy T {
     /// Returns whether two values are equal.

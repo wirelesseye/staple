@@ -896,7 +896,11 @@ mod tests {
         let root =
             std::env::temp_dir().join(format!("staple-completion-scopes-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("dependency.sta"), "pub let imported = 1\n").unwrap();
+        std::fs::write(
+            root.join("dependency.sta"),
+            "pub mod\npub let imported = 1\n",
+        )
+        .unwrap();
         let source = concat!(
             "use dependency.*\n",
             "def outer = parameter: I32 => {\n",
@@ -1040,6 +1044,7 @@ mod tests {
         std::fs::write(
             root.join("dependency.sta"),
             concat!(
+                "pub mod\n",
                 "pub def callable = () => 1\n",
                 "pub type alias Number = I32\n",
                 "pub trait Printable T {}\n",

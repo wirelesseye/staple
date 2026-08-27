@@ -33,6 +33,13 @@ impl Fixture {
             fs::create_dir_all(parent).expect("module directory should be created");
         }
         let source = with_syntax_imports(source);
+        let source = if source.trim_start().starts_with("mod\n")
+            || source.trim_start().starts_with("pub mod\n")
+        {
+            source
+        } else {
+            format!("pub mod\n{source}")
+        };
         fs::write(path, source).expect("module should be written");
     }
 
@@ -325,6 +332,23 @@ fn external_imports_traverse_public_inline_submodules() {
         .compile()
         .expect_err("private inline paths must not be externally importable");
     assert!(error.contains("private"));
+}
+
+#[test]
+fn file_modules_are_private_unless_declared_public() {
+    let fixture = Fixture::new();
+    fixture.write("library.sta", "mod\npub let answer: I32 = 42\n");
+    fixture.write("main.sta", "use library.answer\n");
+    let error = fixture
+        .compile()
+        .expect_err("a private file module must not be imported by another module");
+    assert!(error.contains("module `library` is private"));
+
+    fixture.write("library.sta", "pub mod\npub let answer: I32 = 42\n");
+    fixture.write("main.sta", "use library.answer\nlet value: I32 = answer\n");
+    fixture
+        .compile()
+        .expect("a public file module should import");
 }
 
 #[test]

@@ -770,7 +770,7 @@ impl Collector<'_> {
                 }
                 _ => None,
             })
-            .unwrap_or_default();
+            .unwrap_or_else(|| resolved.program().module(module).syntax.docs.clone());
         self.named_last_with_docs(syntax, name, format!("mod {name}"), docs);
     }
 
@@ -1623,7 +1623,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dependency.sta"),
-            "use std.syntax.(parse_quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => parse_quote { $value }\n",
+            "pub mod\nuse std.syntax.(parse_quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => parse_quote { $value }\n",
         )
         .unwrap();
         let source = concat!(
@@ -1934,7 +1934,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dependency.sta"),
-            "pub def imported = () => 1\npub let imported_value = 2\n",
+            "pub mod\npub def imported = () => 1\npub let imported_value = 2\n",
         )
         .unwrap();
         let source = concat!(
@@ -1983,6 +1983,7 @@ mod tests {
         std::fs::write(
             root.join("dependency.sta"),
             concat!(
+                "pub mod\n",
                 "/// A value.\n",
                 "pub let value = 1\n",
                 "/// A callable.\n",
@@ -2046,6 +2047,7 @@ mod tests {
         std::fs::write(
             root.join("geometry.sta"),
             concat!(
+                "pub mod\n",
                 "pub(repr) type Point = (x: I32, y: I32)\n",
                 "pub def origin = () => Point (x: 0, y: 0)\n",
             ),
@@ -2118,6 +2120,7 @@ mod tests {
         std::fs::write(
             root.join("dependency.sta"),
             concat!(
+                "pub mod\n",
                 "pub type Hidden = I32\n",
                 "pub type HiddenGeneric T = T\n",
                 "pub(repr) type Visible = I32\n",

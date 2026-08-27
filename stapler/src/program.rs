@@ -111,6 +111,7 @@ pub struct Program {
 
 impl Program {
     pub(crate) fn single(module: Module) -> Self {
+        let visibility = module.visibility;
         let mut program = Self {
             entry: ModuleId(0),
             standard_library_core: None,
@@ -123,7 +124,7 @@ impl Program {
                 syntax: module,
                 parent: None,
                 name: None,
-                visibility: Visibility::Private,
+                visibility,
                 qualified_name: "<memory>".to_owned(),
                 companion: false,
             }],
@@ -815,6 +816,7 @@ impl ProgramLoader {
             message: error.message,
         })?;
         let id = ModuleId(self.modules.len());
+        let visibility = syntax.visibility;
         self.paths.insert(path.clone(), id);
         let qualified_name = path.display().to_string();
         self.modules.push(SourceModule {
@@ -823,7 +825,7 @@ impl ProgramLoader {
             syntax,
             parent: None,
             name: None,
-            visibility: Visibility::Private,
+            visibility,
             qualified_name: qualified_name.clone(),
             companion: false,
         });
@@ -1154,7 +1156,7 @@ impl ProgramLoader {
             if parts.len() == 1 {
                 return Ok(entry);
             }
-            return self.resolve_file_import(&parts[1..], root, declaration);
+            return self.resolve_file_import(module, &parts[1..], root, declaration);
         }
 
         // A future Binder dependency root should be dispatched here, before
@@ -1173,11 +1175,12 @@ impl ProgramLoader {
         } else {
             root.to_owned()
         };
-        self.resolve_file_import(parts, &import_root, declaration)
+        self.resolve_file_import(module, parts, &import_root, declaration)
     }
 
     fn resolve_file_import(
         &mut self,
+        importing_module: ModuleId,
         parts: &[String],
         import_root: &Path,
         declaration: &UseDeclaration,
@@ -1192,6 +1195,12 @@ impl ProgramLoader {
                 continue;
             };
             let file = self.load_file(&path)?;
+            if file != importing_module && self.modules[file.0].visibility != Visibility::Public {
+                return Err(load_diagnostic_at(
+                    &declaration.syntax.span,
+                    format!("module `{}` is private", parts[..prefix_len].join(".")),
+                ));
+            }
             return self.traverse_children(file, &parts[prefix_len..], false, declaration);
         }
         Err(load_diagnostic_at(

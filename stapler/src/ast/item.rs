@@ -6,6 +6,11 @@ use super::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Module {
     pub syntax: Syntax,
+    /// Syntax for this module's optional bare `mod` declaration.
+    pub declaration_syntax: Option<Syntax>,
+    pub docs: Vec<String>,
+    pub visibility: Visibility,
+    pub modifiers: Vec<ModifierInvocation>,
     pub items: Vec<Item>,
 }
 

@@ -39,6 +39,31 @@ fn resolve(source: &str) -> stapler::ResolvedModule {
         .expect("source should resolve")
 }
 
+#[test]
+fn applies_documentation_to_the_current_module() {
+    let resolved = resolve("@doc(\"Module docs\")\npub mod\npub let answer = 42\n");
+    assert_eq!(resolved.syntax().visibility, stapler::Visibility::Public);
+    assert_eq!(resolved.syntax().docs, ["Module docs"]);
+}
+
+#[test]
+fn applies_user_modifiers_to_the_current_module() {
+    let resolved = resolve(concat!(
+        "@identity\n",
+        "pub mod\n",
+        "macro @identity: Item -> Item = item => item\n",
+        "pub let answer = 42\n",
+    ));
+    assert_eq!(resolved.syntax().visibility, stapler::Visibility::Public);
+    assert!(
+        resolved
+            .syntax()
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Binding(binding) if binding.name == "answer"))
+    );
+}
+
 fn with_syntax_imports(source: &str) -> String {
     if source.contains("use std.syntax") {
         return source.to_owned();
@@ -797,7 +822,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
         .expect("production String module has its canonical declaration");
     std::fs::write(
         temporary.join("std/core/string.sta"),
-        format!("{declaration}\n{production_body}"),
+        format!("pub mod\n{declaration}\n{production_body}"),
     )
     .expect("test String declaration should be written");
 

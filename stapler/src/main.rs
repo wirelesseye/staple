@@ -610,7 +610,11 @@ mod tests {
             "use package.values.answer\nlet checked: I32 = answer\n",
         )
         .unwrap();
-        std::fs::write(root.join("values.sta"), "pub let answer: I32 = 42\n").unwrap();
+        std::fs::write(
+            root.join("values.sta"),
+            "pub mod\npub let answer: I32 = 42\n",
+        )
+        .unwrap();
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
 
         let outcome = run([

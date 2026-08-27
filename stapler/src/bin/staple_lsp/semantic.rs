@@ -1457,7 +1457,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dependency.sta"),
-            "use std.syntax.(parse_quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => parse_quote { $value }\n",
+            "pub mod\nuse std.syntax.(parse_quote, Expr)\npub macro imported: Expr -> Expr = value: Expr => parse_quote { $value }\n",
         )
         .unwrap();
         let source = concat!(
@@ -1630,7 +1630,7 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         std::fs::write(
             root.join("dependency.sta"),
-            "pub let imported_function = () => 1\npub def imported_value = 2\n",
+            "pub mod\npub let imported_function = () => 1\npub def imported_value = 2\n",
         )
         .unwrap();
         let source = concat!(
@@ -1665,6 +1665,7 @@ mod tests {
         std::fs::write(
             root.join("dependency.sta"),
             concat!(
+                "pub mod\n",
                 "pub let value = 1\n",
                 "pub def callable = () => 1\n",
                 "pub type alias Number = I32\n",

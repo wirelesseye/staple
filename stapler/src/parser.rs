@@ -293,16 +293,92 @@ impl Grammar {
     /// Parses all top-level items and returns the completed module.
     fn parse_source_file(mut self) -> Result<Module, ParseError> {
         let start = self.position;
+        let (declaration_syntax, docs, visibility, modifiers) =
+            self.parse_current_module_declaration()?;
         let mut items = Vec::new();
         while self.peek().is_some() {
+            if self.starts_current_module_declaration() {
+                return Err(self.error(
+                    "the current module declaration must be the first declaration in a module",
+                ));
+            }
             items.push(self.parse_item()?);
             self.eat(TokenKind::Semicolon);
         }
         self.position = self.tokens.len();
         Ok(Module {
             syntax: self.syntax(start),
+            declaration_syntax,
+            docs,
+            visibility,
+            modifiers,
             items,
         })
+    }
+
+    fn starts_current_module_declaration(&mut self) -> bool {
+        let saved = self.position;
+        let result = (|| {
+            let _ = self.doc_comment_modifiers(saved);
+            while self.at(TokenKind::At) {
+                self.parse_modifier_invocation().ok()?;
+            }
+            self.eat(TokenKind::Pub);
+            let mod_token = self.expect(TokenKind::Mod, "expected `mod`").ok()?;
+            let next = self.next_non_trivia(self.position);
+            let newline = self.source[mod_token.span.end
+                ..self
+                    .tokens
+                    .get(next)
+                    .map_or(mod_token.span.end, |token| token.span.start)]
+                .contains('\n');
+            if !newline && self.peek() == Some(TokenKind::Identifier) {
+                return None;
+            }
+            Some(true)
+        })()
+        .unwrap_or(false);
+        self.position = saved;
+        result
+    }
+
+    fn parse_current_module_declaration(
+        &mut self,
+    ) -> Result<
+        (
+            Option<Syntax>,
+            Vec<String>,
+            Visibility,
+            Vec<ModifierInvocation>,
+        ),
+        ParseError,
+    > {
+        let start = self.position;
+        if !self.starts_current_module_declaration() {
+            return Ok((None, Vec::new(), Visibility::Private, Vec::new()));
+        }
+        let mut modifiers = self.doc_comment_modifiers(start);
+        while self.at(TokenKind::At) {
+            modifiers.push(self.parse_modifier_invocation()?);
+        }
+        let visibility = if self.eat(TokenKind::Pub) {
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        let mod_token = self.expect(TokenKind::Mod, "expected `mod`")?;
+        let next = self.next_non_trivia(self.position);
+        let separated_by_newline = self.source[mod_token.span.end
+            ..self
+                .tokens
+                .get(next)
+                .map_or(mod_token.span.end, |token| token.span.start)]
+            .contains('\n');
+        if self.at(TokenKind::LBrace) && !separated_by_newline {
+            return Err(self.error("a bare current-module declaration cannot have a body"));
+        }
+        let syntax = self.syntax(start);
+        Ok((Some(syntax), Vec::new(), visibility, modifiers))
     }
 
     /// Parses one top-level item.
@@ -507,8 +583,15 @@ impl Grammar {
         let name = self.parse_quoted_identifier("expected submodule name")?;
         self.expect(TokenKind::LBrace, "expected `{` after submodule name")?;
         let module_start = self.position;
+        let (declaration_syntax, docs, module_visibility, modifiers) =
+            self.parse_current_module_declaration()?;
         let mut items = Vec::new();
         while self.peek().is_some() && !self.at(TokenKind::RBrace) {
+            if self.starts_current_module_declaration() {
+                return Err(self.error(
+                    "the current module declaration must be the first declaration in a module",
+                ));
+            }
             items.push(self.parse_item()?);
             self.eat(TokenKind::Semicolon);
         }
@@ -517,6 +600,10 @@ impl Grammar {
         }
         let module = Module {
             syntax: self.syntax(module_start),
+            declaration_syntax,
+            docs,
+            visibility: module_visibility,
+            modifiers,
             items,
         };
         self.expect(TokenKind::RBrace, "expected `}` after submodule items")?;
@@ -544,8 +631,15 @@ impl Grammar {
             .ok_or_else(|| self.error("companion target must be a named type or type alias"))?;
         self.expect(TokenKind::LBrace, "expected `{` after companion target")?;
         let module_start = self.position;
+        let (declaration_syntax, docs, module_visibility, modifiers) =
+            self.parse_current_module_declaration()?;
         let mut items = Vec::new();
         while self.peek().is_some() && !self.at(TokenKind::RBrace) {
+            if self.starts_current_module_declaration() {
+                return Err(self.error(
+                    "the current module declaration must be the first declaration in a module",
+                ));
+            }
             items.push(self.parse_item()?);
             self.eat(TokenKind::Semicolon);
         }
@@ -584,6 +678,10 @@ impl Grammar {
         }
         let module = Module {
             syntax: self.syntax(module_start),
+            declaration_syntax,
+            docs,
+            visibility: module_visibility,
+            modifiers,
             items,
         };
         self.expect(TokenKind::RBrace, "expected `}` after companion items")?;

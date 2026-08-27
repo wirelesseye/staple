@@ -530,7 +530,21 @@ status zero.
 
 ### Modules and `use`
 
-Every `.sta` file is a module. Each compilation has a module root. A dotted
+Every `.sta` file is a module. Modules are private by default. A file that is
+intended to be imported by another module declares that at the start of the
+file with a bare `pub mod`; a bare `mod` explicitly retains private visibility:
+
+```staple
+@doc("Public formatting utilities")
+pub mod
+```
+
+The bare declaration describes the current module and may carry the same
+modifier list as another declaration. It must precede ordinary module items and
+may appear at most once. It is distinct from `pub mod api { ... }`, which
+declares a public child named `api` in the current module.
+
+Each compilation has a module root. A dotted
 module path is resolved from that root by replacing dots with path separators
 and adding `.sta`:
 

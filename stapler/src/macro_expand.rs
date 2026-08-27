@@ -498,6 +498,47 @@ pub(crate) fn expand_program(
 
     for source_module in program.modules_mut() {
         let module = source_module.id;
+        if !source_module.syntax.modifiers.is_empty() {
+            let declaration = crate::Submodule {
+                syntax: source_module
+                    .syntax
+                    .declaration_syntax
+                    .clone()
+                    .unwrap_or_else(|| source_module.syntax.syntax.clone()),
+                docs: source_module.syntax.docs.clone(),
+                visibility: source_module.syntax.visibility,
+                name: String::new(),
+                module: source_module.syntax.clone(),
+                companion: false,
+                type_parameters: Vec::new(),
+                trait_bounds: Vec::new(),
+                subtype_bounds: Vec::new(),
+                companion_target: None,
+            };
+            let modified = crate::ModifiedItem {
+                syntax: declaration.syntax.clone(),
+                modifiers: std::mem::take(&mut source_module.syntax.modifiers),
+                item: Box::new(Item::Submodule(declaration)),
+            };
+            match expander.apply_modifier_chain(module, modified, 0) {
+                Some(ModifierChainResult::Item(Item::Submodule(result)))
+                    if result.name.is_empty() =>
+                {
+                    let whole_file_syntax = source_module.syntax.syntax.clone();
+                    source_module.syntax = result.module;
+                    source_module.syntax.syntax = whole_file_syntax;
+                    source_module.syntax.docs = result.docs;
+                    source_module.syntax.visibility = result.visibility;
+                    source_module.syntax.modifiers.clear();
+                    source_module.visibility = result.visibility;
+                }
+                Some(_) => expander.diagnostics.push(Diagnostic::new(
+                    source_module.syntax.syntax.span.clone(),
+                    "a current-module modifier must return exactly one current module",
+                )),
+                None => {}
+            }
+        }
         let mut items = Vec::new();
         for mut item in source_module.syntax.items.clone() {
             expander.expand_item(module, &mut item, 0);
@@ -7536,7 +7577,9 @@ fn modifier_target_supported(item: &Item) -> bool {
         | Item::Break(_)
         | Item::Continue(_)
         | Item::Expression(_) => false,
-        Item::UseDeclaration(_) | Item::Submodule(_) | Item::MacroDeclaration(_) => false,
+        Item::Submodule(submodule) if submodule.name.is_empty() => true,
+        Item::Submodule(_) => false,
+        Item::UseDeclaration(_) | Item::MacroDeclaration(_) => false,
     }
 }
 

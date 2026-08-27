@@ -678,6 +678,32 @@ fn parses_recursive_inline_submodules_losslessly() {
 }
 
 #[test]
+fn parses_current_module_declarations_losslessly() {
+    let private = parse("mod\npub let answer = 42\n").expect("private module should parse");
+    assert_eq!(private.visibility, Visibility::Private);
+    assert!(private.declaration_syntax.is_some());
+    assert_eq!(private.text(), "mod\npub let answer = 42\n");
+
+    let public = parse("@doc(\"API\")\npub mod\npub let answer = 42\n")
+        .expect("modified public module should parse");
+    assert_eq!(public.visibility, Visibility::Public);
+    assert_eq!(public.modifiers.len(), 1);
+    assert_eq!(public.modifiers[0].name, "doc");
+
+    assert!(parse("let answer = 42\npub mod\n").is_err());
+    assert!(parse("pub mod\nmod\n").is_err());
+    assert!(parse("mod {}\n").is_err());
+
+    let inline =
+        parse("pub mod api {\n    @doc(\"API module\")\n    mod\n    pub let answer = 42\n}\n")
+            .expect("an inline module may declare its current-module metadata");
+    let Item::Submodule(api) = &inline.items[0] else {
+        panic!("expected inline module")
+    };
+    assert_eq!(api.module.modifiers.len(), 1);
+}
+
+#[test]
 fn parses_block_scoped_submodules_losslessly() {
     let source = "let x = {\n    mod foo { pub def value = 42 }\n    0\n}\n";
     let root = parse(source).expect("block-scoped submodules should parse");

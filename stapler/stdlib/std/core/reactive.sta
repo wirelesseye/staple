@@ -1,3 +1,5 @@
+pub mod
+
 /// The lexical owner of reactions created within a reactive scope.
 pub type Reactive = opaque
 

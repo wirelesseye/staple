@@ -1,3 +1,5 @@
+pub mod
+
 use std.cinterop.*
 
 /// The capability required for standard output operations.

@@ -1,3 +1,5 @@
+pub mod
+
 /// Provides read-only indexing for a target and position.
 pub trait Index Target Position Output where {Target, Position} ~> Output {
     /// Returns the indexed value.

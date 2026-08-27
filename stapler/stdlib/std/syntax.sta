@@ -1,3 +1,5 @@
+pub mod
+
 /// Compiler-owned, compile-time-only syntax values. Identifiers and calls expose
 /// their data in the first structured-syntax slice; remaining expressions round-trip
 /// through `UnstructuredExpr` without exposing fields.
