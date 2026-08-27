@@ -3929,14 +3929,28 @@ impl NameResolver {
                     // `module` is the namespace the full chain resolved to
                     // (e.g. the `io` module for `std.io`). Walk each shorter
                     // prefix's node (`std`) back up the module tree via its
-                    // parent, rather than re-resolving the dotted string:
-                    // not every intermediate prefix is registered as its
-                    // own lookup-able namespace (only the longest bare
-                    // `std.foo.bar`-style reference typically is), but the
-                    // module tree itself always has the right ancestor.
+                    // parent. Inline submodules are linked through
+                    // `module_parents`; separately-loaded package files are
+                    // not, so when that link is missing recover the segment's
+                    // module by resolving its own dotted prefix as a
+                    // root-qualified namespace (the loader registers every
+                    // resolvable prefix, e.g. `package.outer` as well as
+                    // `package.outer.inner`).
+                    let prefix_parts = namespace.split('.').collect::<Vec<_>>();
                     let mut segment_module = Some(module);
-                    for syntax_id in segments.iter().rev() {
-                        let Some(current) = segment_module else {
+                    for (index, syntax_id) in segments.iter().enumerate().rev() {
+                        let current = segment_module.or_else(|| {
+                            let prefix = prefix_parts.get(..=index)?.join(".");
+                            definition_module
+                                .and_then(|context| {
+                                    self.definition_context_namespaces
+                                        .get(context)
+                                        .and_then(|namespaces| namespaces.get(&prefix))
+                                        .copied()
+                                })
+                                .or_else(|| self.lookup_namespace(&prefix))
+                        });
+                        let Some(current) = current else {
                             break;
                         };
                         self.namespace_references.insert(*syntax_id, current);

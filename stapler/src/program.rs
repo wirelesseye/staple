@@ -1185,7 +1185,13 @@ impl ProgramLoader {
             1
         };
         let mut last_error = None;
-        for prefix_len in (minimum..parts.len()).rev() {
+        let mut longest = None;
+        // Record every resolvable prefix, not just the longest one. A chain
+        // like `package.outer.inner.value` needs `package.outer` and
+        // `package.outer.inner` registered as namespaces too, so tooling can
+        // resolve each intermediate segment; resolving the shorter prefixes
+        // here also loads those ancestor modules as a side effect.
+        for prefix_len in minimum..parts.len() {
             let declaration = UseDeclaration {
                 syntax: Syntax::synthetic(SyntaxId::COMPILER, span.clone()),
                 visibility: Visibility::Private,
@@ -1193,19 +1199,26 @@ impl ProgramLoader {
                 kind: UseKind::Namespace,
             };
             match self.resolve_import(module, &declaration, root) {
-                Ok(target) => return Ok((parts[..prefix_len].join("."), target)),
+                Ok(target) => {
+                    let namespace = parts[..prefix_len].join(".");
+                    self.root_qualified_modules
+                        .insert((module, namespace.clone()), target);
+                    longest = Some((namespace, target));
+                }
                 Err(error) => last_error = Some(error),
             }
         }
-        Err(last_error.unwrap_or_else(|| {
-            load_diagnostic_at(
-                &span,
-                format!(
-                    "could not resolve root-qualified item `{}`",
-                    parts.join(".")
-                ),
-            )
-        }))
+        longest.ok_or_else(|| {
+            last_error.unwrap_or_else(|| {
+                load_diagnostic_at(
+                    &span,
+                    format!(
+                        "could not resolve root-qualified item `{}`",
+                        parts.join(".")
+                    ),
+                )
+            })
+        })
     }
 
     fn can_defer_inline_import(&self, module: ModuleId, declaration: &UseDeclaration) -> bool {

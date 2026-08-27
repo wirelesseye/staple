@@ -838,6 +838,21 @@ impl Collector<'_> {
     fn qualified_receiver(&mut self, expression: &Expression) {
         let resolved = self.typed.resolved();
         match expression {
+            Expression::Name(name) if name.name == "package" => {
+                // The `package` root hovers as the package itself, the same
+                // as a `use package.…` path's leading segment.
+                let program = resolved.program();
+                let docs = program
+                    .package_root()
+                    .map(|root| program.module(root).syntax.docs.clone())
+                    .unwrap_or_default();
+                self.named_with_docs(
+                    &name.syntax,
+                    &name.name,
+                    format!("package {}", program.package_name()),
+                    docs,
+                );
+            }
             Expression::Name(name) => {
                 if let Some(module) = resolved.namespace_for(name.syntax.id) {
                     self.namespace_segment(&name.syntax, &name.name, module);
@@ -1479,6 +1494,55 @@ mod tests {
                 && entry.signature == "package example"
                 && entry.documentation == ["Root package documentation."]
         }));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn qualified_access_segments_hover_intermediate_package_modules() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-hover-qualified-segments-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("outer")).unwrap();
+        std::fs::write(root.join("outer.sta"), "///Outer module.\npub mod\n").unwrap();
+        std::fs::write(
+            root.join("outer/inner.sta"),
+            "///Inner module.\npub mod\npub let answer = 42\n",
+        )
+        .unwrap();
+        let source = "let value: I32 = package.outer.inner.answer\nvalue\n";
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_module_root(&root)
+            .with_package_name("example")
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "package" && entry.signature == "package example"
+            }),
+            "missing package root hover: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "outer"
+                    && entry.signature == "mod outer"
+                    && entry.documentation == ["Outer module."]
+            }),
+            "missing outer segment hover: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "inner"
+                    && entry.signature == "mod inner"
+                    && entry.documentation == ["Inner module."]
+            }),
+            "missing inner segment hover: {entries:?}"
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
     use std::path::PathBuf;

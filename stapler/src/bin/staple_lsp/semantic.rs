@@ -118,6 +118,7 @@ fn lexical_kind(kind: TokenKind) -> Option<u32> {
         TokenKind::String => Some(STRING),
         TokenKind::Integer | TokenKind::Float => Some(NUMBER),
         TokenKind::Use
+        | TokenKind::Package
         | TokenKind::As
         | TokenKind::Pub
         | TokenKind::Let
@@ -302,8 +303,14 @@ impl<'a> Classifier<'a> {
                 self.mark_last(&value.syntax, &value.name, VARIABLE, 0, 1);
             }
             Item::UseDeclaration(value) => {
-                for part in &value.path {
-                    self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
+                for (index, part) in value.path.iter().enumerate() {
+                    if index == 0 && part == "package" {
+                        // The `package` root is the reserved keyword, not a
+                        // namespace segment.
+                        self.mark_first(&value.syntax, part, KEYWORD, 0, 2);
+                    } else {
+                        self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
+                    }
                 }
                 match resolved
                     .map(|resolved| resolved.program().use_kind(value))
@@ -479,8 +486,14 @@ impl<'a> Classifier<'a> {
                 }
             }
             Item::UseDeclaration(value) => {
-                for part in &value.path {
-                    self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
+                for (index, part) in value.path.iter().enumerate() {
+                    if index == 0 && part == "package" {
+                        // The `package` root is the reserved keyword, not a
+                        // namespace segment.
+                        self.mark_first(&value.syntax, part, KEYWORD, 0, 2);
+                    } else {
+                        self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
+                    }
                 }
                 match resolved
                     .map(|resolved| resolved.program().use_kind(value))
@@ -792,6 +805,12 @@ impl<'a> Classifier<'a> {
                 self.mark_last(&value.syntax, &value.name, kind, READONLY, 1);
             }
             Expression::Name(value) => {
+                if value.name == "package" {
+                    // The `package` root is the reserved keyword, whether or
+                    // not the enclosing chain resolved to a qualified path.
+                    self.mark_last(&value.syntax, &value.name, KEYWORD, 0, 2);
+                    return;
+                }
                 if resolved
                     .and_then(|module| module.macro_invocation_for(value.syntax.id))
                     .is_some()
@@ -1066,6 +1085,11 @@ impl<'a> Classifier<'a> {
     fn qualified_receiver(&mut self, expression: &Expression, resolved: Option<&ResolvedModule>) {
         let Some(resolved) = resolved else { return };
         match expression {
+            Expression::Name(name) if name.name == "package" => {
+                // The `package` root is the reserved keyword, not a
+                // namespace segment.
+                self.mark_last(&name.syntax, &name.name, KEYWORD, 0, 2);
+            }
             Expression::Name(name) => match resolved.namespace_for(name.syntax.id) {
                 Some(module) => {
                     let kind = if resolved.companion_type_for_module(module).is_some() {
@@ -1702,6 +1726,59 @@ mod tests {
             assert!(
                 classified.contains(&expected),
                 "missing {expected:?} in {classified:?}"
+            );
+        }
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn classifies_package_root_as_keyword_and_segments_as_namespaces() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-semantic-package-root-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("outer")).unwrap();
+        std::fs::write(root.join("outer.sta"), "pub mod\n").unwrap();
+        std::fs::write(
+            root.join("outer/inner.sta"),
+            "pub mod\npub let answer = 42\n",
+        )
+        .unwrap();
+        let source = concat!(
+            "use package.outer.inner.answer\n",
+            "let value: I32 = package.outer.inner.answer\n",
+            "value\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_module_root(&root)
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let labels = labels(
+            source,
+            &tokens(source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
+
+        assert_eq!(
+            labels
+                .iter()
+                .filter(|token| **token == ("package", KEYWORD))
+                .count(),
+            2,
+            "labels: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&("package", NAMESPACE)),
+            "labels: {labels:?}"
+        );
+        for segment in ["outer", "inner"] {
+            assert!(
+                labels.contains(&(segment, NAMESPACE)),
+                "missing {segment:?} in {labels:?}"
             );
         }
 

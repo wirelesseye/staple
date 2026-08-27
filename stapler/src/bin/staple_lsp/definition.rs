@@ -1449,6 +1449,53 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn qualified_access_segments_target_intermediate_package_modules() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-definition-qualified-segments-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("outer")).unwrap();
+        std::fs::write(root.join("outer.sta"), "pub mod\n").unwrap();
+        std::fs::write(
+            root.join("outer/inner.sta"),
+            "pub mod\npub let answer = 42\n",
+        )
+        .unwrap();
+        let source = "let value: I32 = package.outer.inner.answer\nvalue\n";
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_module_root(&root)
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &resolved, None);
+        let canonical_outer = std::fs::canonicalize(root.join("outer.sta")).unwrap();
+        let canonical_inner = std::fs::canonicalize(root.join("outer/inner.sta")).unwrap();
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "outer"
+                    && entry
+                        .targets
+                        .iter()
+                        .any(|target| target.path == canonical_outer)
+            }),
+            "missing outer segment: {entries:?}"
+        );
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "inner"
+                    && entry
+                        .targets
+                        .iter()
+                        .any(|target| target.path == canonical_inner)
+            }),
+            "missing inner segment: {entries:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     fn assert_target(source: &str, entries: &[DefinitionEntry], origin: &str, target: &str) {
         assert!(
             entries.iter().any(|entry| {
