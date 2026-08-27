@@ -535,6 +535,7 @@ impl Collector<'_> {
             .use_kind(declaration)
             .clone();
         self.imported_module_segments(declaration, &resolved_kind);
+        self.inline_use_path_segments(declaration, &resolved_kind);
         match &resolved_kind {
             UseKind::Selected(names) => {
                 for name in names {
@@ -547,6 +548,101 @@ impl Collector<'_> {
             }
             UseKind::Dotted | UseKind::Namespace | UseKind::Glob => {}
         }
+    }
+
+    /// Annotates module segments of a `use` path that `imported_module_segments`
+    /// can't, because they name something without a backing `.sta` file: an
+    /// inline `mod`, or a `companion` block (`Switch` in `use Switch.*`, which
+    /// hovers as the type it extends).
+    fn inline_use_path_segments(&mut self, declaration: &UseDeclaration, kind: &UseKind) {
+        let Some(chain) = self.use_path_module_chain(declaration, kind) else {
+            return;
+        };
+        for (name, module, file_backed) in chain {
+            let resolved = self.typed.resolved();
+            if let Some(ty) = resolved.companion_type_for_module(module) {
+                if let Some(signature) = self.type_signature(ty, declaration.syntax.id) {
+                    let docs = self
+                        .typed
+                        .resolved()
+                        .type_declarations()
+                        .get(&ty)
+                        .map(|entry| entry.docs.clone())
+                        .unwrap_or_default();
+                    self.named_with_docs(&declaration.syntax, &name, signature, docs);
+                }
+            } else if !file_backed {
+                let docs = self.submodule_docs(module);
+                self.named_with_docs(
+                    &declaration.syntax,
+                    &name,
+                    format!("mod {name}"),
+                    docs,
+                );
+            }
+        }
+    }
+
+    /// Aligns the module segments of a non-rooted `use` path with the module
+    /// each one names, by walking up from the resolved target module. Yields
+    /// `(segment name, module, is file-backed)`; file-backed segments are
+    /// already handled by `imported_module_segments`.
+    fn use_path_module_chain(
+        &self,
+        declaration: &UseDeclaration,
+        kind: &UseKind,
+    ) -> Option<Vec<(String, ModuleId, bool)>> {
+        let module_components = match (&declaration.kind, kind) {
+            (UseKind::Dotted, UseKind::Selected(_)) => declaration.path.len().saturating_sub(1),
+            _ => declaration.path.len(),
+        };
+        let components = &declaration.path[..module_components];
+        if components
+            .first()
+            .is_some_and(|name| matches!(name.as_str(), "std" | "package" | "super"))
+        {
+            return None;
+        }
+        let program = self.typed.resolved().program();
+        let target = program.imported_module(declaration.syntax.id)?;
+        let mut ancestors = vec![target];
+        while let Some(parent) = program.module(*ancestors.last().unwrap()).parent {
+            ancestors.push(parent);
+        }
+        Some(
+            components
+                .iter()
+                .enumerate()
+                .filter_map(|(index, name)| {
+                    let module = *ancestors.get(components.len() - 1 - index)?;
+                    let file_backed = program
+                        .module(module)
+                        .parent
+                        .is_none_or(|parent| program.module(module).path != program.module(parent).path);
+                    Some((name.clone(), module, file_backed))
+                })
+                .collect(),
+        )
+    }
+
+    /// Documentation on the `mod`/`companion` declaration that introduces the
+    /// given child module, if any.
+    fn submodule_docs(&self, child: ModuleId) -> Vec<String> {
+        let resolved = self.typed.resolved();
+        resolved
+            .program()
+            .modules()
+            .iter()
+            .flat_map(|source| &source.syntax.items)
+            .find_map(|item| match item {
+                Item::Submodule(submodule)
+                    if resolved.program().child_module(submodule.syntax.id) == Some(child) =>
+                {
+                    Some(submodule.docs.clone())
+                }
+                _ => None,
+            })
+            .unwrap_or_default()
     }
 
     fn imported_module_segments(&mut self, declaration: &UseDeclaration, kind: &UseKind) {
@@ -1680,6 +1776,69 @@ mod tests {
             });
         assert_eq!(entry.signature, "type Box = I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
+    }
+
+    #[test]
+    fn use_glob_path_segment_hovers_the_companion_type() {
+        let source = concat!(
+            "///A boxed integer.\n",
+            "type Box = I32\n",
+            "companion Box {\n",
+            "    pub type Inner\n",
+            "}\n",
+            "use Box.*\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-use-companion-segment.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let segment = source.find("use Box.*").unwrap() + "use ".len();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.range.start == segment && &source[entry.range.clone()] == "Box")
+            .unwrap_or_else(|| {
+                panic!("no hover entry for `Box` in `use Box.*`: {entries:?}")
+            });
+        assert_eq!(entry.signature, "type Box = I32");
+        assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
+    }
+
+    #[test]
+    fn use_glob_of_a_typegroup_hovers_the_generated_alias() {
+        let source = concat!(
+            "typegroup Switch {\n",
+            "    Enabled,\n",
+            "    Disabled,\n",
+            "}\n",
+            "use Switch.*\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-use-typegroup-segment.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let segment = source.find("use Switch.*").unwrap() + "use ".len();
+        let entry = entries
+            .iter()
+            .find(|entry| entry.range.start == segment && &source[entry.range.clone()] == "Switch")
+            .unwrap_or_else(|| {
+                panic!("no hover entry for `Switch` in `use Switch.*`: {entries:?}")
+            });
+        assert!(
+            entry.signature.starts_with("type alias Switch = "),
+            "unexpected `use Switch.*` segment signature: {entry:?}"
+        );
     }
 
     #[test]

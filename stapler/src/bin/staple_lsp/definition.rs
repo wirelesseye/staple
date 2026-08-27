@@ -488,6 +488,7 @@ impl Collector<'_> {
     fn use_declaration(&mut self, value: &UseDeclaration) {
         let resolved_kind = self.resolved.program().use_kind(value).clone();
         self.use_module_segments(value, &resolved_kind);
+        self.inline_use_path_segments(value, &resolved_kind);
         if let Some(name) = value.path.last() {
             let definitions = self
                 .resolved
@@ -599,6 +600,47 @@ impl Collector<'_> {
                         selection_range: 0..0,
                     }],
                 });
+            }
+        }
+    }
+
+    /// Go-to-definition for `use` path segments without a backing `.sta` file:
+    /// an inline `mod`, or a `companion` block (`Switch` in `use Switch.*`,
+    /// which jumps to the type declaration). File-backed segments are already
+    /// handled by `use_module_segments`.
+    fn inline_use_path_segments(&mut self, declaration: &UseDeclaration, kind: &UseKind) {
+        let module_components = match (&declaration.kind, kind) {
+            (UseKind::Dotted, UseKind::Selected(_)) => declaration.path.len().saturating_sub(1),
+            _ => declaration.path.len(),
+        };
+        let components = &declaration.path[..module_components];
+        if components
+            .first()
+            .is_some_and(|name| matches!(name.as_str(), "std" | "package" | "super"))
+        {
+            return;
+        }
+        let program = self.resolved.program();
+        let Some(target) = program.imported_module(declaration.syntax.id) else {
+            return;
+        };
+        let mut ancestors = vec![target];
+        while let Some(parent) = program.module(*ancestors.last().unwrap()).parent {
+            ancestors.push(parent);
+        }
+        for (index, name) in components.iter().enumerate() {
+            let Some(&module) = ancestors.get(components.len() - 1 - index) else {
+                continue;
+            };
+            let file_backed = program.module(module).parent.is_none_or(|parent| {
+                program.module(module).path != program.module(parent).path
+            });
+            match self.resolved.companion_type_for_module(module) {
+                Some(ty) => self.add(&declaration.syntax, name, &[DefinitionId::Type(ty)], false),
+                None if !file_backed => {
+                    self.add(&declaration.syntax, name, &[DefinitionId::Module(module)], false)
+                }
+                None => {}
             }
         }
     }
@@ -1056,6 +1098,52 @@ mod tests {
                 .iter()
                 .all(|target| target.selection_range.start != companion_header_offset),
             "Box.create's `Box` should not resolve to the companion block header: {entry:?}"
+        );
+    }
+
+    #[test]
+    fn use_glob_path_segment_targets_the_companion_type() {
+        let source = concat!(
+            "type Box = I32\n",
+            "companion Box {\n",
+            "    pub type Inner\n",
+            "}\n",
+            "use Box.*\n",
+        );
+        let path = std::env::temp_dir().join("staple-definition-use-companion-segment.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, typed.resolved(), Some(&typed));
+
+        let type_declaration_offset = source.find("type Box").unwrap() + "type ".len();
+        let companion_header_offset = source.find("companion Box").unwrap() + "companion ".len();
+        let segment = source.find("use Box.*").unwrap() + "use ".len();
+
+        let entry = entries
+            .iter()
+            .find(|entry| entry.range.start == segment && &source[entry.range.clone()] == "Box")
+            .unwrap_or_else(|| {
+                panic!("no definition entry for `Box` in `use Box.*`: {entries:?}")
+            });
+
+        assert!(
+            entry
+                .targets
+                .iter()
+                .any(|target| target.selection_range.start == type_declaration_offset),
+            "expected `use Box.*`'s `Box` to resolve to the type declaration: {entry:?}"
+        );
+        assert!(
+            entry
+                .targets
+                .iter()
+                .all(|target| target.selection_range.start != companion_header_offset),
+            "`use Box.*`'s `Box` should not resolve to the companion header: {entry:?}"
         );
     }
 
