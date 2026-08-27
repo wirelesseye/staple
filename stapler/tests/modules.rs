@@ -2374,3 +2374,53 @@ fn checks_a_rootless_library_public_surface_without_entry_resources() {
         .expect_err("library modules must not receive implicit IO");
     assert!(format_diagnostics(error).contains("IO"));
 }
+
+#[test]
+fn standard_library_imports_resolve_inside_a_binder_package() {
+    let fixture = Fixture::new();
+    fixture.write("src/main.sta", "use std.io.println\nprintln \"hi\"\n");
+    fs::write(
+        fixture.root.join("binder.kdl"),
+        "package \"app\" { root \"src/main.sta\" }\n",
+    )
+    .unwrap();
+
+    let graph = binder::load_package_graph(&fixture.root.join("binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("`std` is an implicit dependency of every package");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("`use std.io` should resolve through the dependency alias path");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("standard-library import should type-check");
+}
+
+#[test]
+fn standard_library_imports_resolve_from_in_memory_source() {
+    let root = std::env::temp_dir();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .load_source("use std.io.println\nprintln \"hi\"\n", &root)
+        .expect("in-memory builds still carry an implicit `std`");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("`use std.io` should resolve without a manifest");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("standard-library import should type-check");
+}
+
+#[test]
+fn rejects_an_explicit_std_dependency_alias() {
+    // The compiler injects `std` as a dependency alias on every package, so a
+    // user manifest must never be allowed to bind that name itself.
+    assert!(binder::validate_dependency_alias("std").is_err());
+}

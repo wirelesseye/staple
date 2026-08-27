@@ -35,6 +35,11 @@ Staple import alias, so the example is imported with `use math...` even if the
 dependency package has a different name. Dependencies resolve recursively;
 cycles and executable dependency targets are rejected.
 
+The standard library is itself a library package (`stdlib/binder.kdl`, shipped
+beside the compiler). The compiler adds it to every graph as an implicit
+dependency under the alias `std`, so `use std....` works without a
+`dependencies` entry and `std` is a reserved alias a manifest may not bind.
+
 `root` and `entry` are relative to the manifest directory. `root` defaults to
 `src/root.sta`, and its file is optional; its parent directory still anchors
 package module paths. Executable entries default to `src/main.sta`. Libraries

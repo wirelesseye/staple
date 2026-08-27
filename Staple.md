@@ -559,11 +559,14 @@ use tools.format
 // loads tools/format.sta
 ```
 
-Paths beginning with `std` resolve from the standard-library module root rather
-than the package module root. `std.core` is the stable prelude interface and
-provides core numbers, booleans, strings, references, results, syntax,
-equality, copying, dropping, defaults, and indexing traits. Interoperability features are
-available through `std.cinterop`.
+The standard library is a library package (`stdlib/binder.kdl`) that every
+package implicitly depends on under the alias `std`; no `dependencies` entry is
+needed, and a manifest may not bind `std` itself. Paths beginning with `std`
+therefore resolve from the standard-library source root through the same
+dependency-alias machinery as any local dependency. `std.core` is the stable
+prelude interface and provides core numbers, booleans, strings, references,
+results, syntax, equality, copying, dropping, defaults, and indexing traits.
+Interoperability features are available through `std.cinterop`.
 
 The keyword `package` always selects the current package root, bypassing inline
 children with the same name:
@@ -608,10 +611,10 @@ let user: package.models.User = package.models.default_user
 
 The prefix before the item is resolved as a module path using the same
 longest-file-prefix and public-inline-submodule rules as `use`. Such a reference
-loads the target module and establishes an initialization dependency. Only the
-explicit roots `std` and `package` receive this treatment; other dotted
-expressions remain namespace or product access. `use` remains useful for short
-local names and is required for re-exporting.
+loads the target module and establishes an initialization dependency. Only
+`package` and dependency aliases (including the implicit `std`) receive this
+treatment; other dotted expressions remain namespace or product access. `use`
+remains useful for short local names and is required for re-exporting.
 
 Only modules reachable from the entry module through `use` declarations or
 root-qualified references are compiled. A source file is loaded once even when

@@ -674,10 +674,18 @@ impl ProgramLoader {
         &mut self,
         overlay: Option<(&Path, &str)>,
     ) -> Result<Program, LoadDiagnostic> {
+        if self.package_graph.is_none() {
+            return Err(LoadDiagnostic::compiler("package graph is not configured"));
+        }
+        // The standard library is an implicit dependency of every package. Add
+        // it to the graph before the package loop below indexes each root, so
+        // `use std....` resolves through the same alias machinery as any local
+        // dependency.
+        self.attach_std_package()?;
         let graph = self
             .package_graph
             .clone()
-            .ok_or_else(|| LoadDiagnostic::compiler("package graph is not configured"))?;
+            .expect("package graph is configured");
         let root_package = graph.root_package().clone();
         self.module_root = Some(root_package.source_root().to_owned());
         self.package_root_path = Some(root_package.root.clone());
@@ -811,6 +819,10 @@ impl ProgramLoader {
             )));
         }
         self.module_root = Some(root.clone());
+        // `use std....` in the entry or package-root module is resolved below,
+        // before `load_standard_library` runs, so the stdlib package must be in
+        // the graph already.
+        self.ensure_standard_library_dependency()?;
         if let Some(package_root) = configured_package_root {
             let file_name = package_root
                 .file_name()
@@ -866,6 +878,7 @@ impl ProgramLoader {
             ))
         })?;
         self.module_root = Some(root.clone());
+        self.ensure_standard_library_dependency()?;
         let path = root.join("<stdin>.sta");
         let entry = self.insert_source(path, source)?;
         self.package_entry = Some(entry);
@@ -921,6 +934,7 @@ impl ProgramLoader {
             ));
         }
         self.module_root = Some(module_root.clone());
+        self.ensure_standard_library_dependency()?;
         let edited = self.insert_source(source_path.clone(), source)?;
         if let Some(configured_root) = self.package_root_path.clone() {
             let root_name = configured_root.file_name().ok_or_else(|| {
@@ -1095,13 +1109,126 @@ impl ProgramLoader {
         })
     }
 
-    fn dependency_for(
+    /// The stdlib source root (`<stdlib>/std`), where `std/core.sta` and its
+    /// siblings live. `resolve_standard_library_root` points one level above it.
+    fn standard_library_package_root(&mut self) -> Result<PathBuf, LoadDiagnostic> {
+        let root = self.resolve_standard_library_root()?;
+        let package_root = root.join("std");
+        Ok(std::fs::canonicalize(&package_root).unwrap_or(package_root))
+    }
+
+    /// Ensures the current graph carries the standard library as a library
+    /// package and records `std` as a dependency alias on every package,
+    /// including the stdlib itself. When the stdlib is already the graph's own
+    /// package (`binder check` run against `stdlib/binder.kdl`), that package is
+    /// reused rather than duplicated. Idempotent; returns the stdlib's
+    /// `PackageId`.
+    fn attach_std_package(&mut self) -> Result<binder::PackageId, LoadDiagnostic> {
+        let package_root = self.standard_library_package_root()?;
+        let graph = self
+            .package_graph
+            .as_mut()
+            .expect("attach_std_package requires a graph");
+        let std_id = if let Some(index) = graph
+            .packages
+            .iter()
+            .position(|package| package.source_root() == package_root)
+        {
+            binder::PackageId(index)
+        } else {
+            let std_id = binder::PackageId(graph.packages.len());
+            graph.packages.push(binder::Package {
+                name: "std".to_owned(),
+                kind: binder::PackageKind::Library,
+                manifest: package_root
+                    .parent()
+                    .unwrap_or(&package_root)
+                    .join("binder.kdl"),
+                directory: package_root.clone(),
+                root: package_root.join("root.sta"),
+                entry: None,
+                dependencies: Vec::new(),
+            });
+            std_id
+        };
+        for package in &mut graph.packages {
+            if !package
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.alias == "std")
+            {
+                package.dependencies.push(binder::Dependency {
+                    alias: "std".to_owned(),
+                    package: std_id,
+                });
+            }
+        }
+        Ok(std_id)
+    }
+
+    /// Ensures a package graph exists and carries the standard library as an
+    /// implicit dependency of every package. Safe to call from every entry
+    /// point; a no-op once satisfied. Does not materialize any module, so it
+    /// leaves module numbering untouched.
+    fn ensure_standard_library_dependency(&mut self) -> Result<(), LoadDiagnostic> {
+        if self.package_graph.is_none() {
+            self.package_graph = Some(binder::PackageGraph {
+                root: binder::PackageId(0),
+                packages: Vec::new(),
+            });
+        }
+        self.attach_std_package()?;
+        Ok(())
+    }
+
+    /// Loads a dependency's declared root module, inserting a public
+    /// namespace-anchor module when the package has no root file on disk (the
+    /// standard library in a manifest-free build). Used only for bare
+    /// `use <alias>`; dotted imports resolve a file under the package directly.
+    fn materialize_package_root(
+        &mut self,
+        package: binder::PackageId,
+    ) -> Result<ModuleId, LoadDiagnostic> {
+        if let Some(id) = self.package_roots.get(&package).copied() {
+            return Ok(id);
+        }
+        let root_path = self
+            .package_graph
+            .as_ref()
+            .expect("package graph is configured")
+            .package(package)
+            .root
+            .clone();
+        let (source, exists) = match std::fs::read_to_string(&root_path) {
+            Ok(source) => (source, true),
+            Err(_) => (String::new(), false),
+        };
+        let module = self.insert_source_for(root_path, &source, Some(package))?;
+        // A missing root is an in-memory namespace anchor, never written to disk.
+        if !exists {
+            self.modules[module.0].visibility = Visibility::Public;
+        }
+        self.package_roots.insert(package, module);
+        Ok(module)
+    }
+
+    fn dependency_target(
         &self,
         module: ModuleId,
         alias: &str,
-    ) -> Option<(binder::PackageId, ModuleId, PathBuf)> {
-        let owner = self.module_packages.get(module.0).copied().flatten()?;
+    ) -> Option<(binder::PackageId, PathBuf)> {
         let graph = self.package_graph.as_ref()?;
+        // A module with no manifest package still belongs to the graph's root
+        // for the purpose of resolving dependency aliases. This keeps `use
+        // std....` working in single-file and stdin builds (whose root package
+        // is synthetic) without granting those modules a real `PackageId` --
+        // package-scoped visibility still requires an explicit manifest.
+        let owner = self
+            .module_packages
+            .get(module.0)
+            .copied()
+            .flatten()
+            .unwrap_or(graph.root);
         let dependency = graph
             .package(owner)
             .dependencies
@@ -1109,7 +1236,6 @@ impl ProgramLoader {
             .find(|dependency| dependency.alias == alias)?;
         Some((
             dependency.package,
-            *self.package_roots.get(&dependency.package)?,
             graph.package(dependency.package).source_root().to_owned(),
         ))
     }
@@ -1372,8 +1498,8 @@ impl ProgramLoader {
         while index < tokens.len() {
             let token = &tokens[index];
             if !matches!(token.kind, TokenKind::Identifier | TokenKind::Package)
-                || (!matches!(token.text.as_str(), "std" | "package")
-                    && self.dependency_for(module, &token.text).is_none())
+                || (token.text != "package"
+                    && self.dependency_target(module, &token.text).is_none())
             {
                 index += 1;
                 continue;
@@ -1431,6 +1557,9 @@ impl ProgramLoader {
         root: &Path,
         span: Span,
     ) -> Result<(String, ModuleId), LoadDiagnostic> {
+        // `std` has only a namespace-anchor root, so a bare `std` reference
+        // resolves to nothing useful; require at least `std.<item>`. This is a
+        // policy choice now, not a mechanism constraint.
         let minimum = if parts.first().is_some_and(|part| part == "std") {
             2
         } else {
@@ -1542,12 +1671,19 @@ impl ProgramLoader {
         }
 
         if let Some(alias) = parts.first()
-            && let Some((package, root_module, source_root)) = self.dependency_for(module, alias)
+            && let Some((package, source_root)) = self.dependency_target(module, alias)
         {
-            let _ = package;
-            self.load_imports(root_module, &source_root)?;
             if parts.len() == 1 {
+                let root_module = self.materialize_package_root(package)?;
+                self.load_imports(root_module, &source_root)?;
                 return Ok(root_module);
+            }
+            // Pull in the dependency's root module only when it exists on disk
+            // (it may re-export names); a namespace-anchor package -- notably the
+            // standard library in a manifest-free build -- has nothing to load,
+            // and materializing it here would perturb module numbering.
+            if let Some(root_module) = self.package_roots.get(&package).copied() {
+                self.load_imports(root_module, &source_root)?;
             }
             return self.resolve_file_import(module, &parts[1..], &source_root, declaration);
         }
@@ -1558,12 +1694,9 @@ impl ProgramLoader {
             return self.traverse_children(module, child, &parts[1..], true, declaration);
         }
 
-        let import_root = if parts.first().is_some_and(|part| part == "std") {
-            self.resolve_standard_library_root()?
-        } else {
-            root.to_owned()
-        };
-        self.resolve_file_import(module, parts, &import_root, declaration)
+        // `std` is not special here: it is an implicit dependency alias handled
+        // by the `dependency_target` branch above, like any local dependency.
+        self.resolve_file_import(module, parts, root, declaration)
     }
 
     fn resolve_file_import(
@@ -1642,6 +1775,7 @@ impl ProgramLoader {
     }
 
     fn load_standard_library(&mut self) -> Result<(), LoadDiagnostic> {
+        self.ensure_standard_library_dependency()?;
         let root = self.resolve_standard_library_root()?;
         let syntax =
             canonical_file(&root.join("std/syntax.sta")).map_err(LoadDiagnostic::compiler)?;
