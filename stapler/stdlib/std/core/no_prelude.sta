@@ -1,0 +1,6 @@
+pub mod
+
+use std.syntax.Item
+
+/// Disables the implicit standard prelude for the current module.
+pub macro @no_prelude: Item -> Item

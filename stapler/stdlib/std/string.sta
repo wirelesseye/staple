@@ -1,0 +1,2 @@
+pub mod
+pub use std.core.string.*

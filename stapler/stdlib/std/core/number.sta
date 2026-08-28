@@ -1,5 +1,8 @@
 pub mod
 
+use std.core.string.String
+use std.core.fmt.(Display, Debug, Formatter)
+
 pub use std.core.number.types.*
 
 extern "staple-intrinsic" {

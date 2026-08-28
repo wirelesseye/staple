@@ -574,10 +574,25 @@ The standard library is a library package (`stdlib/binder.kdl`) that every
 package implicitly depends on under the alias `std`; no `dependencies` entry is
 needed, and a manifest may not bind `std` itself. Paths beginning with `std`
 therefore resolve from the standard-library source root through the same
-dependency-alias machinery as any local dependency. `std.core` is the stable
-prelude interface and provides core numbers, booleans, strings, references,
-results, syntax, equality, copying, dropping, defaults, and indexing traits.
-Interoperability features are available through `std.cinterop`.
+dependency-alias machinery as any local dependency. `std.core` is the small,
+always-imported language interface: booleans, numbers, operator protocols,
+references, reactive primitives, ranges, and compiler modifiers. The separate
+`std.prelude` interface is imported by default and provides strings, lists,
+iteration, formatting traits, defaults, results, and flow macros. Lower-level
+modules such as `std.buffer`, `std.slice`, `std.io`, `std.syntax`, and
+`std.cinterop` require explicit imports.
+
+A package disables its implicit prelude with `prelude #false` in `binder.kdl`.
+A file module may opt out independently:
+
+```staple
+@no_prelude
+pub mod
+```
+
+Core names remain available. `use std.prelude.*` explicitly restores the
+prelude regardless of either opt-out. A module-level opt-out does not propagate
+to inline child modules.
 
 Binder packages conditionally include items with the compiler-provided
 `@feature` modifier declared by `std.core`:
@@ -2347,7 +2362,7 @@ not supported. Values owned by an iteration are dropped before a break,
 continue, or implicit next iteration; a value moved out by `break` becomes the
 loop result and is preserved.
 
-The prelude supplies a `while` form implemented in `std.core.flow` using
+The prelude supplies a `while` form implemented in `std.flow` using
 `loop`, `break`, and a boolean match:
 
 ```staple
@@ -2469,7 +2484,7 @@ returns it unchanged. Floating-point values use round-trip decimal notation.
 `Display` and `Debug` format values into a mutable `Formatter`. Their common
 protocol is `fmt: (T, mut Formatter) -> ()`: `Display` is intended for
 human-facing text, while `Debug` is intended for developer-facing structure.
-These formatting types and traits are declared in `std.core.fmt` and re-exported
+These formatting types and traits are declared in `std.fmt`; `Display` and `Debug` are re-exported
 by `std.core` into the prelude.
 `Formatter.display value` and `Formatter.debug value` create a formatter,
 dispatch the corresponding trait, and return the finished `String`.

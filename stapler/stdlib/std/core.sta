@@ -1,25 +1,15 @@
 pub mod
 
 pub use std.core.boolean.*
-pub use std.core.buffer.(Buffer)
-pub use std.core.clone.*
 pub use std.core.copy.*
-pub use std.core.default.*
 pub use std.core.drop.*
 pub use std.core.doc.*
 pub use std.core.equality.*
 pub use std.core.feature.*
-pub use std.core.flow.*
-pub use std.core.fmt.*
 pub use std.core.index.*
-pub use std.core.iterator.*
-pub use std.core.list.(List, ListIter)
 pub use std.core.number.*
 pub use std.core.range.*
 pub use std.core.reactive.*
 pub use std.core.reference.(Ref)
-pub use std.core.result.*
 pub use std.core.sized.*
-pub use std.core.slice.(Slice)
-pub use std.core.string.*
-pub use std.core.typegroup.*
+pub use std.core.no_prelude.*

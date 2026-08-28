@@ -50,6 +50,11 @@ manifest is:
 package "hello"
 ```
 
+Packages import `std.prelude.*` automatically by default. Set `prelude #false`
+inside `package` to import only the always-available `std.core` interface. This
+setting applies only to the declaring package; modules may still explicitly
+write `use std.prelude.*`.
+
 Binder discovers the nearest `binder.kdl` in the current directory or its
 ancestors. `--manifest-path <path>` selects one explicitly.
 

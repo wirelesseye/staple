@@ -32,6 +32,7 @@ pub struct Package {
     pub dependencies: Vec<Dependency>,
     pub features: HashMap<String, Vec<FeatureMember>>,
     pub default_features: Vec<String>,
+    pub prelude: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -83,6 +84,7 @@ struct ParsedPackage {
     dependency_options: HashMap<String, (bool, Vec<String>)>,
     features: HashMap<String, Vec<FeatureMember>>,
     default_features: Vec<String>,
+    prelude: bool,
 }
 
 pub fn load_package_graph(manifest: &Path) -> Result<PackageGraph, String> {
@@ -268,6 +270,7 @@ fn load_recursive(
         dependencies: Vec::new(),
         features: parsed.features.clone(),
         default_features: parsed.default_features.clone(),
+        prelude: parsed.prelude,
     });
     stack.push(manifest.clone());
     let mut dependencies = Vec::new();
@@ -316,6 +319,7 @@ fn parse_package(manifest: &Path) -> Result<ParsedPackage, String> {
     let mut entry = None;
     let mut dependencies = None;
     let mut features = None;
+    let mut prelude = None;
     if let Some(children) = node.children() {
         for child in children.nodes() {
             match child.name().value() {
@@ -337,6 +341,7 @@ fn parse_package(manifest: &Path) -> Result<ParsedPackage, String> {
                     }
                     features = Some(parse_features(child, manifest)?);
                 }
+                "prelude" => parse_bool_child(child, manifest, &mut prelude)?,
                 unknown => {
                     return Err(format!(
                         "{}: unknown package node `{unknown}`",
@@ -389,7 +394,33 @@ fn parse_package(manifest: &Path) -> Result<ParsedPackage, String> {
         dependency_options,
         features,
         default_features,
+        prelude: prelude.unwrap_or(true),
     })
+}
+
+fn parse_bool_child(
+    node: &KdlNode,
+    manifest: &Path,
+    destination: &mut Option<bool>,
+) -> Result<(), String> {
+    let name = node.name().value();
+    if destination.is_some() {
+        return Err(format!("{}: duplicate `{name}` node", manifest.display()));
+    }
+    if node.children().is_some() || node.entries().len() != 1 || node.entries()[0].name().is_some()
+    {
+        return Err(format!(
+            "{}: `{name}` requires exactly one boolean",
+            manifest.display()
+        ));
+    }
+    *destination = Some(
+        node.entries()[0]
+            .value()
+            .as_bool()
+            .ok_or_else(|| format!("{}: `{name}` must be a boolean", manifest.display()))?,
+    );
+    Ok(())
 }
 
 fn parse_kind_child(
@@ -843,6 +874,7 @@ mod tests {
         .unwrap();
         let graph = load_package_graph(&workspace.join("binder.kdl")).unwrap();
         assert_eq!(graph.root_package().entry, None);
+        assert!(graph.root_package().prelude);
         std::fs::write(workspace.join("src/main.sta"), "42\n").unwrap();
         std::fs::write(workspace.join("binder.kdl"), "package \"app\"\n").unwrap();
         let graph = load_package_graph(&workspace.join("binder.kdl")).unwrap();
@@ -850,6 +882,13 @@ mod tests {
             graph.root_package().entry,
             Some(std::fs::canonicalize(workspace.join("src/main.sta")).unwrap())
         );
+        std::fs::write(
+            workspace.join("binder.kdl"),
+            "package \"app\" { prelude #false }\n",
+        )
+        .unwrap();
+        let graph = load_package_graph(&workspace.join("binder.kdl")).unwrap();
+        assert!(!graph.root_package().prelude);
         let _ = std::fs::remove_dir_all(workspace);
     }
 

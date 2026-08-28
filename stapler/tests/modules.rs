@@ -2466,3 +2466,73 @@ fn binder_features_filter_items_before_resolution() {
         .map_err(format_diagnostics)
         .expect("remaining items should type-check");
 }
+
+#[test]
+fn package_can_disable_and_explicitly_reimport_the_prelude() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        "use std.prelude.*\nlet values: List I32 = List.singleton 1\nlet answer = 1 + 2\n",
+    );
+    fs::write(
+        fixture.root.join("binder.kdl"),
+        "package \"minimal\" {\n  prelude #false\n}\n",
+    )
+    .unwrap();
+    let graph = binder::load_package_graph(&fixture.root.join("binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .unwrap();
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("explicit prelude import should restore convenience names");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("core operators and explicit prelude should type-check");
+}
+
+#[test]
+fn no_prelude_modifier_removes_convenience_names_but_keeps_core() {
+    let fixture = Fixture::new();
+    fs::write(
+        fixture.root.join("main.sta"),
+        "@no_prelude\npub mod\nlet answer = 1 + 2\nlet values: List I32 = List.singleton 1\n",
+    )
+    .unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .load_path(&fixture.root.join("main.sta"))
+        .unwrap();
+    let error = NameResolver::new()
+        .resolve_program(program)
+        .expect_err("List should not be implicit after @no_prelude");
+    let diagnostics = format_diagnostics(error);
+    assert!(diagnostics.contains("unknown type `List`"));
+    assert!(!diagnostics.contains("unknown type `I32`"));
+}
+
+#[test]
+fn moved_std_core_paths_are_private_but_canonical_paths_work() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "main.sta",
+        "use std.list.List\nlet values: List I32 = List.singleton 1\n",
+    );
+    fixture
+        .check_at("main.sta", ".")
+        .expect("canonical std.list path should work");
+    fixture.write(
+        "main.sta",
+        "use std.core.list.List\nlet values: List I32 = List.singleton 1\n",
+    );
+    assert!(
+        fixture
+            .check_at("main.sta", ".")
+            .unwrap_err()
+            .contains("private")
+    );
+}

@@ -1,5 +1,7 @@
 pub mod
 
+use std.core.slice.(Slice)
+
 /// A UTF-8 byte slice used as Staple's string type.
 pub type String = Slice U8
 
@@ -21,6 +23,7 @@ def string_bytes: String -> Slice U8 = value => {
 def string_from_utf8_unchecked: Slice U8 -> String = bytes => String bytes
 
 companion String {
+    use std.core.slice.Slice
     /// Returns the UTF-8 bytes backing a string.
     pub def bytes: String -> Slice U8 = value => string_bytes value
 

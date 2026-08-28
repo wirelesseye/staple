@@ -819,7 +819,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
         .expect("production String module has its canonical declaration");
     std::fs::write(
         temporary.join("std/core/string.sta"),
-        format!("pub mod\n{declaration}\n{production_body}"),
+        format!("pub mod\nuse std.core.slice.Slice\n{declaration}\n{production_body}"),
     )
     .expect("test String declaration should be written");
 
@@ -849,6 +849,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
 #[test]
 fn supports_repeated_spread_and_erased_product_references() {
     let source = concat!(
+        "use std.slice.Slice\n",
         "let explicit: I32[3] = (1, 2, 3)\n",
         "let spread: (String, ...I32[2]) = (\"x\", 4, 5)\n",
         "let fixed: Ref I32[3] = Ref explicit\n",
@@ -1655,6 +1656,7 @@ fn rejects_invalid_product_spreads_and_indices() {
 #[test]
 fn derives_trait_delegated_product_indexing() {
     let source = concat!(
+        "use std.slice.Slice\n",
         "def select: <A, B where Copy A, Copy B> ((A, B), USize) -> A | B = (pair, position) => pair[position]\n",
         "let pair = (1, \"two\")\n",
         "let position: USize = 1\n",
@@ -1859,7 +1861,7 @@ fn rejects_erased_products_outside_refs_and_ref_destructuring() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "let fixed: Ref I32[2] = Ref (1, 2)\nlet erased: Slice I32 = fixed\nlet Ref values = erased\n",
+            "use std.slice.Slice\nlet fixed: Ref I32[2] = Ref (1, 2)\nlet erased: Slice I32 = fixed\nlet Ref values = erased\n",
         ))
         .expect_err_diagnostics("an erased reference cannot be destructured");
     assert!(
@@ -1897,6 +1899,7 @@ fn handles_product_repetition_edges_and_limits() {
 #[test]
 fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
     type_check(concat!(
+        "use std.slice.Slice\n",
         "type alias Ints = Slice I32\n",
         "let fixed: Ref I32[2] = Ref (1, 2)\n",
         "let values: Ints = fixed\n",
@@ -1939,7 +1942,9 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("extern \"c\" { invalid: Slice I32 -> I32 }\n"))
+        .check(resolve(
+            "use std.slice.Slice\nextern \"c\" { invalid: Slice I32 -> I32 }\n",
+        ))
         .expect_err_diagnostics("erased references must not cross the FFI");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
@@ -1951,6 +1956,7 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
 #[test]
 fn enforces_implicit_sized_and_supports_question_sized_parameters() {
     type_check(concat!(
+        "use std.slice.Slice\n",
         "def preserve: <T where ?Sized T> Ref T -> Ref T = value => value\n",
         "def explicitly_sized: <T where ?Sized T, Sized T> Ref T -> Ref T = value => value\n",
         "let fixed: Ref I32[2] = Ref (1, 2)\n",
@@ -1961,6 +1967,7 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.slice.Slice\n",
             "def sized_only: <T> Ref T -> Ref T = value => value\n",
             "let fixed: Ref I32[2] = Ref (1, 2)\n",
             "let erased: Slice I32 = fixed\n",
@@ -3181,6 +3188,7 @@ fn string_literals_have_the_canonical_string_type() {
 #[test]
 fn buffer_intrinsics_type_check_and_compile() {
     let module = type_check(concat!(
+        "use std.buffer.Buffer\nuse std.slice.Slice\n",
         "def exercise: () -> () = () => {\n",
         "let mut values: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
         "let empty_length: USize = Buffer.length values\n",
@@ -3204,6 +3212,7 @@ fn buffer_intrinsics_type_check_and_compile() {
     assert!(llvm.contains("buffer.slice.pointer"));
 
     let module = type_check(concat!(
+        "use std.buffer.Buffer\n",
         "use std.cinterop.*\n",
         "def exercise: () -> () = () => {\n",
         "let mut owned: Buffer CString = Buffer.with_capacity (1 satisfies USize)\n",
@@ -3220,6 +3229,7 @@ fn buffer_intrinsics_type_check_and_compile() {
 #[test]
 fn buffer_and_list_are_move_only_and_clone_their_elements() {
     let module = type_check(concat!(
+        "use std.buffer.Buffer\nuse std.slice.Slice\n",
         "type Resource = I32\n",
         "impl !Copy Resource {}\n",
         "impl Clone Resource { def clone = Resource value => Resource value }\n",
@@ -3247,6 +3257,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
 
     for source in [
         concat!(
+            "use std.buffer.Buffer\n",
             "def invalid: () -> USize = () => {\n",
             "let buffer: Buffer I32 = Buffer.with_capacity (1 satisfies USize)\n",
             "let moved = buffer\n",
@@ -3254,6 +3265,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
             "}\n",
         ),
         concat!(
+            "use std.buffer.Buffer\nuse std.slice.Slice\n",
             "def invalid: () -> USize = () => {\n",
             "let list: List I32 = List.new ()\n",
             "let moved = list\n",
@@ -3261,6 +3273,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
             "}\n",
         ),
         concat!(
+            "use std.buffer.Buffer\nuse std.slice.Slice\n",
             "def invalid: () -> USize = () => {\n",
             "let buffer: Buffer I32 = Buffer.with_capacity (1 satisfies USize)\n",
             "let frozen: Slice I32 = Buffer.freeze buffer\n",
@@ -3280,6 +3293,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.buffer.Buffer\n",
             "type Resource = I32\n",
             "impl !Copy Resource {}\n",
             "def invalid: Buffer Resource -> Buffer Resource = buffer => Clone.clone buffer\n",
@@ -3294,6 +3308,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
 #[test]
 fn buffer_transfer_type_checks_and_compiles() {
     let module = type_check(concat!(
+        "use std.buffer.Buffer\n",
         "def exercise: () -> () = () => {\n",
         "let mut source: Buffer I32 = Buffer.with_capacity (2 satisfies USize)\n",
         "Buffer.push source 1\n",
@@ -3484,6 +3499,7 @@ fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
     // the residual type at that specific depth. Only the argument in the
     // buffer's own position should ever need to be `mut`.
     let module = type_check(concat!(
+        "use std.buffer.Buffer\n",
         "def push_value: (mut Buffer I32, I32) -> () = (mut buffer, value) => {\n",
         "  Buffer.push buffer value\n",
         "}\n",
@@ -6806,6 +6822,7 @@ fn provides_to_string_for_prelude_scalar_types() {
 #[test]
 fn provides_formatter_display_debug_and_structural_product_debug() {
     let module = type_check(concat!(
+        "use std.fmt.Formatter\n",
         "type Point = (x: I32, y: I32)\n",
         "impl Debug Point {\n",
         "  def fmt = (Point (x, y), mut formatter) => {\n",
@@ -6837,6 +6854,7 @@ fn provides_formatter_display_debug_and_structural_product_debug() {
 #[test]
 fn provides_structural_debug_for_sum_types() {
     let module = type_check(concat!(
+        "use std.fmt.Formatter\n",
         "let integer: I32 | String = 42\n",
         "let string: I32 | String = \"text\"\n",
         "let integer_debug: String = Formatter.debug integer\n",
@@ -6853,6 +6871,7 @@ fn provides_structural_debug_for_sum_types() {
 #[test]
 fn derives_debug_for_nominal_representations() {
     let module = type_check(concat!(
+        "use std.fmt.*\n",
         "@derive_debug\ntype Point = (x: I32, y: I32)\n",
         "@derive_debug\ntype Choice = I32 | String\n",
         "@derive_debug\ntype Box T = T\n",
@@ -6887,6 +6906,7 @@ fn exposes_type_declarations_as_structured_items() {
 #[test]
 fn type_checks_and_generates_string_templates() {
     let module = type_check(concat!(
+        "use std.fmt.Formatter\n",
         "type Label = String\n",
         "impl Display Label {\n",
         "  def fmt = (Label value, mut formatter) => Formatter.write (formatter, value)\n",
@@ -6912,6 +6932,7 @@ fn type_checks_and_generates_string_templates() {
 fn string_templates_require_the_selected_formatting_trait() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.fmt.Formatter\n",
             "type Secret = I32\n",
             "let secret = Secret 1\n",
             "let message = \"$secret\"\n",
@@ -6928,6 +6949,7 @@ fn string_templates_require_the_selected_formatting_trait() {
 fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_representations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.fmt.Formatter\n",
             "type Secret = I32\n",
             "let secret = Secret 1\n",
             "let product = (secret,)\n",
@@ -6942,6 +6964,7 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.fmt.Formatter\n",
             "type Secret = I32\n",
             "let secret = Secret 1\n",
             "let text = Formatter.debug secret\n",
@@ -8222,6 +8245,7 @@ fn allows_move_only_globals_borrowed_from_top_level_statements_and_functions() {
 fn rejects_moving_a_move_only_global_out_of_top_level_statements() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.buffer.Buffer\nuse std.slice.Slice\n",
             "let mut data: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
             "let frozen: Slice I32 = Buffer.freeze data\n",
         )))
@@ -8237,6 +8261,7 @@ fn rejects_moving_a_move_only_global_out_of_top_level_statements() {
 fn rejects_moving_a_move_only_global_out_of_a_function() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
+            "use std.buffer.Buffer\n",
             "let mut data: Buffer I32 = Buffer.with_capacity (4 satisfies USize)\n",
             "def take = () => Buffer.freeze data\n",
         )))

@@ -98,10 +98,12 @@ pub struct Program {
     package_graph: Option<binder::PackageGraph>,
     active_features: binder::ActiveFeatures,
     module_packages: Vec<Option<binder::PackageId>>,
+    module_prelude: Vec<bool>,
     package_name: String,
     package_root: Option<ModuleId>,
     package_root_path: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
+    standard_library_prelude: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
     standard_library_io: Option<ModuleId>,
@@ -125,10 +127,17 @@ impl Program {
             package_graph: None,
             active_features: HashMap::new(),
             module_packages: vec![None],
+            module_prelude: vec![
+                !module
+                    .modifiers
+                    .iter()
+                    .any(|modifier| modifier.namespace.is_none() && modifier.name == "no_prelude"),
+            ],
             package_name: "package".to_owned(),
             package_root: None,
             package_root_path: None,
             standard_library_core: None,
+            standard_library_prelude: None,
             standard_library_syntax: None,
             standard_library_cinterop: None,
             standard_library_io: None,
@@ -435,6 +444,14 @@ impl Program {
         self.standard_library_core
     }
 
+    pub fn standard_library_prelude(&self) -> Option<ModuleId> {
+        self.standard_library_prelude
+    }
+
+    pub fn module_uses_prelude(&self, module: ModuleId) -> bool {
+        self.module_prelude.get(module.0).copied().unwrap_or(true)
+    }
+
     pub fn standard_library_syntax(&self) -> Option<ModuleId> {
         self.standard_library_syntax
     }
@@ -623,6 +640,7 @@ pub struct ProgramLoader {
     package_roots: HashMap<binder::PackageId, ModuleId>,
     standard_library_root: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
+    standard_library_prelude: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
     standard_library_io: Option<ModuleId>,
@@ -1164,6 +1182,7 @@ impl ProgramLoader {
                 dependencies: Vec::new(),
                 features: HashMap::new(),
                 default_features: Vec::new(),
+                prelude: true,
             });
             std_id
         };
@@ -1795,6 +1814,11 @@ impl ProgramLoader {
     }
 
     fn module_visible_from(&self, target: ModuleId, importing: ModuleId) -> bool {
+        if self.module_packages[target.0] != self.module_packages[importing.0]
+            && is_legacy_moved_std_module(&self.modules[target.0].path)
+        {
+            return false;
+        }
         match self.modules[target.0].visibility {
             Visibility::Public => true,
             Visibility::Package => self.module_packages[target.0]
@@ -1812,6 +1836,9 @@ impl ProgramLoader {
         self.standard_library_syntax = Some(self.load_file(&syntax)?);
         let core = canonical_file(&root.join("std/core.sta")).map_err(LoadDiagnostic::compiler)?;
         self.standard_library_core = Some(self.load_file(&core)?);
+        let prelude =
+            canonical_file(&root.join("std/prelude.sta")).map_err(LoadDiagnostic::compiler)?;
+        self.standard_library_prelude = Some(self.load_file(&prelude)?);
         let cinterop =
             canonical_file(&root.join("std/cinterop.sta")).map_err(LoadDiagnostic::compiler)?;
         self.standard_library_cinterop = Some(self.load_file(&cinterop)?);
@@ -1879,12 +1906,31 @@ impl ProgramLoader {
             &HashMap::new(),
             &self.root_qualified_modules,
         );
+        let module_prelude = self
+            .modules
+            .iter()
+            .enumerate()
+            .map(|(index, module)| {
+                let package_default = self.module_packages[index]
+                    .and_then(|id| {
+                        self.package_graph
+                            .as_ref()
+                            .map(|graph| graph.package(id).prelude)
+                    })
+                    .unwrap_or(true);
+                package_default
+                    && !module.syntax.modifiers.iter().any(|modifier| {
+                        modifier.namespace.is_none() && modifier.name == "no_prelude"
+                    })
+            })
+            .collect();
         Program {
             entry,
             executable_entry: self.executable_entry,
             package_graph: self.package_graph,
             active_features: self.active_features,
             module_packages: self.module_packages,
+            module_prelude,
             package_name: if self.package_name.is_empty() {
                 "package".to_owned()
             } else {
@@ -1893,6 +1939,7 @@ impl ProgramLoader {
             package_root: self.package_root,
             package_root_path: self.package_root_path,
             standard_library_core: self.standard_library_core,
+            standard_library_prelude: self.standard_library_prelude,
             standard_library_syntax: self.standard_library_syntax,
             standard_library_cinterop: self.standard_library_cinterop,
             standard_library_io: self.standard_library_io,
@@ -1907,6 +1954,24 @@ impl ProgramLoader {
             initialization_order,
         }
     }
+}
+
+fn is_legacy_moved_std_module(path: &Path) -> bool {
+    [
+        "buffer",
+        "clone",
+        "default",
+        "flow",
+        "fmt",
+        "iterator",
+        "list",
+        "result",
+        "slice",
+        "string",
+        "typegroup",
+    ]
+    .iter()
+    .any(|name| path.ends_with(Path::new(&format!("std/core/{name}.sta"))))
 }
 
 /// Returns the per-user standard-library installation path.

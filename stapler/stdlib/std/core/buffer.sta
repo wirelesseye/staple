@@ -1,5 +1,8 @@
 pub mod
 
+use std.core.slice.Slice
+use std.core.clone.Clone
+
 /// A mutable, fixed-capacity buffer of values.
 pub type Buffer T = opaque
 impl<T> !Copy (Buffer T) {}
@@ -15,6 +18,7 @@ def __buffer_transfer: <T> (mut Buffer T, mut Buffer T) -> () = (mut source, mut
 def __buffer_clone: <T where Clone T> Buffer T -> Buffer T = buffer => __buffer_clone buffer
 
 companion<T> Buffer T {
+    use std.core.slice.Slice
     /// Allocates storage for exactly capacity elements without initialising values.
     pub def with_capacity: USize -> Buffer T = capacity => __buffer_with_capacity capacity
 

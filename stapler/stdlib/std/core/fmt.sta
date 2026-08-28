@@ -1,6 +1,9 @@
 pub mod
 
+use std.core.buffer.(Buffer)
 use std.core.string.(String, ToString)
+use std.core.slice.Slice
+use std.core.flow.while
 use std.syntax.*
 
 /// A growable UTF-8 output buffer used by formatting traits.

@@ -1355,6 +1355,8 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
+                "use std.buffer.Buffer\n",
+                "use std.slice.Slice\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "def churn: I32 -> () = n => match n == 0 {\n",
                 "  True() => (),\n",
@@ -1417,6 +1419,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
+                "use std.buffer.Buffer\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "def run = () => {\n",
                 "let mut from: Buffer I32 = Buffer.with_capacity 3\n",
@@ -1682,6 +1685,7 @@ mod tests {
         std::fs::write(
             &source,
             concat!(
+                "use std.slice.Slice\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "let index: USize = 1\n",
                 "let mut product: I32[3] = (10, 20, 30)\n",

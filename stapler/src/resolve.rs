@@ -1076,6 +1076,7 @@ pub struct NameResolver {
     current_module: ModuleId,
     multiple_modules: bool,
     standard_library_core: Option<ModuleId>,
+    standard_library_prelude: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
     standard_library_cinterop: Option<ModuleId>,
     standard_library_io: Option<ModuleId>,
@@ -1109,6 +1110,7 @@ impl NameResolver {
     ) -> Result<ResolvedModule, Vec<Diagnostic>> {
         let (mut program, macro_analysis) = crate::macro_expand::expand_program(program)?;
         self.standard_library_core = program.standard_library_core();
+        self.standard_library_prelude = program.standard_library_prelude();
         self.standard_library_syntax = program.standard_library_syntax();
         self.standard_library_cinterop = program.standard_library_cinterop();
         self.standard_library_io = program.standard_library_io();
@@ -1264,6 +1266,9 @@ impl NameResolver {
             .standard_library_core
             .map(|core| self.interfaces[core.0].traits.clone())
             .unwrap_or_default();
+        if let Some(prelude) = self.standard_library_prelude {
+            standard_traits.extend(self.interfaces[prelude.0].traits.clone());
+        }
         if let Some(syntax) = self.standard_library_syntax {
             standard_traits.extend(self.interfaces[syntax.0].traits.clone());
         }
@@ -1420,10 +1425,36 @@ impl NameResolver {
         for float in FloatType::ALL {
             self.register_builtin_type(core, "std.core", float.name(), BuiltinType::Float(float));
         }
-        self.register_builtin_type(core, "std.core", "String", BuiltinType::String);
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
-        self.register_builtin_type(core, "std.core", "Slice", BuiltinType::Slice);
-        self.register_builtin_type(core, "std.core", "Buffer", BuiltinType::Buffer);
+        for (path, namespace, name, builtin) in [
+            (
+                "std/core/string.sta",
+                "std.string",
+                "String",
+                BuiltinType::String,
+            ),
+            (
+                "std/core/slice.sta",
+                "std.slice",
+                "Slice",
+                BuiltinType::Slice,
+            ),
+            (
+                "std/core/buffer.sta",
+                "std.buffer",
+                "Buffer",
+                BuiltinType::Buffer,
+            ),
+        ] {
+            if let Some(module) = program
+                .modules()
+                .iter()
+                .find(|module| module.path.ends_with(path))
+                .map(|module| module.id)
+            {
+                self.register_builtin_type(module, namespace, name, builtin);
+            }
+        }
         let Some(syntax) = program.standard_library_syntax() else {
             return;
         };
@@ -1609,21 +1640,28 @@ impl NameResolver {
             self.intrinsic_functions
                 .insert(symbol, IntrinsicFunction::RefReplace);
         }
-        if let Some(symbol) = self.interfaces[core.0]
-            .namespaces
-            .get("Slice")
-            .and_then(|companion| self.interfaces[companion.0].values.get("length"))
-            .copied()
-        {
+        let slice_module = program
+            .modules()
+            .iter()
+            .find(|module| module.path.ends_with("std/core/slice.sta"))
+            .map(|module| module.id);
+        if let Some(symbol) = slice_module.and_then(|slice| {
+            self.interfaces[slice.0]
+                .namespaces
+                .get("Slice")
+                .and_then(|companion| self.interfaces[companion.0].values.get("length"))
+                .copied()
+        }) {
             self.intrinsic_functions
                 .insert(symbol, IntrinsicFunction::SliceLength);
         }
-        if let Some(symbol) = self.interfaces[core.0]
-            .namespaces
-            .get("Slice")
-            .and_then(|companion| self.interfaces[companion.0].values.get("from_ref"))
-            .copied()
-        {
+        if let Some(symbol) = slice_module.and_then(|slice| {
+            self.interfaces[slice.0]
+                .namespaces
+                .get("Slice")
+                .and_then(|companion| self.interfaces[companion.0].values.get("from_ref"))
+                .copied()
+        }) {
             self.intrinsic_functions
                 .insert(symbol, IntrinsicFunction::SliceFromRef);
         }
@@ -2205,6 +2243,18 @@ impl NameResolver {
                 }
             }
         }
+        if let Some(prelude) = program.standard_library_prelude() {
+            for module in program.modules() {
+                if module.id != prelude && program.module_uses_prelude(module.id) {
+                    self.definition_context_values[module.id.0]
+                        .extend(self.interfaces[prelude.0].values.clone());
+                    self.definition_context_types[module.id.0]
+                        .extend(self.interfaces[prelude.0].types.clone());
+                    self.definition_context_namespaces[module.id.0]
+                        .extend(self.interfaces[prelude.0].namespaces.clone());
+                }
+            }
+        }
         for module in program.modules() {
             for item in &module.syntax.items {
                 let Item::UseDeclaration(use_) = item else {
@@ -2667,6 +2717,21 @@ impl NameResolver {
         self.prelude_macros = self.interfaces[core.0].macros.clone();
         self.prelude_traits = self.interfaces[core.0].traits.clone();
         self.prelude_namespaces = self.interfaces[core.0].namespaces.clone();
+        if program.module_uses_prelude(module)
+            && let Some(prelude) = program.standard_library_prelude()
+            && module != prelude
+        {
+            self.prelude_values
+                .extend(self.interfaces[prelude.0].values.clone());
+            self.prelude_types
+                .extend(self.interfaces[prelude.0].types.clone());
+            self.prelude_macros
+                .extend(self.interfaces[prelude.0].macros.clone());
+            self.prelude_traits
+                .extend(self.interfaces[prelude.0].traits.clone());
+            self.prelude_namespaces
+                .extend(self.interfaces[prelude.0].namespaces.clone());
+        }
         for trait_id in self.prelude_traits.values().copied().collect::<Vec<_>>() {
             self.add_visible_trait_methods(trait_id);
         }

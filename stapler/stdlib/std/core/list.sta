@@ -2,6 +2,8 @@ pub mod
 
 use std.core.iterator.(Iterator, IntoIterator)
 use std.core.iterator.IterStep.(Done, Yield)
+use std.core.buffer.(Buffer)
+use std.core.clone.Clone
 use std.core.index.(Index, MutateIndex)
 use std.syntax.*
 
@@ -27,6 +29,7 @@ def grow: <T> mut List T -> () = mut list => {
 }
 
 companion<T> List T {
+    use std.core.buffer.(Buffer)
     /// Returns the number of elements in the list.
     pub def length: List T -> USize = list => list.*^length
 

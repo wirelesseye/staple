@@ -42,6 +42,7 @@ enum MacroKind {
     CString,
     Doc,
     Feature,
+    NoPrelude,
     Quote,
     ParseQuote,
 }
@@ -691,6 +692,7 @@ impl MacroExpander {
         let mut definitions = HashMap::new();
         let mut scopes = vec![ModuleScope::default(); program.modules().len()];
         let core = program.standard_library_core();
+        let prelude = program.standard_library_prelude();
         let syntax = program.standard_library_syntax();
         let cinterop = program.standard_library_cinterop();
 
@@ -730,6 +732,13 @@ impl MacroExpander {
                             && declaration.name == "feature"
                         {
                             MacroKind::Feature
+                        } else if source_module
+                            .path
+                            .ends_with(std::path::Path::new("std/core/no_prelude.sta"))
+                            && declaration.modifier
+                            && declaration.name == "no_prelude"
+                        {
+                            MacroKind::NoPrelude
                         } else if let Some(value) = &declaration.value {
                             MacroKind::User(value.clone())
                         } else {
@@ -1113,6 +1122,40 @@ impl MacroExpander {
                     }
                 }
             }
+            if program.module_uses_prelude(source_module.id)
+                && let Some(prelude) = prelude
+                && source_module.id != prelude
+            {
+                for ((module, name, modifier), keys) in &public_macros {
+                    if *module != prelude {
+                        continue;
+                    }
+                    let namespace = if *modifier {
+                        &mut scopes[source_module.id.0].modifiers
+                    } else {
+                        &mut scopes[source_module.id.0].macros
+                    };
+                    namespace
+                        .entry(name.clone())
+                        .or_insert_with(|| keys.clone());
+                }
+                for ((module, name), binding) in &public_helpers {
+                    if *module == prelude {
+                        scopes[source_module.id.0]
+                            .helpers
+                            .entry(name.clone())
+                            .or_insert_with(|| binding.clone());
+                    }
+                }
+                for ((module, name), target) in &public_namespaces {
+                    if *module == prelude {
+                        scopes[source_module.id.0]
+                            .namespaces
+                            .entry(name.clone())
+                            .or_insert_with(|| *target);
+                    }
+                }
+            }
             for (namespace, target) in program.root_qualified_modules(source_module.id) {
                 scopes[source_module.id.0]
                     .namespaces
@@ -1465,9 +1508,11 @@ impl MacroExpander {
             if definition.key.modifier {
                 if matches!(
                     definition.key.name.as_str(),
-                    "recursive_constructor" | "doc" | "feature"
-                ) && !matches!(definition.kind, MacroKind::Doc | MacroKind::Feature)
-                {
+                    "recursive_constructor" | "doc" | "feature" | "no_prelude"
+                ) && !matches!(
+                    definition.kind,
+                    MacroKind::Doc | MacroKind::Feature | MacroKind::NoPrelude
+                ) {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
                         format!(
@@ -1553,7 +1598,7 @@ impl MacroExpander {
                         "compiler-provided macro `c_string` must have signature `Expr -> Expr`",
                     ));
                 }
-                MacroKind::Doc | MacroKind::Feature => {}
+                MacroKind::Doc | MacroKind::Feature | MacroKind::NoPrelude => {}
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -1849,7 +1894,8 @@ impl MacroExpander {
             current = self.expand_macro_call_metadata_invocation(module, generated, depth + 1)?;
         }
         if !modifier_target_supported(&current)
-            && !(invocation.namespace.is_none() && invocation.name == "doc")
+            && !(invocation.namespace.is_none()
+                && matches!(invocation.name.as_str(), "doc" | "no_prelude"))
         {
             self.diagnostics.push(Diagnostic::new(
                 invocation.syntax.span.clone(),
@@ -1880,6 +1926,25 @@ impl MacroExpander {
                 return None;
             };
             declaration.recursive_constructor = true;
+            return Some(ModifierChainResult::Item(current));
+        }
+        if invocation.namespace.is_none() && invocation.name == "no_prelude" {
+            let (definition, _) = self.select_modifier(module, &invocation)?;
+            self.record_invocation(invocation.syntax.id, &definition);
+            if invocation.argument.is_some() {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@no_prelude` does not accept an argument",
+                ));
+                return None;
+            }
+            if !matches!(&current, Item::Submodule(value) if value.name.is_empty()) {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@no_prelude` may only modify the current module declaration",
+                ));
+                return None;
+            }
             return Some(ModifierChainResult::Item(current));
         }
         if invocation.namespace.is_none() && invocation.name == "doc" {
@@ -3106,7 +3171,7 @@ impl MacroExpander {
                     },
                 )))
             }
-            MacroKind::Doc | MacroKind::Feature => {
+            MacroKind::Doc | MacroKind::Feature | MacroKind::NoPrelude => {
                 unreachable!("built-in modifiers are applied directly")
             }
             MacroKind::Quote => {
