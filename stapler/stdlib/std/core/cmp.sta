@@ -1,0 +1,52 @@
+pub mod
+
+/// An ordering result indicating the left value is smaller.
+pub type Less
+/// An ordering result indicating equal values.
+pub type Equal
+/// An ordering result indicating the left value is greater.
+pub type Greater
+/// The result of comparing two ordered values.
+pub type alias Ordering = Less | Equal | Greater
+
+/// Provides equality and inequality comparisons.
+pub trait Eq T where Copy T {
+    /// Returns whether two values are equal.
+    equal: T -> T -> Bool
+    /// Returns whether two values are unequal.
+    not_equal: T -> T -> Bool
+}
+
+/// Provides comparisons that may be unordered.
+pub trait PartialOrd T where Copy T {
+    /// Compares two values, returning `None` when they are unordered.
+    partial_cmp: T -> T -> Option Ordering
+    /// Returns whether the left value is less than the right value.
+    lt: T -> T -> Bool = left => right => match (partial_cmp left right) {
+        Some Less() => True,
+        _ => False,
+    }
+    /// Returns whether the left value is less than or equal to the right value.
+    le: T -> T -> Bool = left => right => match (partial_cmp left right) {
+        Some Less() => True,
+        Some Equal() => True,
+        _ => False,
+    }
+    /// Returns whether the left value is greater than the right value.
+    gt: T -> T -> Bool = left => right => match (partial_cmp left right) {
+        Some Greater() => True,
+        _ => False,
+    }
+    /// Returns whether the left value is greater than or equal to the right value.
+    ge: T -> T -> Bool = left => right => match (partial_cmp left right) {
+        Some Greater() => True,
+        Some Equal() => True,
+        _ => False,
+    }
+}
+
+/// Provides a total ordering.
+pub trait Ord T where Eq T, PartialOrd T {
+    /// Compares two values with a total ordering.
+    cmp: T -> T -> Ordering
+}
