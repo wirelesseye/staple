@@ -1811,7 +1811,7 @@ mod tests {
     #[test]
     fn classifies_macro_meta_locals_parameters_and_helpers() {
         let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
-        let path = stdlib.join("std/core/flow.sta");
+        let path = stdlib.join("std/flow.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
             .with_standard_library_root(stdlib)

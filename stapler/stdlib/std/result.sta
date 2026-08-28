@@ -1,2 +1,4 @@
 pub mod
-pub use std.core.result.*
+
+/// A successful value represented transparently by its payload.
+pub(repr) type Ok T = T

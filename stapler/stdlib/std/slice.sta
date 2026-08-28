@@ -1,2 +1,12 @@
 pub mod
-pub use std.core.slice.*
+
+/// A borrowed immutable sequence of values.
+@recursive_constructor
+pub type Slice T = T
+
+companion<T> Slice T {
+    /// Returns the number of elements in the slice.
+    pub def length: Slice T -> USize = value => 0
+    /// Makes a single-element slice from a reference.
+    pub def from_ref: Ref T -> Slice T = value => value
+}

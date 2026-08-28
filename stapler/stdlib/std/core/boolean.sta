@@ -1,6 +1,6 @@
 pub mod
 
-use std.core.fmt.(Display, Debug, Formatter)
+use std.fmt.(Display, Debug, Formatter)
 
 /// A logical value that is either true or false.
 pub typegroup Bool {

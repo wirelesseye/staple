@@ -1316,7 +1316,7 @@ mod tests {
     #[test]
     fn analyzes_an_open_standard_library_module_from_its_package() {
         let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
-        let path = std::fs::canonicalize(stdlib.join("std/core/flow.sta")).unwrap();
+        let path = std::fs::canonicalize(stdlib.join("std/flow.sta")).unwrap();
         let source = std::fs::read_to_string(&path).unwrap();
         let uri = path_to_uri(&path).unwrap();
         let (connection, _client) = Connection::memory();

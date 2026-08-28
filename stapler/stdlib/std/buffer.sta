@@ -1,2 +1,50 @@
 pub mod
-pub use std.core.buffer.*
+
+use std.slice.Slice
+use std.clone.Clone
+
+/// A mutable, fixed-capacity buffer of values.
+pub type Buffer T = opaque
+impl<T> !Copy (Buffer T) {}
+
+def __buffer_with_capacity: <T> USize -> Buffer T = capacity => __buffer_with_capacity capacity
+def __buffer_length: <T> Buffer T -> USize = buffer => __buffer_length buffer
+def __buffer_capacity: <T> Buffer T -> USize = buffer => __buffer_capacity buffer
+def __buffer_push: <T> (mut Buffer T, move T) -> () = (mut buffer, move value) => __buffer_push (buffer, value)
+def __buffer_pop: <T> mut Buffer T -> Option T = mut buffer => __buffer_pop buffer
+def __buffer_get: <T> (Buffer T, USize) -> Ref T = (buffer, position) => __buffer_get (buffer, position)
+def __buffer_freeze: <T> move Buffer T -> Slice T = move buffer => __buffer_freeze buffer
+def __buffer_transfer: <T> (mut Buffer T, mut Buffer T) -> () = (mut source, mut destination) => __buffer_transfer (source, destination)
+def __buffer_clone: <T where Clone T> Buffer T -> Buffer T = buffer => __buffer_clone buffer
+
+companion<T> Buffer T {
+    use std.slice.Slice
+    /// Allocates storage for exactly capacity elements without initialising values.
+    pub def with_capacity: USize -> Buffer T = capacity => __buffer_with_capacity capacity
+
+    /// Returns the number of initialised elements in the buffer's prefix.
+    pub def length: Buffer T -> USize = buffer => __buffer_length buffer
+
+    /// Returns the fixed number of elements for which the buffer has storage.
+    pub def capacity: Buffer T -> USize = buffer => __buffer_capacity buffer
+
+    /// Appends an element, trapping if the buffer is full or frozen.
+    pub def push: mut Buffer T -> move T -> () = mut buffer => move value => __buffer_push (buffer, value)
+
+    /// Removes and returns the last element, or `None` if empty; traps if frozen.
+    pub def pop: mut Buffer T -> Option T = mut buffer => __buffer_pop buffer
+
+    /// Borrows an initialised element by position, trapping if out of bounds.
+    pub def get_ref: (Buffer T, USize) -> Ref T = (buffer, position) => __buffer_get (buffer, position)
+
+    /// Seals the buffer against mutation and returns a zero-copy slice of its contents.
+    pub def freeze: move Buffer T -> Slice T = move buffer => __buffer_freeze buffer
+
+    /// Moves every initialised source element to destination and empties source.
+    /// Traps for frozen, overlapping, or insufficient-capacity buffers.
+    pub def transfer: (mut Buffer T, mut Buffer T) -> () = (mut source, mut destination) => __buffer_transfer (source, destination)
+}
+
+impl<T where Clone T> Clone (Buffer T) {
+    def clone = buffer => __buffer_clone buffer
+}

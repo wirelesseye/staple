@@ -2516,7 +2516,7 @@ fn no_prelude_modifier_removes_convenience_names_but_keeps_core() {
 }
 
 #[test]
-fn moved_std_core_paths_are_private_but_canonical_paths_work() {
+fn moved_std_core_paths_are_absent_but_canonical_paths_work() {
     let fixture = Fixture::new();
     fixture.write(
         "main.sta",
@@ -2533,6 +2533,6 @@ fn moved_std_core_paths_are_private_but_canonical_paths_work() {
         fixture
             .check_at("main.sta", ".")
             .unwrap_err()
-            .contains("private")
+            .contains("no submodule named `list`")
     );
 }

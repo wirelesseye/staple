@@ -1,2 +1,23 @@
 pub mod
-pub use std.core.iterator.*
+
+companion IterStep {
+    pub(repr) type Done Iter = Iter
+    pub(repr) type Yield (Item, Iter) = (Item, Iter)
+}
+
+/// One step of an iterator: either completion or an item and next iterator.
+pub type alias IterStep (Iter, Item) =
+    IterStep.Done Iter |
+    IterStep.Yield (Item, Iter)
+
+/// A type that yields values one step at a time.
+pub trait Iterator Iter Item where Iter ~> Item {
+    /// Advances the iterator by one step.
+    next: Iter -> IterStep (Iter, Item)
+}
+
+/// A source that can be converted into an iterator.
+pub trait IntoIterator Source Iter where Source ~> Iter, Iterator Iter {
+    /// Converts this source into its iterator.
+    into_iterator: Source -> Iter
+}

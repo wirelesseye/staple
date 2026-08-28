@@ -2178,7 +2178,7 @@ mod tests {
     #[test]
     fn displays_declared_types_for_macro_helper_parameters() {
         let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
-        let path = stdlib_root.join("std").join("core").join("typegroup.sta");
+        let path = stdlib_root.join("std").join("typegroup.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
             .with_standard_library_root(stdlib_root)
@@ -2725,7 +2725,7 @@ mod tests {
     #[test]
     fn describes_macro_meta_locals_and_helpers() {
         let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
-        let path = stdlib.join("std/core/flow.sta");
+        let path = stdlib.join("std/flow.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
             .with_standard_library_root(stdlib)

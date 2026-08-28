@@ -1,2 +1,36 @@
 pub mod
-pub use std.core.string.*
+
+use std.slice.(Slice)
+
+/// A UTF-8 byte slice used as Staple's string type.
+pub type String = Slice U8
+
+extern "staple-intrinsic" {
+    __string_add: (String, String) -> String
+}
+
+/// Converts a value to its string representation.
+pub trait ToString T {
+    /// Converts this value to a string.
+    to_string: T -> String
+}
+
+def string_bytes: String -> Slice U8 = value => {
+    let String bytes = value
+    bytes
+}
+
+def string_from_utf8_unchecked: Slice U8 -> String = bytes => String bytes
+
+companion String {
+    use std.slice.Slice
+    /// Returns the UTF-8 bytes backing a string.
+    pub def bytes: String -> Slice U8 = value => string_bytes value
+
+    /// Constructs a string from bytes known to contain valid UTF-8.
+    pub def from_utf8_unchecked: Slice U8 -> String = bytes => string_from_utf8_unchecked bytes
+}
+
+impl Add String {
+    def add = left => right => __string_add (left, right)
+}

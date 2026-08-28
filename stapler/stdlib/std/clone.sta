@@ -1,2 +1,14 @@
 pub mod
-pub use std.core.clone.*
+
+/// Marks types that can be explicitly duplicated.
+///
+/// Unlike `Copy`, `Clone` is not implicit: a non-`Copy` type must implement
+/// it manually. Every `Copy` type implements `Clone` for free.
+pub trait Clone T {
+    /// Creates an independent copy of the value.
+    clone: T -> T
+}
+
+impl<T where Copy T> Clone T {
+    def clone = value => value
+}

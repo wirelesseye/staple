@@ -1428,19 +1428,14 @@ impl NameResolver {
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
         for (path, namespace, name, builtin) in [
             (
-                "std/core/string.sta",
+                "std/string.sta",
                 "std.string",
                 "String",
                 BuiltinType::String,
             ),
+            ("std/slice.sta", "std.slice", "Slice", BuiltinType::Slice),
             (
-                "std/core/slice.sta",
-                "std.slice",
-                "Slice",
-                BuiltinType::Slice,
-            ),
-            (
-                "std/core/buffer.sta",
+                "std/buffer.sta",
                 "std.buffer",
                 "Buffer",
                 BuiltinType::Buffer,
@@ -1643,7 +1638,7 @@ impl NameResolver {
         let slice_module = program
             .modules()
             .iter()
-            .find(|module| module.path.ends_with("std/core/slice.sta"))
+            .find(|module| module.path.ends_with("std/slice.sta"))
             .map(|module| module.id);
         if let Some(symbol) = slice_module.and_then(|slice| {
             self.interfaces[slice.0]

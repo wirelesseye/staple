@@ -812,14 +812,14 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
         std::process::id()
     ));
     copy_directory(&root.join("stdlib"), &temporary);
-    let production_string = include_str!("../stdlib/std/core/string.sta");
+    let production_string = include_str!("../stdlib/std/string.sta");
     let production_body = production_string
         .split_once("pub type String = Slice U8\n")
         .map(|(_, body)| body)
         .expect("production String module has its canonical declaration");
     std::fs::write(
-        temporary.join("std/core/string.sta"),
-        format!("pub mod\nuse std.core.slice.Slice\n{declaration}\n{production_body}"),
+        temporary.join("std/string.sta"),
+        format!("pub mod\nuse std.slice.Slice\n{declaration}\n{production_body}"),
     )
     .expect("test String declaration should be written");
 

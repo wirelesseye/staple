@@ -1,7 +1,7 @@
 pub mod
 
-use std.core.iterator.(IntoIterator, Iterator)
-use std.core.iterator.IterStep.(Done, Yield)
+use std.iterator.(IntoIterator, Iterator)
+use std.iterator.IterStep.(Done, Yield)
 
 /// A half-open range from `current` up to, but excluding, `end`.
 pub(repr) type Range T = (

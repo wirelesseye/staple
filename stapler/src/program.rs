@@ -1814,11 +1814,6 @@ impl ProgramLoader {
     }
 
     fn module_visible_from(&self, target: ModuleId, importing: ModuleId) -> bool {
-        if self.module_packages[target.0] != self.module_packages[importing.0]
-            && is_legacy_moved_std_module(&self.modules[target.0].path)
-        {
-            return false;
-        }
         match self.modules[target.0].visibility {
             Visibility::Public => true,
             Visibility::Package => self.module_packages[target.0]
@@ -1954,24 +1949,6 @@ impl ProgramLoader {
             initialization_order,
         }
     }
-}
-
-fn is_legacy_moved_std_module(path: &Path) -> bool {
-    [
-        "buffer",
-        "clone",
-        "default",
-        "flow",
-        "fmt",
-        "iterator",
-        "list",
-        "result",
-        "slice",
-        "string",
-        "typegroup",
-    ]
-    .iter()
-    .any(|name| path.ends_with(Path::new(&format!("std/core/{name}.sta"))))
 }
 
 /// Returns the per-user standard-library installation path.
