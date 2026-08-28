@@ -579,6 +579,21 @@ prelude interface and provides core numbers, booleans, strings, references,
 results, syntax, equality, copying, dropping, defaults, and indexing traits.
 Interoperability features are available through `std.cinterop`.
 
+Binder packages conditionally include items with the compiler-provided
+`@feature` modifier declared by `std.core`:
+
+```staple
+@feature("networking")
+@feature("tls")
+pub def connect = ...
+```
+
+Each modifier takes one declared feature name, and repeated modifiers require
+all names. Disabled items are removed before import discovery, macro expansion,
+name resolution, and type checking. The unqualified modifier is reserved like
+`@doc`; qualified user modifiers named `feature` remain ordinary modifiers.
+Using `@feature` without a Binder manifest is an error.
+
 The keyword `package` always selects the current package root, bypassing inline
 children with the same name:
 

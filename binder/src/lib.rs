@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -17,6 +17,8 @@ pub struct PackageId(pub usize);
 pub struct Dependency {
     pub alias: String,
     pub package: PackageId,
+    pub default_features: bool,
+    pub features: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,7 +30,24 @@ pub struct Package {
     pub root: PathBuf,
     pub entry: Option<PathBuf>,
     pub dependencies: Vec<Dependency>,
+    pub features: HashMap<String, Vec<FeatureMember>>,
+    pub default_features: Vec<String>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FeatureMember {
+    Local(String),
+    Dependency { alias: String, feature: String },
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FeatureSelection {
+    pub features: Vec<String>,
+    pub all_features: bool,
+    pub no_default_features: bool,
+}
+
+pub type ActiveFeatures = HashMap<PackageId, HashSet<String>>;
 
 impl Package {
     pub fn source_root(&self) -> &Path {
@@ -61,6 +80,9 @@ struct ParsedPackage {
     root: PathBuf,
     entry: Option<PathBuf>,
     dependencies: Vec<(String, PathBuf)>,
+    dependency_options: HashMap<String, (bool, Vec<String>)>,
+    features: HashMap<String, Vec<FeatureMember>>,
+    default_features: Vec<String>,
 }
 
 pub fn load_package_graph(manifest: &Path) -> Result<PackageGraph, String> {
@@ -69,7 +91,141 @@ pub fn load_package_graph(manifest: &Path) -> Result<PackageGraph, String> {
     let mut loaded = HashMap::new();
     let mut stack = Vec::new();
     let root = load_recursive(&manifest, false, &mut packages, &mut loaded, &mut stack)?;
-    Ok(PackageGraph { root, packages })
+    let graph = PackageGraph { root, packages };
+    validate_features(&graph)?;
+    Ok(graph)
+}
+
+fn validate_features(graph: &PackageGraph) -> Result<(), String> {
+    for package in &graph.packages {
+        for feature in &package.default_features {
+            if !package.features.contains_key(feature) {
+                return Err(format!(
+                    "{}: unknown feature `{feature}`",
+                    package.manifest.display()
+                ));
+            }
+        }
+        for (name, members) in &package.features {
+            for member in members {
+                match member {
+                    FeatureMember::Local(feature) if !package.features.contains_key(feature) => {
+                        return Err(format!(
+                            "{}: feature `{name}` references unknown feature `{feature}`",
+                            package.manifest.display()
+                        ));
+                    }
+                    FeatureMember::Dependency { alias, feature } => {
+                        let dependency = package
+                            .dependencies
+                            .iter()
+                            .find(|dependency| &dependency.alias == alias)
+                            .ok_or_else(|| {
+                                format!(
+                                    "{}: feature `{name}` references unknown dependency `{alias}`",
+                                    package.manifest.display()
+                                )
+                            })?;
+                        if !graph
+                            .package(dependency.package)
+                            .features
+                            .contains_key(feature)
+                        {
+                            return Err(format!(
+                                "{}: feature `{name}` references unknown feature `{alias}/{feature}`",
+                                package.manifest.display()
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        for dependency in &package.dependencies {
+            for feature in &dependency.features {
+                if !graph
+                    .package(dependency.package)
+                    .features
+                    .contains_key(feature)
+                {
+                    return Err(format!(
+                        "{}: dependency `{}` enables unknown feature `{feature}`",
+                        package.manifest.display(),
+                        dependency.alias
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+pub fn resolve_features(
+    graph: &PackageGraph,
+    selection: &FeatureSelection,
+) -> Result<ActiveFeatures, String> {
+    let root = graph.root_package();
+    for feature in &selection.features {
+        if !root.features.contains_key(feature) {
+            return Err(format!(
+                "package `{}` does not declare feature `{feature}`",
+                root.name
+            ));
+        }
+    }
+    let mut active: ActiveFeatures = graph
+        .packages
+        .iter()
+        .enumerate()
+        .map(|(index, _)| (PackageId(index), HashSet::new()))
+        .collect();
+    let mut queue = VecDeque::new();
+    if !selection.no_default_features {
+        for feature in &root.default_features {
+            queue.push_back((graph.root, feature.clone()));
+        }
+    }
+    for feature in &selection.features {
+        queue.push_back((graph.root, feature.clone()));
+    }
+    if selection.all_features {
+        for feature in root.features.keys() {
+            queue.push_back((graph.root, feature.clone()));
+        }
+    }
+    for package in &graph.packages {
+        for dependency in &package.dependencies {
+            let target = graph.package(dependency.package);
+            if dependency.default_features {
+                for feature in &target.default_features {
+                    queue.push_back((dependency.package, feature.clone()));
+                }
+            }
+            for feature in &dependency.features {
+                queue.push_back((dependency.package, feature.clone()));
+            }
+        }
+    }
+    while let Some((package_id, feature)) = queue.pop_front() {
+        if !active.get_mut(&package_id).unwrap().insert(feature.clone()) {
+            continue;
+        }
+        for member in &graph.package(package_id).features[&feature] {
+            match member {
+                FeatureMember::Local(feature) => queue.push_back((package_id, feature.clone())),
+                FeatureMember::Dependency { alias, feature } => {
+                    let dependency = graph
+                        .package(package_id)
+                        .dependencies
+                        .iter()
+                        .find(|dependency| &dependency.alias == alias)
+                        .unwrap();
+                    queue.push_back((dependency.package, feature.clone()));
+                }
+            }
+        }
+    }
+    Ok(active)
 }
 
 fn load_recursive(
@@ -110,15 +266,24 @@ fn load_recursive(
         root: parsed.root.clone(),
         entry: parsed.entry.clone(),
         dependencies: Vec::new(),
+        features: parsed.features.clone(),
+        default_features: parsed.default_features.clone(),
     });
     stack.push(manifest.clone());
     let mut dependencies = Vec::new();
     for (alias, directory) in parsed.dependencies {
         let target_manifest = directory.join("binder.kdl");
         let target = load_recursive(&target_manifest, true, packages, loaded, stack)?;
+        let (default_features, features) = parsed
+            .dependency_options
+            .get(&alias)
+            .cloned()
+            .unwrap_or_else(|| (true, Vec::new()));
         dependencies.push(Dependency {
             alias,
             package: target,
+            default_features,
+            features,
         });
     }
     stack.pop();
@@ -150,6 +315,7 @@ fn parse_package(manifest: &Path) -> Result<ParsedPackage, String> {
     let mut root = None;
     let mut entry = None;
     let mut dependencies = None;
+    let mut features = None;
     if let Some(children) = node.children() {
         for child in children.nodes() {
             match child.name().value() {
@@ -164,6 +330,12 @@ fn parse_package(manifest: &Path) -> Result<ParsedPackage, String> {
                         ));
                     }
                     dependencies = Some(parse_dependencies(child, manifest)?);
+                }
+                "features" => {
+                    if features.is_some() {
+                        return Err(format!("{}: duplicate `features` node", manifest.display()));
+                    }
+                    features = Some(parse_features(child, manifest)?);
                 }
                 unknown => {
                     return Err(format!(
@@ -201,6 +373,8 @@ fn parse_package(manifest: &Path) -> Result<ParsedPackage, String> {
             Ok(entry)
         })
         .transpose()?;
+    let (dependencies, dependency_options) = dependencies.unwrap_or_default();
+    let (features, default_features) = features.unwrap_or_default();
     Ok(ParsedPackage {
         name,
         kind,
@@ -209,10 +383,12 @@ fn parse_package(manifest: &Path) -> Result<ParsedPackage, String> {
         root,
         entry,
         dependencies: dependencies
-            .unwrap_or_default()
             .into_iter()
             .map(|(alias, path)| (alias, directory.join(path)))
             .collect(),
+        dependency_options,
+        features,
+        default_features,
     })
 }
 
@@ -245,7 +421,8 @@ fn parse_kind_child(
     Ok(())
 }
 
-fn parse_dependencies(node: &KdlNode, manifest: &Path) -> Result<Vec<(String, PathBuf)>, String> {
+type ParsedDependencies = (Vec<(String, PathBuf)>, HashMap<String, (bool, Vec<String>)>);
+fn parse_dependencies(node: &KdlNode, manifest: &Path) -> Result<ParsedDependencies, String> {
     if !node.entries().is_empty() {
         return Err(format!(
             "{}: `dependencies` does not accept values or properties",
@@ -253,6 +430,7 @@ fn parse_dependencies(node: &KdlNode, manifest: &Path) -> Result<Vec<(String, Pa
         ));
     }
     let mut result = Vec::new();
+    let mut options = HashMap::new();
     let mut seen = HashMap::new();
     if let Some(children) = node.children() {
         for dependency in children.nodes() {
@@ -265,22 +443,30 @@ fn parse_dependencies(node: &KdlNode, manifest: &Path) -> Result<Vec<(String, Pa
                     manifest.display()
                 ));
             }
-            if dependency.children().is_some() || dependency.entries().len() != 1 {
-                return Err(format!(
-                    "{}: dependency `{alias}` requires exactly one `path` property",
-                    manifest.display()
-                ));
+            let mut path = None;
+            let mut default_features = true;
+            for value in dependency.entries() {
+                match value.name().map(|name| name.value()) {
+                    Some("path") if path.is_none() => path = value.value().as_string(),
+                    Some("default-features") => {
+                        default_features = value.value().as_bool().ok_or_else(|| {
+                            format!(
+                                "{}: dependency `{alias}` `default-features` must be a boolean",
+                                manifest.display()
+                            )
+                        })?
+                    }
+                    _ => {
+                        return Err(format!(
+                            "{}: dependency `{alias}` accepts only `path` and `default-features` properties",
+                            manifest.display()
+                        ));
+                    }
+                }
             }
-            let value = &dependency.entries()[0];
-            if value.name().map(|name| name.value()) != Some("path") {
-                return Err(format!(
-                    "{}: dependency `{alias}` requires a `path` property",
-                    manifest.display()
-                ));
-            }
-            let path = value.value().as_string().ok_or_else(|| {
+            let path = path.ok_or_else(|| {
                 format!(
-                    "{}: dependency `{alias}` path must be a string",
+                    "{}: dependency `{alias}` requires one string `path` property",
                     manifest.display()
                 )
             })?;
@@ -291,10 +477,129 @@ fn parse_dependencies(node: &KdlNode, manifest: &Path) -> Result<Vec<(String, Pa
                     manifest.display()
                 ));
             }
+            let mut enabled = Vec::new();
+            if let Some(children) = dependency.children() {
+                for child in children.nodes() {
+                    if child.name().value() != "features" || child.children().is_some() {
+                        return Err(format!(
+                            "{}: dependency `{alias}` accepts only a `features` child",
+                            manifest.display()
+                        ));
+                    }
+                    for entry in child.entries() {
+                        let feature = entry
+                            .value()
+                            .as_string()
+                            .filter(|_| entry.name().is_none())
+                            .ok_or_else(|| {
+                                format!(
+                                    "{}: dependency `{alias}` features must be strings",
+                                    manifest.display()
+                                )
+                            })?;
+                        validate_feature_name(feature)
+                            .map_err(|error| format!("{}: {error}", manifest.display()))?;
+                        enabled.push(feature.to_owned());
+                    }
+                }
+            }
             result.push((alias.to_owned(), path));
+            options.insert(alias.to_owned(), (default_features, enabled));
         }
     }
-    Ok(result)
+    Ok((result, options))
+}
+
+fn parse_features(
+    node: &KdlNode,
+    manifest: &Path,
+) -> Result<(HashMap<String, Vec<FeatureMember>>, Vec<String>), String> {
+    if !node.entries().is_empty() {
+        return Err(format!(
+            "{}: `features` does not accept values or properties",
+            manifest.display()
+        ));
+    }
+    let mut features = HashMap::new();
+    let mut defaults = Vec::new();
+    if let Some(children) = node.children() {
+        for feature in children.nodes() {
+            let name = feature.name().value();
+            if feature.children().is_some() {
+                return Err(format!(
+                    "{}: feature `{name}` does not accept children",
+                    manifest.display()
+                ));
+            }
+            if name != "default" {
+                validate_feature_name(name)
+                    .map_err(|error| format!("{}: {error}", manifest.display()))?;
+                if features.contains_key(name) {
+                    return Err(format!(
+                        "{}: duplicate feature `{name}`",
+                        manifest.display()
+                    ));
+                }
+            }
+            let mut members = Vec::new();
+            for entry in feature.entries() {
+                let value = entry
+                    .value()
+                    .as_string()
+                    .filter(|_| entry.name().is_none())
+                    .ok_or_else(|| {
+                        format!(
+                            "{}: feature `{name}` members must be strings",
+                            manifest.display()
+                        )
+                    })?;
+                members.push(
+                    if let Some((alias, dependency_feature)) = value.split_once('/') {
+                        validate_dependency_alias(alias)
+                            .map_err(|error| format!("{}: {error}", manifest.display()))?;
+                        validate_feature_name(dependency_feature)
+                            .map_err(|error| format!("{}: {error}", manifest.display()))?;
+                        FeatureMember::Dependency {
+                            alias: alias.to_owned(),
+                            feature: dependency_feature.to_owned(),
+                        }
+                    } else {
+                        validate_feature_name(value)
+                            .map_err(|error| format!("{}: {error}", manifest.display()))?;
+                        FeatureMember::Local(value.to_owned())
+                    },
+                );
+            }
+            if name == "default" {
+                defaults = members
+                    .into_iter()
+                    .map(|member| match member {
+                        FeatureMember::Local(name) => Ok(name),
+                        _ => Err(format!(
+                            "{}: `default` may contain only local features",
+                            manifest.display()
+                        )),
+                    })
+                    .collect::<Result<_, _>>()?;
+            } else {
+                features.insert(name.to_owned(), members);
+            }
+        }
+    }
+    Ok((features, defaults))
+}
+
+pub fn validate_feature_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || !name
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '-'))
+    {
+        return Err(format!(
+            "feature name `{name}` must contain only ASCII letters, numbers, `_`, or `-`"
+        ));
+    }
+    Ok(())
 }
 
 pub fn validate_dependency_alias(alias: &str) -> Result<(), String> {

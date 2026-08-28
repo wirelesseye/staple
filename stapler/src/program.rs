@@ -96,6 +96,7 @@ pub struct Program {
     entry: ModuleId,
     executable_entry: Option<ModuleId>,
     package_graph: Option<binder::PackageGraph>,
+    active_features: binder::ActiveFeatures,
     module_packages: Vec<Option<binder::PackageId>>,
     package_name: String,
     package_root: Option<ModuleId>,
@@ -122,6 +123,7 @@ impl Program {
             entry: ModuleId(0),
             executable_entry: Some(ModuleId(0)),
             package_graph: None,
+            active_features: HashMap::new(),
             module_packages: vec![None],
             package_name: "package".to_owned(),
             package_root: None,
@@ -409,6 +411,9 @@ impl Program {
     pub fn package_graph(&self) -> Option<&binder::PackageGraph> {
         self.package_graph.as_ref()
     }
+    pub(crate) fn active_features(&self) -> &binder::ActiveFeatures {
+        &self.active_features
+    }
 
     pub fn package_of(&self, module: ModuleId) -> Option<binder::PackageId> {
         self.module_packages.get(module.0).copied().flatten()
@@ -612,6 +617,8 @@ pub struct ProgramLoader {
     package_entry: Option<ModuleId>,
     executable_entry: Option<ModuleId>,
     package_graph: Option<binder::PackageGraph>,
+    feature_selection: binder::FeatureSelection,
+    active_features: binder::ActiveFeatures,
     module_packages: Vec<Option<binder::PackageId>>,
     package_roots: HashMap<binder::PackageId, ModuleId>,
     standard_library_root: Option<PathBuf>,
@@ -654,6 +661,10 @@ impl ProgramLoader {
         self.package_graph = Some(graph);
         self
     }
+    pub fn with_feature_selection(mut self, selection: binder::FeatureSelection) -> Self {
+        self.feature_selection = selection;
+        self
+    }
 
     pub fn load_package_graph(mut self) -> Result<Program, String> {
         self.load_package_graph_diagnostic(None)
@@ -680,6 +691,11 @@ impl ProgramLoader {
         // `use std....` resolves through the same alias machinery as any local
         // dependency.
         self.attach_std_package()?;
+        self.active_features = binder::resolve_features(
+            self.package_graph.as_ref().unwrap(),
+            &self.feature_selection,
+        )
+        .map_err(LoadDiagnostic::compiler)?;
         let graph = self
             .package_graph
             .clone()
@@ -1146,6 +1162,8 @@ impl ProgramLoader {
                 root: package_root.join("root.sta"),
                 entry: None,
                 dependencies: Vec::new(),
+                features: HashMap::new(),
+                default_features: Vec::new(),
             });
             std_id
         };
@@ -1158,6 +1176,8 @@ impl ProgramLoader {
                 package.dependencies.push(binder::Dependency {
                     alias: "std".to_owned(),
                     package: std_id,
+                    default_features: true,
+                    features: Vec::new(),
                 });
             }
         }
@@ -1280,7 +1300,7 @@ impl ProgramLoader {
         source: &str,
         package: Option<binder::PackageId>,
     ) -> Result<ModuleId, LoadDiagnostic> {
-        let syntax = parse_with_syntax_ids(
+        let mut syntax = parse_with_syntax_ids(
             source,
             &mut self.next_syntax_id,
             &path.display().to_string(),
@@ -1291,6 +1311,20 @@ impl ProgramLoader {
             location: Some(error.location),
             message: error.message,
         })?;
+        if let Some(package) = package {
+            filter_feature_items(
+                &mut syntax.items,
+                package,
+                self.package_graph.as_ref().unwrap(),
+                &self.active_features,
+            )?;
+        } else if contains_feature_modifier(&syntax.items) {
+            return Err(LoadDiagnostic::source(
+                path.clone(),
+                None,
+                "`@feature` requires a Binder manifest",
+            ));
+        }
         let id = ModuleId(self.modules.len());
         let visibility = syntax.visibility;
         self.paths.insert(path.clone(), id);
@@ -1849,6 +1883,7 @@ impl ProgramLoader {
             entry,
             executable_entry: self.executable_entry,
             package_graph: self.package_graph,
+            active_features: self.active_features,
             module_packages: self.module_packages,
             package_name: if self.package_name.is_empty() {
                 "package".to_owned()
@@ -1894,6 +1929,89 @@ fn canonical_directory(path: &Path, description: &str) -> Result<PathBuf, String
             path.display()
         )
     })
+}
+
+fn contains_feature_modifier(items: &[Item]) -> bool {
+    items.iter().any(|item| match item {
+        Item::Modified(modified) => {
+            modified
+                .modifiers
+                .iter()
+                .any(|modifier| modifier.namespace.is_none() && modifier.name == "feature")
+                || contains_feature_modifier(std::slice::from_ref(&modified.item))
+        }
+        Item::Submodule(module) => contains_feature_modifier(&module.module.items),
+        _ => false,
+    })
+}
+
+fn filter_feature_items(
+    items: &mut Vec<Item>,
+    package: binder::PackageId,
+    graph: &binder::PackageGraph,
+    active: &binder::ActiveFeatures,
+) -> Result<(), LoadDiagnostic> {
+    let mut filtered = Vec::new();
+    for item in std::mem::take(items) {
+        if let Some(mut item) =
+            filter_feature_item(item, &graph.package(package).features, active.get(&package))?
+        {
+            if let Item::Submodule(module) = &mut item {
+                filter_feature_items(&mut module.module.items, package, graph, active)?;
+            }
+            filtered.push(item);
+        }
+    }
+    *items = filtered;
+    Ok(())
+}
+
+fn filter_feature_item(
+    item: Item,
+    declared: &HashMap<String, Vec<binder::FeatureMember>>,
+    enabled: Option<&HashSet<String>>,
+) -> Result<Option<Item>, LoadDiagnostic> {
+    let Item::Modified(mut modified) = item else {
+        return Ok(Some(item));
+    };
+    let mut include = true;
+    let mut remaining = Vec::new();
+    for modifier in modified.modifiers {
+        if modifier.namespace.is_some() || modifier.name != "feature" {
+            remaining.push(modifier);
+            continue;
+        }
+        let argument = modifier.argument.as_ref().ok_or_else(|| {
+            load_diagnostic_at(
+                &modifier.syntax.span,
+                "`@feature` requires a parenthesized string literal",
+            )
+        })?;
+        let Some(Expression::String(literal)) = argument.expression.as_ref() else {
+            return Err(load_diagnostic_at(
+                &modifier.syntax.span,
+                "`@feature` requires a string literal argument",
+            ));
+        };
+        let feature = crate::string_literal::decode(&literal.literal)
+            .map_err(|message| load_diagnostic_at(&modifier.syntax.span, message))?;
+        if !declared.contains_key(&feature) {
+            return Err(load_diagnostic_at(
+                &modifier.syntax.span,
+                format!("package does not declare feature `{feature}`"),
+            ));
+        }
+        include &= enabled.is_some_and(|features| features.contains(&feature));
+    }
+    if !include {
+        return Ok(None);
+    }
+    modified.modifiers = remaining;
+    Ok(Some(if modified.modifiers.is_empty() {
+        *modified.item
+    } else {
+        Item::Modified(modified)
+    }))
 }
 
 fn collect_staple_files(directory: &Path, files: &mut Vec<PathBuf>) {

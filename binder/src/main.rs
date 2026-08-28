@@ -22,6 +22,9 @@ struct Options {
     library_paths: Vec<PathBuf>,
     libraries: Vec<OsString>,
     program_arguments: Vec<OsString>,
+    features: Vec<String>,
+    all_features: bool,
+    no_default_features: bool,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -151,6 +154,9 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         library_paths: Vec::new(),
         libraries: Vec::new(),
         program_arguments: Vec::new(),
+        features: Vec::new(),
+        all_features: false,
+        no_default_features: false,
     };
 
     if mode == Mode::New {
@@ -218,6 +224,21 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             )?;
             continue;
         }
+        if argument == "--features" {
+            add_features(
+                &mut options.features,
+                &utf8_value(next_value(&mut arguments, "--features")?, "--features")?,
+            )?;
+            continue;
+        }
+        if argument == "--all-features" {
+            options.all_features = true;
+            continue;
+        }
+        if argument == "--no-default-features" {
+            options.no_default_features = true;
+            continue;
+        }
         if argument == "-L" {
             options
                 .library_paths
@@ -246,6 +267,8 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
                 OsString::from(value),
                 "--stdlib",
             )?;
+        } else if let Some(value) = text.strip_prefix("--features=") {
+            add_features(&mut options.features, value)?;
         } else if text.starts_with("-L") && text.len() > 2 {
             options.library_paths.push(PathBuf::from(&text[2..]));
         } else if text.starts_with("-l") && text.len() > 2 {
@@ -257,6 +280,14 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
 
     validate_options(&options)?;
     Ok(options)
+}
+
+fn add_features(destination: &mut Vec<String>, value: &str) -> Result<(), String> {
+    for feature in value.split(',') {
+        binder::validate_feature_name(feature)?;
+        destination.push(feature.to_owned());
+    }
+    Ok(())
 }
 
 fn validate_options(options: &Options) -> Result<(), String> {
@@ -435,6 +466,16 @@ fn stapler_arguments(package: &Package, options: &Options, output: Option<&Path>
     }
     arguments.push("--manifest-path".into());
     arguments.push(package.manifest.clone().into_os_string());
+    for feature in &options.features {
+        arguments.push("--features".into());
+        arguments.push(feature.into());
+    }
+    if options.all_features {
+        arguments.push("--all-features".into());
+    }
+    if options.no_default_features {
+        arguments.push("--no-default-features".into());
+    }
     if let Some(output) = output {
         arguments.extend([OsString::from("--emit"), OsString::from("exe")]);
         arguments.push("-o".into());
@@ -544,13 +585,19 @@ fn command_usage(command: &str) -> String {
             "  --target <triple>        LLVM target triple\n",
             "  --linker <command>       linker driver\n",
             "  --stdlib <path>          Staple standard-library root\n",
+            "  --features <names>       enable package features\n",
+            "  --all-features           enable every package feature\n",
+            "  --no-default-features    disable default package features\n",
             "  -L <path>                add a linker search path\n",
             "  -l <name>                link a library",
         ),
         "check" => concat!(
             "usage: binder check [options]\n\n",
             "  --manifest-path <path>  use a specific binder.kdl\n",
-            "  --stdlib <path>          Staple standard-library root",
+            "  --stdlib <path>          Staple standard-library root\n",
+            "  --features <names>       enable package features\n",
+            "  --all-features           enable every package feature\n",
+            "  --no-default-features    disable default package features",
         ),
         "new" => concat!(
             "usage: binder new <name>\n\n",
@@ -561,6 +608,9 @@ fn command_usage(command: &str) -> String {
             "  --manifest-path <path>  use a specific binder.kdl\n",
             "  --linker <command>       linker driver\n",
             "  --stdlib <path>          Staple standard-library root\n",
+            "  --features <names>       enable package features\n",
+            "  --all-features           enable every package feature\n",
+            "  --no-default-features    disable default package features\n",
             "  -L <path>                add a linker search path\n",
             "  -l <name>                link a library\n",
             "  --                        pass remaining arguments to the program",

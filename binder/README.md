@@ -57,6 +57,31 @@ Binder v1 supports local directory dependencies only. It does not support
 registry or Git dependencies, versions, workspaces, profiles, incremental
 builds, or project lockfiles.
 
+## Features
+
+Packages declare additive features in their manifest:
+
+```kdl
+package "application" {
+    features {
+        default "logging"
+        logging
+        full "logging" "geometry/simd"
+    }
+    dependencies {
+        geometry path="../geometry" default-features=#false {
+            features "base"
+        }
+    }
+}
+```
+
+Dependency requests are unified. Dependency defaults apply unless the edge
+sets `default-features=#false`. Build, check, and run accept repeatable
+`--features <comma-separated-names>`, `--all-features`, and
+`--no-default-features`. Staple items use `@feature("name")`; repeated
+modifiers require every named feature.
+
 ## Commands
 
 Create a new project in `<name>/`:

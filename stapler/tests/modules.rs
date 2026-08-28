@@ -2434,3 +2434,35 @@ fn rejects_an_explicit_std_dependency_alias() {
     // user manifest must never be allowed to bind that name itself.
     assert!(binder::validate_dependency_alias("std").is_err());
 }
+
+#[test]
+fn binder_features_filter_items_before_resolution() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "src/main.sta",
+        "@feature(\"broken\")\ndef bad = () => missing_name\ndef good = () => 1\n",
+    );
+    fs::write(
+        fixture.root.join("binder.kdl"),
+        "package \"app\" {\n  features {\n    default \"broken\"\n    broken\n  }\n}\n",
+    )
+    .unwrap();
+    let graph = binder::load_package_graph(&fixture.root.join("binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .with_feature_selection(binder::FeatureSelection {
+            no_default_features: true,
+            ..Default::default()
+        })
+        .load_package_graph()
+        .unwrap();
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("disabled item should not resolve");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("remaining items should type-check");
+}

@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::HashMap, rc::Rc, sync::Arc};
+use std::{
+    cell::RefCell,
+    collections::{HashMap, HashSet},
+    rc::Rc,
+    sync::Arc,
+};
 
 use crate::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, LogicalOperator,
@@ -36,6 +41,7 @@ enum MacroKind {
     User(Expression),
     CString,
     Doc,
+    Feature,
     Quote,
     ParseQuote,
 }
@@ -653,6 +659,9 @@ struct MacroExpander {
     /// alone doesn't help here, since the crash happens well before a
     /// million steps accumulate.
     helper_eval_depth: usize,
+    module_packages: Vec<Option<binder::PackageId>>,
+    active_features: binder::ActiveFeatures,
+    declared_features: HashMap<binder::PackageId, HashSet<String>>,
 }
 
 fn provisional_use_kind(program: &Program, declaration: &UseDeclaration) -> UseKind {
@@ -714,6 +723,13 @@ impl MacroExpander {
                             && declaration.name == "doc"
                         {
                             MacroKind::Doc
+                        } else if source_module
+                            .path
+                            .ends_with(std::path::Path::new("std/core/feature.sta"))
+                            && declaration.modifier
+                            && declaration.name == "feature"
+                        {
+                            MacroKind::Feature
                         } else if let Some(value) = &declaration.value {
                             MacroKind::User(value.clone())
                         } else {
@@ -1239,6 +1255,28 @@ impl MacroExpander {
             invocations: HashMap::new(),
             quote_context: None,
             helper_eval_depth: 0,
+            module_packages: program
+                .modules()
+                .iter()
+                .map(|module| program.package_of(module.id))
+                .collect(),
+            active_features: program.active_features().clone(),
+            declared_features: program
+                .package_graph()
+                .map(|graph| {
+                    graph
+                        .packages
+                        .iter()
+                        .enumerate()
+                        .map(|(index, package)| {
+                            (
+                                binder::PackageId(index),
+                                package.features.keys().cloned().collect(),
+                            )
+                        })
+                        .collect()
+                })
+                .unwrap_or_default(),
         }
     }
 
@@ -1427,8 +1465,8 @@ impl MacroExpander {
             if definition.key.modifier {
                 if matches!(
                     definition.key.name.as_str(),
-                    "recursive_constructor" | "doc"
-                ) && !matches!(definition.kind, MacroKind::Doc)
+                    "recursive_constructor" | "doc" | "feature"
+                ) && !matches!(definition.kind, MacroKind::Doc | MacroKind::Feature)
                 {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -1515,7 +1553,7 @@ impl MacroExpander {
                         "compiler-provided macro `c_string` must have signature `Expr -> Expr`",
                     ));
                 }
-                MacroKind::Doc => {}
+                MacroKind::Doc | MacroKind::Feature => {}
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -1883,6 +1921,59 @@ impl MacroExpander {
                 return None;
             }
             return Some(ModifierChainResult::Item(current));
+        }
+        if invocation.namespace.is_none() && invocation.name == "feature" {
+            let (definition, _) = self.select_modifier(module, &invocation)?;
+            self.record_invocation(invocation.syntax.id, &definition);
+            let Some(argument) = invocation.argument.as_ref() else {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@feature` requires a parenthesized string literal",
+                ));
+                return None;
+            };
+            let Some(Expression::String(literal)) = argument.expression.as_ref() else {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@feature` requires a string literal argument",
+                ));
+                return None;
+            };
+            let feature = match crate::string_literal::decode(&literal.literal) {
+                Ok(feature) => feature,
+                Err(message) => {
+                    self.diagnostics
+                        .push(Diagnostic::new(invocation.syntax.span, message));
+                    return None;
+                }
+            };
+            let Some(package) = self.module_packages[module.0] else {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    "`@feature` requires a Binder manifest",
+                ));
+                return None;
+            };
+            if !self
+                .declared_features
+                .get(&package)
+                .is_some_and(|features| features.contains(&feature))
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    invocation.syntax.span,
+                    format!("package does not declare feature `{feature}`"),
+                ));
+                return None;
+            }
+            return if self
+                .active_features
+                .get(&package)
+                .is_some_and(|features| features.contains(&feature))
+            {
+                Some(ModifierChainResult::Item(current))
+            } else {
+                Some(ModifierChainResult::Items(Vec::new()))
+            };
         }
         let (definition, argument) = self.select_modifier(module, &invocation)?;
         self.record_invocation(invocation.syntax.id, &definition);
@@ -3015,7 +3106,9 @@ impl MacroExpander {
                     },
                 )))
             }
-            MacroKind::Doc => unreachable!("`@doc` is applied directly as a built-in modifier"),
+            MacroKind::Doc | MacroKind::Feature => {
+                unreachable!("built-in modifiers are applied directly")
+            }
             MacroKind::Quote => {
                 self.diagnostics.push(Diagnostic::new(
                     call_span,

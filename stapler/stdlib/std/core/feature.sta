@@ -1,0 +1,6 @@
+pub mod
+
+use std.syntax.(Expr, Item, Parenthesized)
+
+/// Includes an item only when the named Binder package feature is enabled.
+pub macro @feature: Parenthesized (Expr) -> Item -> Item

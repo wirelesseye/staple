@@ -48,6 +48,9 @@ struct Options {
     package_name: Option<String>,
     manifest_path: Option<PathBuf>,
     program_arguments: Vec<OsString>,
+    features: Vec<String>,
+    all_features: bool,
+    no_default_features: bool,
 }
 
 fn main() -> ExitCode {
@@ -97,6 +100,11 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
     if let Some(name) = &options.package_name {
         loader = loader.with_package_name(name);
     }
+    loader = loader.with_feature_selection(binder::FeatureSelection {
+        features: options.features.clone(),
+        all_features: options.all_features,
+        no_default_features: options.no_default_features,
+    });
     let program = if let Some(manifest) = &options.manifest_path {
         let graph = binder::load_package_graph(manifest)?;
         if options.mode != Mode::Check && graph.root_package().entry.is_none() {
@@ -221,6 +229,9 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         package_name: None,
         manifest_path: None,
         program_arguments: Vec::new(),
+        features: Vec::new(),
+        all_features: false,
+        no_default_features: false,
     };
     let mut positional_only = false;
     let mut emit_specified = false;
@@ -281,6 +292,21 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             )?));
             continue;
         }
+        if !positional_only && argument == "--features" {
+            add_features(
+                &mut options.features,
+                &utf8_value(next_value(&mut arguments, "--features")?, "--features")?,
+            )?;
+            continue;
+        }
+        if !positional_only && argument == "--all-features" {
+            options.all_features = true;
+            continue;
+        }
+        if !positional_only && argument == "--no-default-features" {
+            options.no_default_features = true;
+            continue;
+        }
         if !positional_only && argument == "-L" {
             options
                 .library_paths
@@ -310,6 +336,8 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.package_name = Some(value.to_owned());
         } else if !positional_only && let Some(value) = text.strip_prefix("--manifest-path=") {
             options.manifest_path = Some(PathBuf::from(value));
+        } else if !positional_only && let Some(value) = text.strip_prefix("--features=") {
+            add_features(&mut options.features, value)?;
         } else if !positional_only && text.starts_with("-L") && text.len() > 2 {
             options.library_paths.push(PathBuf::from(&text[2..]));
         } else if !positional_only && text.starts_with("-l") && text.len() > 2 {
@@ -336,6 +364,11 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
                 _ => usage(),
             });
         }
+    }
+    if options.manifest_path.is_none()
+        && (!options.features.is_empty() || options.all_features || options.no_default_features)
+    {
+        return Err("feature selection requires `--manifest-path`".to_owned());
     }
 
     if options.input.is_empty() && options.manifest_path.is_none() {
@@ -408,6 +441,14 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         return Err("`-L` and `-l` require `--emit=exe`".to_owned());
     }
     Ok(options)
+}
+
+fn add_features(destination: &mut Vec<String>, value: &str) -> Result<(), String> {
+    for feature in value.split(',') {
+        binder::validate_feature_name(feature)?;
+        destination.push(feature.to_owned());
+    }
+    Ok(())
 }
 
 fn next_value(
@@ -586,6 +627,9 @@ fn usage() -> String {
         "  --package-root <path>     optional package root module\n",
         "  --package-name <name>     package name used by tooling\n",
         "  --manifest-path <path>    load a Binder package graph instead of an input\n",
+        "  --features <names>        enable package features\n",
+        "  --all-features            enable every package feature\n",
+        "  --no-default-features     disable default package features\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         stop parsing options\n",
@@ -606,6 +650,9 @@ fn run_usage() -> String {
         "  --package-root <path>     optional package root module\n",
         "  --package-name <name>     package name used by tooling\n",
         "  --manifest-path <path>    load a Binder package graph instead of an input\n",
+        "  --features <names>        enable package features\n",
+        "  --all-features            enable every package feature\n",
+        "  --no-default-features     disable default package features\n",
         "  -L <path>                 add a library search path when linking\n",
         "  -l <name>                 link a library\n",
         "  --                         pass remaining arguments to the program\n",
@@ -625,6 +672,9 @@ fn check_usage() -> String {
         "  --package-root <path>     optional package root module\n",
         "  --package-name <name>     package name used by tooling\n",
         "  --manifest-path <path>    load a Binder package graph instead of an input\n",
+        "  --features <names>        enable package features\n",
+        "  --all-features            enable every package feature\n",
+        "  --no-default-features     disable default package features\n",
         "  --                         stop parsing options",
     )
     .to_owned()

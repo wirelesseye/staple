@@ -8,6 +8,7 @@ pub use std.core.default.*
 pub use std.core.drop.*
 pub use std.core.doc.*
 pub use std.core.equality.*
+pub use std.core.feature.*
 pub use std.core.flow.*
 pub use std.core.fmt.*
 pub use std.core.index.*
