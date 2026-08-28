@@ -4296,9 +4296,46 @@ fn typegroup_applies_call_modifiers_to_the_alias_and_entry_modifiers_to_variants
         .collect::<Vec<_>>();
     assert_eq!(variants.len(), 2);
     assert_eq!(variants[0].name, "Marked");
-    assert_eq!(variants[0].docs, ["inner", "outer"]);
+    // Docs keep source order: the `///outer` line precedes `@doc("inner")`.
+    assert_eq!(variants[0].docs, ["outer", "inner"]);
     assert_eq!(variants[1].name, "Plain");
     assert!(variants[1].docs.is_empty());
+}
+
+#[test]
+fn typegroup_alias_keeps_multi_line_doc_comment_order() {
+    // The `typegroup` call's `///` lines reach the generated alias as a run of
+    // `@doc` modifiers. Attaching them must preserve reading order rather than
+    // reversing it.
+    let resolved = resolve(concat!(
+        "/// The result of comparing two ordered values.\n",
+        "///\n",
+        "/// Refer to the variants as `Ordering.Less`, `Ordering.Equal`, and\n",
+        "/// `Ordering.Greater`.\n",
+        "pub typegroup Ordering {\n",
+        "    Less,\n",
+        "    Equal,\n",
+        "    Greater,\n",
+        "}\n",
+    ));
+    let alias = resolved
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::TypeDeclaration(declaration) if declaration.name == "Ordering" => Some(declaration),
+            _ => None,
+        })
+        .expect("typegroup should generate its alias");
+    assert_eq!(
+        alias.docs,
+        [
+            " The result of comparing two ordered values.",
+            "",
+            " Refer to the variants as `Ordering.Less`, `Ordering.Equal`, and",
+            " `Ordering.Greater`.",
+        ]
+    );
 }
 
 #[test]

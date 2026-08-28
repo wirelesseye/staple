@@ -1871,6 +1871,45 @@ impl MacroExpander {
         result
     }
 
+    /// Resolves the documentation text carried by a single `@doc`/`///`
+    /// modifier invocation, recording the invocation when it names the
+    /// explicit `@doc(...)` modifier.
+    fn resolve_doc_modifier_text(
+        &mut self,
+        module: ModuleId,
+        invocation: &crate::ModifierInvocation,
+    ) -> Option<String> {
+        if invocation.argument.is_some() {
+            let (definition, _) = self.select_modifier(module, invocation)?;
+            self.record_invocation(invocation.syntax.id, &definition);
+        }
+        if let Some(doc) = invocation.doc.clone() {
+            return Some(doc);
+        }
+        let Some(argument) = invocation.argument.as_ref() else {
+            self.diagnostics.push(Diagnostic::new(
+                invocation.syntax.span.clone(),
+                "`@doc` requires a parenthesized string literal",
+            ));
+            return None;
+        };
+        let Some(Expression::String(literal)) = argument.expression.as_ref() else {
+            self.diagnostics.push(Diagnostic::new(
+                invocation.syntax.span.clone(),
+                "`@doc` requires a string literal argument",
+            ));
+            return None;
+        };
+        match crate::string_literal::decode(&literal.literal) {
+            Ok(doc) => Some(doc),
+            Err(message) => {
+                self.diagnostics
+                    .push(Diagnostic::new(invocation.syntax.span.clone(), message));
+                None
+            }
+        }
+    }
+
     fn apply_modifier_chain(
         &mut self,
         module: ModuleId,
@@ -1948,42 +1987,38 @@ impl MacroExpander {
             return Some(ModifierChainResult::Item(current));
         }
         if invocation.namespace.is_none() && invocation.name == "doc" {
-            if invocation.argument.is_some() {
-                let (definition, _) = self.select_modifier(module, &invocation)?;
-                self.record_invocation(invocation.syntax.id, &definition);
-            }
-            let doc = if let Some(doc) = invocation.doc.clone() {
-                doc
-            } else {
-                let Some(argument) = invocation.argument.as_ref() else {
-                    self.diagnostics.push(Diagnostic::new(
-                        invocation.syntax.span,
-                        "`@doc` requires a parenthesized string literal",
-                    ));
-                    return None;
-                };
-                let Some(Expression::String(literal)) = argument.expression.as_ref() else {
-                    self.diagnostics.push(Diagnostic::new(
-                        invocation.syntax.span,
-                        "`@doc` requires a string literal argument",
-                    ));
-                    return None;
-                };
-                match crate::string_literal::decode(&literal.literal) {
-                    Ok(doc) => doc,
-                    Err(message) => {
-                        self.diagnostics
-                            .push(Diagnostic::new(invocation.syntax.span, message));
-                        return None;
-                    }
+            // A run of leading `@doc`/`///` modifiers describes one declaration
+            // and must be attached in source order. `apply_modifier_chain`
+            // processes the outermost (topmost) modifier first and `attach_doc`
+            // inserts at the front, so handling the run one modifier per pass
+            // would reverse it. Peel the whole run out of the still-unprocessed
+            // modifier list and attach it in a single step instead.
+            let mut doc_invocations = vec![invocation];
+            if let Item::Modified(rest) = &mut current {
+                while rest
+                    .modifiers
+                    .first()
+                    .is_some_and(|next| next.namespace.is_none() && next.name == "doc")
+                {
+                    doc_invocations.push(rest.modifiers.remove(0));
                 }
+            }
+            current = match current {
+                Item::Modified(rest) if rest.modifiers.is_empty() => *rest.item,
+                other => other,
             };
-            if !attach_doc(&mut current, doc) {
-                self.diagnostics.push(Diagnostic::new(
-                    invocation.syntax.span,
-                    "`@doc` may only modify a named declaration",
-                ));
-                return None;
+            let mut docs = Vec::with_capacity(doc_invocations.len());
+            for doc_invocation in &doc_invocations {
+                docs.push(self.resolve_doc_modifier_text(module, doc_invocation)?);
+            }
+            for doc in docs.into_iter().rev() {
+                if !attach_doc(&mut current, doc) {
+                    self.diagnostics.push(Diagnostic::new(
+                        doc_invocations[0].syntax.span.clone(),
+                        "`@doc` may only modify a named declaration",
+                    ));
+                    return None;
+                }
             }
             return Some(ModifierChainResult::Item(current));
         }
