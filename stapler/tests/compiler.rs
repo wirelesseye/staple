@@ -112,10 +112,7 @@ fn with_syntax_imports(source: &str) -> String {
         ("Parenthesized", source.contains("Parenthesized")),
         ("Bracketed", source.contains("Bracketed")),
         ("Braced", source.contains("Braced")),
-        (
-            "MacroCallMetadata",
-            source.contains("MacroCallMetadata"),
-        ),
+        ("MacroCallMetadata", source.contains("MacroCallMetadata")),
         (
             "Visibility",
             source.contains(": Visibility") || source.contains("-> Visibility"),
@@ -4664,12 +4661,22 @@ fn modifiers_before_metadata_calls_are_owned_by_the_macro() {
         "@replace generate\n",
         "let result: I32 = generated\n",
     ));
-    assert!(module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, Item::Binding(binding) if binding.name == "generated")
-    }));
-    assert!(!module.resolved().syntax().items.iter().any(|item| {
-        matches!(item, Item::Binding(binding) if binding.name == "replaced")
-    }));
+    assert!(
+        module
+            .resolved()
+            .syntax()
+            .items
+            .iter()
+            .any(|item| { matches!(item, Item::Binding(binding) if binding.name == "generated") })
+    );
+    assert!(
+        !module
+            .resolved()
+            .syntax()
+            .items
+            .iter()
+            .any(|item| { matches!(item, Item::Binding(binding) if binding.name == "replaced") })
+    );
 }
 
 #[test]
@@ -4678,12 +4685,14 @@ fn metadata_aware_calls_can_return_expression_syntax() {
         "macro expression: MacroCallMetadata -> Expr = metadata => parse_quote { 1 }\n",
         "@ignored expression\n",
     ));
-    assert!(module
-        .resolved()
-        .syntax()
-        .items
-        .iter()
-        .any(|item| matches!(item, Item::Expression(_))));
+    assert!(
+        module
+            .resolved()
+            .syntax()
+            .items
+            .iter()
+            .any(|item| matches!(item, Item::Expression(_)))
+    );
 }
 
 #[test]

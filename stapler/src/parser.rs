@@ -497,7 +497,8 @@ impl Grammar {
                 VisibilityKind::Private,
             )
         };
-        if representation_visibility != Visibility::Private && self.peek() != Some(TokenKind::Type) {
+        if representation_visibility != Visibility::Private && self.peek() != Some(TokenKind::Type)
+        {
             return Err(self.error("representation visibility may only modify a type declaration"));
         }
         let item = match self.peek() {
@@ -1539,7 +1540,9 @@ impl Grammar {
                 TypeDeclarationKind::Distinct | TypeDeclarationKind::Singleton
             )
         {
-            return Err(self.error("representation visibility requires a represented distinct type"));
+            return Err(
+                self.error("representation visibility requires a represented distinct type")
+            );
         }
         Ok(TypeDeclaration {
             syntax: self.syntax(start),

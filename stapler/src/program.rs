@@ -345,8 +345,7 @@ impl Program {
                 // rather than registering a second one of the same name.
                 if top_level
                     && declaration.companion
-                    && let Some(existing) =
-                        self.children[parent].get(&declaration.name).copied()
+                    && let Some(existing) = self.children[parent].get(&declaration.name).copied()
                     && self.modules[existing.0].companion
                 {
                     self.modules[existing.0]
@@ -355,9 +354,8 @@ impl Program {
                         .extend(declaration.module.items);
                     self.child_modules.insert(declaration.syntax.id, existing);
                     if existing.0 < parent {
-                        rescan_from = Some(
-                            rescan_from.map_or(existing.0, |from| from.min(existing.0)),
-                        );
+                        rescan_from =
+                            Some(rescan_from.map_or(existing.0, |from| from.min(existing.0)));
                     }
                     continue;
                 }
@@ -1751,9 +1749,7 @@ impl ProgramLoader {
                     format!("module has no submodule named `{part}`"),
                 )
             })?;
-            if !allow_private
-                && !self.module_visible_from(child, importing_module)
-            {
+            if !allow_private && !self.module_visible_from(child, importing_module) {
                 return Err(load_diagnostic_at(
                     &declaration.syntax.span,
                     format!("submodule `{part}` is private"),

@@ -210,7 +210,11 @@ fn render_expr(expression: &Expression) -> String {
             )
         }
         Expression::Index(index) => {
-            format!("{}[{}]", render_expr(&index.value), render_expr(&index.index))
+            format!(
+                "{}[{}]",
+                render_expr(&index.value),
+                render_expr(&index.index)
+            )
         }
         Expression::Logical(logical) => format!(
             "{} {} {}",
@@ -247,7 +251,9 @@ fn accessor_suffix(accessor: &Accessor) -> String {
 /// Recognizes the shape the parser desugars a binary operator into
 /// (`Trait.method left` applied to `right`, with the synthetic callee's tokens
 /// being the operator itself) and returns the operands and operator text.
-fn desugared_operator(call: &stapler::CallExpression) -> Option<(&Expression, String, &Expression)> {
+fn desugared_operator(
+    call: &stapler::CallExpression,
+) -> Option<(&Expression, String, &Expression)> {
     let Expression::Call(inner) = call.callee.as_ref() else {
         return None;
     };
@@ -392,7 +398,10 @@ fn token_text(stream: &[SyntaxToken], start: usize, end: usize) -> String {
     if start >= end {
         return String::new();
     }
-    stream[start..end].iter().map(|token| token.text.as_str()).collect()
+    stream[start..end]
+        .iter()
+        .map(|token| token.text.as_str())
+        .collect()
 }
 
 // --- "contains a macro-generated node" queries ----------------------------
@@ -438,18 +447,20 @@ fn expr_has_generated(expression: &Expression) -> bool {
         Expression::Satisfies(satisfies) => expr_has_generated(&satisfies.value),
         Expression::Match(match_) => {
             expr_has_generated(&match_.subject)
-                || match_.arms.iter().any(|arm| {
-                    expr_has_generated(&arm.body) || pattern_is_generated(&arm.pattern)
-                })
+                || match_
+                    .arms
+                    .iter()
+                    .any(|arm| expr_has_generated(&arm.body) || pattern_is_generated(&arm.pattern))
         }
         Expression::Loop(loop_) => block_has_generated(&loop_.body),
         Expression::With(with) => {
             expr_has_generated(&with.value) || block_has_generated(&with.body)
         }
         Expression::Block(block) => block_has_generated(block),
-        Expression::Product(product) => {
-            product.elements.iter().any(|element| expr_has_generated(&element.value))
-        }
+        Expression::Product(product) => product
+            .elements
+            .iter()
+            .any(|element| expr_has_generated(&element.value)),
         Expression::Call(call) => {
             expr_has_generated(&call.callee) || expr_has_generated(&call.argument)
         }

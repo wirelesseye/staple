@@ -714,14 +714,18 @@ impl Collector<'_> {
             let Some(&module) = ancestors.get(components.len() - 1 - index) else {
                 continue;
             };
-            let file_backed = program.module(module).parent.is_none_or(|parent| {
-                program.module(module).path != program.module(parent).path
-            });
+            let file_backed = program
+                .module(module)
+                .parent
+                .is_none_or(|parent| program.module(module).path != program.module(parent).path);
             match self.resolved.companion_type_for_module(module) {
                 Some(ty) => self.add(&declaration.syntax, name, &[DefinitionId::Type(ty)], false),
-                None if !file_backed => {
-                    self.add(&declaration.syntax, name, &[DefinitionId::Module(module)], false)
-                }
+                None if !file_backed => self.add(
+                    &declaration.syntax,
+                    name,
+                    &[DefinitionId::Module(module)],
+                    false,
+                ),
                 None => {}
             }
         }
@@ -1222,9 +1226,7 @@ mod tests {
         let entry = entries
             .iter()
             .find(|entry| entry.range.start == segment && &source[entry.range.clone()] == "Box")
-            .unwrap_or_else(|| {
-                panic!("no definition entry for `Box` in `use Box.*`: {entries:?}")
-            });
+            .unwrap_or_else(|| panic!("no definition entry for `Box` in `use Box.*`: {entries:?}"));
 
         assert!(
             entry
@@ -1402,7 +1404,11 @@ mod tests {
             .iter()
             .find(|entry| &source[entry.range.clone()] == "doc")
             .expect("expected a definition entry for `@doc`");
-        assert!(doc.targets.iter().any(|target| target.path.ends_with("std/core/doc.sta")));
+        assert!(
+            doc.targets
+                .iter()
+                .any(|target| target.path.ends_with("std/core/doc.sta"))
+        );
     }
 
     #[test]

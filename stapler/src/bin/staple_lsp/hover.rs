@@ -593,12 +593,7 @@ impl Collector<'_> {
                 }
             } else if !file_backed {
                 let docs = self.submodule_docs(module);
-                self.named_with_docs(
-                    &declaration.syntax,
-                    &name,
-                    format!("mod {name}"),
-                    docs,
-                );
+                self.named_with_docs(&declaration.syntax, &name, format!("mod {name}"), docs);
             }
         }
     }
@@ -635,10 +630,9 @@ impl Collector<'_> {
                 .enumerate()
                 .filter_map(|(index, name)| {
                     let module = *ancestors.get(components.len() - 1 - index)?;
-                    let file_backed = program
-                        .module(module)
-                        .parent
-                        .is_none_or(|parent| program.module(module).path != program.module(parent).path);
+                    let file_backed = program.module(module).parent.is_none_or(|parent| {
+                        program.module(module).path != program.module(parent).path
+                    });
                     Some((name.clone(), module, file_backed))
                 })
                 .collect(),
@@ -1824,9 +1818,7 @@ mod tests {
         let entry = entries
             .iter()
             .find(|entry| entry.range.start == segment && &source[entry.range.clone()] == "Box")
-            .unwrap_or_else(|| {
-                panic!("no hover entry for `Box` in `use Box.*`: {entries:?}")
-            });
+            .unwrap_or_else(|| panic!("no hover entry for `Box` in `use Box.*`: {entries:?}"));
         assert_eq!(entry.signature, "type Box = I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
     }
@@ -2129,10 +2121,7 @@ mod tests {
         assert!(signatures.contains(&("choose", "macro choose: Expr -> Expr")));
         assert!(signatures.contains(&("choose", "macro choose: CallExpr -> Expr")));
         assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
-        assert!(signatures.contains(&(
-            "doc",
-            "macro @doc: Parenthesized (Expr) -> Item -> Item"
-        )));
+        assert!(signatures.contains(&("doc", "macro @doc: Parenthesized (Expr) -> Item -> Item")));
         assert!(signatures.contains(&("inferred", "macro inferred: SyntaxNode -> Expr")));
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
         assert!(

@@ -2163,10 +2163,7 @@ fn imports_resource_types_and_resource_bearing_functions() {
 #[test]
 fn resolves_recursive_binder_dependencies_with_per_package_aliases() {
     let fixture = Fixture::new();
-    fixture.write(
-        "app/src/main.sta",
-        "let result: I32 = middle.answer\n",
-    );
+    fixture.write("app/src/main.sta", "let result: I32 = middle.answer\n");
     fixture.write("middle/src/root.sta", "pub use package.helper.answer\n");
     fixture.write(
         "middle/src/helper.sta",
@@ -2216,7 +2213,10 @@ fn resolves_package_visible_items_within_a_binder_package() {
         "src/bridge.sta",
         "pub(package) mod\npub(package) use package.internal.answer\n",
     );
-    fixture.write("src/internal.sta", "pub(package) mod\npub(package) let answer: I32 = 42\n");
+    fixture.write(
+        "src/internal.sta",
+        "pub(package) mod\npub(package) let answer: I32 = 42\n",
+    );
     fs::write(
         fixture.root.join("binder.kdl"),
         "package \"app\" { root \"src/main.sta\" }\n",
@@ -2243,7 +2243,9 @@ fn resolves_package_visible_items_within_a_binder_package() {
 fn rejects_package_visibility_without_a_binder_manifest() {
     let fixture = Fixture::new();
     fixture.write("main.sta", "pub(package) let secret = 42\nsecret\n");
-    let error = fixture.compile().expect_err("standalone package visibility must fail");
+    let error = fixture
+        .compile()
+        .expect_err("standalone package visibility must fail");
     assert!(error.contains("package visibility requires a Binder manifest"));
 }
 
@@ -2251,7 +2253,10 @@ fn rejects_package_visibility_without_a_binder_manifest() {
 fn rejects_package_visible_dependency_modules() {
     let fixture = Fixture::new();
     fixture.write("app/src/main.sta", "use lib.internal.secret\nsecret\n");
-    fixture.write("lib/src/internal.sta", "pub(package) mod\npub(package) let secret = 42\n");
+    fixture.write(
+        "lib/src/internal.sta",
+        "pub(package) mod\npub(package) let secret = 42\n",
+    );
     fs::write(
         fixture.root.join("app/binder.kdl"),
         "package \"app\" { dependencies { lib path=\"../lib\" } }\n",
@@ -2303,7 +2308,10 @@ fn rejects_promoting_a_package_visible_reexport() {
 #[test]
 fn package_representation_is_usable_locally_but_not_by_a_dependency() {
     let fixture = Fixture::new();
-    fixture.write("app/src/main.sta", "let shared: lib.Shared = lib.Shared 42\n");
+    fixture.write(
+        "app/src/main.sta",
+        "let shared: lib.Shared = lib.Shared 42\n",
+    );
     fixture.write(
         "lib/src/root.sta",
         "pub(repr(package)) type Shared = I32\nlet local: Shared = Shared 1\n",

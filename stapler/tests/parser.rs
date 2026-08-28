@@ -713,9 +713,15 @@ fn parses_package_visibility_losslessly() {
     );
     let root = parse(source).expect("package visibility should parse");
     assert_eq!(root.text(), source);
-    assert!(matches!(&root.items[0], Item::Submodule(module) if module.visibility == Visibility::Package));
-    assert!(matches!(&root.items[1], Item::UseDeclaration(use_) if use_.visibility == Visibility::Package));
-    assert!(matches!(&root.items[2], Item::TypeDeclaration(declaration) if declaration.visibility == Visibility::Package));
+    assert!(
+        matches!(&root.items[0], Item::Submodule(module) if module.visibility == Visibility::Package)
+    );
+    assert!(
+        matches!(&root.items[1], Item::UseDeclaration(use_) if use_.visibility == Visibility::Package)
+    );
+    assert!(
+        matches!(&root.items[2], Item::TypeDeclaration(declaration) if declaration.visibility == Visibility::Package)
+    );
     assert!(matches!(&root.items[3], Item::TypeDeclaration(declaration)
         if declaration.visibility == Visibility::Public
             && declaration.representation_visibility == Visibility::Package));
@@ -1155,7 +1161,10 @@ fn parses_doc_comments_before_metadata_calls() {
     };
     assert_eq!(invocation.modifiers.len(), 1);
     assert_eq!(invocation.modifiers[0].name, "doc");
-    assert_eq!(invocation.modifiers[0].doc.as_deref(), Some(" generated documentation"));
+    assert_eq!(
+        invocation.modifiers[0].doc.as_deref(),
+        Some(" generated documentation")
+    );
 }
 
 #[test]

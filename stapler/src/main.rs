@@ -683,8 +683,8 @@ mod tests {
 
     #[test]
     fn parses_expand_subcommand() {
-        let options = parse_options(["expand".into(), "input.sta".into()])
-            .expect("expand should parse");
+        let options =
+            parse_options(["expand".into(), "input.sta".into()]).expect("expand should parse");
         assert_eq!(options.mode, Mode::Expand);
         assert_eq!(options.input, OsString::from("input.sta"));
     }

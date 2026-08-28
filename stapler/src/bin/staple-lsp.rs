@@ -564,7 +564,8 @@ impl Server {
                     }
                     Ok(resolved) => {
                         definition_path = normalized_source_path(&path);
-                        rebased_module = rebased_surface(&resolved, &definition_path, module, &text);
+                        rebased_module =
+                            rebased_surface(&resolved, &definition_path, module, &text);
                         let surface = rebased_module.as_ref().unwrap_or(module);
                         definition_entries = Some(definition::entries_at_path(
                             &definition_path,

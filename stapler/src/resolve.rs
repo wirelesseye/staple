@@ -943,21 +943,27 @@ fn reexport_declaration(
             let Some(item_module) = candidates.item_module else {
                 return false;
             };
-            let item = declaration.path.last().expect("dotted import has a final component");
+            let item = declaration
+                .path
+                .last()
+                .expect("dotted import has a final component");
             let imported = &interfaces[item_module.0];
             if let Some(namespace) = candidates.namespace {
                 let different_namespace = imported
                     .namespaces
                     .get(item)
                     .is_some_and(|module| *module != namespace);
-                let compatible_item = imported.types.contains_key(item)
-                    || imported.traits.contains_key(item);
+                let compatible_item =
+                    imported.types.contains_key(item) || imported.traits.contains_key(item);
                 let conflicts = imported.values.contains_key(item)
                     || imported.macros.contains_key(item)
                     || different_namespace;
                 if compatible_item && !conflicts {
                     return export_interface_item(exported, imported, item, item)
-                        | exported.namespaces.insert(item.clone(), namespace).is_none();
+                        | exported
+                            .namespaces
+                            .insert(item.clone(), namespace)
+                            .is_none();
                 }
                 false
             } else {
@@ -969,9 +975,7 @@ fn reexport_declaration(
         UseKind::Selected(names) => names.iter().fold(false, |changed, name| {
             export_interface_item(exported, imported, name, name) | changed
         }),
-        UseKind::Renamed { item, alias } => {
-            export_interface_item(exported, imported, item, alias)
-        }
+        UseKind::Renamed { item, alias } => export_interface_item(exported, imported, item, alias),
     }
 }
 
@@ -1711,7 +1715,9 @@ impl NameResolver {
             let mut changed = false;
             for source_module in program.modules() {
                 for item in &source_module.syntax.items {
-                    let Item::UseDeclaration(declaration) = item else { continue };
+                    let Item::UseDeclaration(declaration) = item else {
+                        continue;
+                    };
                     if declaration.visibility != Visibility::Package {
                         continue;
                     }
@@ -1731,7 +1737,9 @@ impl NameResolver {
                     );
                 }
             }
-            if !changed { break; }
+            if !changed {
+                break;
+            }
         }
     }
 
@@ -2104,13 +2112,13 @@ impl NameResolver {
             } else {
                 self.constructors.insert(symbol, id);
             }
-            let constructor_visibility = if declaration.kind == crate::TypeDeclarationKind::Singleton {
-                declaration.visibility
-            } else {
-                declaration.representation_visibility
-            };
-            if constructor_visibility != Visibility::Private
-            {
+            let constructor_visibility =
+                if declaration.kind == crate::TypeDeclarationKind::Singleton {
+                    declaration.visibility
+                } else {
+                    declaration.representation_visibility
+                };
+            if constructor_visibility != Visibility::Private {
                 self.insert_visible_value(
                     module,
                     &declaration.name,
@@ -2425,11 +2433,8 @@ impl NameResolver {
         else {
             return;
         };
-        let interface = self.visible_interface(
-            self.current_module,
-            imported,
-            declaration.visibility,
-        );
+        let interface =
+            self.visible_interface(self.current_module, imported, declaration.visibility);
         if self.use_kind(declaration) == UseKind::Glob {
             self.record_private_glob_items(imported, declaration, &interface);
         }
@@ -3657,7 +3662,8 @@ impl NameResolver {
                     && let Some(module) = definition_module
                         .map(ModuleId)
                         .or_else(|| self.lookup_namespace(&namespace))
-                    && let Some(symbol) = self.qualified_interface(module).values.get(&item).copied()
+                    && let Some(symbol) =
+                        self.qualified_interface(module).values.get(&item).copied()
                 {
                     self.symbols.insert(value.syntax.id, symbol);
                 } else {
@@ -4129,7 +4135,9 @@ impl NameResolver {
                         self.namespace_references.insert(*syntax_id, current);
                         segment_module = self.module_parents.get(&current).copied();
                     }
-                    if let Some(symbol) = self.qualified_interface(module).values.get(&item).copied() {
+                    if let Some(symbol) =
+                        self.qualified_interface(module).values.get(&item).copied()
+                    {
                         self.symbols.insert(access.syntax.id, symbol);
                     } else if self.qualified_interface(module).macros.contains_key(&item) {
                         self.diagnostics.push(Diagnostic::new(
@@ -4717,8 +4725,7 @@ impl NameResolver {
                             pattern.syntax.span.clone(),
                             format!("`{}` is not a represented nominal type", pattern.name),
                         ));
-                    } else if !self.representation_visible(id, self.current_module)
-                    {
+                    } else if !self.representation_visible(id, self.current_module) {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
                             format!("the representation of `{}` is private", pattern.name),

@@ -707,7 +707,9 @@ impl MacroExpander {
                             && declaration.name == "c_string"
                         {
                             MacroKind::CString
-                        } else if source_module.path.ends_with(std::path::Path::new("std/core/doc.sta"))
+                        } else if source_module
+                            .path
+                            .ends_with(std::path::Path::new("std/core/doc.sta"))
                             && declaration.modifier
                             && declaration.name == "doc"
                         {
@@ -924,7 +926,11 @@ impl MacroExpander {
             .filter(|definition| definition.declaration.visibility == Visibility::Package)
         {
             package_macros
-                .entry((definition.key.module, definition.key.name.clone(), definition.key.modifier))
+                .entry((
+                    definition.key.module,
+                    definition.key.name.clone(),
+                    definition.key.modifier,
+                ))
                 .or_default()
                 .push(definition.key.clone());
         }
@@ -954,37 +960,72 @@ impl MacroExpander {
             let mut changed = false;
             for source_module in program.modules() {
                 for item in &source_module.syntax.items {
-                    let Item::UseDeclaration(use_) = item else { continue };
-                    if use_.visibility != Visibility::Package { continue; }
-                    let Some(imported) = program.imported_module(use_.syntax.id) else { continue };
-                    if !macro_same_package(program, source_module.id, imported) { continue; }
+                    let Item::UseDeclaration(use_) = item else {
+                        continue;
+                    };
+                    if use_.visibility != Visibility::Package {
+                        continue;
+                    }
+                    let Some(imported) = program.imported_module(use_.syntax.id) else {
+                        continue;
+                    };
+                    if !macro_same_package(program, source_module.id, imported) {
+                        continue;
+                    }
                     let names = match provisional_use_kind(program, use_) {
                         UseKind::Dotted | UseKind::Namespace => Vec::new(),
-                        UseKind::Glob => previous_macros.keys()
+                        UseKind::Glob => previous_macros
+                            .keys()
                             .filter(|(module, _, _)| *module == imported)
                             .map(|(_, name, _)| (name.clone(), name.clone()))
-                            .chain(previous_helpers.keys().filter(|(module, _)| *module == imported).map(|(_, name)| (name.clone(), name.clone())))
-                            .chain(previous_namespaces.keys().filter(|(module, _)| *module == imported).map(|(_, name)| (name.clone(), name.clone())))
+                            .chain(
+                                previous_helpers
+                                    .keys()
+                                    .filter(|(module, _)| *module == imported)
+                                    .map(|(_, name)| (name.clone(), name.clone())),
+                            )
+                            .chain(
+                                previous_namespaces
+                                    .keys()
+                                    .filter(|(module, _)| *module == imported)
+                                    .map(|(_, name)| (name.clone(), name.clone())),
+                            )
                             .collect(),
-                        UseKind::Selected(names) => names.iter().map(|name| (name.clone(), name.clone())).collect(),
+                        UseKind::Selected(names) => names
+                            .iter()
+                            .map(|name| (name.clone(), name.clone()))
+                            .collect(),
                         UseKind::Renamed { item, alias } => vec![(item.clone(), alias.clone())],
                     };
                     for (item, alias) in names {
                         for modifier in [false, true] {
-                            if let Some(keys) = previous_macros.get(&(imported, item.clone(), modifier)) {
-                                changed |= package_macros.insert((source_module.id, alias.clone(), modifier), keys.clone()).is_none();
+                            if let Some(keys) =
+                                previous_macros.get(&(imported, item.clone(), modifier))
+                            {
+                                changed |= package_macros
+                                    .insert(
+                                        (source_module.id, alias.clone(), modifier),
+                                        keys.clone(),
+                                    )
+                                    .is_none();
                             }
                         }
                         if let Some(helper) = previous_helpers.get(&(imported, item.clone())) {
-                            changed |= package_helpers.insert((source_module.id, alias.clone()), helper.clone()).is_none();
+                            changed |= package_helpers
+                                .insert((source_module.id, alias.clone()), helper.clone())
+                                .is_none();
                         }
                         if let Some(namespace) = previous_namespaces.get(&(imported, item)) {
-                            changed |= package_namespaces.insert((source_module.id, alias), *namespace).is_none();
+                            changed |= package_namespaces
+                                .insert((source_module.id, alias), *namespace)
+                                .is_none();
                         }
                     }
                 }
             }
-            if !changed { break; }
+            if !changed {
+                break;
+            }
         }
 
         let mut all_macros = HashMap::<(ModuleId, String, bool), Vec<MacroKey>>::new();
@@ -1384,8 +1425,10 @@ impl MacroExpander {
                 }
             }
             if definition.key.modifier {
-                if matches!(definition.key.name.as_str(), "recursive_constructor" | "doc")
-                    && !matches!(definition.kind, MacroKind::Doc)
+                if matches!(
+                    definition.key.name.as_str(),
+                    "recursive_constructor" | "doc"
+                ) && !matches!(definition.kind, MacroKind::Doc)
                 {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -1433,13 +1476,10 @@ impl MacroExpander {
                 ));
             }
             if definition.key.modifier
-                && definition
-                    .parameters
-                    .iter()
-                    .any(|parameter| {
-                        *parameter == MetaType::Visibility
-                            || meta_type_contains_macro_call_metadata(parameter)
-                    })
+                && definition.parameters.iter().any(|parameter| {
+                    *parameter == MetaType::Visibility
+                        || meta_type_contains_macro_call_metadata(parameter)
+                })
             {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
@@ -3022,8 +3062,9 @@ impl MacroExpander {
                                                         Value::Syntax(SyntaxValue::Modifier(
                                                             OpaqueModifier {
                                                                 invocation: invocation.clone(),
-                                                                enclosing: (index == 0)
-                                                                    .then(|| metadata.syntax.clone()),
+                                                                enclosing: (index == 0).then(
+                                                                    || metadata.syntax.clone(),
+                                                                ),
                                                             },
                                                         ))
                                                     })
@@ -3118,9 +3159,7 @@ impl MacroExpander {
         if let Expression::VisibilityArgument(visibility) = argument {
             return matches!(
                 expected,
-                MetaType::Syntax
-                    | MetaType::SyntaxNode
-                    | MetaType::Visibility
+                MetaType::Syntax | MetaType::SyntaxNode | MetaType::Visibility
             )
             .then(|| SyntaxValue::Visibility(visibility.clone()));
         }
@@ -5547,16 +5586,14 @@ fn sequence_meta_type(ty: &Type) -> Option<MetaType> {
 fn meta_type_contains_macro_call_metadata(meta: &MetaType) -> bool {
     match meta {
         MetaType::MacroCallMetadata => true,
-        MetaType::Product(elements) => elements
-            .iter()
-            .any(meta_type_contains_macro_call_metadata),
+        MetaType::Product(elements) => elements.iter().any(meta_type_contains_macro_call_metadata),
         MetaType::Optional(element) | MetaType::Sequence(element) => {
             meta_type_contains_macro_call_metadata(element)
         }
         MetaType::Delimited(_, contents) => match contents {
-            DelimitedMetaContents::Fixed(elements) => elements
-                .iter()
-                .any(meta_type_contains_macro_call_metadata),
+            DelimitedMetaContents::Fixed(elements) => {
+                elements.iter().any(meta_type_contains_macro_call_metadata)
+            }
             DelimitedMetaContents::Sequence(element) => {
                 meta_type_contains_macro_call_metadata(element)
             }
@@ -5690,8 +5727,7 @@ fn match_separated_contents(
     separator: &MetaType,
     next_syntax_id: &mut usize,
 ) -> Option<(Vec<Value>, Value, bool)> {
-    let modifier_prefixed =
-        matches!(element, MetaType::Product(elements) if matches!(elements.first(), Some(MetaType::Sequence(element)) if **element == MetaType::Modifier));
+    let modifier_prefixed = matches!(element, MetaType::Product(elements) if matches!(elements.first(), Some(MetaType::Sequence(element)) if **element == MetaType::Modifier));
     if !modifier_prefixed {
         cursor = skip_trivia(parent.tokens(), cursor, end);
     }
@@ -6772,9 +6808,7 @@ pub(crate) fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
             .map(pattern_meta_type)
             .collect::<Option<Vec<_>>>()
             .map(MetaType::Product),
-        Pattern::Nominal(_)
-        | Pattern::StringLiteral(_)
-        | Pattern::Splice(_) => None,
+        Pattern::Nominal(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => None,
     }
 }
 
@@ -8479,9 +8513,9 @@ fn apply_visibility_to_item(
     let name_visibility = match kind {
         VisibilityKind::Private => Visibility::Private,
         VisibilityKind::Package => Visibility::Package,
-        VisibilityKind::Public
-        | VisibilityKind::PublicReprPackage
-        | VisibilityKind::PublicRepr => Visibility::Public,
+        VisibilityKind::Public | VisibilityKind::PublicReprPackage | VisibilityKind::PublicRepr => {
+            Visibility::Public
+        }
     };
     let representation_visibility = match kind {
         VisibilityKind::PublicReprPackage => Visibility::Package,
@@ -8493,9 +8527,7 @@ fn apply_visibility_to_item(
         VisibilityKind::PublicRepr | VisibilityKind::PublicReprPackage
     );
     match item {
-        Item::ExternBlock(block) if !representation_modifier => {
-            block.visibility = name_visibility
-        }
+        Item::ExternBlock(block) if !representation_modifier => block.visibility = name_visibility,
         Item::Submodule(submodule) if !representation_modifier => {
             submodule.visibility = name_visibility
         }
