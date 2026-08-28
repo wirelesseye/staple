@@ -34,12 +34,37 @@ pub fn entries_at_path(
     resolved: &ResolvedModule,
     typed: Option<&TypedModule>,
 ) -> Vec<DefinitionEntry> {
+    // The editor hands us its own freshly parsed `module`, still carrying the
+    // unexpanded macro call sites we want to offer go-to-definition for. Its
+    // `SyntaxId`s are numbered from zero, which only lines up with the loaded
+    // program when this file was parsed first (the standalone case). Under a
+    // package graph the package-root module is parsed ahead of it, so every id
+    // in the editor copy is shifted by a constant relative to the same node in
+    // the program, and each `definitions_for`/`namespace_for` lookup during the
+    // walk would otherwise land on an unrelated node and invent a bogus target.
+    // Recover that constant from the program's own module for this path and
+    // rebase the editor walk's lookups by it.
+    let editor_id_offset = resolved
+        .program()
+        .modules()
+        .iter()
+        .find(|source| {
+            !source.companion
+                && source.path == path
+                && source
+                    .parent
+                    .is_none_or(|parent| resolved.program().module(parent).path != source.path)
+        })
+        .map_or(0, |source| {
+            source.syntax.syntax.id.0 as i64 - module.syntax.id.0 as i64
+        });
     let mut targets = declaration_targets(resolved);
     let entry_path = &resolved.program().module(resolved.program().entry()).path;
     DeclarationCollector {
         resolved,
         path: entry_path,
         targets: &mut targets,
+        id_offset: editor_id_offset,
     }
     .module(module);
     let mut collector = Collector {
@@ -48,8 +73,10 @@ pub fn entries_at_path(
         targets,
         entries: Vec::new(),
         path,
+        id_offset: editor_id_offset,
     };
     collector.module(module);
+    collector.id_offset = 0;
     collector.module(resolved.syntax());
     collector.entries.sort_by(|left, right| {
         left.range
@@ -83,6 +110,7 @@ fn declaration_targets(resolved: &ResolvedModule) -> HashMap<DefinitionId, Defin
             resolved,
             path: &source_module.path,
             targets: &mut targets,
+            id_offset: 0,
         };
         collector.module(&source_module.syntax);
     }
@@ -103,9 +131,18 @@ struct DeclarationCollector<'a> {
     resolved: &'a ResolvedModule,
     path: &'a PathBuf,
     targets: &'a mut HashMap<DefinitionId, DefinitionTarget>,
+    /// Added to every `SyntaxId` taken from the walked tree before it is used
+    /// to query the resolver, so an editor-owned copy whose ids start from
+    /// zero still lines up with the loaded program. Zero for program-owned
+    /// trees.
+    id_offset: i64,
 }
 
 impl DeclarationCollector<'_> {
+    fn resolved_id(&self, id: SyntaxId) -> SyntaxId {
+        SyntaxId((id.0 as i64 + self.id_offset) as usize)
+    }
+
     fn module(&mut self, module: &Module) {
         for item in &module.items {
             self.item(item);
@@ -130,7 +167,11 @@ impl DeclarationCollector<'_> {
             Item::VisibilitySplice(value) => self.item(&value.item),
             Item::RepeatedItemSplice(_) => {}
             Item::Submodule(value) => {
-                if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
+                if let Some(id) = self
+                    .resolved
+                    .program()
+                    .child_module(self.resolved_id(value.syntax.id))
+                {
                     self.insert(DefinitionId::Module(id), &value.syntax, &value.name);
                 }
                 self.module(&value.module);
@@ -194,7 +235,11 @@ impl DeclarationCollector<'_> {
             }
             Item::Continue(_) => {}
             Item::Submodule(value) => {
-                if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
+                if let Some(id) = self
+                    .resolved
+                    .program()
+                    .child_module(self.resolved_id(value.syntax.id))
+                {
                     self.insert(DefinitionId::Module(id), &value.syntax, &value.name);
                 }
                 self.module(&value.module);
@@ -323,8 +368,9 @@ impl DeclarationCollector<'_> {
     }
 
     fn declaration(&mut self, syntax: &Syntax, name: &str) {
-        for definition in self.resolved.definitions_for(syntax.id) {
-            if self.resolved.declaration_syntax(definition) == Some(syntax.id) {
+        let id = self.resolved_id(syntax.id);
+        for definition in self.resolved.definitions_for(id) {
+            if self.resolved.declaration_syntax(definition) == Some(id) {
                 self.insert(definition, syntax, name);
             }
         }
@@ -365,9 +411,19 @@ struct Collector<'a> {
     targets: HashMap<DefinitionId, DefinitionTarget>,
     entries: Vec<DefinitionEntry>,
     path: &'a Path,
+    /// Added to every `SyntaxId` taken from the walked tree before it is used
+    /// to query the resolver or type checker. Non-zero while walking an
+    /// editor-owned surface tree whose ids start from zero but whose backing
+    /// module sits further along the program's shared id sequence; zero for
+    /// program-owned trees.
+    id_offset: i64,
 }
 
 impl Collector<'_> {
+    fn resolved_id(&self, id: SyntaxId) -> SyntaxId {
+        SyntaxId((id.0 as i64 + self.id_offset) as usize)
+    }
+
     fn module(&mut self, module: &Module) {
         for item in &module.items {
             self.item(item);
@@ -420,7 +476,11 @@ impl Collector<'_> {
             Item::RepeatedItemSplice(_) => {}
             Item::UseDeclaration(value) => self.use_declaration(value),
             Item::Submodule(value) => {
-                if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
+                if let Some(id) = self
+                    .resolved
+                    .program()
+                    .child_module(self.resolved_id(value.syntax.id))
+                {
                     // A `companion` header points at the type it extends, not
                     // at the companion submodule.
                     let definitions = self.namespace_definitions(id);
@@ -514,7 +574,7 @@ impl Collector<'_> {
         if let Some(name) = value.path.last() {
             let definitions = self
                 .resolved
-                .import_definitions(value.syntax.id, name)
+                .import_definitions(self.resolved_id(value.syntax.id), name)
                 .to_vec();
             self.add(&value.syntax, name, &definitions, false);
         }
@@ -523,7 +583,7 @@ impl Collector<'_> {
                 for name in names {
                     let definitions = self
                         .resolved
-                        .import_definitions(value.syntax.id, name)
+                        .import_definitions(self.resolved_id(value.syntax.id), name)
                         .to_vec();
                     self.add(&value.syntax, name, &definitions, true);
                 }
@@ -532,7 +592,7 @@ impl Collector<'_> {
                 for name in [item, alias] {
                     let definitions = self
                         .resolved
-                        .import_definitions(value.syntax.id, name)
+                        .import_definitions(self.resolved_id(value.syntax.id), name)
                         .to_vec();
                     self.add(&value.syntax, name, &definitions, name == alias);
                 }
@@ -563,7 +623,7 @@ impl Collector<'_> {
         let Some(target) = self
             .resolved
             .program()
-            .imported_module(declaration.syntax.id)
+            .imported_module(self.resolved_id(declaration.syntax.id))
         else {
             return;
         };
@@ -643,7 +703,7 @@ impl Collector<'_> {
             return;
         }
         let program = self.resolved.program();
-        let Some(target) = program.imported_module(declaration.syntax.id) else {
+        let Some(target) = program.imported_module(self.resolved_id(declaration.syntax.id)) else {
             return;
         };
         let mut ancestors = vec![target];
@@ -687,7 +747,11 @@ impl Collector<'_> {
             Item::Continue(_) => {}
             Item::Expression(value) => self.expression(value),
             Item::Submodule(value) => {
-                if let Some(id) = self.resolved.program().child_module(value.syntax.id) {
+                if let Some(id) = self
+                    .resolved
+                    .program()
+                    .child_module(self.resolved_id(value.syntax.id))
+                {
                     let definitions = self.namespace_definitions(id);
                     self.add(&value.syntax, &value.name, &definitions, false);
                 }
@@ -946,7 +1010,10 @@ impl Collector<'_> {
     fn qualified_receiver(&mut self, expression: &Expression) {
         match expression {
             Expression::Name(name) => {
-                if let Some(module) = self.resolved.namespace_for(name.syntax.id) {
+                if let Some(module) = self
+                    .resolved
+                    .namespace_for(self.resolved_id(name.syntax.id))
+                {
                     let definitions = self.namespace_definitions(module);
                     self.add(&name.syntax, &name.name, &definitions, false);
                 } else {
@@ -955,7 +1022,9 @@ impl Collector<'_> {
             }
             Expression::Access(access) => {
                 if let Accessor::Name(member) = &access.accessor
-                    && let Some(module) = self.resolved.namespace_for(access.syntax.id)
+                    && let Some(module) = self
+                        .resolved
+                        .namespace_for(self.resolved_id(access.syntax.id))
                 {
                     self.qualified_receiver(&access.value);
                     let definitions = self.namespace_definitions(module);
@@ -981,6 +1050,7 @@ impl Collector<'_> {
     }
 
     fn definitions_for(&self, syntax: SyntaxId) -> Vec<DefinitionId> {
+        let syntax = self.resolved_id(syntax);
         let mut definitions = self.resolved.definitions_for(syntax);
         if let Some(symbol) = self.typed.and_then(|typed| typed.symbol_for(syntax)) {
             definitions.push(DefinitionId::Symbol(symbol));
@@ -996,7 +1066,10 @@ impl Collector<'_> {
     }
 
     fn macro_invocation_definitions(&self, syntax: SyntaxId) -> Option<Vec<DefinitionId>> {
-        let declaration = self.resolved.macro_invocation_for(syntax)?.declaration;
+        let declaration = self
+            .resolved
+            .macro_invocation_for(self.resolved_id(syntax))?
+            .declaration;
         Some(self.resolved.definitions_for(declaration))
     }
 
@@ -1674,6 +1747,91 @@ mod tests {
             "missing inner segment: {entries:?}"
         );
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn qualified_segments_do_not_gain_shifted_targets_under_a_package_graph() {
+        // When the open file is not parsed first (a package graph parses the
+        // package-root module ahead of it), the editor's own `parse` produces
+        // `SyntaxId`s shifted from the loaded program's. Walking that copy made
+        // every qualified-access segment pick up a neighbouring node's
+        // definition on top of its real one.
+        let root = std::env::temp_dir().join(format!(
+            "staple-definition-package-graph-shift-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src/middle")).unwrap();
+        std::fs::write(
+            root.join("binder.kdl"),
+            "package \"hello_world\" {\n    root \"src/root.sta\"\n}\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("src/root.sta"), "/// Test docs\npub mod").unwrap();
+        std::fs::write(
+            root.join("src/utils.sta"),
+            "/// utils\npub mod\n\n/// add\npub def add = a: I32 => b: I32 => a + b\n",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("src/middle/foo.sta"),
+            "pub mod\n\nmod aa {\n    use super.bar\n\n    let a = bar ()\n}\n\npub def bar = () => ()\n",
+        )
+        .unwrap();
+        let source = concat!(
+            "use std.io.println\n",
+            "use package.utils.add\n",
+            "\n",
+            "pub type Foo = ()\n",
+            "\n",
+            "companion Foo {\n",
+            "    def a = x: I32 => {}\n",
+            "}\n",
+            "\n",
+            "package.middle.foo.bar ()\n",
+            "package.utils.add 1 2\n",
+        );
+        std::fs::write(root.join("src/main.sta"), source).unwrap();
+        let path = std::fs::canonicalize(root.join("src/main.sta")).unwrap();
+        let graph = binder::load_package_graph(&root.join("binder.kdl")).unwrap();
+        let program = ProgramLoader::new()
+            .with_package_graph(graph)
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_package_graph_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries_at_path(&path, &module, typed.resolved(), Some(&typed));
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let targets_for = |origin: &str, offset: usize| {
+            entries
+                .iter()
+                .find(|entry| entry.range.start >= offset && &source[entry.range.clone()] == origin)
+                .map(|entry| entry.targets.clone())
+                .unwrap_or_default()
+        };
+
+        let line_11 = source.find("package.utils.add 1 2").unwrap();
+        let line_10 = source.find("package.middle.foo.bar ()").unwrap();
+
+        for (origin, offset, expected) in [
+            ("utils", line_11, "utils.sta"),
+            ("add", line_11, "utils.sta"),
+            ("foo", line_10, "foo.sta"),
+        ] {
+            let targets = targets_for(origin, offset);
+            assert_eq!(
+                targets.len(),
+                1,
+                "`{origin}` should resolve to exactly one definition, got {targets:?}"
+            );
+            assert!(
+                targets[0].path.ends_with(expected),
+                "`{origin}` should resolve into {expected}, got {targets:?}"
+            );
+        }
     }
 
     fn assert_target(source: &str, entries: &[DefinitionEntry], origin: &str, target: &str) {
