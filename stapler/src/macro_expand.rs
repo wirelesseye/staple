@@ -5679,9 +5679,13 @@ fn match_separated_contents(
     separator: &MetaType,
     next_syntax_id: &mut usize,
 ) -> Option<(Vec<Value>, Value, bool)> {
-    cursor = skip_trivia(parent.tokens(), cursor, end);
+    let modifier_prefixed =
+        matches!(element, MetaType::Product(elements) if matches!(elements.first(), Some(MetaType::Sequence(element)) if **element == MetaType::Modifier));
+    if !modifier_prefixed {
+        cursor = skip_trivia(parent.tokens(), cursor, end);
+    }
     let separator_value = constructed_separator(separator)?;
-    if cursor == end {
+    if skip_trivia(parent.tokens(), cursor, end) == end {
         return Some((Vec::new(), separator_value, false));
     }
     let mut elements = Vec::new();
@@ -5700,8 +5704,12 @@ fn match_separated_contents(
         let separator_end = separator_at + 1;
         let separator_fragment = syntax_slice(parent, separator_at, separator_end);
         match_syntax_fragment(separator, &separator_fragment, next_syntax_id)?;
-        cursor = skip_trivia(parent.tokens(), separator_end, end);
-        if cursor == end {
+        cursor = if modifier_prefixed {
+            separator_end
+        } else {
+            skip_trivia(parent.tokens(), separator_end, end)
+        };
+        if skip_trivia(parent.tokens(), cursor, end) == end {
             return Some((elements, separator_value, true));
         }
     }
@@ -5756,10 +5764,60 @@ fn match_fixed_contents(
     expected: &[MetaType],
     next_syntax_id: &mut usize,
 ) -> Option<Vec<(Option<String>, Value)>> {
-    let cursor = skip_trivia(parent.tokens(), cursor, end);
     let Some((first, rest)) = expected.split_first() else {
         return (skip_trivia(parent.tokens(), cursor, end) == end).then(Vec::new);
     };
+    let cursor = if matches!(first, MetaType::Sequence(element) if **element == MetaType::Modifier)
+    {
+        cursor
+    } else {
+        skip_trivia(parent.tokens(), cursor, end)
+    };
+    if let MetaType::Sequence(element) = first {
+        if **element == MetaType::Modifier
+            && let Some((docs, doc_end)) = leading_doc_modifiers(parent, cursor, end)
+        {
+            let checkpoint = *next_syntax_id;
+            if let Some(mut values) =
+                match_fixed_contents(parent, doc_end, end, expected, next_syntax_id)
+                && let Some((_, Value::Sequence(sequence))) = values.first_mut()
+            {
+                for doc in docs.into_iter().rev() {
+                    sequence.insert(
+                        0,
+                        Value::Syntax(SyntaxValue::Modifier(OpaqueModifier {
+                            invocation: doc,
+                            enclosing: None,
+                        })),
+                    );
+                }
+                return Some(values);
+            }
+            *next_syntax_id = checkpoint;
+            return None;
+        }
+        let cursor = skip_trivia(parent.tokens(), cursor, end);
+        let checkpoint = *next_syntax_id;
+        if let Some(mut values) = match_fixed_contents(parent, cursor, end, rest, next_syntax_id) {
+            values.insert(0, (None, Value::Sequence(Vec::new())));
+            return Some(values);
+        }
+        *next_syntax_id = checkpoint;
+        for candidate_end in candidate_ends(parent.tokens(), cursor, end) {
+            let fragment = syntax_slice(parent, cursor, candidate_end);
+            let checkpoint = *next_syntax_id;
+            if let Some(value) = match_syntax_fragment(element, &fragment, next_syntax_id)
+                && let Some(mut values) =
+                    match_fixed_contents(parent, candidate_end, end, expected, next_syntax_id)
+                && let Some((_, Value::Sequence(sequence))) = values.first_mut()
+            {
+                sequence.insert(0, value);
+                return Some(values);
+            }
+            *next_syntax_id = checkpoint;
+        }
+        return None;
+    }
     if matches!(first, MetaType::Optional(_)) {
         let checkpoint = *next_syntax_id;
         if let Some(mut values) = match_fixed_contents(parent, cursor, end, rest, next_syntax_id) {
@@ -5798,6 +5856,18 @@ fn match_sequence_contents(
 ) -> Option<Vec<Value>> {
     let mut values = Vec::new();
     loop {
+        if *expected == MetaType::Modifier
+            && let Some((docs, doc_end)) = leading_doc_modifiers(parent, cursor, end)
+        {
+            for doc in docs {
+                values.push(Value::Syntax(SyntaxValue::Modifier(OpaqueModifier {
+                    invocation: doc,
+                    enclosing: None,
+                })));
+            }
+            cursor = doc_end;
+            continue;
+        }
         cursor = skip_trivia(parent.tokens(), cursor, end);
         if cursor == end {
             return Some(values);
@@ -5816,6 +5886,47 @@ fn match_sequence_contents(
         values.push(value);
         cursor = candidate_end;
     }
+}
+
+fn leading_doc_modifiers(
+    parent: &Syntax,
+    start: usize,
+    end: usize,
+) -> Option<(Vec<crate::ModifierInvocation>, usize)> {
+    let tokens = parent.tokens();
+    let mut position = start;
+    let mut line_start = start == 0
+        || tokens[..start]
+            .last()
+            .is_some_and(|token| token.kind == crate::TokenKind::Newline);
+    let mut docs = Vec::new();
+    while position < end {
+        let token = &tokens[position];
+        match token.kind {
+            crate::TokenKind::Whitespace => position += 1,
+            crate::TokenKind::Newline => {
+                line_start = true;
+                position += 1;
+            }
+            crate::TokenKind::LineComment
+                if line_start
+                    && token.text.starts_with("///")
+                    && !token.text.starts_with("////") =>
+            {
+                docs.push(crate::ModifierInvocation {
+                    syntax: syntax_slice(parent, start, position + 1),
+                    namespace: None,
+                    name: "doc".to_owned(),
+                    argument: None,
+                    doc: Some(token.text[3..].to_owned()),
+                });
+                line_start = false;
+                position += 1;
+            }
+            _ => break,
+        }
+    }
+    (!docs.is_empty()).then_some((docs, position))
 }
 
 fn match_syntax_fragment(
@@ -5841,7 +5952,11 @@ fn match_syntax_fragment(
                     .map(|value| Value::Nominal("Some".to_owned(), Box::new(value)))
             };
         }
-        MetaType::Sequence(_) => return None,
+        MetaType::Sequence(element) => {
+            let values =
+                match_sequence_contents(syntax, 0, syntax.tokens().len(), element, next_syntax_id)?;
+            return Some(Value::Sequence(values));
+        }
         _ => {}
     }
     let expression = || {
@@ -5934,7 +6049,13 @@ fn match_syntax_fragment(
             }
             SyntaxValue::Item(Box::new(item))
         }
-        MetaType::Modifier => return None,
+        MetaType::Modifier => {
+            let invocation = crate::parser::parse_modifier_fragment(syntax, next_syntax_id).ok()?;
+            SyntaxValue::Modifier(OpaqueModifier {
+                invocation,
+                enclosing: None,
+            })
+        }
         MetaType::Visibility => {
             let (value, ids) = expression()?;
             let Expression::VisibilityArgument(value) = value else {

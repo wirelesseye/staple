@@ -161,6 +161,16 @@ pub(crate) fn parse_expression_fragment(
     })
 }
 
+/// Reinterprets original tokens as exactly one modifier invocation.
+pub(crate) fn parse_modifier_fragment(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<ModifierInvocation, ParseError> {
+    parse_fragment(syntax, false, next_syntax_id, |grammar| {
+        grammar.parse_modifier_invocation()
+    })
+}
+
 /// Reinterprets original tokens as exactly one item.
 pub(crate) fn parse_item_fragment(
     syntax: &Syntax,

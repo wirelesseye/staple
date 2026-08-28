@@ -2197,7 +2197,10 @@ mod tests {
 
         for expected in [
             ("visibility", "visibility: Visibility"),
-            ("entries", "entries: Sequence (Ident String, Optional Type)"),
+            (
+                "entries",
+                "entries: Sequence (Sequence Modifier, Ident String, Optional Type)",
+            ),
         ] {
             assert!(
                 entries.iter().any(|entry| {

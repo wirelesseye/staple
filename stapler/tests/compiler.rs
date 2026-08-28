@@ -4238,6 +4238,57 @@ fn expands_standard_typegroup_into_module_variants_and_alias() {
 }
 
 #[test]
+fn typegroup_applies_call_modifiers_to_the_alias_and_entry_modifiers_to_variants() {
+    let resolved = resolve(concat!(
+        "@doc(\"alias docs\")\n",
+        "typegroup Tagged T {\n",
+        "    ///outer\n",
+        "    @doc(\"inner\")\n",
+        "    Marked T,\n",
+        "    Plain,\n",
+        "}\n",
+    ));
+    let alias = resolved
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::TypeDeclaration(declaration) if declaration.name == "Tagged" => Some(declaration),
+            _ => None,
+        })
+        .expect("typegroup should generate its alias");
+    assert_eq!(alias.docs, ["alias docs"]);
+
+    let companion = resolved
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::Submodule(module) if module.companion && module.name == "Tagged" => Some(module),
+            _ => None,
+        })
+        .expect("typegroup should generate its companion");
+    assert!(
+        companion.docs.is_empty(),
+        "call modifiers must not leak to the companion"
+    );
+    let variants = companion
+        .module
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            Item::TypeDeclaration(declaration) => Some(declaration),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(variants.len(), 2);
+    assert_eq!(variants[0].name, "Marked");
+    assert_eq!(variants[0].docs, ["inner", "outer"]);
+    assert_eq!(variants[1].name, "Plain");
+    assert!(variants[1].docs.is_empty());
+}
+
+#[test]
 fn resolves_and_merges_type_companion_items() {
     type_check(concat!(
         "type alias Animal = I32\n",
