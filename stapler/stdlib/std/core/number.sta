@@ -309,20 +309,20 @@ impl Eq I8 {
 
 impl PartialOrd I8 {
     def partial_cmp = left => right => match (__i8_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__i8_gt (left, right)) {
-        True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+        True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord I8 {
     def cmp = left => right => match (__i8_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__i8_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -334,20 +334,20 @@ impl Eq I16 {
 
 impl PartialOrd I16 {
     def partial_cmp = left => right => match (__i16_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__i16_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord I16 {
     def cmp = left => right => match (__i16_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__i16_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -359,20 +359,20 @@ impl Eq I32 {
 
 impl PartialOrd I32 {
     def partial_cmp = left => right => match (__i32_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__i32_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord I32 {
     def cmp = left => right => match (__i32_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__i32_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -384,20 +384,20 @@ impl Eq I64 {
 
 impl PartialOrd I64 {
     def partial_cmp = left => right => match (__i64_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__i64_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord I64 {
     def cmp = left => right => match (__i64_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__i64_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -409,20 +409,20 @@ impl Eq U8 {
 
 impl PartialOrd U8 {
     def partial_cmp = left => right => match (__u8_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__u8_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord U8 {
     def cmp = left => right => match (__u8_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__u8_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -434,20 +434,20 @@ impl Eq U16 {
 
 impl PartialOrd U16 {
     def partial_cmp = left => right => match (__u16_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__u16_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord U16 {
     def cmp = left => right => match (__u16_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__u16_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -459,20 +459,20 @@ impl Eq U32 {
 
 impl PartialOrd U32 {
     def partial_cmp = left => right => match (__u32_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__u32_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord U32 {
     def cmp = left => right => match (__u32_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__u32_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -484,20 +484,20 @@ impl Eq U64 {
 
 impl PartialOrd U64 {
     def partial_cmp = left => right => match (__u64_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__u64_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord U64 {
     def cmp = left => right => match (__u64_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__u64_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -509,20 +509,20 @@ impl Eq ISize {
 
 impl PartialOrd ISize {
     def partial_cmp = left => right => match (__isize_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__isize_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord ISize {
     def cmp = left => right => match (__isize_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__isize_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -534,20 +534,20 @@ impl Eq USize {
 
 impl PartialOrd USize {
     def partial_cmp = left => right => match (__usize_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__usize_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
-            False() => Some (Equal satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
+            False() => Some (Ordering.Equal satisfies Ordering),
         },
     }
 }
 
 impl Ord USize {
     def cmp = left => right => match (__usize_lt (left, right)) {
-        True() => Less,
+        True() => Ordering.Less,
         False() => match (__usize_gt (left, right)) {
-            True() => Greater,
-            False() => Equal,
+            True() => Ordering.Greater,
+            False() => Ordering.Equal,
         },
     }
 }
@@ -575,11 +575,11 @@ impl Eq F32 {
 
 impl PartialOrd F32 {
     def partial_cmp = left => right => match (__f32_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__f32_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
             False() => match (__f32_equal (left, right)) {
-                True() => Some (Equal satisfies Ordering),
+                True() => Some (Ordering.Equal satisfies Ordering),
                 False() => None,
             },
         },
@@ -609,11 +609,11 @@ impl Eq F64 {
 
 impl PartialOrd F64 {
     def partial_cmp = left => right => match (__f64_lt (left, right)) {
-        True() => Some (Less satisfies Ordering),
+        True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__f64_gt (left, right)) {
-            True() => Some (Greater satisfies Ordering),
+            True() => Some (Ordering.Greater satisfies Ordering),
             False() => match (__f64_equal (left, right)) {
-                True() => Some (Equal satisfies Ordering),
+                True() => Some (Ordering.Equal satisfies Ordering),
                 False() => None,
             },
         },

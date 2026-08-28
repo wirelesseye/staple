@@ -1908,7 +1908,7 @@ trait Convert (From, To) {
 trait PartialOrd T where Copy T {
     partial_cmp: T -> T -> Option Ordering
     lt: T -> T -> Bool = left => right => match (partial_cmp left right) {
-        Some Less() => True,
+        Some Ordering.Less() => True,
         _ => False,
     }
 }
@@ -2782,8 +2782,8 @@ Signed integer division uses signed semantics, while unsigned integer division
 uses unsigned semantics. All integer types implement `Eq` for `==` and `!=`, and
 `PartialOrd` and `Ord` for ordering. `PartialOrd.partial_cmp` returns
 `Option Ordering`; its default `lt`, `le`, `gt`, and `ge` methods back `<`, `<=`,
-`>`, and `>=`. `Ord.cmp` returns `Less`, `Equal`, or `Greater` and requires both
-`Eq` and `PartialOrd`. Integer ordering uses signed semantics for signed types
+`>`, and `>=`. `Ord.cmp` returns `Ordering.Less`, `Ordering.Equal`, or
+`Ordering.Greater` and requires both `Eq` and `PartialOrd`. Integer ordering uses signed semantics for signed types
 and unsigned semantics for unsigned types.
 
 `F32` and `F64` use IEEE-754 single and double precision. Both implement the
