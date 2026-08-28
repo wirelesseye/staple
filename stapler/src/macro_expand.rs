@@ -35,6 +35,7 @@ struct MacroKey {
 enum MacroKind {
     User(Expression),
     CString,
+    Doc,
     Quote,
     ParseQuote,
 }
@@ -706,6 +707,11 @@ impl MacroExpander {
                             && declaration.name == "c_string"
                         {
                             MacroKind::CString
+                        } else if source_module.path.ends_with(std::path::Path::new("std/core/doc.sta"))
+                            && declaration.modifier
+                            && declaration.name == "doc"
+                        {
+                            MacroKind::Doc
                         } else if let Some(value) = &declaration.value {
                             MacroKind::User(value.clone())
                         } else {
@@ -1378,10 +1384,9 @@ impl MacroExpander {
                 }
             }
             if definition.key.modifier {
-                if matches!(
-                    definition.key.name.as_str(),
-                    "recursive_constructor" | "doc"
-                ) {
+                if matches!(definition.key.name.as_str(), "recursive_constructor" | "doc")
+                    && !matches!(definition.kind, MacroKind::Doc)
+                {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
                         format!(
@@ -1470,6 +1475,7 @@ impl MacroExpander {
                         "compiler-provided macro `c_string` must have signature `Expr -> Expr`",
                     ));
                 }
+                MacroKind::Doc => {}
                 MacroKind::User(_) if definition.declaration.value.is_none() => {
                     self.diagnostics.push(Diagnostic::new(
                         definition.declaration.syntax.span.clone(),
@@ -1799,6 +1805,10 @@ impl MacroExpander {
             return Some(ModifierChainResult::Item(current));
         }
         if invocation.namespace.is_none() && invocation.name == "doc" {
+            if invocation.argument.is_some() {
+                let (definition, _) = self.select_modifier(module, &invocation)?;
+                self.record_invocation(invocation.syntax.id, &definition);
+            }
             let doc = if let Some(doc) = invocation.doc.clone() {
                 doc
             } else {
@@ -2965,6 +2975,7 @@ impl MacroExpander {
                     },
                 )))
             }
+            MacroKind::Doc => unreachable!("`@doc` is applied directly as a built-in modifier"),
             MacroKind::Quote => {
                 self.diagnostics.push(Diagnostic::new(
                     call_span,

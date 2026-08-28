@@ -1310,6 +1310,7 @@ mod tests {
             "macro identity: Expr -> Expr = value => parse_quote { $value }\n",
             "macro @keep: Item -> Item = item => item\n",
             "let answer = identity 42\n",
+            "@doc(\"A kept value.\")\n",
             "@keep\n",
             "let kept = answer\n",
         );
@@ -1324,6 +1325,11 @@ mod tests {
 
         assert_target(source, &entries, "identity", "identity");
         assert_target(source, &entries, "keep", "keep");
+        let doc = entries
+            .iter()
+            .find(|entry| &source[entry.range.clone()] == "doc")
+            .expect("expected a definition entry for `@doc`");
+        assert!(doc.targets.iter().any(|target| target.path.ends_with("std/core/doc.sta")));
     }
 
     #[test]

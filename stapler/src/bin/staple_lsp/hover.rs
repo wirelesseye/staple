@@ -2109,6 +2109,7 @@ mod tests {
             "macro @identity: Item -> Item = item: Item => item\n",
             "let selected = choose (discarded 0)\n",
             "let inferred_value = inferred 4\n",
+            "@doc(\"A decorated value.\")\n",
             "@identity let decorated = dependency.imported 3\n",
         );
         let path = root.join("main.sta");
@@ -2128,6 +2129,10 @@ mod tests {
         assert!(signatures.contains(&("choose", "macro choose: Expr -> Expr")));
         assert!(signatures.contains(&("choose", "macro choose: CallExpr -> Expr")));
         assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
+        assert!(signatures.contains(&(
+            "doc",
+            "macro @doc: Parenthesized (Expr) -> Item -> Item"
+        )));
         assert!(signatures.contains(&("inferred", "macro inferred: SyntaxNode -> Expr")));
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
         assert!(
