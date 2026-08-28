@@ -25,8 +25,11 @@ pub type F32 = opaque
 /// A 64-bit floating-point number.
 pub type F64 = opaque
 
+/// A value that may be absent.
 pub(repr) typegroup Option T {
+    /// Represents the absence of a value.
     None,
+    /// Contains a present value.
     Some T,
 }
 pub use Option.*

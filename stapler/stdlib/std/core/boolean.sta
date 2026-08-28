@@ -1,7 +1,10 @@
 pub mod
 
+/// A logical value that is either true or false.
 pub typegroup Bool {
+    /// The logical true value.
     True,
+    /// The logical false value.
     False,
 }
 pub use Bool.*
