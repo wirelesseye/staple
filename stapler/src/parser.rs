@@ -86,6 +86,19 @@ pub fn parse(source: &str) -> Result<Module, ParseError> {
     Grammar::new(tokens, Arc::from(source), 0, None).parse_source_file()
 }
 
+/// Parses a complete Staple source file, assigning `SyntaxId`s from
+/// `first_syntax_id` upwards instead of from zero.
+///
+/// A tool that has already loaded a [`crate::Program`] can re-parse one of its
+/// files this way to obtain a surface tree whose ids line up with the loaded
+/// program, even though the program parsed other modules before this one. The
+/// parse is otherwise identical to [`parse`]: given the same source it produces
+/// the same tree shape and consumes the same number of ids, just rebased.
+pub fn parse_at(source: &str, first_syntax_id: usize) -> Result<Module, ParseError> {
+    let tokens = Arc::from(lex(source));
+    Grammar::new(tokens, Arc::from(source), first_syntax_id, None).parse_source_file()
+}
+
 /// Parses a named source while assigning syntax IDs from a shared sequence.
 ///
 /// On success, `next_syntax_id` is advanced past every ID assigned to the

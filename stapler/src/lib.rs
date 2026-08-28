@@ -16,7 +16,7 @@ pub use codegen::*;
 pub use macro_expand::expand_macros;
 pub use diagnostic::*;
 pub use lexer::lex;
-pub use parser::parse;
+pub use parser::{parse, parse_at};
 pub use program::*;
 pub use resolve::*;
 pub use typecheck::*;

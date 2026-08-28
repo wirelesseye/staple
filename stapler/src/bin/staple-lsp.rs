@@ -82,6 +82,41 @@ fn normalized_source_path(path: &Path) -> PathBuf {
     })
 }
 
+/// Re-parses the editor buffer so its `SyntaxId`s match the ones the loaded
+/// program assigned to this file. The program parses its modules from a shared
+/// counter, so unless this file happened to be parsed first its ids are offset
+/// from a plain `parse` by a constant; recovering that constant from the
+/// program's own module for `path` and re-parsing from it realigns the two.
+/// Returns `None` when the file isn't in the program or is already aligned, in
+/// which case the caller keeps the original `parse` output.
+fn rebased_surface(
+    resolved: &stapler::ResolvedModule,
+    path: &Path,
+    editor_module: &stapler::Module,
+    text: &str,
+) -> Option<stapler::Module> {
+    let program = resolved.program();
+    let program_last_id = program
+        .modules()
+        .iter()
+        .find(|source| {
+            !source.companion
+                && source.path == path
+                && source
+                    .parent
+                    .is_none_or(|parent| program.module(parent).path != source.path)
+        })?
+        .syntax
+        .syntax
+        .id
+        .0;
+    let base = program_last_id.checked_sub(editor_module.syntax.id.0)?;
+    if base == 0 {
+        return None;
+    }
+    stapler::parse_at(text, base).ok()
+}
+
 fn is_standard_library_source(config: &binder::PackageGraph, path: &Path) -> bool {
     let package = config.root_package();
     package.name == "std"
@@ -483,6 +518,12 @@ impl Server {
         let mut document_completion = None;
         let mut definition_entries = None;
         let mut definition_path = path.clone();
+        // The editor's own `parse` numbers `SyntaxId`s from zero, which only
+        // lines up with the loaded program when this file was parsed first.
+        // Once the program is loaded we re-parse the buffer starting from the
+        // id the program assigned this module, so hover/definition/semantic
+        // walks over the surface tree query the resolver with matching ids.
+        let mut rebased_module: Option<stapler::Module> = None;
         let mut analysis_succeeded = false;
         if let Some(module) = &parsed {
             let mut loader = ProgramLoader::new();
@@ -523,25 +564,28 @@ impl Server {
                     }
                     Ok(resolved) => {
                         definition_path = normalized_source_path(&path);
+                        rebased_module = rebased_surface(&resolved, &definition_path, module, &text);
+                        let surface = rebased_module.as_ref().unwrap_or(module);
                         definition_entries = Some(definition::entries_at_path(
                             &definition_path,
-                            module,
+                            surface,
                             &resolved,
                             None,
                         ));
                         resolved_for_tokens = Some(resolved.clone());
                         match TypeChecker::new().check(resolved) {
                             Ok(typed) => {
+                                let surface = rebased_module.as_ref().unwrap_or(module);
                                 definition_entries = Some(definition::entries_at_path(
                                     &definition_path,
-                                    module,
+                                    surface,
                                     typed.resolved(),
                                     Some(&typed),
                                 ));
                                 hover_entries =
-                                    hover::entries_at_path(&definition_path, module, &typed);
+                                    hover::entries_at_path(&definition_path, surface, &typed);
                                 let completion_index =
-                                    staple_lsp::completion::index(module, &typed);
+                                    staple_lsp::completion::index(surface, &typed);
                                 typed_for_tokens = Some(typed);
                                 document_completion = Some(completion_index);
                                 analysis_succeeded = true;
@@ -564,7 +608,7 @@ impl Server {
         let current_semantic = semantic::entries_at_path(
             &text,
             &definition_path,
-            parsed.as_ref(),
+            rebased_module.as_ref().or(parsed.as_ref()),
             resolved_for_tokens.as_ref(),
             typed_for_tokens.as_ref(),
         );
@@ -1304,6 +1348,89 @@ mod tests {
                 .definition_entries
                 .iter()
                 .any(|entry| { entry.range.start <= imported && imported < entry.range.end })
+        );
+    }
+
+    #[test]
+    fn hover_and_semantics_track_a_macro_call_in_a_non_first_package_module() {
+        // `main.sta` is parsed after the package-root module, so the editor's
+        // own `parse` numbers its `SyntaxId`s below the ones the program gave
+        // it. Without realigning them, hover on the `when` macro call reported
+        // a neighbouring node's type (`I32`) and the semantic classifier
+        // mislabelled the token.
+        let root = std::env::temp_dir().join(format!(
+            "staple-lsp-macro-call-shift-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("binder.kdl"), "package \"hello_world\"\n").unwrap();
+        std::fs::write(root.join("src/root.sta"), "/// Test docs\npub mod").unwrap();
+        let source = concat!(
+            "use std.io.println\n",
+            "\n",
+            "let x = 3\n",
+            "let y: I32 = x + 30\n",
+            "\n",
+            "when {\n",
+            "    True => println \"123\"\n",
+            "}\n",
+            "\n",
+            "println \"Hello, world!\"\n",
+        );
+        std::fs::write(root.join("src/main.sta"), source).unwrap();
+        let path = std::fs::canonicalize(root.join("src/main.sta")).unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        let (connection, _client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: source.to_owned(),
+                    version: 1,
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib")),
+        };
+
+        server.analyze(&uri).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let document = &server.documents[&uri];
+        let when = source.find("when {").unwrap();
+
+        let hover = document
+            .hover_entries
+            .iter()
+            .find(|entry| entry.range.start <= when && when < entry.range.end)
+            .unwrap_or_else(|| panic!("no hover entry for `when`: {:?}", document.hover_entries));
+        assert!(
+            hover.signature.contains("macro") && hover.signature.contains("when"),
+            "`when` hover should describe the macro, got {:?}",
+            hover.signature
+        );
+        assert!(
+            !hover.signature.contains("I32"),
+            "`when` hover should not report a neighbouring node's type, got {:?}",
+            hover.signature
+        );
+
+        let semantics = &document
+            .last_successful
+            .as_ref()
+            .expect("analysis succeeded")
+            .semantic_entries;
+        let token = semantics
+            .iter()
+            .find(|entry| entry.start == when && entry.end == when + "when".len())
+            .unwrap_or_else(|| panic!("no semantic token for `when`: {semantics:?}"));
+        assert_eq!(
+            token.token_type,
+            semantic::MACRO,
+            "`when` should be classified as a macro"
         );
     }
 
