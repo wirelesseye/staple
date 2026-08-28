@@ -82,6 +82,12 @@ fn normalized_source_path(path: &Path) -> PathBuf {
     })
 }
 
+fn is_standard_library_source(config: &binder::PackageGraph, path: &Path) -> bool {
+    let package = config.root_package();
+    package.name == "std"
+        && normalized_source_path(path).starts_with(normalized_source_path(package.source_root()))
+}
+
 fn main() {
     if let Err(error) = run() {
         eprintln!("staple-lsp: {error}");
@@ -484,12 +490,15 @@ impl Server {
                 loader = loader.with_standard_library_root(stdlib);
             }
             let config = package_config(&path);
-            if let Some(config) = &config {
+            let use_package_graph = config
+                .as_ref()
+                .is_some_and(|config| !is_standard_library_source(config, &path));
+            if use_package_graph && let Some(config) = &config {
                 loader = loader.with_package_graph(config.clone());
             }
-            let loaded = match &config {
-                Some(_) => loader.load_package_graph_source_at(&path, &text),
-                None => loader.load_source_at(&path, &text),
+            let loaded = match use_package_graph {
+                true => loader.load_package_graph_source_at(&path, &text),
+                false => loader.load_source_at(&path, &text),
             };
             match loaded {
                 Err(error) => {
@@ -1257,6 +1266,45 @@ mod tests {
             .expect("an empty opened root module should not project entry ranges onto itself");
         assert!(server.documents[&uri].semantic_tokens.is_empty());
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn analyzes_an_open_standard_library_module_from_its_package() {
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        let path = std::fs::canonicalize(stdlib.join("std/core/flow.sta")).unwrap();
+        let source = std::fs::read_to_string(&path).unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        let (connection, _client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: source.clone(),
+                    version: 1,
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(stdlib),
+        };
+
+        server.analyze(&uri).unwrap();
+
+        let document = &server.documents[&uri];
+        let imported = source.find("Expr").unwrap();
+        assert!(
+            document
+                .hover_entries
+                .iter()
+                .any(|entry| { entry.range.start <= imported && imported < entry.range.end })
+        );
+        assert!(
+            document
+                .definition_entries
+                .iter()
+                .any(|entry| { entry.range.start <= imported && imported < entry.range.end })
+        );
     }
 
     #[test]
