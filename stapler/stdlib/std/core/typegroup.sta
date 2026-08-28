@@ -128,10 +128,12 @@ group => parameters => entries => match entries {
 }
 
 pub macro typegroup =
-visibility: MacroCallVisibility =>
+metadata: MacroCallMetadata =>
 group: Ident String =>
 parameters: Sequence Type =>
-body: Braced (Separated (Ident String, Optional Type) Comma) => match body {
+body: Braced (Separated (Ident String, Optional Type) Comma) => {
+    let visibility = metadata.visibility
+    match body {
     Braced (Separated (
         separator,
         elements,
@@ -165,4 +167,5 @@ body: Braced (Separated (Ident String, Optional Type) Comma) => match body {
             },
         }
     },
+    }
 }

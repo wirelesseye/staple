@@ -53,7 +53,15 @@ struct MacroDefinition {
 enum MacroArgument {
     Expression(Expression),
     Visibility(VisibilitySyntax),
+    Metadata(MacroCallMetadata),
     Sequence(Vec<Expression>),
+}
+
+#[derive(Clone)]
+struct MacroCallMetadata {
+    syntax: Syntax,
+    modifiers: Vec<ModifierInvocation>,
+    visibility: VisibilitySyntax,
 }
 
 #[derive(Clone)]
@@ -88,7 +96,7 @@ pub(crate) enum MetaType {
     TypeDeclarationItem,
     UnstructuredItem,
     Visibility,
-    MacroCallVisibility,
+    MacroCallMetadata,
     Comma,
     Equals,
     FatArrow,
@@ -501,11 +509,11 @@ pub(crate) fn expand_program(
         for item in &module.syntax.items {
             if let Item::Binding(binding) = item
                 && binding.kind == BindingKind::Def
-                && binding_uses_macro_call_visibility(binding)
+                && binding_uses_macro_call_metadata(binding)
             {
                 expander.diagnostics.push(Diagnostic::new(
                     binding.syntax.span.clone(),
-                    "`MacroCallVisibility` may only be the first parameter of a function-style macro",
+                    "`MacroCallMetadata` may only be the first parameter of a function-style macro",
                 ));
             }
         }
@@ -1352,8 +1360,11 @@ impl MacroExpander {
                             declared
                         };
                     if !implicit_modifier_item
-                        && body_parameter
-                            .is_some_and(|body_parameter| body_parameter != *effective_declared)
+                        && body_parameter.is_some_and(|body_parameter| {
+                            body_parameter != *effective_declared
+                                && !(effective_declared == &MetaType::MacroCallMetadata
+                                    && matches!(body_parameter, MetaType::Product(_)))
+                        })
                     {
                         self.diagnostics.push(Diagnostic::new(
                             body.syntax().span.clone(),
@@ -1417,16 +1428,17 @@ impl MacroExpander {
                 ));
             }
             if definition.key.modifier
-                && definition.parameters.iter().any(|parameter| {
-                    matches!(
-                        parameter,
-                        MetaType::Visibility | MetaType::MacroCallVisibility
-                    )
-                })
+                && definition
+                    .parameters
+                    .iter()
+                    .any(|parameter| {
+                        *parameter == MetaType::Visibility
+                            || meta_type_contains_macro_call_metadata(parameter)
+                    })
             {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
-                    "modifier macros do not accept visibility parameters",
+                    "modifier macros do not accept visibility or macro-call metadata parameters",
                 ));
             }
             if !definition.key.modifier
@@ -1435,14 +1447,15 @@ impl MacroExpander {
                     .iter()
                     .enumerate()
                     .any(|(index, parameter)| {
-                        *parameter == MetaType::MacroCallVisibility && index != 0
+                        meta_type_contains_macro_call_metadata(parameter)
+                            && (index != 0 || *parameter != MetaType::MacroCallMetadata)
                     })
-                    || definition.result == MetaType::MacroCallVisibility)
+                    || meta_type_contains_macro_call_metadata(&definition.result))
             {
                 self.diagnostics.push(Diagnostic::new(
                     definition.declaration.syntax.span.clone(),
                     format!(
-                        "macro `{}` may use `MacroCallVisibility` only as its first parameter",
+                        "macro `{}` may use `MacroCallMetadata` only as its first parameter",
                         definition.key.name
                     ),
                 ));
@@ -1520,7 +1533,7 @@ impl MacroExpander {
         if let Item::VisibilityMacroInvocation(invocation) = item {
             let invocation = invocation.clone();
             if let Some(expanded) =
-                self.expand_visibility_macro_invocation(module, invocation, depth)
+                self.expand_macro_call_metadata_invocation(module, invocation, depth)
             {
                 *item = expanded;
                 self.expand_item(module, item, depth + 1);
@@ -1601,7 +1614,7 @@ impl MacroExpander {
         }
     }
 
-    fn expand_visibility_macro_invocation(
+    fn expand_macro_call_metadata_invocation(
         &mut self,
         module: ModuleId,
         invocation: crate::VisibilityMacroInvocation,
@@ -1611,14 +1624,18 @@ impl MacroExpander {
         let Some(keys) = self.resolve_macro(module, head) else {
             self.diagnostics.push(Diagnostic::new(
                 invocation.syntax.span.clone(),
-                "a visibility prefix must precede a macro whose first parameter is `MacroCallVisibility`",
+                "a modifier or visibility prefix must precede a macro whose first parameter is `MacroCallMetadata`",
             ));
             return None;
         };
         let selected = self.select_macro(
             &keys,
             &arguments,
-            Some(&invocation.visibility),
+            Some(&MacroCallMetadata {
+                syntax: invocation.syntax.clone(),
+                modifiers: invocation.modifiers.clone(),
+                visibility: invocation.visibility.clone(),
+            }),
             invocation.syntax.span.clone(),
         )?;
         self.record_invocation(head.syntax().id, &selected.definition);
@@ -1745,7 +1762,7 @@ impl MacroExpander {
             Item::Modified(modified)
         };
         if let Item::VisibilityMacroInvocation(generated) = current {
-            current = self.expand_visibility_macro_invocation(module, generated, depth + 1)?;
+            current = self.expand_macro_call_metadata_invocation(module, generated, depth + 1)?;
         }
         if !modifier_target_supported(&current)
             && !(invocation.namespace.is_none() && invocation.name == "doc")
@@ -2780,7 +2797,7 @@ impl MacroExpander {
         &mut self,
         keys: &[MacroKey],
         arguments: &[&Expression],
-        call_visibility: Option<&VisibilitySyntax>,
+        call_metadata: Option<&MacroCallMetadata>,
         span: Span,
     ) -> Option<SelectedMacro> {
         let definitions = keys
@@ -2790,7 +2807,7 @@ impl MacroExpander {
         let mut complete = definitions
             .iter()
             .filter_map(|definition| {
-                match_macro_arguments(definition, arguments, call_visibility).map(
+                match_macro_arguments(definition, arguments, call_metadata).map(
                     |(matched_arguments, consumed, effective_parameters)| SelectedMacro {
                         definition: definition.clone(),
                         arguments: matched_arguments,
@@ -2805,11 +2822,11 @@ impl MacroExpander {
                 definition.parameters.iter().any(|parameter| {
                     matches!(
                         parameter,
-                        MetaType::Visibility | MetaType::MacroCallVisibility
+                        MetaType::Visibility | MetaType::MacroCallMetadata
                     )
                 })
             });
-            if call_visibility.is_some() {
+            if call_metadata.is_some() {
                 let name = keys
                     .first()
                     .map(|key| key.name.as_str())
@@ -2817,7 +2834,7 @@ impl MacroExpander {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     format!(
-                        "macro `{name}` has no overload whose first parameter is `MacroCallVisibility`"
+                        "macro `{name}` has no overload whose first parameter is `MacroCallMetadata`"
                     ),
                 ));
                 return None;
@@ -2979,6 +2996,40 @@ impl MacroExpander {
                             MacroArgument::Visibility(visibility) => {
                                 SyntaxValue::Visibility(visibility)
                             }
+                            MacroArgument::Metadata(metadata) => {
+                                value = self.apply_value(
+                                    value,
+                                    Value::Product(vec![
+                                        (
+                                            Some("modifiers".to_owned()),
+                                            Value::Sequence(
+                                                metadata
+                                                    .modifiers
+                                                    .iter()
+                                                    .enumerate()
+                                                    .map(|(index, invocation)| {
+                                                        Value::Syntax(SyntaxValue::Modifier(
+                                                            OpaqueModifier {
+                                                                invocation: invocation.clone(),
+                                                                enclosing: (index == 0)
+                                                                    .then(|| metadata.syntax.clone()),
+                                                            },
+                                                        ))
+                                                    })
+                                                    .collect(),
+                                            ),
+                                        ),
+                                        (
+                                            Some("visibility".to_owned()),
+                                            Value::Syntax(SyntaxValue::Visibility(
+                                                metadata.visibility,
+                                            )),
+                                        ),
+                                    ]),
+                                    call_span.clone(),
+                                )?;
+                                continue;
+                            }
                             MacroArgument::Sequence(arguments) => {
                                 let MetaType::Sequence(element) = expected else {
                                     return None;
@@ -3059,7 +3110,6 @@ impl MacroExpander {
                 MetaType::Syntax
                     | MetaType::SyntaxNode
                     | MetaType::Visibility
-                    | MetaType::MacroCallVisibility
             )
             .then(|| SyntaxValue::Visibility(visibility.clone()));
         }
@@ -3070,7 +3120,7 @@ impl MacroExpander {
             MetaType::Pattern => {
                 parse_pattern_argument(argument, &mut self.next_syntax_id).map(SyntaxValue::Pattern)
             }
-            MetaType::Visibility | MetaType::MacroCallVisibility => {
+            MetaType::Visibility => {
                 let Expression::VisibilityArgument(visibility) = argument else {
                     return None;
                 };
@@ -3117,7 +3167,7 @@ impl MacroExpander {
                     MetaType::TypeDeclarationItem => "a type declaration item".to_owned(),
                     MetaType::UnstructuredItem => "an unstructured item".to_owned(),
                     MetaType::Visibility => "visibility syntax".to_owned(),
-                    MetaType::MacroCallVisibility => "macro-call visibility".to_owned(),
+                    MetaType::MacroCallMetadata => "macro-call metadata".to_owned(),
                     MetaType::Comma => "comma syntax".to_owned(),
                     MetaType::Equals => "equals syntax".to_owned(),
                     MetaType::FatArrow => "fat-arrow syntax".to_owned(),
@@ -5305,7 +5355,7 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "TypeDeclarationItem" => Some(MetaType::TypeDeclarationItem),
             "UnstructuredItem" => Some(MetaType::UnstructuredItem),
             "Visibility" => Some(MetaType::Visibility),
-            "MacroCallVisibility" => Some(MetaType::MacroCallVisibility),
+            "MacroCallMetadata" => Some(MetaType::MacroCallMetadata),
             "Comma" => Some(MetaType::Comma),
             "Equals" => Some(MetaType::Equals),
             "FatArrow" => Some(MetaType::FatArrow),
@@ -5483,6 +5533,31 @@ fn sequence_meta_type(ty: &Type) -> Option<MetaType> {
     }
 }
 
+fn meta_type_contains_macro_call_metadata(meta: &MetaType) -> bool {
+    match meta {
+        MetaType::MacroCallMetadata => true,
+        MetaType::Product(elements) => elements
+            .iter()
+            .any(meta_type_contains_macro_call_metadata),
+        MetaType::Optional(element) | MetaType::Sequence(element) => {
+            meta_type_contains_macro_call_metadata(element)
+        }
+        MetaType::Delimited(_, contents) => match contents {
+            DelimitedMetaContents::Fixed(elements) => elements
+                .iter()
+                .any(meta_type_contains_macro_call_metadata),
+            DelimitedMetaContents::Sequence(element) => {
+                meta_type_contains_macro_call_metadata(element)
+            }
+            DelimitedMetaContents::Separated { element, separator } => {
+                meta_type_contains_macro_call_metadata(element)
+                    || meta_type_contains_macro_call_metadata(separator)
+            }
+        },
+        _ => false,
+    }
+}
+
 fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
     let expression_argument = meta_argument_expression(expected, argument);
     match expected {
@@ -5501,7 +5576,7 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
             })
         }
         MetaType::Visibility => matches!(argument, Expression::VisibilityArgument(_)),
-        MetaType::MacroCallVisibility => false,
+        MetaType::MacroCallMetadata => false,
         MetaType::Syntax => true,
         MetaType::SyntaxNode => !matches!(argument, Expression::SyntaxArgument(_)),
         MetaType::Expr => !matches!(
@@ -5860,7 +5935,7 @@ fn match_syntax_fragment(
             SyntaxValue::Item(Box::new(item))
         }
         MetaType::Modifier => return None,
-        MetaType::Visibility | MetaType::MacroCallVisibility => {
+        MetaType::Visibility => {
             let (value, ids) = expression()?;
             let Expression::VisibilityArgument(value) = value else {
                 return None;
@@ -5871,6 +5946,7 @@ fn match_syntax_fragment(
         MetaType::Syntax => SyntaxValue::Raw(syntax.clone()),
         MetaType::SyntaxNode => structural_syntax_value(syntax, next_syntax_id)?,
         MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => unreachable!(),
+        MetaType::MacroCallMetadata => unreachable!(),
     };
     Some(Value::Syntax(syntax_value))
 }
@@ -5974,18 +6050,22 @@ fn syntax_slice(parent: &Syntax, start: usize, end: usize) -> Syntax {
 fn match_macro_arguments(
     definition: &MacroDefinition,
     arguments: &[&Expression],
-    call_visibility: Option<&VisibilitySyntax>,
+    call_metadata: Option<&MacroCallMetadata>,
 ) -> Option<(Vec<MacroArgument>, usize, Vec<(MetaType, bool)>)> {
     let mut matched = Vec::with_capacity(definition.parameters.len());
     let mut effective = Vec::new();
     let mut parameter_index = 0;
 
-    if definition.parameters.first() == Some(&MetaType::MacroCallVisibility) {
-        matched.push(MacroArgument::Visibility(
-            call_visibility.cloned().unwrap_or_else(private_visibility),
-        ));
+    if definition.parameters.first() == Some(&MetaType::MacroCallMetadata) {
+        matched.push(MacroArgument::Metadata(call_metadata.cloned().unwrap_or(
+            MacroCallMetadata {
+                syntax: Syntax::compiler(),
+                modifiers: Vec::new(),
+                visibility: private_visibility(),
+            },
+        )));
         parameter_index += 1;
-    } else if call_visibility.is_some() {
+    } else if call_metadata.is_some() {
         return None;
     }
 
@@ -6067,7 +6147,7 @@ fn match_macro_parameter_suffix(
             }
             None
         }
-        MetaType::MacroCallVisibility => None,
+        MetaType::MacroCallMetadata => None,
         _ => {
             let argument = arguments.get(argument_index).copied()?;
             if !meta_type_matches(expected, argument) {
@@ -6130,7 +6210,7 @@ fn modifier_argument_matches(expected: &MetaType, argument: &ModifierArgument) -
         | MetaType::Syntax
         | MetaType::SyntaxNode
         | MetaType::Visibility
-        | MetaType::MacroCallVisibility => false,
+        | MetaType::MacroCallMetadata => false,
         _ => argument
             .expression
             .as_ref()
@@ -6228,7 +6308,6 @@ fn meta_type_at_least_as_specific(left: &MetaType, right: &MetaType) -> bool {
                 | (MetaType::CallExpr, MetaType::Expr)
                 | (MetaType::UnstructuredExpr, MetaType::Expr)
                 | (MetaType::Ident(Some(_)), MetaType::Ident(None))
-                | (MetaType::MacroCallVisibility, MetaType::Visibility)
         )
 }
 
@@ -6331,7 +6410,7 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
             MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
             MetaType::Visibility => "Visibility".to_owned(),
-            MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
+            MetaType::MacroCallMetadata => "MacroCallMetadata".to_owned(),
             MetaType::Comma => "Comma".to_owned(),
             MetaType::Equals => "Equals".to_owned(),
             MetaType::FatArrow => "FatArrow".to_owned(),
@@ -6419,7 +6498,7 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
         MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
         MetaType::Visibility => "Visibility".to_owned(),
-        MetaType::MacroCallVisibility => "MacroCallVisibility".to_owned(),
+        MetaType::MacroCallMetadata => "MacroCallMetadata".to_owned(),
         MetaType::Comma => "Comma".to_owned(),
         MetaType::Equals => "Equals".to_owned(),
         MetaType::FatArrow => "FatArrow".to_owned(),
@@ -6555,8 +6634,13 @@ pub(crate) fn pattern_meta_type(pattern: &Pattern) -> Option<MetaType> {
             Type::Inferred(_) => Some(MetaType::SyntaxNode),
             ty => meta_type(ty),
         },
-        Pattern::Product(_)
-        | Pattern::Nominal(_)
+        Pattern::Product(product) => product
+            .elements
+            .iter()
+            .map(pattern_meta_type)
+            .collect::<Option<Vec<_>>>()
+            .map(MetaType::Product),
+        Pattern::Nominal(_)
         | Pattern::StringLiteral(_)
         | Pattern::Splice(_) => None,
     }
@@ -6587,7 +6671,7 @@ fn type_contains_syntax(ty: &Type) -> bool {
                 | "Modifier"
                 | "ModifiedItem"
                 | "Visibility"
-                | "MacroCallVisibility"
+                | "MacroCallMetadata"
                 | "Private"
                 | "Package"
                 | "Public"
@@ -6662,30 +6746,38 @@ fn binding_contains_syntax(binding: &Binding) -> bool {
             .is_some_and(expression_parameter_contains_syntax)
 }
 
-fn binding_uses_macro_call_visibility(binding: &Binding) -> bool {
+fn binding_uses_macro_call_metadata(binding: &Binding) -> bool {
     binding
         .annotation
         .as_ref()
-        .is_some_and(|annotation| type_contains_named(annotation, "MacroCallVisibility"))
+        .is_some_and(|annotation| type_contains_named(annotation, "MacroCallMetadata"))
         || binding.value.as_ref().is_some_and(|value| {
             let mut current = value;
             while let Expression::Function(function) = current {
-                let contains = match &function.pattern {
-                    Pattern::Binding(binding) => {
-                        type_contains_named(&binding.ty, "MacroCallVisibility")
-                    }
-                    Pattern::Wildcard(wildcard) => {
-                        type_contains_named(&wildcard.ty, "MacroCallVisibility")
-                    }
-                    _ => false,
-                };
-                if contains {
+                if pattern_uses_macro_call_metadata(&function.pattern) {
                     return true;
                 }
                 current = &function.body;
             }
             false
         })
+}
+
+fn pattern_uses_macro_call_metadata(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Binding(binding) => type_contains_named(&binding.ty, "MacroCallMetadata"),
+        Pattern::Wildcard(wildcard) => type_contains_named(&wildcard.ty, "MacroCallMetadata"),
+        Pattern::At(at) => {
+            type_contains_named(&at.binding.ty, "MacroCallMetadata")
+                || pattern_uses_macro_call_metadata(&at.pattern)
+        }
+        Pattern::Product(product) => product
+            .elements
+            .iter()
+            .any(pattern_uses_macro_call_metadata),
+        Pattern::Nominal(nominal) => pattern_uses_macro_call_metadata(&nominal.argument),
+        Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
+    }
 }
 
 fn type_contains_named(ty: &Type, expected: &str) -> bool {
@@ -7425,10 +7517,21 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
                     _ => false,
                 }
         }
-        (
-            MetaType::Visibility | MetaType::MacroCallVisibility,
-            Value::Syntax(SyntaxValue::Visibility(_)),
-        ) => true,
+        (MetaType::Visibility, Value::Syntax(SyntaxValue::Visibility(_))) => true,
+        (MetaType::MacroCallMetadata, Value::Product(fields)) => {
+            let [
+                (Some(modifiers), Value::Sequence(modifiers_value)),
+                (Some(visibility), Value::Syntax(SyntaxValue::Visibility(_))),
+            ] = fields.as_slice()
+            else {
+                return false;
+            };
+            modifiers == "modifiers"
+                && visibility == "visibility"
+                && modifiers_value
+                    .iter()
+                    .all(|value| meta_type_matches_value(&MetaType::Modifier, value))
+        }
         _ => false,
     }
 }
@@ -8103,6 +8206,13 @@ fn substitute_item(
             substitute_item(&mut modified.item, environment, diagnostics)?;
         }
         Item::VisibilityMacroInvocation(invocation) => {
+            for modifier in &mut invocation.modifiers {
+                if let Some(argument) = &mut modifier.argument
+                    && let Some(expression) = &mut argument.expression
+                {
+                    *expression = substitute_splices(expression, environment, diagnostics)?;
+                }
+            }
             invocation.expression =
                 substitute_splices(&invocation.expression, environment, diagnostics)?;
         }
@@ -8448,6 +8558,13 @@ fn alpha_rename_item(item: &mut Item, mark: u64) {
             alpha_rename_item(&mut modified.item, mark);
         }
         Item::VisibilityMacroInvocation(invocation) => {
+            for modifier in &mut invocation.modifiers {
+                if let Some(argument) = &mut modifier.argument
+                    && let Some(expression) = &mut argument.expression
+                {
+                    alpha_rename_expression(expression, mark, &mut scopes);
+                }
+            }
             alpha_rename_expression(&mut invocation.expression, mark, &mut scopes);
         }
         Item::VisibilitySplice(splice) => alpha_rename_item(&mut splice.item, mark),
@@ -8907,6 +9024,15 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
         }
         Item::VisibilityMacroInvocation(invocation) => {
             expander.freshen_syntax(&mut invocation.syntax, module, mark);
+            for modifier in &mut invocation.modifiers {
+                expander.freshen_syntax(&mut modifier.syntax, module, mark);
+                if let Some(argument) = &mut modifier.argument {
+                    expander.freshen_syntax(&mut argument.syntax, module, mark);
+                    if let Some(expression) = &mut argument.expression {
+                        expander.freshen_expression(expression, module, mark);
+                    }
+                }
+            }
             expander.freshen_syntax(&mut invocation.visibility.syntax, module, mark);
             expander.freshen_expression(&mut invocation.expression, module, mark);
         }

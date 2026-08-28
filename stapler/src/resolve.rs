@@ -5169,7 +5169,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         | "SingletonDeclaration"
         | "OpaqueDeclaration"
         | "Visibility"
-        | "MacroCallVisibility"
+        | "MacroCallMetadata"
         | "Comma"
         | "Equals"
         | "FatArrow" => Some(name),
@@ -5244,7 +5244,7 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
                     | "SingletonDeclaration"
                     | "OpaqueDeclaration"
                     | "Visibility"
-                    | "MacroCallVisibility"
+                    | "MacroCallMetadata"
                     | "Comma"
                     | "Equals"
                     | "FatArrow"

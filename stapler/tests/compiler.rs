@@ -113,8 +113,8 @@ fn with_syntax_imports(source: &str) -> String {
         ("Bracketed", source.contains("Bracketed")),
         ("Braced", source.contains("Braced")),
         (
-            "MacroCallVisibility",
-            source.contains("MacroCallVisibility"),
+            "MacroCallMetadata",
+            source.contains("MacroCallMetadata"),
         ),
         (
             "Visibility",
@@ -4178,7 +4178,7 @@ fn modified_item_can_be_destructured_and_reconstructed_losslessly() {
 }
 
 #[test]
-fn expands_visibility_aware_macros_and_contextual_visibility_splices() {
+fn expands_metadata_aware_macros_and_contextual_visibility_splices() {
     let module = type_check(concat!(
         "def normalize_visibility: Visibility -> Visibility = value => value\n",
         "def visibility_number: Visibility -> Expr = value => match value {\n",
@@ -4188,15 +4188,15 @@ fn expands_visibility_aware_macros_and_contextual_visibility_splices() {
         "    PublicReprPackage => parse_quote { 4 },\n",
         "    PublicRepr => parse_quote { 5 },\n",
         "}\n",
-        "macro define_alias = vis: MacroCallVisibility => ty: Type => {\n",
-        "    let actual = normalize_visibility vis\n",
+        "macro define_alias = metadata: MacroCallMetadata => ty: Type => {\n",
+        "    let actual = normalize_visibility metadata.visibility\n",
         "    parse_quote { $actual type alias Generated = $ty }\n",
         "}\n",
         "macro classify = before: Expr => vis: Visibility => after: Expr => {\n",
         "    let number = visibility_number vis\n",
         "    number\n",
         "}\n",
-        "macro call_visibility = vis: MacroCallVisibility => visibility_number vis\n",
+        "macro call_visibility = metadata: MacroCallMetadata => visibility_number metadata.visibility\n",
         "macro first_visibility = vis: Visibility => value: Expr => visibility_number vis\n",
         "macro final_visibility = value: Expr => vis: Visibility => visibility_number vis\n",
         "pub define_alias I32\n",
@@ -4215,7 +4215,7 @@ fn expands_visibility_aware_macros_and_contextual_visibility_splices() {
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("visibility-aware macro output should compile");
+        .expect("metadata-aware macro output should compile");
 }
 
 #[test]
@@ -4573,7 +4573,7 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
 #[test]
 fn public_repr_macro_call_can_generate_a_public_representation() {
     let module = type_check(concat!(
-        "macro define_box = vis: MacroCallVisibility => parse_quote { $vis type Box = I32 }\n",
+        "macro define_box = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility type Box = I32 } }\n",
         "pub(repr) define_box\n",
         "let boxed: Box = Box 42\n",
     ));
@@ -4586,10 +4586,10 @@ fn public_repr_macro_call_can_generate_a_public_representation() {
 }
 
 #[test]
-fn modifiers_compose_after_visibility_aware_item_calls() {
+fn modifiers_compose_after_metadata_aware_item_calls() {
     let module = type_check(concat!(
         "macro @identity: Item -> Item = item => item\n",
-        "macro define = vis: MacroCallVisibility => parse_quote { $vis let generated: I32 = 42 }\n",
+        "macro define = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility let generated: I32 = 42 } }\n",
         "@identity\n",
         "pub define\n",
         "let result: I32 = generated\n",
@@ -4603,28 +4603,61 @@ fn modifiers_compose_after_visibility_aware_item_calls() {
 }
 
 #[test]
-fn diagnoses_invalid_visibility_macro_uses() {
+fn modifiers_before_metadata_calls_are_owned_by_the_macro() {
+    let module = type_check(concat!(
+        "macro @replace: Item -> Item = _ => parse_quote { let replaced: I32 = 0 }\n",
+        "macro generate: MacroCallMetadata -> Item = (modifiers, visibility) => match modifiers {\n",
+        "    Sequence () => parse_quote { let no_modifier: I32 = 0 },\n",
+        "    _ => parse_quote { let generated: I32 = 42 },\n",
+        "}\n",
+        "@replace generate\n",
+        "let result: I32 = generated\n",
+    ));
+    assert!(module.resolved().syntax().items.iter().any(|item| {
+        matches!(item, Item::Binding(binding) if binding.name == "generated")
+    }));
+    assert!(!module.resolved().syntax().items.iter().any(|item| {
+        matches!(item, Item::Binding(binding) if binding.name == "replaced")
+    }));
+}
+
+#[test]
+fn metadata_aware_calls_can_return_expression_syntax() {
+    let module = type_check(concat!(
+        "macro expression: MacroCallMetadata -> Expr = metadata => parse_quote { 1 }\n",
+        "@ignored expression\n",
+    ));
+    assert!(module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .any(|item| matches!(item, Item::Expression(_))));
+}
+
+#[test]
+fn diagnoses_invalid_metadata_macro_uses() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     for (source, expected) in [
         (
-            "macro invalid: Expr -> MacroCallVisibility -> Expr = left => vis => left\n",
-            "macro `invalid` may use `MacroCallVisibility` only as its first parameter",
+            "macro invalid: Expr -> MacroCallMetadata -> Expr = left => metadata => left\n",
+            "macro `invalid` may use `MacroCallMetadata` only as its first parameter",
         ),
         (
-            "def invalid: MacroCallVisibility -> Visibility = value => value\n",
-            "`MacroCallVisibility` may only be the first parameter of a function-style macro",
+            "def invalid: MacroCallMetadata -> Visibility = value => value\n",
+            "`MacroCallMetadata` may only be the first parameter of a function-style macro",
         ),
         (
             "macro ordinary: Expr -> Expr = value => parse_quote { $value }\npub ordinary 1\n",
-            "macro `ordinary` has no overload whose first parameter is `MacroCallVisibility`",
+            "macro `ordinary` has no overload whose first parameter is `MacroCallMetadata`",
         ),
         (
-            "macro invalid = vis: MacroCallVisibility => parse_quote { $vis type alias Generated = I32 }\npub(repr) invalid\n",
+            "macro @ignored: Item -> Item = item => item\nmacro ordinary: Expr -> Expr = value => parse_quote { $value }\n@ignored ordinary\n",
+            "macro `ordinary` has no overload whose first parameter is `MacroCallMetadata`",
+        ),
+        (
+            "macro invalid = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility type alias Generated = I32 } }\npub(repr) invalid\n",
             "`PublicRepr` visibility requires a represented distinct type",
-        ),
-        (
-            "macro @identity: Item -> Item = item => item\nmacro expression = vis: MacroCallVisibility => parse_quote { 1 }\n@identity\npub expression\n",
-            "modifier macros may only be applied to `let`, `def`, `type`, `extern`, `trait`, or `impl` items",
         ),
         (
             "let visibility = Private\n",
@@ -4648,11 +4681,11 @@ fn diagnoses_invalid_visibility_macro_uses() {
 }
 
 #[test]
-fn implicit_macro_call_visibility_can_make_overloads_ambiguous() {
+fn implicit_macro_call_metadata_can_make_overloads_ambiguous() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let source = concat!(
         "macro choose: Expr -> Expr = value => parse_quote { $value }\n",
-        "macro choose: MacroCallVisibility -> Expr -> Expr = vis => value => parse_quote { $value }\n",
+        "macro choose: MacroCallMetadata -> Expr -> Expr = metadata => value => parse_quote { $value }\n",
         "let result = choose 1\n",
     );
     let program = ProgramLoader::new()

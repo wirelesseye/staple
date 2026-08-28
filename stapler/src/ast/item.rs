@@ -75,9 +75,12 @@ pub struct RepeatedItemSplice {
     pub name: String,
 }
 
+/// A function-style macro invocation with compiler-owned call metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VisibilityMacroInvocation {
     pub syntax: Syntax,
+    /// Prefix modifiers supplied to the macro call, in source order.
+    pub modifiers: Vec<ModifierInvocation>,
     pub visibility: VisibilitySyntax,
     pub expression: Expression,
 }

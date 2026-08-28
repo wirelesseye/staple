@@ -427,6 +427,15 @@ impl Collector<'_> {
                 self.item(&value.item, module_index);
             }
             Item::VisibilityMacroInvocation(value) => {
+                for modifier in &value.modifiers {
+                    if let Some(expression) = modifier
+                        .argument
+                        .as_ref()
+                        .and_then(|argument| argument.expression.as_ref())
+                    {
+                        self.expression(expression, module_index);
+                    }
+                }
                 self.expression(&value.expression, module_index)
             }
             Item::VisibilitySplice(value) => self.item(&value.item, module_index),

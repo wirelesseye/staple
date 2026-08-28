@@ -292,6 +292,19 @@ impl<'a> Classifier<'a> {
                 self.item(&value.item, resolved);
             }
             Item::VisibilityMacroInvocation(value) => {
+                for modifier in &value.modifiers {
+                    if let Some(namespace) = &modifier.namespace {
+                        self.mark_first(&modifier.syntax, namespace, NAMESPACE, 0, 1);
+                    }
+                    self.mark_last(&modifier.syntax, &modifier.name, MACRO, 0, 1);
+                    if let Some(expression) = modifier
+                        .argument
+                        .as_ref()
+                        .and_then(|argument| argument.expression.as_ref())
+                    {
+                        self.expression(expression, resolved);
+                    }
+                }
                 self.visibility(&value.visibility);
                 self.expression(&value.expression, resolved);
             }
@@ -1762,6 +1775,7 @@ mod tests {
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
             .with_module_root(&root)
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();

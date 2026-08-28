@@ -392,10 +392,31 @@ impl Grammar {
         let previous = self.newline_terminates_expression;
         self.newline_terminates_expression = true;
         let item_start = self.position;
+        if let Some((modifiers, visibility, expression)) = self.try_parse_macro_call_metadata()? {
+            self.newline_terminates_expression = previous;
+            return Ok(Item::VisibilityMacroInvocation(VisibilityMacroInvocation {
+                syntax: self.syntax(item_start),
+                modifiers,
+                visibility,
+                expression,
+            }));
+        }
         let docs = self.leading_doc_comments(item_start);
         if !docs.is_empty() {
             self.position = self.next_non_trivia(item_start);
-            if !self.at(TokenKind::At) {
+            let starts_metadata_call = if self.at(TokenKind::At) {
+                true
+            } else {
+                let checkpoint = self.position;
+                let next_syntax_id = self.next_syntax_id;
+                let starts_metadata_call = self.eat(TokenKind::Pub)
+                    && self.parse_visibility_after_pub().is_ok()
+                    && self.peek() == Some(TokenKind::Identifier);
+                self.position = checkpoint;
+                self.next_syntax_id = next_syntax_id;
+                starts_metadata_call
+            };
+            if !starts_metadata_call {
                 let mut item = self.parse_item()?;
                 if !attach_parsed_docs(&mut item, docs) {
                     return Err(self.error("documentation comments require a named declaration"));
@@ -410,6 +431,9 @@ impl Grammar {
             while self.at(TokenKind::At) {
                 modifiers.push(self.parse_modifier_invocation()?);
             }
+            // A modifier prefix followed by a macro call is call metadata,
+            // rather than a `ModifiedItem`. Declarations retain the existing
+            // modifier wrapper and are recognized by their item keyword.
             let item = Box::new(self.parse_item()?);
             self.newline_terminates_expression = previous;
             return Ok(Item::Modified(ModifiedItem {
@@ -441,7 +465,7 @@ impl Grammar {
                 item,
             }));
         }
-        let (visibility, representation_visibility, visibility_kind) = if self.eat(TokenKind::Pub) {
+        let (visibility, representation_visibility, _) = if self.eat(TokenKind::Pub) {
             self.parse_visibility_after_pub()?
         } else {
             (
@@ -450,29 +474,6 @@ impl Grammar {
                 VisibilityKind::Private,
             )
         };
-        let visibility_syntax = if visibility_kind != VisibilityKind::Private {
-            Some(VisibilitySyntax {
-                syntax: self.syntax(item_start),
-                kind: visibility_kind,
-            })
-        } else {
-            None
-        };
-        if let Some(visibility) = visibility_syntax
-            && self.peek() == Some(TokenKind::Identifier)
-        {
-            let previous_macro_punctuation = self.macro_punctuation_arguments;
-            self.macro_punctuation_arguments = true;
-            let expression = self.parse_expression();
-            self.macro_punctuation_arguments = previous_macro_punctuation;
-            let expression = expression?;
-            self.newline_terminates_expression = previous;
-            return Ok(Item::VisibilityMacroInvocation(VisibilityMacroInvocation {
-                syntax: self.syntax(item_start),
-                visibility,
-                expression,
-            }));
-        }
         if representation_visibility != Visibility::Private && self.peek() != Some(TokenKind::Type) {
             return Err(self.error("representation visibility may only modify a type declaration"));
         }
@@ -494,6 +495,61 @@ impl Grammar {
         };
         self.newline_terminates_expression = previous;
         item
+    }
+
+    /// Attempts to parse a complete metadata-aware macro invocation prefix.
+    /// This is speculative so documentation comments interleaved with explicit
+    /// modifiers can be kept in one ordered metadata sequence while ordinary
+    /// declaration modifiers retain their existing parsing behavior.
+    fn try_parse_macro_call_metadata(
+        &mut self,
+    ) -> Result<Option<(Vec<ModifierInvocation>, VisibilitySyntax, Expression)>, ParseError> {
+        let checkpoint = self.position;
+        let next_syntax_id = self.next_syntax_id;
+        let mut modifiers = Vec::new();
+        loop {
+            let docs = self.leading_doc_comments(self.position);
+            if !docs.is_empty() {
+                modifiers.extend(self.doc_comment_modifiers(self.position));
+                continue;
+            }
+            if self.at(TokenKind::At) {
+                modifiers.push(self.parse_modifier_invocation()?);
+                continue;
+            }
+            break;
+        }
+        let visibility_start = self.next_non_trivia(self.position);
+        let visibility_kind = if self.eat(TokenKind::Pub) {
+            let (_, _, kind) = self.parse_visibility_after_pub()?;
+            kind
+        } else {
+            VisibilityKind::Private
+        };
+        if (modifiers.is_empty() && visibility_kind == VisibilityKind::Private)
+            || self.peek() != Some(TokenKind::Identifier)
+        {
+            self.position = checkpoint;
+            self.next_syntax_id = next_syntax_id;
+            return Ok(None);
+        }
+        let visibility = if visibility_kind == VisibilityKind::Private {
+            VisibilitySyntax {
+                syntax: Syntax::compiler(),
+                kind: visibility_kind,
+            }
+        } else {
+            VisibilitySyntax {
+                syntax: self.syntax(visibility_start),
+                kind: visibility_kind,
+            }
+        };
+        let previous_macro_punctuation = self.macro_punctuation_arguments;
+        self.macro_punctuation_arguments = true;
+        let expression = self.parse_expression();
+        self.macro_punctuation_arguments = previous_macro_punctuation;
+        let expression = expression?;
+        Ok(Some((modifiers, visibility, expression)))
     }
 
     fn parse_visibility_after_pub(

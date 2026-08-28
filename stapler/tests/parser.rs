@@ -1075,9 +1075,9 @@ fn parses_triple_slash_docs_on_named_declarations_and_members() {
 }
 
 #[test]
-fn parses_visibility_aware_macro_calls_and_splices_losslessly() {
+fn parses_metadata_aware_macro_calls_losslessly() {
     let source = concat!(
-        "macro define = vis: MacroCallVisibility => ty: Type => quote { $vis type Generated = $ty }\n",
+        "macro define = metadata: MacroCallMetadata => ty: Type => quote { type Generated = $ty }\n",
         "pub define I32\n",
         "pub(repr) define I32\n",
         "configure value pub I32\n",
@@ -1100,7 +1100,7 @@ fn parses_visibility_aware_macro_calls_and_splices_losslessly() {
     assert!(matches!(
         &quote.template,
         stapler::QuoteTemplate::Item(item)
-            if matches!(item.as_ref(), Item::VisibilitySplice(_))
+            if matches!(item.as_ref(), Item::TypeDeclaration(_))
     ));
     assert!(matches!(
         &root.items[1],
@@ -1112,6 +1112,66 @@ fn parses_visibility_aware_macro_calls_and_splices_losslessly() {
         Item::VisibilityMacroInvocation(invocation)
             if invocation.visibility.kind == stapler::VisibilityKind::PublicRepr
     ));
+}
+
+#[test]
+fn parses_modifier_prefixes_as_macro_call_metadata() {
+    let source = concat!(
+        "macro define = MacroCallMetadata => quote { let generated: I32 = 42 }\n",
+        "/// generated documentation\n",
+        "@outer\n",
+        "@inner\n",
+        "pub define\n",
+    );
+    let root = parse(source).expect("metadata prefixes should parse");
+    assert_eq!(root.text(), source);
+    let Item::VisibilityMacroInvocation(invocation) = &root.items[1] else {
+        panic!("expected metadata macro invocation");
+    };
+    assert_eq!(invocation.visibility.kind, stapler::VisibilityKind::Public);
+    assert_eq!(invocation.modifiers.len(), 3);
+    assert_eq!(invocation.modifiers[0].name, "doc");
+    assert_eq!(invocation.modifiers[1].name, "outer");
+    assert_eq!(invocation.modifiers[2].name, "inner");
+}
+
+#[test]
+fn parses_doc_comments_before_metadata_calls() {
+    let source = concat!(
+        "macro define = MacroCallMetadata => quote { let generated: I32 = 42 }\n",
+        "/// generated documentation\n",
+        "pub define\n",
+    );
+    let root = parse(source).expect("documentation should become metadata");
+    let Item::VisibilityMacroInvocation(invocation) = &root.items[1] else {
+        panic!("expected metadata macro invocation");
+    };
+    assert_eq!(invocation.modifiers.len(), 1);
+    assert_eq!(invocation.modifiers[0].name, "doc");
+    assert_eq!(invocation.modifiers[0].doc.as_deref(), Some(" generated documentation"));
+}
+
+#[test]
+fn preserves_doc_comments_interleaved_with_metadata_modifiers() {
+    let source = concat!(
+        "macro define = MacroCallMetadata => quote { let generated: I32 = 42 }\n",
+        "@outer\n",
+        "/// generated documentation\n",
+        "@inner\n",
+        "pub define\n",
+    );
+    let root = parse(source).expect("interleaved metadata prefixes should parse");
+    let Item::VisibilityMacroInvocation(invocation) = &root.items[1] else {
+        panic!("expected metadata macro invocation");
+    };
+    assert_eq!(
+        invocation
+            .modifiers
+            .iter()
+            .map(|modifier| modifier.name.as_str())
+            .collect::<Vec<_>>(),
+        ["outer", "doc", "inner"]
+    );
 }
 
 #[test]

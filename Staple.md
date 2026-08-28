@@ -125,7 +125,7 @@ macro collect =
 The sequence consumes zero or more consecutive top-level arguments. Matching
 starts greedily and backs up until the remaining parameters match, so the
 following `Equals` terminates `values`. `Visibility` and
-`MacroCallVisibility` do not count as terminators because they may supply an
+`MacroCallMetadata` do not count as terminators because they may supply an
 implicit `Private` value without consuming source. A top-level sequence may be
 the final parameter, in which case it has no required suffix and simply
 consumes the maximal run of consecutive matching arguments; a longer complete
@@ -371,31 +371,41 @@ and optional opaque representation. All other items match `UnstructuredItem`
 and remain lossless but opaque. `BindingPattern` and `NominalPattern` provide
 the structured pattern construction needed by declaration modifiers.
 
-Visibility is also compiler-owned syntax. Its three atomic variants are
-`Private`, `Public`, and `PublicRepr`. They can be matched and passed through
-compile-time helpers accepting `Visibility`, but cannot survive expansion as
-runtime values. `MacroCallVisibility` is a special marker permitted only as
-the first parameter of a function-style macro:
+Visibility is also compiler-owned syntax. Its atomic variants are `Private`,
+`Package`, `Public`, `PublicReprPackage`, and `PublicRepr`. They can be matched
+and passed through compile-time helpers accepting `Visibility`, but cannot
+survive expansion as runtime values. `MacroCallMetadata` is a compiler-owned
+product permitted only as the first parameter of a function-style macro:
+
+```staple
+pub type MacroCallMetadata = (
+    modifiers: Sequence Modifier,
+    visibility: Visibility,
+)
+```
 
 ```staple
 macro define_alias =
-    vis: MacroCallVisibility =>
+    metadata: MacroCallMetadata =>
     ty: Type =>
-    parse_quote { $vis type alias Generated = $ty }
+    {
+        let visibility = metadata.visibility
+        parse_quote { $visibility type alias Generated = $ty }
+    }
 
 pub define_alias I32
 ```
 
-`pub` or `pub(repr)` before the macro name supplies `Public` or `PublicRepr`.
-An unprefixed call supplies `Private`. The captured value is accepted anywhere
-that expects `Visibility`; this is a compiler-owned compatibility rule rather
-than general language subtyping. A prefixed call is parsed in module-item
-grammar, but its macro may return either an item or an expression. Normal
-syntax placement rules still reject type, pattern, or visibility results that
-have no valid placement.
+The metadata contains the ordered `Sequence Modifier` prefix and the supplied
+visibility. `pub`, `pub(package)`, `pub(repr(package))`, and `pub(repr)` before
+the macro name supply the corresponding visibility; an unprefixed call supplies
+`Private`, and no-prefix calls receive an empty modifier sequence. A prefixed
+call is parsed in module-item grammar, but its macro may return either an item
+or an expression. Normal syntax placement rules still reject type, pattern, or
+visibility results that have no valid placement.
 
 An ordinary `Visibility` parameter may appear in any position. At that
-position `pub` or `pub(repr)` consumes one source atom; if neither is present,
+position each visibility form consumes one source atom; if none is present,
 `Private` is injected without consuming the following argument:
 
 ```staple
@@ -409,24 +419,25 @@ configure value pub I32
 configure value pub(repr) I32
 ```
 
-Visibility-aware overload matching ranks candidates by source atoms consumed,
+Metadata-aware overload matching ranks candidates by source atoms consumed,
 not by the number of parameters after implicit values are inserted. Therefore
 an ordinary overload and an implicitly-private overload consuming the same
 source syntax are ambiguous. An explicit prefix before the macro name selects
-only overloads beginning with `MacroCallVisibility`.
+only overloads beginning with `MacroCallMetadata`.
 
 `Visibility` is also a `parse_quote` result type, following the same
 absence-means-`Private` convention: `parse_quote { }: Visibility` yields
-`Private`, `parse_quote { pub }: Visibility` yields `Public`, and
-`parse_quote { pub(repr) }: Visibility` yields `PublicRepr`.
+`Private`, while `pub`, `pub(package)`, `pub(repr(package))`, and
+`pub(repr)` yield `Public`, `Package`, `PublicReprPackage`, and `PublicRepr`.
 
 Inside an item quotation, a visibility value may be spliced immediately before
-a declaration. `Private` emits no prefix, `Public` emits `pub`, and
+a declaration. `Private` emits no prefix, `Package` emits `pub(package)`,
+`Public` emits `pub`, `PublicReprPackage` emits `pub(repr(package))`, and
 `PublicRepr` emits `pub(repr)`. Existing declaration rules are checked after
-substitution. `PublicRepr` is valid on represented distinct types and on
-singleton types, where representation visibility is a no-op.
-Modifiers surrounding a visibility-aware call run after that call has produced
-its item.
+substitution. Representation visibility is valid on represented distinct types
+and on singleton types, where it is a no-op.
+Modifiers surrounding a metadata-aware call belong to the metadata value and
+are not automatically applied after the call has produced its result.
 
 Quotations may contain multiple items and return `Sequence Item`. Such a
 sequence can replace a top-level macro invocation or be inserted into an inline

@@ -115,7 +115,18 @@ impl DeclarationCollector<'_> {
     fn item(&mut self, item: &Item) {
         match item {
             Item::Modified(value) => self.item(&value.item),
-            Item::VisibilityMacroInvocation(value) => self.expression(&value.expression),
+            Item::VisibilityMacroInvocation(value) => {
+                for modifier in &value.modifiers {
+                    if let Some(expression) = modifier
+                        .argument
+                        .as_ref()
+                        .and_then(|argument| argument.expression.as_ref())
+                    {
+                        self.expression(expression);
+                    }
+                }
+                self.expression(&value.expression)
+            }
             Item::VisibilitySplice(value) => self.item(&value.item),
             Item::RepeatedItemSplice(_) => {}
             Item::Submodule(value) => {
@@ -393,7 +404,18 @@ impl Collector<'_> {
                 }
                 self.item(&value.item);
             }
-            Item::VisibilityMacroInvocation(value) => self.expression(&value.expression),
+            Item::VisibilityMacroInvocation(value) => {
+                for modifier in &value.modifiers {
+                    if let Some(expression) = modifier
+                        .argument
+                        .as_ref()
+                        .and_then(|argument| argument.expression.as_ref())
+                    {
+                        self.expression(expression);
+                    }
+                }
+                self.expression(&value.expression)
+            }
             Item::VisibilitySplice(value) => self.item(&value.item),
             Item::RepeatedItemSplice(_) => {}
             Item::UseDeclaration(value) => self.use_declaration(value),
@@ -1583,6 +1605,7 @@ mod tests {
         let program = ProgramLoader::new()
             .with_module_root(&root)
             .with_package_root(&root_path)
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1616,6 +1639,7 @@ mod tests {
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
             .with_module_root(&root)
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();

@@ -91,7 +91,7 @@ fn with_syntax_imports(source: &str) -> String {
         "SyntaxNode",
         "Ident",
         "CallExpr",
-        "MacroCallVisibility",
+        "MacroCallMetadata",
     ] {
         if source.contains(name) {
             names.push(name);
@@ -1713,6 +1713,7 @@ fn package_root_owns_items_and_entry_has_its_relative_module_name() {
     let program = ProgramLoader::new()
         .with_module_root(fixture.root.join("src"))
         .with_package_root(fixture.root.join("src/root.sta"))
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
         .load_path(&fixture.root.join("src/main.sta"))
         .expect("configured package root and entry should load");
     let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1735,6 +1736,7 @@ fn missing_package_root_still_anchors_entry_and_sibling_modules() {
 
     let program = ProgramLoader::new()
         .with_package_root(fixture.root.join("src/root.sta"))
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
         .load_path(&fixture.root.join("src/main.sta"))
         .expect("an absent root module should remain a valid package anchor");
     assert!(program.package_root().is_none());
@@ -1962,7 +1964,7 @@ fn imports_function_and_modifier_macros_with_the_same_name() {
 }
 
 #[test]
-fn imports_and_reexports_visibility_aware_macros() {
+fn imports_and_reexports_metadata_aware_macros() {
     let fixture = Fixture::new();
     fixture.write(
         "main.sta",
@@ -1976,15 +1978,15 @@ fn imports_and_reexports_visibility_aware_macros() {
     fixture.write(
         "helpers.sta",
         concat!(
-            "pub macro define = vis: MacroCallVisibility => parse_quote {\n",
-            "    $vis let generated: I32 = 42\n",
-            "}\n",
+            "pub macro define = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote {\n",
+            "    $visibility let generated: I32 = 42\n",
+            "} }\n",
         ),
     );
 
     fixture
         .compile()
-        .expect("visibility-aware macros should survive imports and re-exports");
+        .expect("metadata-aware macros should survive imports and re-exports");
 }
 
 #[test]

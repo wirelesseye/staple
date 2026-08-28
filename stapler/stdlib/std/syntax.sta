@@ -93,8 +93,12 @@ pub(repr) type ModifiedItem = (
 /// The syntax category for items.
 pub type alias Item = ModifiedItem | TypeDeclarationItem | UnstructuredItem
 
-/// Compiler-owned visibility syntax. `MacroCallVisibility` is an invocation
-/// marker whose value is usable as `Visibility` in compile-time code.
+/// Compiler-owned metadata supplied to a function-style macro invocation.
+/// Modifiers are ordered outermost first.
+pub type MacroCallMetadata = (
+    modifiers: Sequence Modifier,
+    visibility: Visibility,
+)
 /// Private visibility syntax.
 pub type Private
 /// Package-scoped visibility syntax.
@@ -107,9 +111,6 @@ pub type PublicReprPackage
 pub type PublicRepr
 /// The syntax category for visibility markers.
 pub type alias Visibility = Private | Package | Public | PublicReprPackage | PublicRepr
-/// Visibility supplied by a visibility-aware macro invocation.
-pub type MacroCallVisibility = opaque
-
 /// An arbitrary lossless syntax fragment. `SyntaxNode` is exactly one structural
 /// node; delimiter nodes retain their complete opaque contents.
 /// An opaque lossless syntax fragment.

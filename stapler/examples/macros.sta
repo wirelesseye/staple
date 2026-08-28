@@ -19,7 +19,7 @@ use std.syntax.(
     Parenthesized,
     Bracketed,
     Braced,
-    MacroCallVisibility,
+    MacroCallMetadata,
 )
 
 // Parameters consume syntax rather than evaluated runtime values. Expr rejects
@@ -131,13 +131,16 @@ macro @duplicate: Item -> Sequence Item = _ => parse_quote {
 @duplicate
 def duplicated_original = () => 0
 
-// MacroCallVisibility receives Private, Public, or PublicRepr from the call
-// prefix. Identifier and type syntax can be spliced into declaration positions.
-macro define_alias: MacroCallVisibility -> Ident String -> Type -> Item =
-    visibility =>
+// MacroCallMetadata receives ordered modifiers and Private, Public, Package,
+// or representation visibility from the call prefix.
+macro define_alias: MacroCallMetadata -> Ident String -> Type -> Item =
+    metadata =>
     name =>
     ty =>
-    parse_quote { $visibility type alias $name = $ty }
+    {
+        let visibility = metadata.visibility
+        parse_quote { $visibility type alias $name = $ty }
+    }
 
 pub define_alias PublicAnswer I32
 let public_answer: PublicAnswer = 42
