@@ -943,7 +943,7 @@ fn supports_repeated_spread_and_erased_product_references() {
     let llvm = generator
         .compile_module(&module)
         .expect("product extensions should generate LLVM");
-    assert!(llvm.contains("erased_ref.length"));
+    assert!(llvm.contains("slice.length"));
     assert!(llvm.contains("index.out_of_bounds"));
     assert!(llvm.contains("llvm.trap"));
 }
@@ -2151,7 +2151,7 @@ fn rejects_erased_products_outside_refs_and_ref_destructuring() {
         .check(resolve(
             "use std.slice.Slice\nlet fixed: Ref I32[2] = Ref (1, 2)\nlet erased: Slice I32 = fixed\nlet Ref values = erased\n",
         ))
-        .expect_err_diagnostics("an erased reference cannot be destructured");
+        .expect_err_diagnostics("a slice cannot be destructured as a Ref");
     assert!(
         diagnostics
             .iter()
@@ -2233,7 +2233,7 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
         .check(resolve(
             "use std.slice.Slice\nextern \"c\" { invalid: Slice I32 -> I32 }\n",
         ))
-        .expect_err_diagnostics("erased references must not cross the FFI");
+        .expect_err_diagnostics("slices must not cross the FFI");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -2245,28 +2245,13 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
 fn enforces_implicit_sized_and_supports_question_sized_parameters() {
     type_check(concat!(
         "use std.slice.Slice\n",
-        "def preserve: <T where ?Sized T> Ref T -> Ref T = value => value\n",
+        "def preserve_slice: <T> Slice T -> Slice T = value => value\n",
         "def explicitly_sized: <T where ?Sized T, Sized T> Ref T -> Ref T = value => value\n",
         "let fixed: Ref I32[2] = Ref (1, 2)\n",
         "let erased: Slice I32 = fixed\n",
-        "let same: Slice I32 = preserve erased\n",
+        "let same: Slice I32 = preserve_slice erased\n",
         "let same_fixed: Ref I32[2] = explicitly_sized fixed\n",
     ));
-
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "use std.slice.Slice\n",
-            "def sized_only: <T> Ref T -> Ref T = value => value\n",
-            "let fixed: Ref I32[2] = Ref (1, 2)\n",
-            "let erased: Slice I32 = fixed\n",
-            "let invalid = sized_only erased\n",
-        )))
-        .expect_err_diagnostics("ordinary generic parameters have an implicit Sized bound");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("implicit `Sized` bound") })
-    );
 
     let diagnostics = TypeChecker::new()
         .check(resolve(

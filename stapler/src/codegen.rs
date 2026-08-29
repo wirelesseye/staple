@@ -16,7 +16,7 @@ use inkwell::{
 };
 
 use crate::typecheck::{
-    contains_type_parameter, erased_ref_length, infer_type_parameters, select_sum_alternative,
+    contains_type_parameter, infer_type_parameters, select_sum_alternative, slice_ref_length,
     substitute_type,
 };
 use crate::{
@@ -3016,17 +3016,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     let BasicValueEnum::StructValue(reference) = value else {
                         return Err(Diagnostic::new(
                             access.value.syntax().span.clone(),
-                            "erased product reference has an invalid representation",
+                            "slice has an invalid representation",
                         ));
                     };
                     let pointer = self
                         .builder
-                        .build_extract_value(reference, 0, "erased_ref.pointer")
+                        .build_extract_value(reference, 0, "slice.pointer")
                         .map_err(compiler_diagnostic)?
                         .into_pointer_value();
                     let length = self
                         .builder
-                        .build_extract_value(reference, 1, "erased_ref.length")
+                        .build_extract_value(reference, 1, "slice.length")
                         .map_err(compiler_diagnostic)?
                         .into_int_value();
                     let position = self.size_type.const_int(index as u64, false);
@@ -3805,27 +3805,24 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             .const_int(product.elements.len() as u64, false),
                     ))
                 }
-                CheckedType::ErasedProduct(_) => {
-                    let BasicValueEnum::StructValue(reference) = value else {
-                        return Err(Diagnostic::new(
-                            span,
-                            "erased reference has an invalid representation",
-                        ));
-                    };
-                    let pointer = self
-                        .builder
-                        .build_extract_value(reference, 0, "index.pointer")
-                        .map_err(compiler_diagnostic)?
-                        .into_pointer_value();
-                    let length = self
-                        .builder
-                        .build_extract_value(reference, 1, "index.length")
-                        .map_err(compiler_diagnostic)?
-                        .into_int_value();
-                    Ok((pointer, length))
-                }
                 _ => Err(Diagnostic::new(span, "invalid structural Index target")),
             },
+            CheckedType::Slice(_) => {
+                let BasicValueEnum::StructValue(slice) = value else {
+                    return Err(Diagnostic::new(span, "slice has an invalid representation"));
+                };
+                let pointer = self
+                    .builder
+                    .build_extract_value(slice, 0, "index.pointer")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let length = self
+                    .builder
+                    .build_extract_value(slice, 1, "index.length")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                Ok((pointer, length))
+            }
             _ => Err(Diagnostic::new(span, "invalid structural Index target")),
         }
     }
@@ -3858,7 +3855,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 self.size_type
                     .const_int(product.elements.len() as u64, false),
             ),
-            CheckedType::Ref(_) => {
+            CheckedType::Ref(_) | CheckedType::Slice(_) => {
                 let reference = self
                     .builder
                     .build_load(
@@ -5250,10 +5247,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Ok(value)
         } else if matches!(
             (source, target),
-            (CheckedType::Ref(_), CheckedType::Ref(target))
-                if matches!(target.as_ref(), CheckedType::ErasedProduct(_))
+            (CheckedType::Ref(_), CheckedType::Slice(_))
         ) {
-            self.coerce_erased_ref_value(value, source, target, span)
+            self.coerce_slice_ref_value(value, source, target, span)
         } else if matches!(target, CheckedType::Sum(_)) {
             self.coerce_sum_value(value, source, target, span)
         } else {
@@ -5374,7 +5370,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         length: inkwell::values::IntValue<'context>,
         span: Span,
     ) -> CodeGenerationResult<inkwell::values::StructValue<'context>> {
-        let mut value = self.erased_ref_type().const_zero();
+        let mut value = self.slice_type().const_zero();
         value = self
             .builder
             .build_insert_value(value, pointer, 0, "string.pointer")
@@ -5622,7 +5618,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map_err(compiler_diagnostic)
     }
 
-    fn erased_ref_type(&self) -> inkwell::types::StructType<'context> {
+    fn slice_type(&self) -> inkwell::types::StructType<'context> {
         self.context.struct_type(
             &[
                 self.context.ptr_type(AddressSpace::default()).into(),
@@ -5632,19 +5628,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         )
     }
 
-    fn coerce_erased_ref_value(
+    fn coerce_slice_ref_value(
         &self,
         value: AnyValueEnum<'context>,
         source: &CheckedType,
         target: &CheckedType,
         span: Span,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let (CheckedType::Ref(source), CheckedType::Ref(target)) = (source, target) else {
-            return Err(Diagnostic::new(span, "invalid erased reference coercion"));
-        };
-        let length = erased_ref_length(source, target)
-            .filter(|length| *length != usize::MAX)
-            .ok_or_else(|| Diagnostic::new(span.clone(), "invalid erased reference coercion"))?;
+        let length = slice_ref_length(source, target)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "invalid slice coercion"))?;
         let BasicValueEnum::PointerValue(pointer) = value_as_basic(value).ok_or_else(|| {
             Diagnostic::new(span.clone(), "invalid fixed reference representation")
         })?
@@ -5654,10 +5646,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "invalid fixed reference representation",
             ));
         };
-        let mut result = self.erased_ref_type().const_zero();
+        let mut result = self.slice_type().const_zero();
         result = self
             .builder
-            .build_insert_value(result, pointer, 0, "erased_ref.pointer")
+            .build_insert_value(result, pointer, 0, "slice.pointer")
             .map_err(compiler_diagnostic)?
             .into_struct_value();
         result = self
@@ -5666,7 +5658,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 result,
                 self.size_type.const_int(length as u64, false),
                 1,
-                "erased_ref.length",
+                "slice.length",
             )
             .map_err(compiler_diagnostic)?
             .into_struct_value();
@@ -6581,12 +6573,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let Some(BasicValueEnum::StructValue(reference)) = value_as_basic(value) else {
                     return Err(Diagnostic::new(
                         call.argument.syntax().span.clone(),
-                        "length requires an erased product reference",
+                        "length requires a slice",
                     ));
                 };
                 return self
                     .builder
-                    .build_extract_value(reference, 1, "erased_ref.length")
+                    .build_extract_value(reference, 1, "slice.length")
                     .map(|value| value.as_any_value_enum())
                     .map_err(compiler_diagnostic);
             }
@@ -6600,7 +6592,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         Diagnostic::new(call.syntax.span.clone(), "unchecked from_ref result")
                     })?;
                 let value = self.compile_expression(environment, &call.argument)?;
-                return self.coerce_erased_ref_value(
+                return self.coerce_slice_ref_value(
                     value,
                     &source_type,
                     &target_type,
@@ -9088,11 +9080,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     )
                 })
                 .and_then(|representation| self.compile_type(representation)),
-            CheckedType::Ref(payload)
-                if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)) =>
-            {
-                Ok(self.erased_ref_type().into())
-            }
+            CheckedType::Slice(_) => Ok(self.slice_type().into()),
             CheckedType::Ref(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::Buffer(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::ErasedProduct(_) => Err(Diagnostic::new(
@@ -9751,7 +9739,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .into_int_value();
         let data = self.buffer_data_pointer(buffer, llvm_element)?;
         self.register_gc_interior(data, buffer)?;
-        let mut result = self.erased_ref_type().const_zero();
+        let mut result = self.slice_type().const_zero();
         result = self
             .builder
             .build_insert_value(result, data, 0, "buffer.slice.pointer")

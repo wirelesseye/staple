@@ -177,6 +177,7 @@ pub enum CheckedType {
     String,
     StringLiteralSet(Vec<String>),
     Ref(Box<CheckedType>),
+    Slice(Box<CheckedType>),
     Buffer(Box<CheckedType>),
     ErasedProduct(Box<CheckedType>),
     CString,
@@ -211,9 +212,7 @@ pub enum CheckedType {
 }
 
 fn expected_string_representation() -> CheckedType {
-    CheckedType::Ref(Box::new(CheckedType::ErasedProduct(Box::new(
-        CheckedType::U8,
-    ))))
+    CheckedType::Slice(Box::new(CheckedType::U8))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -648,11 +647,7 @@ impl CheckedType {
         match self {
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => false,
             Self::CPointer { pointee } => pointee.is_fully_known(),
-            Self::Ref(value) => {
-                matches!(value.as_ref(), Self::ErasedProduct(element) if element.is_fully_known())
-                    || value.is_fully_known()
-            }
-            Self::Buffer(value) => value.is_fully_known(),
+            Self::Ref(value) | Self::Slice(value) | Self::Buffer(value) => value.is_fully_known(),
             Self::ErasedProduct(_) => false,
             Self::Product(product) => product
                 .elements
@@ -706,6 +701,7 @@ impl CheckedType {
             Self::Distinct { representation, .. } => representation.is_sized(),
             // These values all have a statically known handle or scalar representation.
             Self::Ref(_)
+            | Self::Slice(_)
             | Self::Buffer(_)
             | Self::CPointer { .. }
             | Self::Function(_)
@@ -757,12 +753,8 @@ impl fmt::Display for CheckedType {
                 }
                 Ok(())
             }
-            Self::Ref(value) => match value.as_ref() {
-                Self::ErasedProduct(element) => {
-                    format_type_application(formatter, "Slice", element)
-                }
-                _ => format_type_application(formatter, "Ref", value),
-            },
+            Self::Ref(value) => format_type_application(formatter, "Ref", value),
+            Self::Slice(value) => format_type_application(formatter, "Slice", value),
             Self::Buffer(value) => format_type_application(formatter, "Buffer", value),
             Self::ErasedProduct(value) => write!(formatter, "{value}[]"),
             Self::CString => formatter.write_str("CString"),
@@ -2851,9 +2843,7 @@ impl TypeChecker {
                     .filter(|value_type| matches!(
                         value_type,
                         CheckedType::Function(function)
-                            if matches!(function.parameter.as_ref(),
-                                CheckedType::Ref(payload)
-                                    if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)))
+                            if matches!(function.parameter.as_ref(), CheckedType::Slice(_))
                                 && *function.result == CheckedType::USize
                     ))
                     .unwrap_or(CheckedType::Error),
@@ -2865,9 +2855,7 @@ impl TypeChecker {
                         value_type,
                         CheckedType::Function(function)
                             if matches!(function.parameter.as_ref(), CheckedType::Ref(_))
-                                && matches!(function.result.as_ref(),
-                                    CheckedType::Ref(payload)
-                                        if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)))
+                                && matches!(function.result.as_ref(), CheckedType::Slice(_))
                     ))
                     .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::BufferWithCapacity
@@ -4798,6 +4786,14 @@ impl TypeChecker {
                         }
                         self.bind_pattern_types(module, &pattern.argument, payload);
                     }
+                    CheckedType::Slice(_)
+                        if module.builtin_type(expected_id) == Some(BuiltinType::Ref) =>
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            pattern.syntax.span.clone(),
+                            "a slice cannot be destructured as a `Ref`",
+                        ));
+                    }
                     CheckedType::Distinct {
                         id, representation, ..
                     } if *id == expected_id => {
@@ -6160,27 +6156,10 @@ impl TypeChecker {
                     }
                     let element = match &argument_type {
                         CheckedType::Ref(payload) => match payload.as_ref() {
-                            CheckedType::ErasedProduct(_) => {
-                                self.diagnostics.push(Diagnostic::new(
-                                    call.argument.syntax().span.clone(),
-                                    "`from_ref` requires a fixed-size `Ref`, found a `Slice`",
-                                ));
-                                None
-                            }
                             CheckedType::Product(product) if !product.variadic => {
                                 match product.elements.as_slice() {
                                     [] => match expected {
-                                        Some(CheckedType::Ref(expected_payload))
-                                            if matches!(
-                                                expected_payload.as_ref(),
-                                                CheckedType::ErasedProduct(_)
-                                            ) =>
-                                        {
-                                            let CheckedType::ErasedProduct(expected_element) =
-                                                expected_payload.as_ref()
-                                            else {
-                                                unreachable!()
-                                            };
+                                        Some(CheckedType::Slice(expected_element)) => {
                                             Some(expected_element.as_ref().clone())
                                         }
                                         _ => {
@@ -6219,9 +6198,7 @@ impl TypeChecker {
                         }
                     };
                     let result = match element {
-                        Some(element) => CheckedType::Ref(Box::new(CheckedType::ErasedProduct(
-                            Box::new(element),
-                        ))),
+                        Some(element) => CheckedType::Slice(Box::new(element)),
                         None => CheckedType::Error,
                     };
                     return self.finish_expression_type(expression, result, expected);
@@ -6879,9 +6856,7 @@ impl TypeChecker {
                     }
                     if let Some(expected_result) = expected
                         && !matches!(expected_result, CheckedType::Sum(_))
-                        && !matches!(expected_result,
-                            CheckedType::Ref(payload)
-                                if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)))
+                        && !matches!(expected_result, CheckedType::Slice(_))
                         && !checked_type_contains_erased_product(&raw_callee_type)
                     {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
@@ -6907,11 +6882,8 @@ impl TypeChecker {
                             Some(&expected_callee),
                         );
                     }
-                    let instantiation_expected = expected.filter(|expected| {
-                        !matches!(expected,
-                            CheckedType::Ref(payload)
-                                if matches!(payload.as_ref(), CheckedType::ErasedProduct(_)))
-                    });
+                    let instantiation_expected =
+                        expected.filter(|expected| !matches!(expected, CheckedType::Slice(_)));
                     let callee_type = self.instantiate_function_use(
                         raw_callee_type.clone(),
                         Some(&argument_type),
@@ -6986,6 +6958,8 @@ impl TypeChecker {
                 if let CheckedType::Ref(payload) = accessible {
                     dereference = Some(payload.as_ref().clone());
                     accessible = *payload;
+                } else if let CheckedType::Slice(element) = accessible {
+                    accessible = CheckedType::ErasedProduct(element);
                 }
 
                 let current_module = module
@@ -7721,6 +7695,15 @@ impl TypeChecker {
                         }
                         Some(payload.as_ref().clone())
                     }
+                    CheckedType::Slice(_)
+                        if module.builtin_type(expected_id) == Some(BuiltinType::Ref) =>
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            pattern.syntax.span.clone(),
+                            "a slice cannot be destructured as a `Ref`",
+                        ));
+                        return;
+                    }
                     CheckedType::Sum(sum) => {
                         let matches = sum
                             .alternatives
@@ -8252,10 +8235,8 @@ impl TypeChecker {
                     )
                 })
             }
-            (CheckedType::Ref(actual), CheckedType::Ref(expected))
-                if matches!(expected.as_ref(), CheckedType::ErasedProduct(_)) =>
-            {
-                erased_ref_length(actual, expected).is_some()
+            (CheckedType::Ref(_), CheckedType::Slice(_)) => {
+                slice_ref_length(&actual, expected).is_some()
             }
             _ => false,
         };
@@ -9591,9 +9572,7 @@ impl TypeChecker {
                 return CheckedType::Ref(Box::new(arguments[0].clone()));
             }
             Some(crate::RecursiveConstruction::Slice) => {
-                return CheckedType::Ref(Box::new(CheckedType::ErasedProduct(Box::new(
-                    arguments[0].clone(),
-                ))));
+                return CheckedType::Slice(Box::new(arguments[0].clone()));
             }
             Some(crate::RecursiveConstruction::Syntax) => {
                 return CheckedType::Opaque {
@@ -10023,8 +10002,11 @@ impl TypeChecker {
     }
 }
 
-pub(crate) fn erased_ref_length(actual: &CheckedType, expected: &CheckedType) -> Option<usize> {
-    let CheckedType::ErasedProduct(element) = expected else {
+pub(crate) fn slice_ref_length(source: &CheckedType, target: &CheckedType) -> Option<usize> {
+    let CheckedType::Ref(actual) = source else {
+        return None;
+    };
+    let CheckedType::Slice(element) = target else {
         return None;
     };
     // An `Inferred` element (e.g. from `erase_type_parameters`, or a source
@@ -10033,13 +10015,10 @@ pub(crate) fn erased_ref_length(actual: &CheckedType, expected: &CheckedType) ->
     let element_matches = |candidate: &CheckedType| {
         matches!(element.as_ref(), CheckedType::Inferred) || candidate == element.as_ref()
     };
-    if let CheckedType::ErasedProduct(actual_element) = actual {
-        return element_matches(actual_element).then_some(usize::MAX);
-    }
-    if element_matches(actual) {
+    if element_matches(actual.as_ref()) {
         return Some(1);
     }
-    let CheckedType::Product(product) = actual else {
+    let CheckedType::Product(product) = actual.as_ref() else {
         return None;
     };
     if product.elements.is_empty() {
@@ -10149,6 +10128,9 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         }),
         (CheckedType::Ref(actual), CheckedType::Ref(expected)) => {
             merge_types(*actual, *expected).map(|value| CheckedType::Ref(Box::new(value)))
+        }
+        (CheckedType::Slice(actual), CheckedType::Slice(expected)) => {
+            merge_types(*actual, *expected).map(|value| CheckedType::Slice(Box::new(value)))
         }
         (CheckedType::Buffer(actual), CheckedType::Buffer(expected)) => {
             merge_types(*actual, *expected).map(|value| CheckedType::Buffer(Box::new(value)))
@@ -10261,11 +10243,7 @@ fn can_coerce_type(actual: &CheckedType, expected: &CheckedType) -> bool {
                 )
             })
         }
-        (CheckedType::Ref(actual), CheckedType::Ref(expected))
-            if matches!(expected.as_ref(), CheckedType::ErasedProduct(_)) =>
-        {
-            erased_ref_length(actual, expected).is_some()
-        }
+        (CheckedType::Ref(_), CheckedType::Slice(_)) => slice_ref_length(actual, expected).is_some(),
         _ => false,
     }
 }
@@ -10481,6 +10459,9 @@ pub(crate) fn substitute_type(
         CheckedType::Ref(value) => {
             CheckedType::Ref(Box::new(substitute_type(*value, substitutions)))
         }
+        CheckedType::Slice(value) => {
+            CheckedType::Slice(Box::new(substitute_type(*value, substitutions)))
+        }
         CheckedType::Buffer(value) => {
             CheckedType::Buffer(Box::new(substitute_type(*value, substitutions)))
         }
@@ -10607,6 +10588,7 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
             pointee: Box::new(erase_type_parameters(pointee)),
         },
         CheckedType::Ref(value) => CheckedType::Ref(Box::new(erase_type_parameters(value))),
+        CheckedType::Slice(value) => CheckedType::Slice(Box::new(erase_type_parameters(value))),
         CheckedType::Buffer(value) => CheckedType::Buffer(Box::new(erase_type_parameters(value))),
         CheckedType::ErasedProduct(value) => {
             CheckedType::ErasedProduct(Box::new(erase_type_parameters(value)))
@@ -10663,7 +10645,9 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Parameter { .. } => true,
         CheckedType::CPointer { pointee } => contains_type_parameter(pointee),
-        CheckedType::Ref(value) | CheckedType::Buffer(value) => contains_type_parameter(value),
+        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
+            contains_type_parameter(value)
+        }
         CheckedType::ErasedProduct(value) => contains_type_parameter(value),
         CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_type_parameter),
         CheckedType::Product(product) => product
@@ -10704,6 +10688,7 @@ fn contains_effect_parameter(value_type: &CheckedType) -> bool {
         }
         CheckedType::CPointer { pointee }
         | CheckedType::Ref(pointee)
+        | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee)
         | CheckedType::ErasedProduct(pointee) => contains_effect_parameter(pointee),
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
@@ -10734,7 +10719,9 @@ fn contains_inferred_type(value_type: &CheckedType) -> bool {
     match value_type {
         CheckedType::Inferred | CheckedType::TypeConstructor { .. } => true,
         CheckedType::CPointer { pointee } => contains_inferred_type(pointee),
-        CheckedType::Ref(value) | CheckedType::Buffer(value) => contains_inferred_type(value),
+        CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
+            contains_inferred_type(value)
+        }
         CheckedType::ErasedProduct(value) => contains_inferred_type(value),
         CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_inferred_type),
         CheckedType::Product(product) => product
@@ -10767,7 +10754,9 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
                 ids.insert(*id);
             }
             CheckedType::CPointer { pointee } => collect(pointee, ids),
-            CheckedType::Ref(value) | CheckedType::Buffer(value) => collect(value, ids),
+            CheckedType::Ref(value) | CheckedType::Slice(value) | CheckedType::Buffer(value) => {
+                collect(value, ids)
+            }
             CheckedType::ErasedProduct(value) => collect(value, ids),
             CheckedType::Opaque { arguments, .. } => {
                 for argument in arguments {
@@ -10916,6 +10905,7 @@ fn unify_impl_headers(
             unify_impl_headers(left, right, free_parameters, substitutions)
         }
         (CheckedType::Ref(left), CheckedType::Ref(right))
+        | (CheckedType::Slice(left), CheckedType::Slice(right))
         | (CheckedType::Buffer(left), CheckedType::Buffer(right))
         | (CheckedType::ErasedProduct(left), CheckedType::ErasedProduct(right)) => {
             unify_impl_headers(left, right, free_parameters, substitutions)
@@ -11100,6 +11090,7 @@ fn sized_type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId
             CheckedType::Parameter { .. } => {}
             CheckedType::CPointer { pointee } => collect(pointee, ids),
             CheckedType::Ref(value)
+            | CheckedType::Slice(value)
             | CheckedType::Buffer(value)
             | CheckedType::ErasedProduct(value) => collect(value, ids),
             CheckedType::Opaque { arguments, .. }
@@ -11173,21 +11164,11 @@ pub(crate) fn infer_type_parameters(
             let CheckedType::Ref(actual_value) = actual else {
                 return false;
             };
-            if let CheckedType::ErasedProduct(element) = value.as_ref() {
-                return match actual_value.as_ref() {
-                    CheckedType::ErasedProduct(actual_element) => {
-                        infer_type_parameters(element, actual_element, substitutions)
-                    }
-                    CheckedType::Product(product) if product.elements.is_empty() => false,
-                    CheckedType::Product(product) => {
-                        product.homogeneous_element().is_some_and(|actual_element| {
-                            infer_type_parameters(element, actual_element, substitutions)
-                        })
-                    }
-                    actual_element => infer_type_parameters(element, actual_element, substitutions),
-                };
-            }
             infer_type_parameters(value, actual_value, substitutions)
+        }
+        CheckedType::Slice(value) => {
+            matches!(actual, CheckedType::Slice(actual_value)
+                if infer_type_parameters(value, actual_value, substitutions))
         }
         CheckedType::Buffer(value) => {
             matches!(actual, CheckedType::Buffer(actual_value)
@@ -11314,6 +11295,7 @@ fn clear_function_effects(value_type: &mut CheckedType) {
     match value_type {
         CheckedType::CPointer { pointee }
         | CheckedType::Ref(pointee)
+        | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee)
         | CheckedType::ErasedProduct(pointee) => clear_function_effects(pointee),
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
@@ -12265,11 +12247,9 @@ fn structural_trait_arguments(
                     let element = product.homogeneous_element()?.clone();
                     is_copy(&element).then_some(element)?
                 }
-                CheckedType::ErasedProduct(element) => {
-                    is_copy(element).then(|| element.as_ref().clone())?
-                }
                 _ => return None,
             },
+            CheckedType::Slice(element) => is_copy(element).then(|| element.as_ref().clone())?,
             _ => return None,
         };
         if accepts(&output) {
@@ -12290,9 +12270,9 @@ fn structural_trait_arguments(
                 CheckedType::Product(product) if !product.variadic => {
                     product.homogeneous_element()?.clone()
                 }
-                CheckedType::ErasedProduct(element) => element.as_ref().clone(),
                 _ => return None,
             },
+            CheckedType::Slice(element) => element.as_ref().clone(),
             _ => return None,
         };
         if accepts(&element) {
@@ -12359,7 +12339,7 @@ fn checked_type_contains_sum(value_type: &CheckedType) -> bool {
 
 fn checked_type_contains_erased_product(value_type: &CheckedType) -> bool {
     match value_type {
-        CheckedType::ErasedProduct(_) => true,
+        CheckedType::ErasedProduct(_) | CheckedType::Slice(_) => true,
         CheckedType::Ref(value)
         | CheckedType::Buffer(value)
         | CheckedType::CPointer { pointee: value } => checked_type_contains_erased_product(value),
@@ -12508,8 +12488,7 @@ fn valid_buffer_intrinsic_type(
         crate::IntrinsicFunction::BufferFreeze => {
             matches!(
                 (function.parameter.as_ref(), function.result.as_ref()),
-                (CheckedType::Buffer(element), CheckedType::Ref(result))
-                    if matches!(result.as_ref(), CheckedType::ErasedProduct(result) if result == element)
+                (CheckedType::Buffer(element), CheckedType::Slice(result)) if result == element
             ) && function.effects == no_effects
         }
         crate::IntrinsicFunction::BufferClone => {
@@ -12601,6 +12580,7 @@ fn is_copy_type(
         | CheckedType::CChar
         | CheckedType::CPointer { .. }
         | CheckedType::Ref(_)
+        | CheckedType::Slice(_)
         | CheckedType::Function(_) => true,
         CheckedType::CString | CheckedType::Buffer(_) => false,
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {

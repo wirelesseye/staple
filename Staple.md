@@ -2697,10 +2697,10 @@ Transparent aliases may name the underlying unsized array shape (`type alias
 Elements T = T[]`), but that shape can only be completed into a usable type
 through `Slice` — writing `Ref` directly around an unsized array, whether
 spelled out (`Ref T[]`) or reached through such an alias, is rejected; use
-`Slice T` instead. `Ref` remains generic over `?Sized T` so that functions
-like `preserve: <T where ?Sized T> Ref T -> Ref T` work uniformly whether
-`T` ends up sized or erased, but constructing that erasure in the first
-place always goes through `Slice`.
+`Slice T` instead. `Ref` remains generic over `?Sized T`, but `Slice T` is a
+distinct, sized pointer-and-length value rather than a `Ref T[]`. Generic
+slice-preserving functions state that directly, for example
+`preserve: <T> Slice T -> Slice T`.
 
 `Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
 prefix. `Buffer.with_capacity` allocates space without constructing any `T`
