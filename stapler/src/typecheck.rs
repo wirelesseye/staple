@@ -222,11 +222,28 @@ pub struct CheckedProductType {
     pub variadic: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct CheckedTypeElement {
     pub name: Option<String>,
     pub value_type: CheckedType,
+    /// Contextual construction metadata; deliberately excluded from type equality.
+    pub default: Option<Expression>,
 }
+
+#[derive(Debug, Clone)]
+pub struct CheckedProductDefaultPlan {
+    pub final_type: CheckedProductType,
+    /// Missing fields, in field order. Explicitly initialized positions are `None`.
+    pub defaults: Vec<Option<Expression>>,
+}
+
+impl PartialEq for CheckedTypeElement {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.value_type == other.value_type
+    }
+}
+
+impl Eq for CheckedTypeElement {}
 
 impl CheckedProductType {
     pub fn homogeneous_element(&self) -> Option<&CheckedType> {
@@ -820,6 +837,7 @@ fn format_type_application(
 pub struct TypedModule {
     resolved: ResolvedModule,
     expression_types: HashMap<SyntaxId, CheckedType>,
+    product_default_plans: HashMap<SyntaxId, CheckedProductDefaultPlan>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
@@ -938,6 +956,13 @@ impl TypedModule {
 
     pub fn type_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.expression_types.get(&syntax_id)
+    }
+
+    pub(crate) fn product_default_plan(
+        &self,
+        syntax_id: SyntaxId,
+    ) -> Option<&CheckedProductDefaultPlan> {
+        self.product_default_plans.get(&syntax_id)
     }
 
     pub fn companion_type_of_expression(&self, expression: &Expression) -> Option<TypeId> {
@@ -1327,6 +1352,9 @@ impl TypedModule {
 #[derive(Default)]
 pub struct TypeChecker {
     expression_types: HashMap<SyntaxId, CheckedType>,
+    product_default_plans: HashMap<SyntaxId, CheckedProductDefaultPlan>,
+    checked_product_defaults: HashSet<SyntaxId>,
+    product_default_expressions: HashMap<SyntaxId, Expression>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
@@ -1508,6 +1536,7 @@ impl TypeChecker {
             self.ensure_function_checked(&module, function_id);
         }
         self.infer_effects(&module);
+        self.validate_product_default_effects(&module);
         self.infer_derived_bindings(&module);
 
         if !self.diagnostics.is_empty() {
@@ -1517,6 +1546,7 @@ impl TypeChecker {
         let typed = TypedModule {
             resolved: module,
             expression_types: self.expression_types,
+            product_default_plans: self.product_default_plans,
             symbol_types: self.symbol_types,
             function_types: self.function_types,
             expression_effects: self.expression_effects,
@@ -2124,6 +2154,7 @@ impl TypeChecker {
                         .map(|value_type| CheckedTypeElement {
                             name: None,
                             value_type,
+                            default: None,
                         })
                         .collect(),
                     variadic: false,
@@ -2557,6 +2588,7 @@ impl TypeChecker {
                     .map(|element| CheckedTypeElement {
                         name: None,
                         value_type: self.checked_type_parameter_pattern(module, element),
+                        default: None,
                     })
                     .collect(),
                 variadic: false,
@@ -2646,10 +2678,12 @@ impl TypeChecker {
                                 CheckedTypeElement {
                                     name: None,
                                     value_type: integer.clone(),
+                                    default: None,
                                 },
                                 CheckedTypeElement {
                                     name: None,
                                     value_type: integer.clone(),
+                                    default: None,
                                 },
                             ],
                             variadic: false,
@@ -2675,10 +2709,12 @@ impl TypeChecker {
                                 CheckedTypeElement {
                                     name: None,
                                     value_type: integer.clone(),
+                                    default: None,
                                 },
                                 CheckedTypeElement {
                                     name: None,
                                     value_type: integer,
+                                    default: None,
                                 },
                             ],
                             variadic: false,
@@ -2693,8 +2729,8 @@ impl TypeChecker {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
-                                CheckedTypeElement { name: None, value_type: float.clone() },
-                                CheckedTypeElement { name: None, value_type: float.clone() },
+                                CheckedTypeElement { name: None, value_type: float.clone(), default: None },
+                                CheckedTypeElement { name: None, value_type: float.clone(), default: None },
                             ],
                             variadic: false,
                         })),
@@ -2716,8 +2752,8 @@ impl TypeChecker {
                     CheckedType::Function(CheckedFunctionType {
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
-                                CheckedTypeElement { name: None, value_type: float.clone() },
-                                CheckedTypeElement { name: None, value_type: float },
+                                CheckedTypeElement { name: None, value_type: float.clone(), default: None },
+                                CheckedTypeElement { name: None, value_type: float, default: None },
                             ],
                             variadic: false,
                         })),
@@ -2745,8 +2781,8 @@ impl TypeChecker {
                 crate::IntrinsicFunction::StringAdd => CheckedType::Function(CheckedFunctionType {
                     parameter: Box::new(CheckedType::Product(CheckedProductType {
                         elements: vec![
-                            CheckedTypeElement { name: None, value_type: CheckedType::String },
-                            CheckedTypeElement { name: None, value_type: CheckedType::String },
+                            CheckedTypeElement { name: None, value_type: CheckedType::String, default: None },
+                            CheckedTypeElement { name: None, value_type: CheckedType::String, default: None },
                         ],
                         variadic: false,
                     })),
@@ -3938,6 +3974,30 @@ impl TypeChecker {
                 }
             }
         }
+    }
+
+    fn validate_product_default_effects(&mut self, module: &ResolvedModule) {
+        let defaults = self
+            .product_default_expressions
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        let previous_function = self.current_effect_function.get();
+        self.current_effect_function
+            .set(module.functions().first().map(|function| function.id));
+        for default in defaults {
+            let effects = self.expression_effects_now(module, &default, &HashMap::new());
+            if effects.variable.is_some()
+                || !effects.resources.is_empty()
+                || effects.state.is_some()
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    default.syntax().span.clone(),
+                    "a product field default must be pure",
+                ));
+            }
+        }
+        self.current_effect_function.set(previous_function);
     }
 
     fn refreshed_expression_type(
@@ -5162,7 +5222,12 @@ impl TypeChecker {
         } else {
             match (value_type, declared_type) {
                 (Some(actual), Some(expected)) => {
-                    self.require_compatible(actual, expected, binding.syntax.span.clone())
+                    let merged = self.require_compatible(
+                        actual,
+                        expected.clone(),
+                        binding.syntax.span.clone(),
+                    );
+                    replace_product_default_policy(merged, &expected)
                 }
                 (Some(actual), None) => actual,
                 (None, Some(expected)) => expected,
@@ -5384,6 +5449,7 @@ impl TypeChecker {
                         Some(merged) => elements.push(CheckedTypeElement {
                             name: Some(name),
                             value_type: merged,
+                            default: None,
                         }),
                         None => {
                             has_error = true;
@@ -5524,6 +5590,7 @@ impl TypeChecker {
                 vec![CheckedTypeElement {
                     name: element.name.clone(),
                     value_type,
+                    default: None,
                 }]
             };
             for field in contributed {
@@ -5571,21 +5638,61 @@ impl TypeChecker {
         }
         for (index, was_initialized) in initialized.iter().enumerate() {
             if !was_initialized {
-                has_error = true;
                 let field = &expected_product.elements[index];
-                self.diagnostics.push(Diagnostic::new(
-                    product.syntax.span.clone(),
-                    field.name.as_ref().map_or_else(
-                        || format!("missing product element at position {index}"),
-                        |name| format!("missing product field `{name}`"),
-                    ),
-                ));
+                if field.default.is_none() {
+                    has_error = true;
+                    self.diagnostics.push(Diagnostic::new(
+                        product.syntax.span.clone(),
+                        field.name.as_ref().map_or_else(
+                            || format!("missing product element at position {index}"),
+                            |name| format!("missing product field `{name}`"),
+                        ),
+                    ));
+                }
             }
         }
         if has_error {
             CheckedType::Error
         } else {
+            self.record_product_defaults(module, product.syntax.id, expected_product, &initialized);
             normalize_product_type(result, false)
+        }
+    }
+
+    fn record_product_defaults(
+        &mut self,
+        module: &ResolvedModule,
+        syntax: SyntaxId,
+        expected: &CheckedProductType,
+        initialized: &[bool],
+    ) {
+        let mut defaults = vec![None; expected.elements.len()];
+        for (index, field) in expected.elements.iter().enumerate() {
+            if !initialized.get(index).copied().unwrap_or(false)
+                && let Some(default) = &field.default
+            {
+                let actual =
+                    self.check_expression_expected(module, default, Some(&field.value_type));
+                self.require_compatible(
+                    actual,
+                    field.value_type.clone(),
+                    default.syntax().span.clone(),
+                );
+                defaults[index] = Some(default.clone());
+            }
+        }
+        if defaults.iter().any(Option::is_some) {
+            let mut final_type = expected.clone();
+            for field in &mut final_type.elements {
+                field.default = None;
+            }
+            self.product_default_plans.insert(
+                syntax,
+                CheckedProductDefaultPlan {
+                    final_type,
+                    defaults,
+                },
+            );
         }
     }
 
@@ -5895,10 +6002,49 @@ impl TypeChecker {
                         elements.push(CheckedTypeElement {
                             name: element.name.clone(),
                             value_type,
+                            default: None,
                         });
                     }
                 }
-                normalize_product_type(elements, false)
+                if let Some(CheckedType::Product(expected_product)) = expected
+                    && !expected_product.variadic
+                    && elements.len() < expected_product.elements.len()
+                {
+                    let initialized_count = elements.len();
+                    if let Some((index, field)) = expected_product
+                        .elements
+                        .iter()
+                        .enumerate()
+                        .skip(initialized_count)
+                        .find(|(_, field)| field.default.is_none())
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            product.syntax.span.clone(),
+                            field.name.as_ref().map_or_else(
+                                || format!("missing product element at position {index}"),
+                                |name| format!("missing product field `{name}`"),
+                            ),
+                        ));
+                        CheckedType::Error
+                    } else {
+                        let initialized = (0..expected_product.elements.len())
+                            .map(|index| index < initialized_count)
+                            .collect::<Vec<_>>();
+                        self.record_product_defaults(
+                            module,
+                            product.syntax.id,
+                            expected_product,
+                            &initialized,
+                        );
+                        let mut completed = expected_product.clone();
+                        for field in &mut completed.elements {
+                            field.default = None;
+                        }
+                        normalize_product_type(completed.elements, false)
+                    }
+                } else {
+                    normalize_product_type(elements, false)
+                }
             }
             Expression::Call(call) => {
                 if let Some(symbol) = module.symbol_for(call.callee.syntax().id)
@@ -6036,7 +6182,8 @@ impl TypeChecker {
                     let result = match callee_type {
                         CheckedType::Function(function) => {
                             self.check_call_argument(
-                                call.argument.syntax().id,
+                                module,
+                                &call.argument,
                                 receiver_type,
                                 &function.parameter,
                                 call.argument.syntax().span.clone(),
@@ -6126,7 +6273,8 @@ impl TypeChecker {
                         let result = match callee_type {
                             CheckedType::Function(function) => {
                                 self.check_call_argument(
-                                    call.argument.syntax().id,
+                                    module,
+                                    &call.argument,
                                     argument_type,
                                     &function.parameter,
                                     call.argument.syntax().span.clone(),
@@ -6142,9 +6290,20 @@ impl TypeChecker {
                         return CheckedType::empty_product();
                     }
                     let argument_expected_owned = match &raw_callee_type {
-                        CheckedType::Function(function) => {
-                            Some(erase_type_parameters(&function.parameter))
-                        }
+                        CheckedType::Function(function) => match function.parameter.as_ref() {
+                            CheckedType::Product(product)
+                                if !matches!(call.argument.as_ref(), Expression::Product(_))
+                                    && product.elements.len() > 1
+                                    && product
+                                        .elements
+                                        .iter()
+                                        .skip(1)
+                                        .all(|field| field.default.is_some()) =>
+                            {
+                                Some(erase_type_parameters(&product.elements[0].value_type))
+                            }
+                            _ => Some(erase_type_parameters(&function.parameter)),
+                        },
                         _ => None,
                     };
                     let argument_expected = argument_expected_owned.as_ref();
@@ -6255,7 +6414,8 @@ impl TypeChecker {
                     match callee_type {
                         CheckedType::Function(function) => {
                             self.check_call_argument(
-                                call.argument.syntax().id,
+                                module,
+                                &call.argument,
                                 argument_type,
                                 &function.parameter,
                                 call.argument.syntax().span.clone(),
@@ -8094,7 +8254,24 @@ impl TypeChecker {
         };
         let mut substitutions = HashMap::new();
         if let Some(argument) = argument
-            && !infer_type_parameters(&function.parameter, argument, &mut substitutions)
+            && !infer_type_parameters(
+                match function.parameter.as_ref() {
+                    CheckedType::Product(product)
+                        if !matches!(argument, CheckedType::Product(_))
+                            && product.elements.len() > 1
+                            && product
+                                .elements
+                                .iter()
+                                .skip(1)
+                                .all(|field| field.default.is_some()) =>
+                    {
+                        &product.elements[0].value_type
+                    }
+                    parameter => parameter,
+                },
+                argument,
+                &mut substitutions,
+            )
         {
             self.diagnostics.push(Diagnostic::new(
                 span.clone(),
@@ -8172,7 +8349,8 @@ impl TypeChecker {
 
     fn check_call_argument(
         &mut self,
-        syntax: SyntaxId,
+        module: &ResolvedModule,
+        expression: &Expression,
         actual: CheckedType,
         expected: &CheckedType,
         span: Span,
@@ -8185,6 +8363,7 @@ impl TypeChecker {
                 value_type => vec![CheckedTypeElement {
                     name: None,
                     value_type,
+                    default: None,
                 }],
             };
             if actual_elements.len() < expected_product.elements.len() {
@@ -8206,7 +8385,44 @@ impl TypeChecker {
             }
             return;
         }
-        self.coerce_expression_type(syntax, actual, expected, span);
+        if let CheckedType::Product(expected_product) = expected
+            && !expected_product.variadic
+            && !matches!(actual, CheckedType::Product(_))
+            && expected_product.elements.len() > 1
+        {
+            let Some(first) = expected_product.elements.first() else {
+                self.coerce_expression_type(expression.syntax().id, actual, expected, span);
+                return;
+            };
+            self.require_compatible(actual, first.value_type.clone(), span.clone());
+            if let Some((index, field)) = expected_product
+                .elements
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, field)| field.default.is_none())
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    field.name.as_ref().map_or_else(
+                        || format!("missing product element at position {index}"),
+                        |name| format!("missing product field `{name}`"),
+                    ),
+                ));
+                return;
+            }
+            let initialized = (0..expected_product.elements.len())
+                .map(|index| index == 0)
+                .collect::<Vec<_>>();
+            self.record_product_defaults(
+                module,
+                expression.syntax().id,
+                expected_product,
+                &initialized,
+            );
+            return;
+        }
+        self.coerce_expression_type(expression.syntax().id, actual, expected, span);
     }
 
     fn make_implicit_thunk(
@@ -8415,6 +8631,7 @@ impl TypeChecker {
                         .map(|_| CheckedTypeElement {
                             name: None,
                             value_type: element.clone(),
+                            default: None,
                         })
                         .collect(),
                     false,
@@ -8998,6 +9215,7 @@ impl TypeChecker {
                     elements.extend((0..count).map(|_| CheckedTypeElement {
                         name: None,
                         value_type: value_type.clone(),
+                        default: None,
                     }));
                     continue;
                 }
@@ -9047,11 +9265,41 @@ impl TypeChecker {
                         format!("duplicate product field name `{name}`"),
                     ));
                 }
+                let value_type = self.resolve_source_type_inner(module, &element.ty);
+                if let Some(default) = element.default.as_deref()
+                    && self.checked_product_defaults.insert(default.syntax().id)
+                {
+                    if !implicit_thunk_captures(module, default).is_empty() {
+                        self.diagnostics.push(Diagnostic::new(
+                            default.syntax().span.clone(),
+                            "a product field default cannot capture a local runtime value",
+                        ));
+                    }
+                    if !contains_type_parameter(&value_type) {
+                        let actual =
+                            self.check_expression_expected(module, default, Some(&value_type));
+                        self.require_compatible(
+                            actual,
+                            value_type.clone(),
+                            default.syntax().span.clone(),
+                        );
+                    }
+                    self.product_default_expressions
+                        .insert(default.syntax().id, default.clone());
+                }
                 elements.push(CheckedTypeElement {
                     name: element.name.clone(),
-                    value_type: self.resolve_source_type_inner(module, &element.ty),
+                    value_type,
+                    default: element.default.as_deref().cloned(),
                 });
             }
+        }
+        if elements.len() == 1 && elements[0].default.is_some() {
+            self.diagnostics.push(Diagnostic::new(
+                product.syntax.span.clone(),
+                "a singleton product field cannot have a default because the product normalizes to its element type",
+            ));
+            elements[0].default = None;
         }
         CheckedProductType {
             elements,
@@ -9220,6 +9468,33 @@ pub(crate) fn erased_ref_length(actual: &CheckedType, expected: &CheckedType) ->
     element_matches(homogeneous).then_some(product.elements.len())
 }
 
+fn replace_product_default_policy(merged: CheckedType, expected: &CheckedType) -> CheckedType {
+    match (merged, expected) {
+        (CheckedType::Product(mut merged), CheckedType::Product(expected))
+            if merged.elements.len() == expected.elements.len() =>
+        {
+            for (merged, expected) in merged.elements.iter_mut().zip(&expected.elements) {
+                merged.default = expected.default.clone();
+                merged.value_type =
+                    replace_product_default_policy(merged.value_type.clone(), &expected.value_type);
+            }
+            CheckedType::Product(merged)
+        }
+        (CheckedType::Function(mut merged), CheckedType::Function(expected)) => {
+            merged.parameter = Box::new(replace_product_default_policy(
+                *merged.parameter,
+                &expected.parameter,
+            ));
+            merged.result = Box::new(replace_product_default_policy(
+                *merged.result,
+                &expected.result,
+            ));
+            CheckedType::Function(merged)
+        }
+        (merged, _) => merged,
+    }
+}
+
 fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType> {
     match (actual, expected) {
         (CheckedType::Error, _) | (_, CheckedType::Error) => Some(CheckedType::Error),
@@ -9313,6 +9588,7 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
                         CheckedTypeElement {
                             name: expected.name.or(actual.name),
                             value_type,
+                            default: expected.default.or(actual.default),
                         }
                     })
                 })
@@ -9647,6 +9923,7 @@ pub(crate) fn substitute_type(
                 .map(|element| CheckedTypeElement {
                     name: element.name,
                     value_type: substitute_type(element.value_type, substitutions),
+                    default: element.default,
                 })
                 .collect(),
             variadic: product.variadic,
@@ -9766,6 +10043,7 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
                 .map(|element| CheckedTypeElement {
                     name: element.name.clone(),
                     value_type: erase_type_parameters(&element.value_type),
+                    default: element.default.clone(),
                 })
                 .collect(),
             variadic: product.variadic,
@@ -11337,10 +11615,12 @@ fn structural_trait_arguments(
                 CheckedTypeElement {
                     name: None,
                     value_type: source.clone(),
+                    default: None,
                 },
                 CheckedTypeElement {
                     name: None,
                     value_type: CheckedType::USize,
+                    default: None,
                 },
             ],
             variadic: false,

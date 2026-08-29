@@ -2331,6 +2331,45 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_anonymous_product_field_defaults() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("stapler-product-defaults-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("stapler-product-defaults-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "extern \"c\" { exit: I32 -> () }\n",
+                "def text: (String, x: I32 = 0, y: I32 = 0) -> I32 = (value, x, y) => x + y\n",
+                "let point: (x: I32 = 1, y: I32 = 2) = ()\n",
+                "let result = text \"Hello\" + text (\"Hello\", .y: 10) + point.x + point.y\n",
+                "exit (result - 13)\n",
+            ),
+        )
+        .expect("temporary product-default source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("product-default executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("product-default executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success());
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn drops_owned_locals_in_reverse_scope_order() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

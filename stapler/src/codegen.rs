@@ -47,6 +47,7 @@ struct ModuleEmitter<'module, 'context> {
         HashMap<TypeParameterId, CheckedType>,
     )>,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
+    expression_type_overrides: HashMap<crate::SyntaxId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     globals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
     closure_codes: HashMap<SymbolId, inkwell::values::FunctionValue<'context>>,
@@ -176,6 +177,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             structural_trait_codes: HashMap::new(),
             specialization_queue: Vec::new(),
             active_type_substitutions: HashMap::new(),
+            expression_type_overrides: HashMap::new(),
             function_symbols: HashMap::new(),
             globals: HashMap::new(),
             closure_codes: HashMap::new(),
@@ -778,9 +780,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
     fn concrete_expression_type(&self, expression: &Expression) -> Option<CheckedType> {
         let mut value_type = self
-            .typed_module
-            .type_of_expression(expression.syntax().id)
+            .expression_type_overrides
+            .get(&expression.syntax().id)
             .cloned()
+            .or_else(|| {
+                self.typed_module
+                    .type_of_expression(expression.syntax().id)
+                    .cloned()
+            })
             .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))?;
         let function_id = self
             .typed_module
@@ -3937,10 +3944,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 CheckedTypeElement {
                     name: None,
                     value_type: item.clone(),
+                    default: None,
                 },
                 CheckedTypeElement {
                     name: None,
                     value_type: iter.clone(),
+                    default: None,
                 },
             ],
             variadic: false,
@@ -8220,7 +8229,63 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 )
             })?);
         }
-        Ok(values)
+        if let Some(plan) = self
+            .typed_module
+            .product_default_plan(product.syntax.id)
+            .cloned()
+        {
+            let mut positioned = vec![None; plan.defaults.len()];
+            for (index, value) in values.into_iter().enumerate() {
+                positioned[index] = Some(value);
+            }
+            self.compile_product_default_plan(environment, &plan, positioned)
+        } else {
+            Ok(values)
+        }
+    }
+
+    fn compile_product_default_plan(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        plan: &crate::typecheck::CheckedProductDefaultPlan,
+        mut values: Vec<Option<BasicValueEnum<'context>>>,
+    ) -> CodeGenerationResult<Vec<BasicValueEnum<'context>>> {
+        for (index, default) in plan.defaults.iter().enumerate() {
+            if values[index].is_none()
+                && let Some(default) = default
+            {
+                let previous = self.expression_type_overrides.insert(
+                    default.syntax().id,
+                    plan.final_type.elements[index].value_type.clone(),
+                );
+                let compiled = self.compile_expression(environment, default);
+                if let Some(previous) = previous {
+                    self.expression_type_overrides
+                        .insert(default.syntax().id, previous);
+                } else {
+                    self.expression_type_overrides.remove(&default.syntax().id);
+                }
+                let value = compiled?;
+                values[index] = Some(value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(
+                        default.syntax().span.clone(),
+                        "product field default is not first-class",
+                    )
+                })?);
+            }
+        }
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| {
+                value.ok_or_else(|| {
+                    Diagnostic::new(
+                        Span::Compiler,
+                        format!("missing product element at position {index}"),
+                    )
+                })
+            })
+            .collect()
     }
 
     /// Evaluates a designated product in source order, but stores each value
@@ -8310,18 +8375,26 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             })?);
             positional_index += 1;
         }
-        values
-            .into_iter()
-            .enumerate()
-            .map(|(index, value)| {
-                value.ok_or_else(|| {
-                    Diagnostic::new(
-                        product.syntax.span.clone(),
-                        format!("missing product element at position {index}"),
-                    )
+        if let Some(plan) = self
+            .typed_module
+            .product_default_plan(product.syntax.id)
+            .cloned()
+        {
+            self.compile_product_default_plan(environment, &plan, values)
+        } else {
+            values
+                .into_iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    value.ok_or_else(|| {
+                        Diagnostic::new(
+                            product.syntax.span.clone(),
+                            format!("missing product element at position {index}"),
+                        )
+                    })
                 })
-            })
-            .collect()
+                .collect()
+        }
     }
 
     /// Compiles a product literal that contains one or more `...=` named
@@ -8445,6 +8518,110 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         let types = flattened_parameter_types(&function_type.parameter);
         let mask = mutation_parameter_mask(types.len(), mutations);
+        if let Some(plan) = self
+            .typed_module
+            .product_default_plan(argument.syntax().id)
+            .cloned()
+        {
+            let mut values = vec![None; plan.defaults.len()];
+            let mut temporaries = Vec::new();
+            let mut positional = 0usize;
+            let explicit = match argument {
+                Expression::Product(product)
+                    if product.elements.iter().all(|element| !element.spread) =>
+                {
+                    product
+                        .elements
+                        .iter()
+                        .map(|element| {
+                            let index = if element.designated {
+                                plan.final_type
+                                    .elements
+                                    .iter()
+                                    .position(|field| field.name == element.name)
+                                    .expect("checked designated field")
+                            } else {
+                                let index = positional;
+                                positional += 1;
+                                index
+                            };
+                            (index, &element.value)
+                        })
+                        .collect::<Vec<_>>()
+                }
+                Expression::Product(_) => Vec::new(),
+                _ => vec![(0, argument)],
+            };
+            for (index, expression) in explicit {
+                if mask[index] {
+                    let (pointer, temporary) = self.compile_mutation_argument_pointer(
+                        environment,
+                        expression,
+                        types[index],
+                    )?;
+                    values[index] = Some(pointer.into());
+                    temporaries.extend(temporary);
+                } else {
+                    let value = self.compile_expression(environment, expression)?;
+                    values[index] = Some(
+                        value_as_basic(value)
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    expression.syntax().span.clone(),
+                                    "argument is not first-class",
+                                )
+                            })?
+                            .into(),
+                    );
+                }
+            }
+            for (index, default) in plan.defaults.iter().enumerate() {
+                if values[index].is_some() {
+                    continue;
+                }
+                let default = default.as_ref().expect("checked default field");
+                let previous = self.expression_type_overrides.insert(
+                    default.syntax().id,
+                    plan.final_type.elements[index].value_type.clone(),
+                );
+                if mask[index] {
+                    let compiled =
+                        self.compile_mutation_argument_pointer(environment, default, types[index]);
+                    if let Some(previous) = previous {
+                        self.expression_type_overrides
+                            .insert(default.syntax().id, previous);
+                    } else {
+                        self.expression_type_overrides.remove(&default.syntax().id);
+                    }
+                    let (pointer, temporary) = compiled?;
+                    values[index] = Some(pointer.into());
+                    temporaries.extend(temporary);
+                } else {
+                    let compiled = self.compile_expression(environment, default);
+                    if let Some(previous) = previous {
+                        self.expression_type_overrides
+                            .insert(default.syntax().id, previous);
+                    } else {
+                        self.expression_type_overrides.remove(&default.syntax().id);
+                    }
+                    let value = compiled?;
+                    values[index] = Some(
+                        value_as_basic(value)
+                            .ok_or_else(|| {
+                                Diagnostic::new(
+                                    default.syntax().span.clone(),
+                                    "product field default is not first-class",
+                                )
+                            })?
+                            .into(),
+                    );
+                }
+            }
+            return Ok(CompiledCallArguments {
+                values: values.into_iter().map(Option::unwrap).collect(),
+                temporaries,
+            });
+        }
         let expressions = match argument {
             Expression::Product(product) if product.elements.len() == types.len() => Some(
                 product
@@ -8584,7 +8761,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         expected_count: usize,
         variadic: bool,
     ) -> CodeGenerationResult<Vec<inkwell::values::BasicMetadataValueEnum<'context>>> {
-        let arguments =
+        let mut arguments =
             if let Some(thunk) = self.typed_module.implicit_thunk_for(argument.syntax().id) {
                 vec![
                     self.build_closure(environment, thunk.id, argument.syntax().span.clone())?
@@ -8605,6 +8782,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     })?]
                 }
             };
+        if let Some(plan) = self
+            .typed_module
+            .product_default_plan(argument.syntax().id)
+            .cloned()
+        {
+            let mut positioned = vec![None; plan.defaults.len()];
+            for (index, value) in arguments.into_iter().enumerate() {
+                positioned[index] = Some(value);
+            }
+            arguments = self.compile_product_default_plan(environment, &plan, positioned)?;
+        }
         if environment.did_return {
             return Ok(Vec::new());
         }

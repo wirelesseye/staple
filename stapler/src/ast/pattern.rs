@@ -71,6 +71,7 @@ impl Pattern {
                 Self::Splice(_) => None,
             },
             ty: self.ty(),
+            default: None,
             spread: false,
             mutable: false,
             moved: false,

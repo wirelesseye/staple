@@ -4394,6 +4394,9 @@ impl NameResolver {
             Type::Product(product) => {
                 for element in &product.elements {
                     self.resolve_type_with(&element.ty, strict);
+                    if let Some(default) = &element.default {
+                        self.resolve_expression(default, Some(&element.ty), None);
+                    }
                 }
             }
             Type::Sum(sum) => {

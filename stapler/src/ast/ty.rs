@@ -284,6 +284,7 @@ pub struct TypeElement {
     pub syntax: Syntax,
     pub name: Option<String>,
     pub ty: Type,
+    pub default: Option<Box<super::Expression>>,
     pub spread: bool,
     /// Temporary parser marker, normalized into the enclosing function type.
     pub mutable: bool,

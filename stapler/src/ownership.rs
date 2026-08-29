@@ -260,6 +260,7 @@ impl<'a> OwnershipChecker<'a> {
                 for element in &value.elements {
                     self.check_expression(&element.value, consume);
                 }
+                self.check_product_defaults(value.syntax.id, consume);
                 true
             }
             Expression::Call(value) => {
@@ -394,6 +395,32 @@ impl<'a> OwnershipChecker<'a> {
             return;
         }
         self.check_expression(argument, !callee.moves.is_empty());
+        if !matches!(argument, Expression::Product(_))
+            && let Some(plan) = self
+                .module
+                .product_default_plan(argument.syntax().id)
+                .cloned()
+        {
+            for (index, default) in plan.defaults.into_iter().enumerate() {
+                if let Some(default) = default {
+                    self.check_expression(
+                        &default,
+                        callee
+                            .moves
+                            .contains(&crate::CheckedMutation::Element(index)),
+                    );
+                }
+            }
+        }
+    }
+
+    fn check_product_defaults(&mut self, syntax: crate::SyntaxId, consume: bool) {
+        let Some(plan) = self.module.product_default_plan(syntax).cloned() else {
+            return;
+        };
+        for default in plan.defaults.into_iter().flatten() {
+            self.check_expression(&default, consume);
+        }
     }
 
     fn check_item(&mut self, item: &Item) -> bool {

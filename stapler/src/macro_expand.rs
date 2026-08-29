@@ -7754,6 +7754,7 @@ fn type_parameter_pattern_type(parameter: &crate::TypeParameterPattern) -> Type 
                     syntax: element.syntax().clone(),
                     name: None,
                     ty: type_parameter_pattern_type(element),
+                    default: None,
                     spread: false,
                     mutable: false,
                     moved: false,
@@ -8368,6 +8369,7 @@ fn substitute_type(
                                 namespace: None,
                                 name: identifier.name,
                             }),
+                            default: None,
                             spread: false,
                             mutable: false,
                             moved: false,
@@ -9518,6 +9520,9 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
             for element in &mut product.elements {
                 expander.freshen_syntax(&mut element.syntax, module, mark);
                 freshen_type(expander, &mut element.ty, module, mark);
+                if let Some(default) = &mut element.default {
+                    expander.freshen_expression(default, module, mark);
+                }
             }
         }
         Type::Sum(sum) => {

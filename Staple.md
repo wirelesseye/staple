@@ -1169,6 +1169,40 @@ initializers also do not combine with a `...=` named spread. Named spreads keep
 their separate merge semantics described below, including later-field
 overrides.
 
+#### Default field values
+
+A named field in a fixed product type may provide a default expression with
+`=`:
+
+```staple
+let point: (x: I32 = 0, y: I32 = 0) = ()
+def text: (String, x: I32 = 0, y: I32 = 0) -> () =
+    (value, x, y) => ()
+
+text ("Hello")          // equivalent to text ("Hello", 0, 0)
+text ("Hello", .y: 10) // equivalent to text ("Hello", 0, 10)
+```
+
+Positional construction may omit only a trailing suffix for which every field
+has a default. Designated initializers may leave any defaulted field absent;
+every non-defaulted field must still be initialized. `()` is therefore valid
+when every field defaults. Explicit expressions are evaluated once in source
+order, followed by the defaults of absent fields in product-field order. A
+default is not evaluated when an explicit initializer supplies that field.
+
+Defaults are contextual construction metadata, not part of structural type
+identity or runtime representation. They are preserved through transparent
+aliases, product type spreads, and function parameter types, but are erased
+from a constructed product value. Function-parameter defaults are inserted by
+the caller; the callee always receives the complete ordinary product.
+
+Defaults must be pure and portable: they may use literals, global names, and
+compile-time parameters, but may not capture local runtime values or refer to
+sibling fields. Unnamed fields, variadic markers, repeated or spread elements,
+and singleton products that normalize to their element type cannot declare a
+default. A named spread (`...=`) retains its complete-field requirement and
+does not fill absent fields from defaults.
+
 #### Element access
 
 Every element can be accessed by its zero-based index. A named element can also

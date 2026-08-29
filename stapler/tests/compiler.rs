@@ -967,6 +967,118 @@ fn spreads_fixed_product_values_and_call_arguments() {
 }
 
 #[test]
+fn fills_anonymous_product_field_defaults_at_calls_and_construction() {
+    let source = concat!(
+        "def text: (String, x: I32 = 0, y: I32 = 0) -> () = (value, x, y) => ()\n",
+        "text (\"Hello\")\n",
+        "text (\"Hello\", x: 5)\n",
+        "text (\"Hello\", .y: 10)\n",
+        "let inferred = text\n",
+        "inferred \"Hello\"\n",
+        "let point: (x: I32 = 1, y: I32 = 2) = ()\n",
+        "let selected: I32 = point.x + point.y\n",
+        "def mutate_default: (String, mut x: I32 = 0) -> () = (value, mut x) => { x = 1 }\n",
+        "mutate_default \"temporary\"\n",
+        "def move_default: (String, move suffix: String = \"!\") -> () = (value, move suffix) => ()\n",
+        "move_default \"Hello\"\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("defaulted product fields should generate LLVM");
+}
+
+#[test]
+fn preserves_product_field_defaults_through_aliases_and_type_spreads() {
+    let source = concat!(
+        "type alias Point = (x: I32 = 1, y: I32 = 2)\n",
+        "let point: Point = ()\n",
+        "let extended: (...Point, z: I32 = 3) = ()\n",
+        "let answer: I32 = point.x + extended.y + extended.z\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("aliased and spread defaults should generate LLVM");
+}
+
+#[test]
+fn rejects_invalid_product_field_defaults_and_missing_required_fields() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let bad: (x: I32 = \"wrong\", y: I32 = 0) = ()\n"))
+        .expect_err_diagnostics("a mismatched default should be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `I32`"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let bad: (x: I32 = 1) = 1\n"))
+        .expect_err_diagnostics("a singleton default should be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("singleton product field"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def bad: (a: I32, b: I32 = 1, c: I32) -> () = (a, b, c) => ()\n",
+            "bad (a: 1)\n",
+        )))
+        .expect_err_diagnostics("a required trailing field should not be defaulted");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("missing product field `c`"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def make: I32 -> () = captured => {\n",
+            "    let bad: (x: I32 = captured, y: I32 = 0) = ()\n",
+            "    ()\n",
+            "}\n",
+        )))
+        .expect_err_diagnostics("a default should not capture a local value");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot capture a local runtime value")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let mut state: I32 = 1\n",
+            "let bad: (x: I32 = state, y: I32 = 0) = ()\n",
+        )))
+        .expect_err_diagnostics("a stateful default should not be pure");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("must be pure"))
+    );
+}
+
+#[test]
+fn explicit_function_annotations_replace_inferred_product_defaults() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def original: (String, x: I32 = 0) -> () = (value, x) => ()\n",
+            "let strict: (String, x: I32) -> () = original\n",
+            "strict \"Hello\"\n",
+        )))
+        .expect_err_diagnostics("an explicit annotation without defaults should remove them");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("missing product field `x`")
+            || diagnostic.message.contains("expected `(")
+    }));
+}
+
+#[test]
 fn spreads_named_product_values_by_name_and_overrides_fields() {
     let source = concat!(
         "let dimensions = (height: 600, width: 800)\n",

@@ -1653,6 +1653,24 @@ fn parses_named_product_types_values_and_access() {
 }
 
 #[test]
+fn parses_anonymous_product_field_defaults() {
+    let root = parse("def text: (String, x: I32 = 0, y: I32 = 0) -> () = (text, x, y) => ()\n")
+        .expect("product field defaults should parse");
+    let Item::Binding(text) = unmodified_item(&root.items[0]) else {
+        panic!("expected binding");
+    };
+    let Type::Function(function) = text.annotation.as_ref().expect("function type") else {
+        panic!("expected function type");
+    };
+    let Type::Product(parameters) = function.parameter.as_ref() else {
+        panic!("expected product parameter");
+    };
+    assert!(parameters.elements[0].default.is_none());
+    assert!(parameters.elements[1].default.is_some());
+    assert!(parameters.elements[2].default.is_some());
+}
+
+#[test]
 fn parses_contextual_named_product_initializers_losslessly() {
     let source = "let value: (I32, a: I32, b: I32) = (1, .b: 3, .a: 2)\n";
     let root = parse(source).expect("designated product syntax should parse");

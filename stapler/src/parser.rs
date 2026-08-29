@@ -2443,6 +2443,7 @@ impl Grammar {
                                 syntax: self.syntax(element_start),
                                 name: None,
                                 ty,
+                                default: None,
                                 spread: true,
                                 mutable: false,
                                 moved: false,
@@ -2450,10 +2451,20 @@ impl Grammar {
                         }
                     } else {
                         let ty = self.parse_type()?;
+                        let default = if self.eat(TokenKind::Equals) {
+                            if name.is_none() {
+                                return Err(self
+                                    .error("only a named product field may have a default value"));
+                            }
+                            Some(Box::new(self.parse_expression()?))
+                        } else {
+                            None
+                        };
                         elements.push(TypeElement {
                             syntax: self.syntax(element_start),
                             name,
                             ty,
+                            default,
                             spread: false,
                             mutable,
                             moved,
