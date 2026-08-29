@@ -29,6 +29,16 @@ clauses => match clauses {
     },
 }
 
+/// Evaluates the first matching condition from an ordered set of branches.
+///
+/// # Example
+///
+/// ```staple
+/// when {
+///     ready => start (),
+///     else => wait ()
+/// }
+/// ```
 pub macro when =
     body: Braced (Separated (Expr, FatArrow, Expr) Comma) => match body {
         Braced (Separated (_, clauses, _)) => when_clauses clauses,
@@ -81,12 +91,26 @@ condition => consequent => rest => {
     }
 }
 
+/// Evaluates a conditional expression with optional `else if` and `else` branches.
+///
+/// # Example
+///
+/// ```staple
+/// if ready { start () } else { wait () }
+/// ```
 pub macro if =
     condition: Expr =>
     consequent: Expr =>
     rest: Sequence Expr =>
     if_branches condition consequent rest
 
+/// Repeats a body while its condition evaluates to `True`.
+///
+/// # Example
+///
+/// ```staple
+/// while (index < limit) { index = index + 1 }
+/// ```
 pub macro while =
     condition: Expr =>
     body: Expr =>
@@ -99,6 +123,13 @@ pub macro while =
         }
     }
 
+/// Iterates over an `IntoIterator`, binding each item to a pattern.
+///
+/// # Example
+///
+/// ```staple
+/// for item in items { process item }
+/// ```
 pub macro for =
     pattern: Pattern =>
     _: Ident "in" =>

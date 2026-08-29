@@ -141,6 +141,13 @@ group => parameters => entries => match entries {
     },
 }
 
+/// Declares a sum-type alias and companion variants from a compact definition.
+///
+/// # Example
+///
+/// ```staple
+/// typegroup Switch { Enabled, Disabled }
+/// ```
 pub macro typegroup:
     MacroCallMetadata ->
     Ident String ->

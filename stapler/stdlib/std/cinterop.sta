@@ -9,6 +9,13 @@ pub type CPointer Pointee = opaque
 /// A null-terminated C string.
 pub type CString = opaque
 
+/// Converts a string literal to a null-terminated C string.
+///
+/// # Example
+///
+/// ```staple
+/// c_string "hello\\n"
+/// ```
 pub macro c_string: Expr -> Expr
 
 extern "staple-intrinsic" {

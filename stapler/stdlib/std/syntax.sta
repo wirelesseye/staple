@@ -118,5 +118,19 @@ pub type Syntax = opaque
 /// Exactly one structural syntax node.
 pub type alias SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
 
+/// Produces opaque syntax from a braced quotation without reparsing it.
+///
+/// # Example
+///
+/// ```staple
+/// macro identity = value: Expr => quote { $value }
+/// ```
 pub macro quote: Braced Syntax -> Syntax
+/// Produces parsed syntax of the expected category from a braced quotation.
+///
+/// # Example
+///
+/// ```staple
+/// macro identity: Expr -> Expr = value: Expr => parse_quote { $value }
+/// ```
 pub macro parse_quote: Braced Syntax -> Syntax

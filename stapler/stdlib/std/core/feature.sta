@@ -3,4 +3,11 @@ pub mod
 use std.syntax.(Expr, Item, Parenthesized)
 
 /// Includes an item only when the named Binder package feature is enabled.
+///
+/// # Example
+///
+/// ```staple
+/// @feature("tracing")
+/// def trace = value => log value
+/// ```
 pub macro @feature: Parenthesized (Expr) -> Item -> Item

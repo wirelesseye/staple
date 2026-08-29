@@ -53,6 +53,13 @@ name_syntax => name => target => parameters => representation => {
 
 /// Derives `Debug` for a represented nominal type by prefixing its name and
 /// delegating formatting to its representation.
+///
+/// # Example
+///
+/// ```staple
+/// @derive_debug
+/// pub(repr) type UserId = I32
+/// ```
 pub macro @derive_debug: Item -> Sequence Item = item => match item {
     TypeDeclarationItem (
         DistinctDeclaration(), name_syntax, name, target, parameters, Some representation,

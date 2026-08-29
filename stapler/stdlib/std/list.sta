@@ -140,6 +140,13 @@ def list_of_expression: Sequence Expr -> Expr = elements => match elements {
 }
 
 companion<T> List T {
+    /// Constructs a list from a comma-separated sequence of expressions.
+    ///
+    /// # Example
+    ///
+    /// ```staple
+    /// let values: List I32 = List.of (1, 2, 3)
+    /// ```
     pub macro of =
         body: Parenthesized (Separated Expr Comma) => match body {
             Parenthesized (Separated (_, elements, _)) => list_of_expression elements,
