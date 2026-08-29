@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
 
-use lsp_types::{CompletionItem, CompletionItemKind};
+use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
 use stapler::*;
 
 const KEYWORDS: &[&str] = &[
@@ -88,13 +88,75 @@ struct NamedQualifier {
 }
 
 pub fn index(module: &Module, typed: &TypedModule) -> CompletionIndex {
+    let mut symbol_docs = HashMap::new();
+    for source in typed.resolved().program().modules() {
+        collect_symbol_docs(typed, &source.syntax.items, &mut symbol_docs);
+    }
+    collect_symbol_docs(typed, &module.items, &mut symbol_docs);
     let mut collector = Collector {
         typed,
         index: CompletionIndex::default(),
+        symbol_docs,
     };
     let entry = typed.resolved().program().entry();
     collector.module(module, entry);
     collector.index
+}
+
+/// Walks module and submodule items, recording the doc comments attached to
+/// each `let`/`def`/`extern` binding under its resolved symbol. Companion
+/// methods and imported values both surface here, so completion candidates
+/// built from a bare `DefinitionId::Symbol` can still show documentation.
+fn collect_symbol_docs(
+    typed: &TypedModule,
+    items: &[Item],
+    docs: &mut HashMap<SymbolId, Vec<String>>,
+) {
+    for item in items {
+        collect_item_symbol_docs(typed, item, docs);
+    }
+}
+
+fn collect_item_symbol_docs(
+    typed: &TypedModule,
+    item: &Item,
+    docs: &mut HashMap<SymbolId, Vec<String>>,
+) {
+    match item {
+        Item::Modified(value) => collect_item_symbol_docs(typed, &value.item, docs),
+        Item::VisibilitySplice(value) => collect_item_symbol_docs(typed, &value.item, docs),
+        Item::Submodule(value) => collect_symbol_docs(typed, &value.module.items, docs),
+        Item::ExternBlock(block) => {
+            for binding in &block.bindings {
+                record_binding_docs(typed, binding, docs);
+            }
+        }
+        Item::Binding(binding) => record_binding_docs(typed, binding, docs),
+        _ => {}
+    }
+}
+
+fn record_binding_docs(
+    typed: &TypedModule,
+    binding: &Binding,
+    docs: &mut HashMap<SymbolId, Vec<String>>,
+) {
+    if binding.docs.is_empty() {
+        return;
+    }
+    if let Some(symbol) = typed.symbol_for(binding.syntax.id) {
+        docs.entry(symbol).or_insert_with(|| binding.docs.clone());
+    }
+}
+
+fn markup_documentation(docs: &[String]) -> Option<Documentation> {
+    if docs.is_empty() {
+        return None;
+    }
+    Some(Documentation::MarkupContent(MarkupContent {
+        kind: MarkupKind::Markdown,
+        value: docs.join("\n"),
+    }))
 }
 
 pub fn keywords() -> Vec<CompletionItem> {
@@ -214,6 +276,7 @@ impl CompletionIndex {
 struct Collector<'a> {
     typed: &'a TypedModule,
     index: CompletionIndex,
+    symbol_docs: HashMap<SymbolId, Vec<String>>,
 }
 
 impl Collector<'_> {
@@ -717,6 +780,9 @@ impl Collector<'_> {
         if let Some(detail) = candidate.item.detail.take() {
             candidate.item.detail = Some(format!("{prefix} {}: {detail}", binding.name));
         }
+        if candidate.item.documentation.is_none() {
+            candidate.item.documentation = markup_documentation(&binding.docs);
+        }
         Some(candidate)
     }
 
@@ -857,6 +923,31 @@ impl Collector<'_> {
                 (Namespace::Value, kind, info.type_display.clone())
             }
         };
+        let docs = match definition {
+            DefinitionId::Symbol(symbol) => {
+                self.symbol_docs.get(&symbol).cloned().unwrap_or_default()
+            }
+            DefinitionId::Type(id) => resolved
+                .type_declarations()
+                .get(&id)
+                .map(|declaration| declaration.docs.clone())
+                .unwrap_or_default(),
+            DefinitionId::Trait(id) => resolved
+                .traits()
+                .get(&id)
+                .map(|resolved| resolved.declaration.docs.clone())
+                .unwrap_or_default(),
+            DefinitionId::TraitMethod(id) => resolved
+                .trait_method(id)
+                .map(|method| method.docs.clone())
+                .unwrap_or_default(),
+            DefinitionId::Macro(id) => resolved
+                .macro_for(id)
+                .map(|macro_| macro_.docs.clone())
+                .unwrap_or_default(),
+            DefinitionId::Module(id) => resolved.program().module(id).syntax.docs.clone(),
+            DefinitionId::TypeParameter(_) | DefinitionId::CompileTime(_) => Vec::new(),
+        };
         Some(Candidate {
             available_from,
             namespace,
@@ -864,6 +955,7 @@ impl Collector<'_> {
                 label: name.to_owned(),
                 kind: Some(kind),
                 detail,
+                documentation: markup_documentation(&docs),
                 ..CompletionItem::default()
             },
         })
@@ -1177,6 +1269,60 @@ mod tests {
                 .iter()
                 .any(|item| item.label == "to_string")
         );
+    }
+
+    #[test]
+    fn completion_items_carry_doc_comments() {
+        let root =
+            std::env::temp_dir().join(format!("staple-completion-docs-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("dependency.sta"),
+            concat!(
+                "pub mod\n",
+                "/// Adds one to its argument.\n",
+                "pub def bump = value: I32 => value\n",
+            ),
+        )
+        .unwrap();
+        let source = concat!(
+            "use dependency.bump\n",
+            "/// The magic number.\n",
+            "def answer: I32 = 42\n",
+            "answer\n",
+        );
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let items = index(&module, &typed).items(source.rfind("answer").unwrap());
+
+        let documentation = |label: &str| {
+            items
+                .iter()
+                .find(|item| item.label == label)
+                .and_then(|item| item.documentation.clone())
+        };
+        assert_eq!(
+            documentation("answer"),
+            Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: " The magic number.".to_owned(),
+            }))
+        );
+        assert_eq!(
+            documentation("bump"),
+            Some(Documentation::MarkupContent(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: " Adds one to its argument.".to_owned(),
+            }))
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
