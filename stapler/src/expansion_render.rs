@@ -173,7 +173,8 @@ fn render_expr(expression: &Expression) -> String {
         ),
         Expression::Loop(loop_) => format!("loop {}", render_block(&loop_.body)),
         Expression::With(with) => format!(
-            "with {} = {} {}",
+            "with {}{} = {} {}",
+            if with.mutable { "mut " } else { "" },
             with.resource.syntax().text().trim(),
             render_expr(&with.value),
             render_block(&with.body),

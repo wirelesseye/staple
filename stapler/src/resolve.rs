@@ -4404,7 +4404,7 @@ impl NameResolver {
             Type::Function(function) => {
                 self.resolve_type_with(&function.parameter, strict);
                 for resource in &function.effects.resources {
-                    self.resolve_type_with(resource, strict);
+                    self.resolve_type_with(&resource.value_type, strict);
                 }
                 self.resolve_type_with(&function.result, strict);
             }
@@ -4584,7 +4584,7 @@ impl NameResolver {
             Type::Function(function) => {
                 self.validate_representation(&function.parameter, required);
                 for resource in &function.effects.resources {
-                    self.validate_representation(resource, required);
+                    self.validate_representation(&resource.value_type, required);
                 }
                 self.validate_representation(&function.result, required);
             }

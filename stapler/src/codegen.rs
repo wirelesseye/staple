@@ -62,7 +62,7 @@ struct ModuleEmitter<'module, 'context> {
     target_data: TargetData,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct SumStorage<'context> {
     tag: inkwell::values::PointerValue<'context>,
     payload: inkwell::values::PointerValue<'context>,
@@ -72,6 +72,13 @@ struct SumStorage<'context> {
 struct CompiledCallArguments<'context> {
     values: Vec<inkwell::values::BasicMetadataValueEnum<'context>>,
     temporaries: Vec<(inkwell::values::PointerValue<'context>, CheckedType)>,
+}
+
+#[derive(Clone)]
+struct BoundResource<'context> {
+    resource: CheckedResource,
+    value: inkwell::values::AnyValueEnum<'context>,
+    indirect: bool,
 }
 
 #[derive(Clone, Default)]
@@ -91,7 +98,7 @@ struct FunctionEnvironment<'context> {
     parameter_pointers: HashMap<SymbolId, inkwell::values::PointerValue<'context>>,
     function_id: Option<FunctionId>,
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
-    resources: Vec<(CheckedResource, inkwell::values::AnyValueEnum<'context>)>,
+    resources: Vec<BoundResource<'context>>,
     reactive_scopes: Vec<inkwell::values::PointerValue<'context>>,
     did_return: bool,
     loops: Vec<LoopCodegenContext<'context>>,
@@ -831,9 +838,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .cloned()
             .zip(parameters.iter().skip(1).take(resource_count).copied())
         {
-            environment
-                .resources
-                .push((resource, value.as_any_value_enum()));
+            let indirect = resource.mutable
+                || !self
+                    .typed_module
+                    .is_copy_in_function(&resource.value_type, environment.function_id);
+            environment.resources.push(BoundResource {
+                resource,
+                value: value.as_any_value_enum(),
+                indirect,
+            });
         }
         if !function.captures.is_empty() {
             let environment_type = self.compile_capture_type(function)?;
@@ -1446,10 +1459,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             if Some(module_id) == entry_module
                 && let Some(io_resource) = self.typed_module.io_resource()
             {
-                environment.resources.push((
-                    io_resource,
-                    self.context.struct_type(&[], false).const_zero().into(),
-                ));
+                let io_type = self.compile_type(&io_resource.value_type)?;
+                let io = self
+                    .builder
+                    .build_alloca(io_type, "io.resource")
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_store(io, self.context.struct_type(&[], false).const_zero())
+                    .map_err(compiler_diagnostic)?;
+                environment.resources.push(BoundResource {
+                    resource: io_resource,
+                    value: io.as_any_value_enum(),
+                    indirect: true,
+                });
             }
             let mut entry_reactive_scope_pushed = false;
             if Some(module_id) == entry_module
@@ -1465,9 +1487,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         Span::Compiler,
                     )?
                     .expect("reactive_scope_create returns a pointer");
-                environment
-                    .resources
-                    .push((reactive_resource, scope.as_any_value_enum()));
+                environment.resources.push(BoundResource {
+                    resource: reactive_resource,
+                    value: scope.as_any_value_enum(),
+                    indirect: false,
+                });
                 environment.reactive_scopes.push(scope.into_pointer_value());
                 entry_reactive_scope_pushed = true;
             }
@@ -2342,6 +2366,39 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         }
 
         match expression {
+            Expression::Product(product) if product.elements.len() == 1 => {
+                self.compile_place_pointer(environment, &product.elements[0].value)
+            }
+            Expression::Satisfies(value) => self.compile_place_pointer(environment, &value.value),
+            Expression::Resource(resource) => {
+                let expected = self
+                    .typed_module
+                    .resource_for_expression(resource.syntax.id)
+                    .ok_or_else(|| {
+                        Diagnostic::new(resource.syntax.span.clone(), "unchecked resource place")
+                    })?;
+                let bound = environment
+                    .resources
+                    .iter()
+                    .rev()
+                    .find(|candidate| candidate.resource.value_type == expected.value_type)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            resource.syntax.span.clone(),
+                            format!("resource `{}` is not available", expected.value_type),
+                        )
+                    })?;
+                if !bound.indirect {
+                    return Err(Diagnostic::new(
+                        resource.syntax.span.clone(),
+                        format!("resource `{}` is not mutable", expected.value_type),
+                    ));
+                }
+                let pointer = value_as_basic(bound.value)
+                    .expect("resource address is first-class")
+                    .into_pointer_value();
+                Ok((pointer, expected.value_type.clone(), None))
+            }
             Expression::Access(access) => {
                 let checked = self
                     .typed_module
@@ -2728,8 +2785,25 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .resources
                     .iter()
                     .rev()
-                    .find(|(candidate, _)| candidate == expected)
-                    .map(|(_, value)| *value)
+                    .find(|candidate| candidate.resource.value_type == expected.value_type)
+                    .map(|bound| {
+                        if bound.indirect {
+                            let pointer = value_as_basic(bound.value)
+                                .expect("borrowed resource pointer is first-class")
+                                .into_pointer_value();
+                            self.builder
+                                .build_load(
+                                    self.compile_type(&expected.value_type)
+                                        .expect("resource type compiles"),
+                                    pointer,
+                                    "resource.borrow",
+                                )
+                                .expect("resource load")
+                                .as_any_value_enum()
+                        } else {
+                            bound.value
+                        }
+                    })
                     .ok_or_else(|| {
                         Diagnostic::new(
                             resource.syntax.span.clone(),
@@ -2749,10 +2823,42 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 if environment.did_return {
                     return Ok(self.unit_value());
                 }
-                environment.resources.push((resource, value));
+                let copy = self
+                    .typed_module
+                    .is_copy_in_function(&resource.value_type, environment.function_id);
+                let borrow_provider = with.mutable || !copy;
+                let stored = if borrow_provider
+                    && let Ok((pointer, _, _)) =
+                        self.compile_place_pointer(environment, &with.value)
+                {
+                    pointer.as_any_value_enum()
+                } else {
+                    let ty = self.compile_type(&resource.value_type)?;
+                    let pointer = self
+                        .builder
+                        .build_alloca(ty, "resource.provider")
+                        .map_err(compiler_diagnostic)?;
+                    self.builder
+                        .build_store(
+                            pointer,
+                            value_as_basic(value).ok_or_else(|| {
+                                Diagnostic::new(
+                                    with.value.syntax().span.clone(),
+                                    "resource provider is not first-class",
+                                )
+                            })?,
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    pointer.as_any_value_enum()
+                };
+                environment.resources.push(BoundResource {
+                    resource,
+                    value: stored,
+                    indirect: true,
+                });
                 let reactive = self
                     .typed_module
-                    .is_reactive_type(&environment.resources.last().unwrap().0.value_type);
+                    .is_reactive_type(&environment.resources.last().unwrap().resource.value_type);
                 if reactive {
                     let scope = value_as_basic(value)
                         .expect("Reactive is first-class")
@@ -6234,18 +6340,45 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .resources
             .iter()
             .map(|resource| {
-                let value = environment
+                let bound = environment
                     .resources
                     .iter()
                     .rev()
-                    .find(|(candidate, _)| candidate == resource)
-                    .map(|(_, value)| *value)
+                    .find(|candidate| candidate.resource.value_type == resource.value_type)
                     .ok_or_else(|| {
                         Diagnostic::new(
                             span.clone(),
                             format!("resource `{}` is not available", resource.value_type),
                         )
                     })?;
+                let value = if resource.mutable
+                    || !self
+                        .typed_module
+                        .is_copy_in_function(&resource.value_type, environment.function_id)
+                {
+                    if bound.indirect {
+                        bound.value
+                    } else {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            format!("resource `{}` is not borrowable", resource.value_type),
+                        ));
+                    }
+                } else if bound.indirect {
+                    let pointer = value_as_basic(bound.value)
+                        .expect("borrowed resource pointer")
+                        .into_pointer_value();
+                    self.builder
+                        .build_load(
+                            self.compile_type(&resource.value_type)?,
+                            pointer,
+                            "resource.copy",
+                        )
+                        .map_err(compiler_diagnostic)?
+                        .as_any_value_enum()
+                } else {
+                    bound.value
+                };
                 value_as_basic(value)
                     .map(Into::into)
                     .ok_or_else(|| Diagnostic::new(span.clone(), "resource is not first-class"))
@@ -6640,12 +6773,26 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .resources
             .iter()
             .rev()
-            .find_map(|(resource, value)| {
-                self.typed_module
-                    .is_reactive_type(&resource.value_type)
-                    .then(|| value_as_basic(*value))
-                    .flatten()
-                    .map(|value| value.into_pointer_value())
+            .find_map(|bound| {
+                if !self
+                    .typed_module
+                    .is_reactive_type(&bound.resource.value_type)
+                {
+                    return None;
+                }
+                let value = value_as_basic(bound.value)?;
+                if bound.indirect {
+                    self.builder
+                        .build_load(
+                            self.compile_type(&bound.resource.value_type).ok()?,
+                            value.into_pointer_value(),
+                            "reactive.resource",
+                        )
+                        .ok()
+                        .map(|value| value.into_pointer_value())
+                } else {
+                    Some(value.into_pointer_value())
+                }
             })
             .ok_or_else(|| {
                 Diagnostic::new(
@@ -6656,7 +6803,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
         let mut payload_fields = vec![callback.get_type().into()];
         for resource in &callback_type.effects.resources {
-            payload_fields.push(self.compile_type(&resource.value_type)?);
+            if resource.mutable
+                || !self
+                    .typed_module
+                    .is_copy_in_function(&resource.value_type, environment.function_id)
+            {
+                payload_fields.push(self.context.ptr_type(AddressSpace::default()).into());
+            } else {
+                payload_fields.push(self.compile_type(&resource.value_type)?);
+            }
         }
         let payload_type = self.context.struct_type(&payload_fields, false);
         let payload = self
@@ -6737,7 +6892,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             arguments.push(
                 self.builder
                     .build_load(
-                        self.compile_type(&resource.value_type)?,
+                        if resource.mutable
+                            || !self
+                                .typed_module
+                                .is_copy_in_function(&resource.value_type, environment.function_id)
+                        {
+                            self.context.ptr_type(AddressSpace::default()).into()
+                        } else {
+                            self.compile_type(&resource.value_type)?
+                        },
                         slot,
                         "reaction.resource",
                     )
@@ -8547,7 +8710,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let return_type = self.compile_type(&function_type.result)?;
         let mut parameter_types = vec![self.context.ptr_type(AddressSpace::default()).into()];
         for resource in &function_type.effects.resources {
-            parameter_types.push(self.compile_type(&resource.value_type)?.into());
+            if resource.mutable
+                || !self
+                    .typed_module
+                    .is_copy_in_function(&resource.value_type, None)
+            {
+                parameter_types.push(self.context.ptr_type(AddressSpace::default()).into());
+            } else {
+                parameter_types.push(self.compile_type(&resource.value_type)?.into());
+            }
         }
         let value_parameters = if function_type.mutations.contains(&CheckedMutation::Whole) {
             vec![self.context.ptr_type(AddressSpace::default()).into()]

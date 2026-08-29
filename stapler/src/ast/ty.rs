@@ -313,8 +313,24 @@ pub struct FunctionType {
 pub struct EffectSet {
     pub syntax: Syntax,
     pub variable: Option<EffectVariable>,
-    pub resources: Vec<Type>,
+    pub resources: Vec<ResourceEffect>,
     pub state: Vec<StateEffect>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceEffect {
+    pub syntax: Syntax,
+    pub value_type: Type,
+    pub mutable: bool,
+}
+
+impl fmt::Display for ResourceEffect {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.mutable {
+            formatter.write_str("mut ")?;
+        }
+        write!(formatter, "{}", self.value_type)
+    }
 }
 
 impl EffectSet {

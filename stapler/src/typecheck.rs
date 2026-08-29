@@ -255,6 +255,7 @@ pub struct CheckedFunctionType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedResource {
     pub value_type: CheckedType,
+    pub mutable: bool,
 }
 
 /// A parameter position addressed by a `mut` or `move` marker: either the
@@ -320,10 +321,20 @@ impl CheckedEffectSet {
         resources.sort_by(|left, right| {
             format!("{:?}", left.value_type).cmp(&format!("{:?}", right.value_type))
         });
-        resources.dedup();
+        let mut canonical = Vec::<CheckedResource>::new();
+        for resource in resources {
+            if let Some(existing) = canonical
+                .iter_mut()
+                .find(|candidate| candidate.value_type == resource.value_type)
+            {
+                existing.mutable |= resource.mutable;
+            } else {
+                canonical.push(resource);
+            }
+        }
         Self {
             variable: None,
-            resources,
+            resources: canonical,
             state: None,
         }
     }
@@ -359,7 +370,7 @@ impl CheckedEffectSet {
         let mut result = Self::canonical(
             self.resources
                 .iter()
-                .filter(|candidate| *candidate != resource)
+                .filter(|candidate| candidate.value_type != resource.value_type)
                 .cloned()
                 .collect(),
         )
@@ -374,10 +385,12 @@ impl CheckedEffectSet {
         {
             return false;
         }
-        self.resources
-            .iter()
-            .all(|resource| other.resources.contains(resource))
-            && state_is_subset(self.state, other.state)
+        self.resources.iter().all(|resource| {
+            other.resources.iter().any(|candidate| {
+                candidate.value_type == resource.value_type
+                    && (!resource.mutable || candidate.mutable)
+            })
+        }) && state_is_subset(self.state, other.state)
     }
 }
 
@@ -405,6 +418,9 @@ impl fmt::Display for CheckedEffectSet {
                 formatter.write_str(", ")?;
             }
             first = false;
+            if resource.mutable {
+                formatter.write_str("mut ")?;
+            }
             write!(formatter, "{}", resource.value_type)?;
         }
         formatter.write_str("}")
@@ -1051,6 +1067,7 @@ impl TypedModule {
                 name: "IO".to_owned(),
                 arguments: Vec::new(),
             },
+            mutable: false,
         })
     }
 
@@ -1061,6 +1078,7 @@ impl TypedModule {
                 name: "Reactive".to_owned(),
                 arguments: Vec::new(),
             },
+            mutable: false,
         })
     }
 
@@ -3451,6 +3469,15 @@ impl TypeChecker {
         target_parameters: &HashMap<SymbolId, usize>,
     ) -> CheckedEffectSet {
         match expression {
+            Expression::Resource(value) => self
+                .resource_types
+                .get(&value.syntax.id)
+                .cloned()
+                .map(|mut resource| {
+                    resource.mutable = true;
+                    CheckedEffectSet::canonical(vec![resource])
+                })
+                .unwrap_or_default(),
             Expression::Name(name) => {
                 let state_cell = self.state_cell_symbol(module, name.syntax.id);
                 if let Some(symbol) = state_cell {
@@ -4913,6 +4940,44 @@ impl TypeChecker {
         projected: bool,
         _crossed_ref: bool,
     ) -> Option<PlaceIssue> {
+        fn contains_resource(expression: &Expression) -> bool {
+            match expression {
+                Expression::Resource(_) => true,
+                Expression::Access(value) => contains_resource(&value.value),
+                Expression::Index(value) => contains_resource(&value.value),
+                Expression::Satisfies(value) => contains_resource(&value.value),
+                Expression::Product(value) => value
+                    .elements
+                    .iter()
+                    .any(|element| contains_resource(&element.value)),
+                _ => false,
+            }
+        }
+        if contains_resource(expression) {
+            return None;
+        }
+        match expression {
+            Expression::Resource(_) => return None,
+            Expression::Access(access) => {
+                return self.writable_place_issue(
+                    module,
+                    &access.value,
+                    current_module,
+                    true,
+                    false,
+                );
+            }
+            Expression::Index(index) => {
+                return self.writable_place_issue(
+                    module,
+                    &index.value,
+                    current_module,
+                    true,
+                    false,
+                );
+            }
+            _ => {}
+        }
         if let Some(symbol) = module.symbol_for(expression.syntax().id) {
             let is_parameter = self.mutable_parameter_symbols.contains(&symbol);
             let permitted = is_parameter || module.has_mutable_storage(symbol);
@@ -4930,11 +4995,8 @@ impl TypeChecker {
             return Some(PlaceIssue::NotAPlace);
         }
         match expression {
-            Expression::Access(access) => {
-                self.writable_place_issue(module, &access.value, current_module, true, false)
-            }
-            Expression::Index(index) => {
-                self.writable_place_issue(module, &index.value, current_module, true, false)
+            Expression::Resource(_) | Expression::Access(_) | Expression::Index(_) => {
+                unreachable!()
             }
             Expression::Name(_) => Some(PlaceIssue::NotAPlace),
             other => {
@@ -5609,7 +5671,11 @@ impl TypeChecker {
                     &crate::EffectSet {
                         syntax: resource.resource.syntax().clone(),
                         variable: None,
-                        resources: vec![resource.resource.clone()],
+                        resources: vec![crate::ResourceEffect {
+                            syntax: resource.resource.syntax().clone(),
+                            value_type: resource.resource.clone(),
+                            mutable: false,
+                        }],
                         state: Vec::new(),
                     },
                 );
@@ -5626,7 +5692,11 @@ impl TypeChecker {
                     &crate::EffectSet {
                         syntax: with.resource.syntax().clone(),
                         variable: None,
-                        resources: vec![with.resource.clone()],
+                        resources: vec![crate::ResourceEffect {
+                            syntax: with.resource.syntax().clone(),
+                            value_type: with.resource.clone(),
+                            mutable: with.mutable,
+                        }],
                         state: Vec::new(),
                     },
                 );
@@ -5640,11 +5710,36 @@ impl TypeChecker {
                     &with.value,
                     Some(&resource_type.value_type),
                 );
-                self.check_expression_expected(
+                let result = self.check_expression_expected(
                     module,
                     &Expression::Block(with.body.clone()),
                     expected,
-                )
+                );
+                let body_effects = self.block_effects_now(module, &with.body, &HashMap::new());
+                if !with.mutable
+                    && body_effects.resources.iter().any(|required| {
+                        required.value_type == resource_type.value_type && required.mutable
+                    })
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        with.resource.syntax().span.clone(),
+                        format!(
+                            "immutable resource provider `{}` cannot satisfy a mutable resource requirement; use `with mut`",
+                            resource_type.value_type
+                        ),
+                    ));
+                }
+                if with.mutable
+                    && let Some((root, _)) = place_root_symbol(module, &with.value)
+                    && !module.has_mutable_storage(root)
+                    && !self.mutable_parameter_symbols.contains(&root)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        with.value.syntax().span.clone(),
+                        "a mutable resource provider must be declared `mut`",
+                    ));
+                }
+                result
             }
             Expression::Block(block) => {
                 let mut result = CheckedType::empty_product();
@@ -8337,7 +8432,7 @@ impl TypeChecker {
         let mut resources = Vec::new();
         let mut variable = None;
         for resource in &source.resources {
-            if let Type::Named(named) = resource
+            if let Type::Named(named) = &resource.value_type
                 && let Some(id) = module.type_parameter_for(named.syntax.id)
                 && module.is_effect_parameter(id)
             {
@@ -8354,7 +8449,7 @@ impl TypeChecker {
                 }
                 continue;
             }
-            let value_type = self.resolve_source_type_inner(module, resource);
+            let value_type = self.resolve_source_type_inner(module, &resource.value_type);
             let builtin_resource = matches!(&value_type, CheckedType::Opaque { id, .. }
                 if Some(*id) == self.io_type || Some(*id) == self.reactive_type);
             let valid_nominal =
@@ -8362,29 +8457,20 @@ impl TypeChecker {
             let concrete = !contains_type_parameter(&value_type)
                 && !contains_inferred_type(&value_type)
                 && value_type.is_fully_known();
-            let copy = builtin_resource
-                || is_copy_type(
-                    &value_type,
-                    self.copy_trait,
-                    self.drop_trait,
-                    self.io_type,
-                    &self.trait_implementations,
-                    &[],
-                );
             if value_type == CheckedType::Error {
                 continue;
             }
-            if !valid_nominal || !concrete || (!builtin_resource && !value_type.is_sized()) || !copy
-            {
+            if !valid_nominal || !concrete || (!builtin_resource && !value_type.is_sized()) {
                 self.diagnostics.push(Diagnostic::new(
-                    resource.syntax().span.clone(),
-                    format!(
-                        "resource type `{value_type}` must be a concrete, sized, Copy nominal type"
-                    ),
+                    resource.syntax.span.clone(),
+                    format!("resource type `{value_type}` must be a concrete, sized nominal type"),
                 ));
                 continue;
             }
-            resources.push(CheckedResource { value_type });
+            resources.push(CheckedResource {
+                value_type,
+                mutable: resource.mutable,
+            });
         }
         let state = source.state.iter().copied().fold(None, |current, effect| {
             union_state(
@@ -9503,6 +9589,7 @@ fn substitute_effect_set(
             .into_iter()
             .map(|resource| CheckedResource {
                 value_type: substitute_type(resource.value_type, substitutions),
+                mutable: resource.mutable,
             })
             .collect(),
     )

@@ -2190,12 +2190,19 @@ impl Grammar {
                         StateEffect::ReadWrite
                     };
                     state.push(effect);
-                } else if self.at(TokenKind::Mut) {
-                    return Err(self.error("`mut` is not an effect; place it before the function parameter type or a direct product element type"));
                 } else if self.at(TokenKind::Move) {
-                    return Err(self.error("`move` is not an effect; place it before the function parameter type or a direct product element type"));
+                    return Err(
+                        self.error("resources cannot be moved; use an immutable or `mut` resource")
+                    );
                 } else {
-                    resources.push(self.parse_type_union()?);
+                    let resource_start = self.position;
+                    let mutable = self.eat(TokenKind::Mut);
+                    let value_type = self.parse_type_union()?;
+                    resources.push(ResourceEffect {
+                        syntax: self.syntax(resource_start),
+                        value_type,
+                        mutable,
+                    });
                 }
                 if !self.eat(TokenKind::Comma) {
                     break;
@@ -3294,6 +3301,7 @@ impl Grammar {
     fn is_with_resource_expression_start(&self) -> bool {
         let mut candidate = self.clone();
         candidate.bump_token();
+        candidate.eat(TokenKind::Mut);
         candidate.parse_type_union().is_ok() && candidate.at(TokenKind::Equals)
     }
 
@@ -3303,6 +3311,7 @@ impl Grammar {
         if keyword.text != "with" {
             return Err(self.error("expected `with`"));
         }
+        let mutable = self.eat(TokenKind::Mut);
         let resource = self.parse_type_union()?;
         self.expect(TokenKind::Equals, "expected `=` after resource type")?;
         let previous = self.brace_terminates_expression;
@@ -3314,6 +3323,7 @@ impl Grammar {
         Ok(WithResourceExpression {
             syntax: self.syntax(start),
             resource,
+            mutable,
             value,
             body,
         })

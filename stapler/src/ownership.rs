@@ -226,9 +226,26 @@ impl<'a> OwnershipChecker<'a> {
                 self.states = merge_states(&entry, &context.breaks);
                 !context.breaks.is_empty()
             }
-            Expression::Resource(_) => true,
+            Expression::Resource(value) => {
+                if consume
+                    && self
+                        .module
+                        .resource_for_expression(value.syntax.id)
+                        .is_some_and(|resource| {
+                            !self
+                                .module
+                                .is_copy_in_function(&resource.value_type, self.function)
+                        })
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.syntax.span.clone(),
+                        "cannot move out of a borrowed resource",
+                    ));
+                }
+                true
+            }
             Expression::With(value) => {
-                self.check_expression(&value.value, true);
+                self.check_expression(&value.value, false);
                 self.check_expression(&Expression::Block(value.body.clone()), consume)
             }
             Expression::Block(value) => {

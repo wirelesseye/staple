@@ -1271,7 +1271,13 @@ mod tests {
                 "let derived = with Clock = outer { with Clock = derive () { read () } }\n",
                 "let reader = with Clock = outer { make_reader () }\n",
                 "let later = with Clock = inner { reader () }\n",
-                "exit ((derived - 42) + (later - 7))\n",
+                "type Config = (x: I32)\n",
+                "def read_config = () => (resource Config).x\n",
+                "def update_config: () ->{mut Config} () = () => { (resource Config).x = 9 }\n",
+                "let mut config = Config (x: 1)\n",
+                "let copied = with Config = config { config.x = 2; read_config () }\n",
+                "with mut Config = config { update_config () }\n",
+                "exit ((derived - 42) + (later - 7) + (copied - 1) + (config.x - 9))\n",
             ),
         )
         .expect("temporary resource source should be writable");

@@ -7039,7 +7039,11 @@ fn type_contains_syntax(ty: &Type) -> bool {
         ),
         Type::Function(function) => {
             type_contains_syntax(&function.parameter)
-                || function.effects.resources.iter().any(type_contains_syntax)
+                || function
+                    .effects
+                    .resources
+                    .iter()
+                    .any(|resource| type_contains_syntax(&resource.value_type))
                 || type_contains_syntax(&function.result)
         }
         Type::Product(product) => product
@@ -7071,7 +7075,7 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
                     .effects
                     .resources
                     .iter()
-                    .any(|ty| type_contains_unshadowed_syntax(ty, declared))
+                    .any(|resource| type_contains_unshadowed_syntax(&resource.value_type, declared))
                 || type_contains_unshadowed_syntax(&function.result, declared)
         }
         Type::Product(product) => product
@@ -7148,7 +7152,7 @@ fn type_contains_named(ty: &Type, expected: &str) -> bool {
                     .effects
                     .resources
                     .iter()
-                    .any(|resource| type_contains_named(resource, expected))
+                    .any(|resource| type_contains_named(&resource.value_type, expected))
                 || type_contains_named(&function.result, expected)
         }
         Type::Product(product) => product
@@ -8425,7 +8429,7 @@ fn substitute_type(
         Type::Function(function) => {
             substitute_type(&mut function.parameter, environment, diagnostics)?;
             for resource in &mut function.effects.resources {
-                substitute_type(resource, environment, diagnostics)?;
+                substitute_type(&mut resource.value_type, environment, diagnostics)?;
             }
             substitute_type(&mut function.result, environment, diagnostics)?;
         }
@@ -9525,7 +9529,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
             freshen_type(expander, &mut function.parameter, module, mark);
             expander.freshen_syntax(&mut function.effects.syntax, module, mark);
             for resource in &mut function.effects.resources {
-                freshen_type(expander, resource, module, mark);
+                freshen_type(expander, &mut resource.value_type, module, mark);
             }
             for mutation in &mut function.mutations {
                 expander.freshen_syntax(&mut mutation.syntax, module, mark);

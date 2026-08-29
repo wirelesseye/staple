@@ -1076,7 +1076,7 @@ impl<'a> Classifier<'a> {
             Type::Function(value) => {
                 self.ty(&value.parameter, resolved);
                 for resource in &value.effects.resources {
-                    self.ty(resource, resolved);
+                    self.ty(&resource.value_type, resolved);
                 }
                 self.ty(&value.result, resolved);
             }

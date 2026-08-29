@@ -1509,7 +1509,7 @@ declarations are rejected.
 
 A typed resource is an implicit value identified by its concrete nominal type.
 There is no separate resource declaration: any fully concrete, sized nominal
-type whose representation is compiler-derived `Copy` may be used. For example:
+type may be used. For example:
 
 ```staple
 type Clock = (
@@ -1522,10 +1522,25 @@ type Logger = (
 ```
 
 Transparent aliases use the identity of their underlying nominal type. A
-structural type, ordinary opaque type, unspecialized generic type, unsized type,
-or move-only nominal type is not eligible. The compiler-represented opaque
-`std.io.IO` and `std.core.Reactive` are compiler-represented opaque exceptions. Consequently resources never add
-a new borrowing or ownership mode: their hidden values can always be copied.
+structural type, ordinary opaque type, unspecialized generic type, or unsized
+type is not eligible. The compiler-represented opaque `std.io.IO` and
+`std.core.Reactive` are exceptions.
+
+Resource ownership follows ordinary parameter ownership. An immutable `Copy`
+resource is copied, while an immutable non-`Copy` resource is shared-borrowed
+and cannot be moved, dropped, or returned whole. A resource entry may be marked
+`mut` to request a mutable borrow:
+
+```staple
+def increment: () ->{mut Counter} () = () => {
+    (resource Counter).value = (resource Counter).value + 1
+}
+```
+
+`mut R` subsumes `R` when checking a function body, and a set containing both
+canonicalizes to `mut R`. Mutation is performed directly through `resource R`
+or by forwarding that expression to a mutable parameter. Binding a local
+mutable-borrow alias from a resource is not supported.
 
 Function arrows list their effects in braces. Effect sets are
 unordered and duplicate-free, and each arrow in a curried type has its own set:
@@ -1692,6 +1707,21 @@ with Clock = system_clock {
 }
 ```
 
+The provider mode is explicit. `with R = value` supplies an immutable
+resource: it copies `value` when `R` is `Copy`, and otherwise shared-borrows
+it. `with mut R = value` supplies a mutable resource:
+
+```staple
+let mut config = Config (x: 42)
+with mut Config = config {
+    update_config ()
+}
+```
+
+A mutable named provider must be declared `mut`. A non-place mutable provider
+is materialized in scope-local storage and its final value is discarded. An
+immutable provider cannot satisfy a `mut R` requirement.
+
 The provider is evaluated before its binding is installed. A nested provider
 of the same concrete type shadows the nearest outer provider, while its own
 initializer can still use the outer value. The body result is the result of the
@@ -1699,8 +1729,10 @@ initializer can still use the outer value. The body result is the result of the
 provider: the function keeps the resource in its type and receives it when it
 is called.
 
-Resource values are passed as hidden `Copy` parameters, after the closure
-environment and before explicit arguments. Executable top-level initialization
+Resource values are passed as hidden parameters after the closure environment
+and before explicit arguments. Immutable `Copy` resources are passed by value;
+immutable non-`Copy` resources are passed by shared address; and `mut` resources
+are passed by mutable address. Executable top-level initialization
 must supply every required resource. External functions cannot declare Staple
 resources because foreign ABIs do not include these hidden parameters.
 Resource-bearing function types and nominal resource identities are preserved
@@ -1716,6 +1748,8 @@ still rejected.
 Macros may quote, splice, generate, and transform resource syntax. Attempting
 to evaluate `resource` or `with` as a compile-time macro operation is rejected;
 providers exist only in runtime lexical scopes.
+
+Nested providers continue to shadow by nominal resource type.
 
 ### Mutable parameters
 

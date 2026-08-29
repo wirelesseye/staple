@@ -583,17 +583,13 @@ fn mutable_module_bindings_contribute_state_effects_and_metadata() {
 #[test]
 fn rejects_invalid_resource_contracts_and_types() {
     let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "use std.cinterop.*\n",
-            "type MoveOnly = CString\n",
-            "def invalid: () ->{MoveOnly} () = () => ()\n",
-        )))
-        .expect_err_diagnostics("move-only resources must be rejected");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("concrete, sized, Copy nominal type")
-    }));
+        .check(resolve("def invalid: () ->{(I32, I32)} () = () => ()\n"))
+        .expect_err_diagnostics("structural resources must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("concrete, sized nominal type") })
+    );
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
@@ -606,6 +602,82 @@ fn rejects_invalid_resource_contracts_and_types() {
         diagnostic
             .message
             .contains("not contained in its declared effect set")
+    }));
+}
+
+#[test]
+fn mutable_and_non_copy_resources_follow_parameter_ownership() {
+    let module = type_check(concat!(
+        "use std.cinterop.*\n",
+        "type Counter = (value: I32)\n",
+        "type Handle = CString\n",
+        "def increment: () ->{mut Counter} () = () => {\n",
+        "  (resource Counter).value = (resource Counter).value + 1\n",
+        "}\n",
+        "def observe_handle: () ->{Handle} () = () => ()\n",
+        "let mut counter = Counter (value: 0)\n",
+        "with mut Counter = counter { increment () }\n",
+    ));
+
+    let increment = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "increment")
+        .expect("increment function");
+    let resources = &module
+        .type_of_function(increment.id)
+        .unwrap()
+        .effects
+        .resources;
+    assert_eq!(resources.len(), 1);
+    assert!(resources[0].mutable);
+
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("borrowed resources should lower through the hidden ABI");
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.*\n",
+            "type Handle = CString\n",
+            "def take: move Handle -> () = move value => ()\n",
+            "def invalid: () ->{Handle} () = () => take (resource Handle)\n",
+        )))
+        .expect_err_diagnostics("a borrowed resource must not be movable");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("borrowed resource"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Counter = (value: I32)\n",
+            "def increment: () ->{mut Counter} () = () => {\n",
+            "  (resource Counter).value = 1\n",
+            "}\n",
+            "let counter = Counter (value: 0)\n",
+            "with Counter = counter { increment () }\n",
+        )))
+        .expect_err_diagnostics("immutable providers cannot satisfy mutable resources");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("use `with mut`"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Counter = (value: I32)\n",
+            "let counter = Counter (value: 0)\n",
+            "with mut Counter = counter { () }\n",
+        )))
+        .expect_err_diagnostics("mutable providers need mutable named storage");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("provider must be declared `mut`")
     }));
 }
 
@@ -650,11 +722,11 @@ fn allows_io_at_entry_module_top_level_but_rejects_non_builtin_opaque_resources(
             "type Token = opaque\ndef use_token: () ->{Token} () = () => ()\n",
         ))
         .expect_err_diagnostics("only std.io.IO may be an opaque resource");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("concrete, sized, Copy nominal type")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("concrete, sized nominal type") })
+    );
 }
 
 #[test]
@@ -4323,7 +4395,9 @@ fn typegroup_alias_keeps_multi_line_doc_comment_order() {
         .items
         .iter()
         .find_map(|item| match item {
-            Item::TypeDeclaration(declaration) if declaration.name == "Ordering" => Some(declaration),
+            Item::TypeDeclaration(declaration) if declaration.name == "Ordering" => {
+                Some(declaration)
+            }
             _ => None,
         })
         .expect("typegroup should generate its alias");

@@ -45,6 +45,7 @@ fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
         "def read: () ->{Clock} I32 = () => (resource Clock).now ()\n",
         "def nested: () ->{Clock} () ->{} I32 = () => () => 1\n",
         "with Clock = system_clock { read () }\n",
+        "with mut Clock = system_clock { read () }\n",
         "macro request = () => quote { resource Clock }\n",
         "macro provide = value => quote { with Clock = $value { resource Clock } }\n",
     );
@@ -59,8 +60,12 @@ fn parses_typed_resource_sets_accesses_and_providers_losslessly() {
     };
     assert_eq!(function.effects.resources.len(), 1);
     assert!(matches!(module.items[3], Item::Expression(_)));
-    assert!(matches!(module.items[4], Item::MacroDeclaration(_)));
+    assert!(matches!(
+        &module.items[4],
+        Item::Expression(Expression::With(with)) if with.mutable
+    ));
     assert!(matches!(module.items[5], Item::MacroDeclaration(_)));
+    assert!(matches!(module.items[6], Item::MacroDeclaration(_)));
 
     assert!(parse("resource () ->\n").is_err());
     assert!(parse("with Clock = {}\n").is_err());
@@ -119,7 +124,7 @@ fn parses_mutable_parameter_types_losslessly() {
         "def f1: mut A -> () = a => ()\n",
         "def f2: (mut A, B) -> () = (a, b) => ()\n",
         "def f3: (mut a: A, b: B) -> () = (a, b) => ()\n",
-        "def f4: (mut a: A, b: B) ->{IO} () = (a, b) => ()\n",
+        "def f4: (mut a: A, b: B) ->{mut IO} () = (a, b) => ()\n",
         "let operation: mut A -> () = f1\n",
     );
     let module = parse(source).expect("mutable parameter types should parse");
@@ -166,9 +171,10 @@ fn parses_mutable_parameter_types_losslessly() {
     };
     assert_eq!(function.mutations.len(), 1);
     assert_eq!(function.effects.resources.len(), 1);
+    assert!(function.effects.resources[0].mutable);
 
-    let error = parse("def bad: A ->{mut} () = a => ()\n").expect_err("legacy syntax must fail");
-    assert!(error.message.contains("`mut` is not an effect"));
+    assert!(parse("def bad: A ->{mut} () = a => ()\n").is_err());
+    assert!(parse("def bad: A ->{move IO} () = a => ()\n").is_err());
     assert!(parse("def bad: (a: mut A, b: B) -> () = (a, b) => ()\n").is_err());
     assert!(parse("def bad: ((mut A, B), C) -> () = (a, b) => ()\n").is_err());
     assert!(parse("def bad: mut (mut A, B) -> () = (a, b) => ()\n").is_err());

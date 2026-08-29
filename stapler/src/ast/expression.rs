@@ -80,6 +80,7 @@ pub struct ResourceExpression {
 pub struct WithResourceExpression {
     pub syntax: Syntax,
     pub resource: Type,
+    pub mutable: bool,
     pub value: Box<Expression>,
     pub body: BlockExpression,
 }
