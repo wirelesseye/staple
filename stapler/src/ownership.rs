@@ -265,6 +265,22 @@ impl<'a> OwnershipChecker<'a> {
             }
             Expression::Call(value) => {
                 self.check_expression(&value.callee, false);
+                if let Some(plan) = self.module.curried_default_plan(value.syntax.id) {
+                    for default in &plan.defaults {
+                        self.check_call_argument(&default.value, Some(&default.function));
+                    }
+                    if !matches!(value.argument.as_ref(), Expression::Name(name) if name.name == "_")
+                    {
+                        let residual = plan.defaults.last().and_then(|default| {
+                            match default.function.result.as_ref() {
+                                crate::CheckedType::Function(function) => Some(function),
+                                _ => None,
+                            }
+                        });
+                        self.check_call_argument(&value.argument, residual);
+                    }
+                    return true;
+                }
                 let scoped_c_string = self
                     .module
                     .symbol_for(value.callee.syntax().id)

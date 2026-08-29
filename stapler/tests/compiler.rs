@@ -990,6 +990,110 @@ fn fills_anonymous_product_field_defaults_at_calls_and_construction() {
 }
 
 #[test]
+fn fills_defaulted_curried_parameters_at_calls_and_through_aliases() {
+    let declaration = type_check(
+        "def app: (props: I32 = 7) -> (() -> I32) -> I32 = props => children => props + children ()\n",
+    );
+    let app = declaration
+        .functions()
+        .iter()
+        .find(|function| function.name == "app")
+        .expect("app declaration");
+    assert!(
+        declaration
+            .type_of_function(app.id)
+            .expect("app type")
+            .default
+            .is_some()
+    );
+    let source = concat!(
+        "def app: (props: I32 = 7) -> (() -> I32) -> I32 = props => children => props + children ()\n",
+        "let explicit: I32 = app 5 { 1 }\n",
+        "let omitted: I32 = app { 2 }\n",
+        "let component = app\n",
+        "let aliased: I32 = component { 3 }\n",
+        "let defaulted = app _\n",
+        "let partial: I32 = defaulted { 4 }\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("defaulted curried calls should generate LLVM");
+}
+
+#[test]
+fn rejects_a_default_on_the_final_curried_parameter() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "def bad: (value: I32 = 1) -> I32 = value => value\n",
+        ))
+        .expect_err_diagnostics("a final arrow cannot have a default");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("only a non-final curried parameter")
+    }));
+}
+
+#[test]
+fn supports_consecutive_defaulted_curried_parameters_and_direct_product_construction() {
+    let source = concat!(
+        "def render: (options: (width: I32 = 10, height: I32 = 20) = ()) -> (theme: String = \"light\") -> (() -> I32) -> I32 = options => theme => children => options.width + children ()\n",
+        "let omitted: I32 = render { 1 }\n",
+        "let explicit: I32 = render (.width: 20) \"dark\" { 2 }\n",
+        "let one_default = render _ \"dark\"\n",
+        "let partial: I32 = one_default { 3 }\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("consecutive defaulted curried calls should generate LLVM");
+}
+
+#[test]
+fn rejects_default_omission_placeholder_outside_a_defaulted_call() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let invalid = _\n"))
+        .expect_err_diagnostics("a standalone omission placeholder must fail");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("may only omit a defaulted curried parameter")
+    }));
+}
+
+#[test]
+fn infers_generic_parameters_across_a_skipped_defaulted_arrow() {
+    let source = concat!(
+        "def fallback: <T where Default T> (value: T = default ()) -> (() -> T) -> T = value => children => children ()\n",
+        "let text: String = fallback { \"chosen\" }\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("generic defaulted curried calls should specialize");
+}
+
+#[test]
+fn applies_defaulted_curried_parameters_on_trait_methods() {
+    let source = concat!(
+        "trait Render T where Default T { render: (props: T = default ()) -> (() -> T) -> T }\n",
+        "impl Render I32 { def render = props => children => props + children () }\n",
+        "let value: I32 = Render.render { 2 }\n",
+        "let renderer: (() -> I32) -> I32 = Render.render _\n",
+        "let explicit_default: I32 = renderer { 3 }\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("trait method defaults should generate LLVM");
+}
+
+#[test]
 fn preserves_product_field_defaults_through_aliases_and_type_spreads() {
     let source = concat!(
         "type alias Point = (x: I32 = 1, y: I32 = 2)\n",
@@ -6867,11 +6971,13 @@ fn type_checks_and_generates_curried_functions() {
         assert_eq!(
             module.type_of_function(function.id).expect("checked type"),
             &stapler::CheckedFunctionType {
+                default: None,
                 parameter: Box::new(CheckedType::I32),
                 mutations: Vec::new(),
                 moves: Vec::new(),
                 effects: stapler::CheckedEffectSet::default(),
                 result: Box::new(CheckedType::Function(stapler::CheckedFunctionType {
+                    default: None,
                     parameter: Box::new(CheckedType::I32),
                     mutations: Vec::new(),
                     moves: Vec::new(),

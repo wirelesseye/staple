@@ -6038,6 +6038,46 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         call: &CallExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        if let Some(plan) = self
+            .typed_module
+            .curried_default_plan(call.syntax.id)
+            .cloned()
+        {
+            let mut callee = self.compile_expression(environment, &call.callee)?;
+            if environment.did_return {
+                return Ok(self.unit_value());
+            }
+            for default in &plan.defaults {
+                callee = self.compile_indirect_call_value(
+                    environment,
+                    callee,
+                    &default.value,
+                    &default.function,
+                    call.syntax.span.clone(),
+                )?;
+                if environment.did_return {
+                    return Ok(self.unit_value());
+                }
+            }
+            if matches!(call.argument.as_ref(), Expression::Name(name) if name.name == "_") {
+                return Ok(callee);
+            }
+            let function = plan
+                .defaults
+                .last()
+                .and_then(|default| match default.function.result.as_ref() {
+                    CheckedType::Function(function) => Some(function.clone()),
+                    _ => None,
+                })
+                .expect("a defaulted curried arrow has a residual function");
+            return self.compile_indirect_call_value(
+                environment,
+                callee,
+                &call.argument,
+                &function,
+                call.syntax.span.clone(),
+            );
+        }
         if let Some(dispatch) = self
             .typed_module
             .trait_dispatch_for(call.callee.syntax().id)
@@ -6333,6 +6373,52 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )
             .map_err(|error| Diagnostic::new(call.syntax.span.clone(), error.to_string()))?;
         self.drop_mutation_temporaries(compiled.temporaries, call.syntax.span.clone())?;
+        Ok(call_site
+            .try_as_basic_value()
+            .unwrap_basic()
+            .as_any_value_enum())
+    }
+
+    fn compile_indirect_call_value(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        callee: AnyValueEnum<'context>,
+        argument: &Expression,
+        function_type: &CheckedFunctionType,
+        span: Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let AnyValueEnum::StructValue(closure) = callee else {
+            return Err(Diagnostic::new(span, "expression is not a closure"));
+        };
+        let compiled = self.compile_effect_arguments(environment, argument, function_type)?;
+        let mut arguments = compiled.values;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
+        let code = self
+            .builder
+            .build_extract_value(closure, 0, "closure.code")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_pointer_value();
+        let closure_environment = self
+            .builder
+            .build_extract_value(closure, 1, "closure.environment")
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .into_pointer_value();
+        let mut hidden =
+            self.compile_resource_arguments(environment, &function_type.effects, span.clone())?;
+        hidden.append(&mut arguments);
+        hidden.insert(0, closure_environment.into());
+        let call_site = self
+            .builder
+            .build_indirect_call(
+                self.compile_closure_function_type(function_type)?,
+                code,
+                &hidden,
+                "closure.defaulted.call",
+            )
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        self.drop_mutation_temporaries(compiled.temporaries, span)?;
         Ok(call_site
             .try_as_basic_value()
             .unwrap_basic()

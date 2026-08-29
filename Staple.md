@@ -2267,6 +2267,53 @@ Both calls produce `3`. `add 1` returns a function that captures the value of
 stored or passed like other values. Product-parameter functions remain the
 ordinary choice when all arguments should be supplied together.
 
+### Defaulted curried parameters
+
+A named, non-final curried parameter may provide a default expression:
+
+```staple
+type alias AppProps = (title: String = "App", width: I32 = 800)
+
+def App:
+    (props: AppProps = ()) -> (() -> ()) -> ()
+= props => children => {
+    children ()
+}
+```
+
+When an argument does not match the current parameter, the compiler may insert
+its default and apply the argument to the next curried layer. A braced argument
+prefers a reachable zero-argument callback parameter, which supports trailing
+UI-style child blocks even when the block's result could also construct the
+defaulted parameter:
+
+```staple
+App (.title: "Settings") {
+    // children
+}
+
+App {
+    // default props and children
+}
+```
+
+Outside that braced-callback preference, direct application wins. Consecutive
+defaulted layers may be skipped in declaration order. `_` explicitly applies
+the current layer's default when overlapping or generic parameter types would
+otherwise select direct application:
+
+```staple
+let with_default_props = App _
+with_default_props { () }
+```
+
+Only a singleton named parameter on an arrow whose result is another function
+may use this form. A final arrow cannot be defaulted; use product-field defaults
+for trailing optional data. Curried defaults have the same purity, portability,
+and call-site evaluation rules as product-field defaults. They are static call
+metadata, preserved by inferred aliases and generic specialization, and do not
+change closure layout or the runtime function ABI.
+
 The fixed operators (`+ - * / == != < <= > >= .. ..=`, see
 [Values and expressions](#values-and-expressions)) desugar to the same shape:
 an operator call supplies its left and right operands through two curried

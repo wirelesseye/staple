@@ -4223,6 +4223,7 @@ impl NameResolver {
                 self.resolve_expression(&logical.left, None, None);
                 self.resolve_expression(&logical.right, None, None);
             }
+            Expression::Name(name) if name.name == "_" => {}
             Expression::Name(name) => match (
                 name.syntax
                     .definition_module()
