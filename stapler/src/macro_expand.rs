@@ -6964,6 +6964,11 @@ fn inferred_result_meta_type(expression: &Expression) -> MetaType {
             .first()
             .map(|arm| inferred_result_meta_type(&arm.body))
             .unwrap_or(MetaType::SyntaxNode),
+        // A `satisfies` annotation asserts the result type of the quoted
+        // template, so infer from it directly when it names a meta type;
+        // otherwise fall back to the annotated value's own shape.
+        Expression::Satisfies(satisfies) => meta_type(&satisfies.ty)
+            .unwrap_or_else(|| inferred_result_meta_type(&satisfies.value)),
         _ => MetaType::SyntaxNode,
     }
 }

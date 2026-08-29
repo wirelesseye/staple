@@ -2098,9 +2098,11 @@ mod tests {
             "macro choose: Expr -> Expr = _: Expr => parse_quote { 1 }\n",
             "macro choose: CallExpr -> Expr = _: CallExpr => parse_quote { 2 }\n",
             "macro inferred = value => parse_quote { $value }\n",
+            "macro satisfied = expr: Expr => parse_quote { $expr } satisfies Expr\n",
             "macro @identity: Item -> Item = item: Item => item\n",
             "let selected = choose (discarded 0)\n",
             "let inferred_value = inferred 4\n",
+            "let satisfied_value = satisfied 5\n",
             "@doc(\"A decorated value.\")\n",
             "@identity let decorated = dependency.imported 3\n",
         );
@@ -2123,6 +2125,7 @@ mod tests {
         assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
         assert!(signatures.contains(&("doc", "macro @doc: Parenthesized (Expr) -> Item -> Item")));
         assert!(signatures.contains(&("inferred", "macro inferred: SyntaxNode -> Expr")));
+        assert!(signatures.contains(&("satisfied", "macro satisfied: Expr -> Expr")));
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));
         assert!(
             signatures.contains(&("parse_quote", "macro parse_quote: Braced Syntax -> Syntax"))
