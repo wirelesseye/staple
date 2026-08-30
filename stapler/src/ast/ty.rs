@@ -5,6 +5,7 @@ use super::{SpliceExpression, Syntax};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Inferred(InferredType),
+    NumberLiteral(NumberLiteralType),
     StringLiteral(StringLiteralType),
     Named(NamedType),
     Product(ProductType),
@@ -19,6 +20,7 @@ impl Type {
     pub fn syntax(&self) -> &Syntax {
         match self {
             Self::Inferred(ty) => &ty.syntax,
+            Self::NumberLiteral(ty) => &ty.syntax,
             Self::StringLiteral(ty) => &ty.syntax,
             Self::Named(ty) => &ty.syntax,
             Self::Product(ty) => &ty.syntax,
@@ -35,6 +37,7 @@ impl fmt::Display for Type {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Inferred(_) => formatter.write_str("_"),
+            Self::NumberLiteral(literal) => formatter.write_str(&literal.literal),
             Self::StringLiteral(literal) => formatter.write_str(&literal.literal),
             Self::Named(named) => match &named.namespace {
                 Some(namespace) => write!(formatter, "{namespace}.{}", named.name),
@@ -189,6 +192,13 @@ pub struct StringLiteralType {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumberLiteralType {
+    pub syntax: Syntax,
+    /// The non-negative decimal literal exactly as written.
+    pub literal: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SumType {
     pub syntax: Syntax,
     pub alternatives: Vec<Type>,
@@ -297,7 +307,7 @@ pub struct RepeatedType {
     pub syntax: Syntax,
     pub element: Box<Type>,
     /// `None` denotes an erased length (`T[]`).
-    pub count: Option<String>,
+    pub count: Option<Box<Type>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

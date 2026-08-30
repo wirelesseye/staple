@@ -1084,8 +1084,11 @@ impl<'a> Classifier<'a> {
                 self.ty(&value.callee, resolved);
                 self.ty(&value.argument, resolved);
             }
-            Type::Repeated(value) => self.ty(&value.element, resolved),
-            Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
+            Type::Repeated(value) => {
+                self.ty(&value.element, resolved);
+                if let Some(count) = &value.count { self.ty(count, resolved); }
+            }
+            Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
         }
     }
 

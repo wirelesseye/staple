@@ -949,6 +949,48 @@ fn supports_repeated_spread_and_erased_product_references() {
 }
 
 #[test]
+fn supports_number_literal_types_as_generic_product_sizes() {
+    let source = concat!(
+        "type alias Three = 3\n",
+        "type alias Vector T N where N <: Natural = T[N]\n",
+        "let direct: I32[Three] = (1, 2, 3)\n",
+        "let generic: Vector I32 Three = direct\n",
+        "def keep: <T, N where N <: Natural> move T[N] -> T[N] = move values => values\n",
+        "let inferred: I32[3] = keep (1, 2, 3)\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("dependent product sizes should specialize before code generation");
+}
+
+#[test]
+fn number_literal_types_are_natural_but_not_runtime_integers() {
+    type_check(concat!(
+        "type alias Three = 3\n",
+        "type alias Triple (T) = T[Three]\n",
+        "type alias NaturalIdentity (N) where N <: Natural = N\n",
+        "type alias AlsoThree = NaturalIdentity Three\n",
+    ));
+    let diagnostics = TypeChecker::new()
+        .check(resolve("type alias Bad (N) where N <: I32 = N\ntype alias Three = 3\nlet invalid: I32[Bad Three] = ()\n"))
+        .expect_err_diagnostics("number literal types must not subtype runtime integers");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("not a subtype of `I32`")));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def invalid: <T, N> move T[N] -> T[N] = move values => values\n"))
+        .expect_err_diagnostics("dependent sizes require a Natural bound");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("must have a `Natural` subtype bound")
+    }));
+
+    TypeChecker::new()
+        .check(resolve("let invalid: 3 = 3\n"))
+        .expect_err_diagnostics("number literal types have no runtime values");
+}
+
+#[test]
 fn spreads_fixed_product_values_and_call_arguments() {
     let source = concat!(
         "def sum: I32[4] -> I32 = (a, b, c, d) => a + b + c + d\n",

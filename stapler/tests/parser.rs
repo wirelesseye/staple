@@ -383,6 +383,21 @@ fn parses_string_literal_types_and_patterns_losslessly() {
 }
 
 #[test]
+fn parses_number_literal_types_and_dependent_product_sizes_losslessly() {
+    let source = concat!(
+        "type alias Three = 3\n",
+        "type alias Vector T N where N <: Natural = T[N]\n",
+        "let values: Vector I32 Three = (1, 2, 3)\n",
+    );
+    let root = parse(source).expect("number literal types should parse");
+    assert_eq!(root.text(), source);
+    let Item::TypeDeclaration(three) = &root.items[0] else {
+        panic!("expected type alias");
+    };
+    assert!(matches!(three.underlying, Some(Type::NumberLiteral(_))));
+}
+
+#[test]
 fn parses_traits_implementations_and_bounds_losslessly() {
     let source = concat!(
         "pub trait ToString T {\n",

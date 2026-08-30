@@ -9050,6 +9050,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Span::Compiler,
                 "cannot generate code for an erroneous type",
             )),
+            CheckedType::Natural | CheckedType::NumberLiteral(_) => Err(Diagnostic::new(
+                Span::Compiler,
+                "compile-time number types have no runtime representation",
+            )),
+            CheckedType::RepeatedProduct { .. } => Err(Diagnostic::new(
+                Span::Compiler,
+                "cannot generate code for a homogeneous product with an unspecialized size",
+            )),
             CheckedType::CChar => Ok(self.context.i8_type().into()),
             CheckedType::Parameter { name, .. } => Err(Diagnostic::new(
                 Span::Compiler,

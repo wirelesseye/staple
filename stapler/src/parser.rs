@@ -2314,10 +2314,7 @@ impl Grammar {
             let count = if self.at(TokenKind::RBracket) {
                 None
             } else {
-                Some(
-                    self.expect(TokenKind::Integer, "expected a product repetition count")?
-                        .text,
-                )
+                Some(Box::new(self.parse_type()?))
             };
             self.expect(TokenKind::RBracket, "expected `]` after product repetition")?;
             ty = Type::Repeated(crate::RepeatedType {
@@ -2336,6 +2333,7 @@ impl Grammar {
                 TokenKind::Underscore
                     | TokenKind::LParen
                     | TokenKind::Identifier
+                    | TokenKind::Integer
                     | TokenKind::String
                     | TokenKind::Dollar
             )
@@ -2373,6 +2371,13 @@ impl Grammar {
         if self.eat(TokenKind::Underscore) {
             return Ok(Type::Inferred(InferredType {
                 syntax: self.syntax(start),
+            }));
+        }
+        if self.peek() == Some(TokenKind::Integer) {
+            let literal = self.bump_token().expect("peeked integer").text;
+            return Ok(Type::NumberLiteral(crate::NumberLiteralType {
+                syntax: self.syntax(start),
+                literal,
             }));
         }
         if self.peek() == Some(TokenKind::String) {

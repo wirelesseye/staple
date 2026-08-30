@@ -71,6 +71,7 @@ pub struct ResolvedTraitImplementation {
 pub enum BuiltinType {
     Integer(IntegerType),
     Float(FloatType),
+    Natural,
     String,
     Ref,
     Slice,
@@ -1425,6 +1426,7 @@ impl NameResolver {
         for float in FloatType::ALL {
             self.register_builtin_type(core, "std.core", float.name(), BuiltinType::Float(float));
         }
+        self.register_builtin_type(core, "std.core", "Natural", BuiltinType::Natural);
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
         for (path, namespace, name, builtin) in [
             (
@@ -4416,7 +4418,12 @@ impl NameResolver {
                 self.resolve_type_with(&application.callee, strict);
                 self.resolve_type_with(&application.argument, strict);
             }
-            Type::Repeated(repeated) => self.resolve_type_with(&repeated.element, strict),
+            Type::Repeated(repeated) => {
+                self.resolve_type_with(&repeated.element, strict);
+                if let Some(count) = &repeated.count {
+                    self.resolve_type_with(count, strict);
+                }
+            }
             Type::Splice(splice) => {
                 if strict {
                     self.diagnostics.push(Diagnostic::new(
@@ -4425,7 +4432,7 @@ impl NameResolver {
                     ));
                 }
             }
-            Type::Inferred(_) | Type::StringLiteral(_) => {}
+            Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) => {}
         }
     }
 
@@ -4596,8 +4603,13 @@ impl NameResolver {
                 self.validate_representation(&application.callee, required);
                 self.validate_representation(&application.argument, required);
             }
-            Type::Repeated(repeated) => self.validate_representation(&repeated.element, required),
-            Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
+            Type::Repeated(repeated) => {
+                self.validate_representation(&repeated.element, required);
+                if let Some(count) = &repeated.count {
+                    self.validate_representation(count, required);
+                }
+            }
+            Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
         }
     }
 

@@ -1498,8 +1498,11 @@ impl Collector<'_> {
                 self.ty(&application.callee);
                 self.ty(&application.argument);
             }
-            Type::Repeated(repeated) => self.ty(&repeated.element),
-            Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
+            Type::Repeated(repeated) => {
+                self.ty(&repeated.element);
+                if let Some(count) = &repeated.count { self.ty(count); }
+            }
+            Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
         }
     }
 

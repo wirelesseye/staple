@@ -1227,6 +1227,13 @@ exactly equivalent to a product containing `N` copies of `T`, rather than a
 distinct array type. In particular, `T[0]` is `()` and `T[1]` is `T`. A fully
 expanded product may contain at most 65,535 elements.
 
+The size is a compile-time type. Non-negative integer type literals such as
+`0`, `3`, and `42` are singleton subtypes of the prelude type `Natural`; they
+are not subtypes of `I32`, `USize`, or any other runtime integer type. An alias
+or a parameter bounded by `Natural` may be used as a size, for example
+`type alias Vector T N where N <: Natural = T[N]`. The size must resolve to one
+singleton literal before code generation.
+
 Product type elements can be flattened explicitly with `...`:
 
 ```staple
@@ -2171,6 +2178,8 @@ subtyping relation instead:
 - `T <: T` (reflexivity);
 - every string literal type is a subtype of `String`, and a literal type whose
   values are a subset of another literal type's values is a subtype of it;
+- every non-negative integer literal type is a subtype of the compile-time-only
+  type `Natural`, but not of a runtime integer type;
 - `A <: A | B` and `B <: A | B` (a type is a subtype of any union containing
   it, or containing a wider type it is a subtype of); and
 - if `A <: C` and `B <: C`, then `A | B <: C` (a union is a subtype of `C`

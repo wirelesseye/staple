@@ -7059,8 +7059,9 @@ fn type_contains_syntax(ty: &Type) -> bool {
         Type::Application(application) => {
             type_contains_syntax(&application.callee) || type_contains_syntax(&application.argument)
         }
-        Type::Repeated(repeated) => type_contains_syntax(&repeated.element),
-        Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => false,
+        Type::Repeated(repeated) => type_contains_syntax(&repeated.element)
+            || repeated.count.as_deref().is_some_and(type_contains_syntax),
+        Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => false,
     }
 }
 
@@ -7071,7 +7072,7 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
         {
             false
         }
-        Type::Named(_) | Type::StringLiteral(_) | Type::Inferred(_) | Type::Splice(_) => {
+        Type::Named(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Inferred(_) | Type::Splice(_) => {
             type_contains_syntax(ty)
         }
         Type::Function(function) => {
@@ -7095,7 +7096,8 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
             type_contains_unshadowed_syntax(&application.callee, declared)
                 || type_contains_unshadowed_syntax(&application.argument, declared)
         }
-        Type::Repeated(repeated) => type_contains_unshadowed_syntax(&repeated.element, declared),
+        Type::Repeated(repeated) => type_contains_unshadowed_syntax(&repeated.element, declared)
+            || repeated.count.as_deref().is_some_and(|count| type_contains_unshadowed_syntax(count, declared)),
     }
 }
 
@@ -7172,8 +7174,9 @@ fn type_contains_named(ty: &Type, expected: &str) -> bool {
             type_contains_named(&application.callee, expected)
                 || type_contains_named(&application.argument, expected)
         }
-        Type::Repeated(repeated) => type_contains_named(&repeated.element, expected),
-        Type::Inferred(_) | Type::StringLiteral(_) | Type::Splice(_) => false,
+        Type::Repeated(repeated) => type_contains_named(&repeated.element, expected)
+            || repeated.count.as_deref().is_some_and(|count| type_contains_named(count, expected)),
+        Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => false,
     }
 }
 
@@ -8445,7 +8448,10 @@ fn substitute_type(
             substitute_type(&mut application.argument, environment, diagnostics)?;
         }
         Type::Repeated(repeated) => {
-            substitute_type(&mut repeated.element, environment, diagnostics)?
+            substitute_type(&mut repeated.element, environment, diagnostics)?;
+            if let Some(count) = &mut repeated.count {
+                substitute_type(count, environment, diagnostics)?;
+            }
         }
         Type::Named(named) => {
             if let Some(namespace) = &mut named.namespace {
@@ -8453,7 +8459,7 @@ fn substitute_type(
             }
             substitute_identifier(&mut named.name, &mut named.syntax, environment, diagnostics)?;
         }
-        Type::Inferred(_) | Type::StringLiteral(_) => {}
+        Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) => {}
         Type::Splice(_) => unreachable!(),
     }
     Some(())
@@ -9510,6 +9516,7 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
 fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, mark: u64) {
     let syntax = match ty {
         Type::Inferred(ty) => &mut ty.syntax,
+        Type::NumberLiteral(ty) => &mut ty.syntax,
         Type::StringLiteral(ty) => &mut ty.syntax,
         Type::Named(ty) => &mut ty.syntax,
         Type::Product(ty) => &mut ty.syntax,
@@ -9550,7 +9557,12 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
             freshen_type(expander, &mut application.callee, module, mark);
             freshen_type(expander, &mut application.argument, module, mark);
         }
-        Type::Repeated(repeated) => freshen_type(expander, &mut repeated.element, module, mark),
-        Type::Inferred(_) | Type::StringLiteral(_) | Type::Named(_) | Type::Splice(_) => {}
+        Type::Repeated(repeated) => {
+            freshen_type(expander, &mut repeated.element, module, mark);
+            if let Some(count) = &mut repeated.count {
+                freshen_type(expander, count, module, mark);
+            }
+        }
+        Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Named(_) | Type::Splice(_) => {}
     }
 }

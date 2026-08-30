@@ -174,12 +174,18 @@ pub enum CheckedType {
     USize,
     F32,
     F64,
+    Natural,
+    NumberLiteral(u64),
     String,
     StringLiteralSet(Vec<String>),
     Ref(Box<CheckedType>),
     Slice(Box<CheckedType>),
     Buffer(Box<CheckedType>),
     ErasedProduct(Box<CheckedType>),
+    RepeatedProduct {
+        element: Box<CheckedType>,
+        count: Box<CheckedType>,
+    },
     CString,
     CChar,
     Parameter {
@@ -649,6 +655,9 @@ impl CheckedType {
             Self::CPointer { pointee } => pointee.is_fully_known(),
             Self::Ref(value) | Self::Slice(value) | Self::Buffer(value) => value.is_fully_known(),
             Self::ErasedProduct(_) => false,
+            Self::RepeatedProduct { element, count } => {
+                element.is_fully_known() && count.is_fully_known()
+            }
             Self::Product(product) => product
                 .elements
                 .iter()
@@ -676,6 +685,8 @@ impl CheckedType {
             | Self::USize
             | Self::F32
             | Self::F64
+            | Self::Natural
+            | Self::NumberLiteral(_)
             | Self::String
             | Self::StringLiteralSet(_)
             | Self::CString
@@ -692,6 +703,7 @@ impl CheckedType {
             // independently.
             Self::Inferred | Self::Error | Self::TypeConstructor { .. } => true,
             Self::ErasedProduct(_) => false,
+            Self::RepeatedProduct { element, .. } => element.is_sized(),
             Self::Parameter { sized, .. } => *sized,
             Self::Product(product) => product
                 .elements
@@ -722,7 +734,12 @@ impl CheckedType {
             | Self::CString
             | Self::CChar
             | Self::Opaque { .. } => true,
+            Self::Natural | Self::NumberLiteral(_) => false,
         }
+    }
+
+    fn is_compile_time_number(&self) -> bool {
+        matches!(self, Self::Natural | Self::NumberLiteral(_))
     }
 }
 
@@ -743,6 +760,8 @@ impl fmt::Display for CheckedType {
             Self::USize => formatter.write_str("USize"),
             Self::F32 => formatter.write_str("F32"),
             Self::F64 => formatter.write_str("F64"),
+            Self::Natural => formatter.write_str("Natural"),
+            Self::NumberLiteral(value) => write!(formatter, "{value}"),
             Self::String => formatter.write_str("String"),
             Self::StringLiteralSet(values) => {
                 for (index, value) in values.iter().enumerate() {
@@ -757,6 +776,7 @@ impl fmt::Display for CheckedType {
             Self::Slice(value) => format_type_application(formatter, "Slice", value),
             Self::Buffer(value) => format_type_application(formatter, "Buffer", value),
             Self::ErasedProduct(value) => write!(formatter, "{value}[]"),
+            Self::RepeatedProduct { element, count } => write!(formatter, "{element}[{count}]"),
             Self::CString => formatter.write_str("CString"),
             Self::CChar => formatter.write_str("CChar"),
             Self::Parameter { name, .. } => formatter.write_str(name),
@@ -3204,6 +3224,17 @@ impl TypeChecker {
                 if let Some(bound) = self.resolve_subtype_bound(module, bound) {
                     subtype_bounds.push(bound);
                 }
+            }
+            if let Some(function_type) = self.function_types.get(&function.id)
+                && !repeated_product_counts_are_natural(
+                    &CheckedType::Function(function_type.clone()),
+                    &subtype_bounds,
+                )
+            {
+                self.diagnostics.push(Diagnostic::new(
+                    function.pattern.syntax().span.clone(),
+                    "homogeneous product size parameters must have a `Natural` subtype bound",
+                ));
             }
             if !subtype_bounds.is_empty() {
                 self.function_subtype_bounds
@@ -8631,6 +8662,9 @@ impl TypeChecker {
         if matches!(sub, CheckedType::StringLiteralSet(_)) && *sup == CheckedType::String {
             return true;
         }
+        if matches!(sub, CheckedType::NumberLiteral(_)) && *sup == CheckedType::Natural {
+            return true;
+        }
         if let (
             CheckedType::StringLiteralSet(sub_values),
             CheckedType::StringLiteralSet(sup_values),
@@ -9015,6 +9049,16 @@ impl TypeChecker {
     ) -> CheckedType {
         match source_type {
             Type::Inferred(_) => CheckedType::Inferred,
+            Type::NumberLiteral(literal) => match literal.literal.parse::<u64>() {
+                Ok(value) => CheckedType::NumberLiteral(value),
+                Err(_) => {
+                    self.diagnostics.push(Diagnostic::new(
+                        literal.syntax.span.clone(),
+                        "number literal type is too large",
+                    ));
+                    CheckedType::Error
+                }
+            },
             Type::StringLiteral(literal) => match crate::string_literal::decode(&literal.literal) {
                 Ok(value) => CheckedType::StringLiteralSet(vec![value]),
                 Err(message) => {
@@ -9174,30 +9218,42 @@ impl TypeChecker {
                 let Some(count) = &repeated.count else {
                     return CheckedType::ErasedProduct(Box::new(element));
                 };
-                let Ok(count) = count.parse::<usize>() else {
-                    self.diagnostics.push(Diagnostic::new(
-                        repeated.syntax.span.clone(),
-                        "product repetition count is too large",
-                    ));
-                    return CheckedType::Error;
-                };
-                if count > MAX_PRODUCT_ARITY {
-                    self.diagnostics.push(Diagnostic::new(
-                        repeated.syntax.span.clone(),
-                        format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                    ));
-                    return CheckedType::Error;
+                let count = self.resolve_source_type_inner(module, count);
+                match count {
+                    CheckedType::NumberLiteral(count) => {
+                        let Ok(count) = usize::try_from(count) else {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.syntax.span.clone(),
+                                "product repetition count is too large",
+                            ));
+                            return CheckedType::Error;
+                        };
+                        if count > MAX_PRODUCT_ARITY {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.syntax.span.clone(),
+                                format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
+                            ));
+                            return CheckedType::Error;
+                        }
+                        repeated_product(element, count)
+                    }
+                    CheckedType::Parameter { .. }
+                        if self.active_subtype_bounds.is_empty()
+                            || self.is_subtype(&count, &CheckedType::Natural) => {
+                        CheckedType::RepeatedProduct {
+                            element: Box::new(element),
+                            count: Box::new(count),
+                        }
+                    }
+                    CheckedType::Error => CheckedType::Error,
+                    other => {
+                        self.diagnostics.push(Diagnostic::new(
+                            repeated.syntax.span.clone(),
+                            format!("product repetition count must be a singleton subtype of `Natural`, found `{other}`"),
+                        ));
+                        CheckedType::Error
+                    }
                 }
-                normalize_product_type(
-                    (0..count)
-                        .map(|_| CheckedTypeElement {
-                            name: None,
-                            value_type: element.clone(),
-                            default: None,
-                        })
-                        .collect(),
-                    false,
-                )
             }
             Type::Splice(_) => CheckedType::Error,
         }
@@ -9690,7 +9746,11 @@ impl TypeChecker {
                 let Some(id) = module.type_parameter_for(binding.syntax.id) else {
                     return false;
                 };
-                if binding.sized && !argument.is_sized() && *argument != CheckedType::Error {
+                if binding.sized
+                    && !argument.is_sized()
+                    && !argument.is_compile_time_number()
+                    && *argument != CheckedType::Error
+                {
                     self.diagnostics.push(Diagnostic::new(
                         binding.syntax.span.clone(),
                         format!(
@@ -9755,29 +9815,32 @@ impl TypeChecker {
         for element in &product.elements {
             if element.spread {
                 if let Type::Repeated(repeated) = &element.ty
-                    && let Some(count) = &repeated.count
+                    && let Some(count_source) = &repeated.count
                 {
-                    let Ok(count) = count.parse::<usize>() else {
-                        self.diagnostics.push(Diagnostic::new(
-                            repeated.syntax.span.clone(),
-                            "product repetition count is too large",
-                        ));
-                        continue;
-                    };
-                    let value_type = self.resolve_source_type_inner(module, &repeated.element);
-                    if elements.len().saturating_add(count) > MAX_PRODUCT_ARITY {
-                        self.diagnostics.push(Diagnostic::new(
-                            element.syntax.span.clone(),
-                            format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                        ));
+                    let count = self.resolve_source_type_inner(module, count_source);
+                    if let CheckedType::NumberLiteral(count) = count {
+                        let Ok(count) = usize::try_from(count) else {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.syntax.span.clone(),
+                                "product repetition count is too large",
+                            ));
+                            continue;
+                        };
+                        let value_type = self.resolve_source_type_inner(module, &repeated.element);
+                        if elements.len().saturating_add(count) > MAX_PRODUCT_ARITY {
+                            self.diagnostics.push(Diagnostic::new(
+                                element.syntax.span.clone(),
+                                format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
+                            ));
+                            continue;
+                        }
+                        elements.extend((0..count).map(|_| CheckedTypeElement {
+                            name: None,
+                            value_type: value_type.clone(),
+                            default: None,
+                        }));
                         continue;
                     }
-                    elements.extend((0..count).map(|_| CheckedTypeElement {
-                        name: None,
-                        value_type: value_type.clone(),
-                        default: None,
-                    }));
-                    continue;
                 }
                 match self.resolve_source_type_inner(module, &element.ty) {
                     CheckedType::Product(product) if !product.variadic => {
@@ -9882,6 +9945,7 @@ impl TypeChecker {
             return match builtin {
                 BuiltinType::Integer(integer) => CheckedType::integer(integer),
                 BuiltinType::Float(float) => CheckedType::float(float),
+                BuiltinType::Natural => CheckedType::Natural,
                 BuiltinType::String => CheckedType::String,
                 BuiltinType::Ref => CheckedType::TypeConstructor {
                     id,
@@ -10081,6 +10145,9 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         }
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
+        (CheckedType::Natural, CheckedType::Natural) => Some(CheckedType::Natural),
+        (CheckedType::NumberLiteral(actual), CheckedType::NumberLiteral(expected))
+            if actual == expected => Some(CheckedType::NumberLiteral(actual)),
         (
             CheckedType::Parameter {
                 id: actual,
@@ -10138,6 +10205,19 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         (CheckedType::ErasedProduct(actual), CheckedType::ErasedProduct(expected)) => {
             merge_types(*actual, *expected).map(|value| CheckedType::ErasedProduct(Box::new(value)))
         }
+        (
+            CheckedType::RepeatedProduct {
+                element: actual_element,
+                count: actual_count,
+            },
+            CheckedType::RepeatedProduct {
+                element: expected_element,
+                count: expected_count,
+            },
+        ) => Some(CheckedType::RepeatedProduct {
+            element: Box::new(merge_types(*actual_element, *expected_element)?),
+            count: Box::new(merge_types(*actual_count, *expected_count)?),
+        }),
         (CheckedType::Product(actual), CheckedType::Product(expected))
             if actual.variadic == expected.variadic
                 && actual.elements.len() == expected.elements.len() =>
@@ -10468,6 +10548,20 @@ pub(crate) fn substitute_type(
         CheckedType::ErasedProduct(value) => {
             CheckedType::ErasedProduct(Box::new(substitute_type(*value, substitutions)))
         }
+        CheckedType::RepeatedProduct { element, count } => {
+            let element = substitute_type(*element, substitutions);
+            let count = substitute_type(*count, substitutions);
+            match count {
+                CheckedType::NumberLiteral(count) => usize::try_from(count)
+                    .ok()
+                    .filter(|count| *count <= MAX_PRODUCT_ARITY)
+                    .map_or(CheckedType::Error, |count| repeated_product(element, count)),
+                count => CheckedType::RepeatedProduct {
+                    element: Box::new(element),
+                    count: Box::new(count),
+                },
+            }
+        }
         CheckedType::Opaque {
             id,
             name,
@@ -10593,6 +10687,7 @@ fn erase_type_parameters(value_type: &CheckedType) -> CheckedType {
         CheckedType::ErasedProduct(value) => {
             CheckedType::ErasedProduct(Box::new(erase_type_parameters(value)))
         }
+        CheckedType::RepeatedProduct { .. } => CheckedType::Inferred,
         CheckedType::Opaque {
             id,
             name,
@@ -10649,6 +10744,9 @@ pub(crate) fn contains_type_parameter(value_type: &CheckedType) -> bool {
             contains_type_parameter(value)
         }
         CheckedType::ErasedProduct(value) => contains_type_parameter(value),
+        CheckedType::RepeatedProduct { element, count } => {
+            contains_type_parameter(element) || contains_type_parameter(count)
+        }
         CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_type_parameter),
         CheckedType::Product(product) => product
             .elements
@@ -10691,6 +10789,9 @@ fn contains_effect_parameter(value_type: &CheckedType) -> bool {
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee)
         | CheckedType::ErasedProduct(pointee) => contains_effect_parameter(pointee),
+        CheckedType::RepeatedProduct { element, count } => {
+            contains_effect_parameter(element) || contains_effect_parameter(count)
+        }
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments.iter().any(contains_effect_parameter)
         }
@@ -10723,6 +10824,9 @@ fn contains_inferred_type(value_type: &CheckedType) -> bool {
             contains_inferred_type(value)
         }
         CheckedType::ErasedProduct(value) => contains_inferred_type(value),
+        CheckedType::RepeatedProduct { element, count } => {
+            contains_inferred_type(element) || contains_inferred_type(count)
+        }
         CheckedType::Opaque { arguments, .. } => arguments.iter().any(contains_inferred_type),
         CheckedType::Product(product) => product
             .elements
@@ -10758,6 +10862,10 @@ fn type_parameter_ids(value_type: &CheckedType) -> HashSet<TypeParameterId> {
                 collect(value, ids)
             }
             CheckedType::ErasedProduct(value) => collect(value, ids),
+            CheckedType::RepeatedProduct { element, count } => {
+                collect(element, ids);
+                collect(count, ids);
+            }
             CheckedType::Opaque { arguments, .. } => {
                 for argument in arguments {
                     collect(argument, ids);
@@ -11178,6 +11286,22 @@ pub(crate) fn infer_type_parameters(
             matches!(actual, CheckedType::ErasedProduct(actual_value)
                 if infer_type_parameters(value, actual_value, substitutions))
         }
+        CheckedType::RepeatedProduct { element, count } => {
+            let (actual_elements, actual_count): (Vec<&CheckedType>, usize) = match actual {
+                CheckedType::Product(product) if !product.variadic => (
+                    product.elements.iter().map(|element| &element.value_type).collect(),
+                    product.elements.len(),
+                ),
+                other => (vec![other], 1),
+            };
+            infer_type_parameters(
+                count,
+                &CheckedType::NumberLiteral(actual_count as u64),
+                substitutions,
+            ) && actual_elements
+                .into_iter()
+                .all(|actual| infer_type_parameters(element, actual, substitutions))
+        }
         CheckedType::Opaque { id, arguments, .. } => {
             let CheckedType::Opaque {
                 id: actual_id,
@@ -11373,6 +11497,74 @@ fn normalize_product_type(elements: Vec<CheckedTypeElement>, variadic: bool) -> 
         elements.into_iter().next().unwrap().value_type
     } else {
         CheckedType::Product(CheckedProductType { elements, variadic })
+    }
+}
+
+fn repeated_product(element: CheckedType, count: usize) -> CheckedType {
+    normalize_product_type(
+        (0..count)
+            .map(|_| CheckedTypeElement {
+                name: None,
+                value_type: element.clone(),
+                default: None,
+            })
+            .collect(),
+        false,
+    )
+}
+
+fn repeated_product_counts_are_natural(
+    value_type: &CheckedType,
+    bounds: &[CheckedSubtypeBound],
+) -> bool {
+    match value_type {
+        CheckedType::RepeatedProduct { element, count } => {
+            let count_is_natural = match count.as_ref() {
+                CheckedType::NumberLiteral(_) => true,
+                CheckedType::Parameter { id, .. } => bounds.iter().any(|bound| {
+                    bound.parameter == *id && bound.supertype == CheckedType::Natural
+                }),
+                _ => false,
+            };
+            count_is_natural && repeated_product_counts_are_natural(element, bounds)
+        }
+        CheckedType::CPointer { pointee }
+        | CheckedType::Ref(pointee)
+        | CheckedType::Slice(pointee)
+        | CheckedType::Buffer(pointee)
+        | CheckedType::ErasedProduct(pointee) => {
+            repeated_product_counts_are_natural(pointee, bounds)
+        }
+        CheckedType::Product(product) => product.elements.iter().all(|element| {
+            repeated_product_counts_are_natural(&element.value_type, bounds)
+        }),
+        CheckedType::Sum(sum) => sum
+            .alternatives
+            .iter()
+            .all(|alternative| repeated_product_counts_are_natural(alternative, bounds)),
+        CheckedType::Function(function) => {
+            repeated_product_counts_are_natural(&function.parameter, bounds)
+                && repeated_product_counts_are_natural(&function.result, bounds)
+                && function.effects.resources.iter().all(|resource| {
+                    repeated_product_counts_are_natural(&resource.value_type, bounds)
+                })
+        }
+        CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
+            arguments
+                .iter()
+                .all(|argument| repeated_product_counts_are_natural(argument, bounds))
+        }
+        CheckedType::Distinct {
+            arguments,
+            representation,
+            ..
+        } => {
+            arguments
+                .iter()
+                .all(|argument| repeated_product_counts_are_natural(argument, bounds))
+                && repeated_product_counts_are_natural(representation, bounds)
+        }
+        _ => true,
     }
 }
 
@@ -12582,7 +12774,11 @@ fn is_copy_type(
         | CheckedType::Ref(_)
         | CheckedType::Slice(_)
         | CheckedType::Function(_) => true,
-        CheckedType::CString | CheckedType::Buffer(_) => false,
+        CheckedType::CString
+        | CheckedType::Buffer(_)
+        | CheckedType::Natural
+        | CheckedType::NumberLiteral(_)
+        | CheckedType::RepeatedProduct { .. } => false,
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
             bounds.iter().any(|bound| {
                 bound.trait_id == copy_trait

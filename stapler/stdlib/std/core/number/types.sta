@@ -1,5 +1,8 @@
 pub mod
 
+/// The compile-time type of non-negative integer singleton types.
+pub type Natural = opaque
+
 /// An 8-bit signed integer.
 pub type I8 = opaque
 /// A 16-bit signed integer.
