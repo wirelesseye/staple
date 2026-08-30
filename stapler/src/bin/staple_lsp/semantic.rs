@@ -787,6 +787,10 @@ impl<'a> Classifier<'a> {
                 self.expression_with_mod(&value.value, resolved, modifiers);
                 self.expression(&value.index, resolved);
             }
+            Expression::Binary(value) => {
+                self.expression(&value.left, resolved);
+                self.expression(&value.right, resolved);
+            }
             Expression::Logical(value) => {
                 self.expression(&value.left, resolved);
                 self.expression(&value.right, resolved);

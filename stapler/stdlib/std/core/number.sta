@@ -143,172 +143,172 @@ impl Debug F32 { def fmt = (value, mut formatter) => Display.fmt (value, formatt
 impl Debug F64 { def fmt = (value, mut formatter) => Display.fmt (value, formatter) }
 
 impl Add I8 {
-    def add = left => right => __i8_add (left, right)
+    def add = (left, right) => __i8_add (left, right)
 }
 
 impl Subtract I8 {
-    def subtract = left => right => __i8_subtract (left, right)
+    def subtract = (left, right) => __i8_subtract (left, right)
 }
 
 impl Multiply I8 {
-    def multiply = left => right => __i8_multiply (left, right)
+    def multiply = (left, right) => __i8_multiply (left, right)
 }
 
 impl Divide I8 {
-    def divide = left => right => __i8_divide (left, right)
+    def divide = (left, right) => __i8_divide (left, right)
 }
 
 impl Add I16 {
-    def add = left => right => __i16_add (left, right)
+    def add = (left, right) => __i16_add (left, right)
 }
 
 impl Subtract I16 {
-    def subtract = left => right => __i16_subtract (left, right)
+    def subtract = (left, right) => __i16_subtract (left, right)
 }
 
 impl Multiply I16 {
-    def multiply = left => right => __i16_multiply (left, right)
+    def multiply = (left, right) => __i16_multiply (left, right)
 }
 
 impl Divide I16 {
-    def divide = left => right => __i16_divide (left, right)
+    def divide = (left, right) => __i16_divide (left, right)
 }
 
 impl Add I32 {
-    def add = left => right => __i32_add (left, right)
+    def add = (left, right) => __i32_add (left, right)
 }
 
 impl Subtract I32 {
-    def subtract = left => right => __i32_subtract (left, right)
+    def subtract = (left, right) => __i32_subtract (left, right)
 }
 
 impl Multiply I32 {
-    def multiply = left => right => __i32_multiply (left, right)
+    def multiply = (left, right) => __i32_multiply (left, right)
 }
 
 impl Divide I32 {
-    def divide = left => right => __i32_divide (left, right)
+    def divide = (left, right) => __i32_divide (left, right)
 }
 
 impl Add I64 {
-    def add = left => right => __i64_add (left, right)
+    def add = (left, right) => __i64_add (left, right)
 }
 
 impl Subtract I64 {
-    def subtract = left => right => __i64_subtract (left, right)
+    def subtract = (left, right) => __i64_subtract (left, right)
 }
 
 impl Multiply I64 {
-    def multiply = left => right => __i64_multiply (left, right)
+    def multiply = (left, right) => __i64_multiply (left, right)
 }
 
 impl Divide I64 {
-    def divide = left => right => __i64_divide (left, right)
+    def divide = (left, right) => __i64_divide (left, right)
 }
 
 impl Add U8 {
-    def add = left => right => __u8_add (left, right)
+    def add = (left, right) => __u8_add (left, right)
 }
 
 impl Subtract U8 {
-    def subtract = left => right => __u8_subtract (left, right)
+    def subtract = (left, right) => __u8_subtract (left, right)
 }
 
 impl Multiply U8 {
-    def multiply = left => right => __u8_multiply (left, right)
+    def multiply = (left, right) => __u8_multiply (left, right)
 }
 
 impl Divide U8 {
-    def divide = left => right => __u8_divide (left, right)
+    def divide = (left, right) => __u8_divide (left, right)
 }
 
 impl Add U16 {
-    def add = left => right => __u16_add (left, right)
+    def add = (left, right) => __u16_add (left, right)
 }
 
 impl Subtract U16 {
-    def subtract = left => right => __u16_subtract (left, right)
+    def subtract = (left, right) => __u16_subtract (left, right)
 }
 
 impl Multiply U16 {
-    def multiply = left => right => __u16_multiply (left, right)
+    def multiply = (left, right) => __u16_multiply (left, right)
 }
 
 impl Divide U16 {
-    def divide = left => right => __u16_divide (left, right)
+    def divide = (left, right) => __u16_divide (left, right)
 }
 
 impl Add U32 {
-    def add = left => right => __u32_add (left, right)
+    def add = (left, right) => __u32_add (left, right)
 }
 
 impl Subtract U32 {
-    def subtract = left => right => __u32_subtract (left, right)
+    def subtract = (left, right) => __u32_subtract (left, right)
 }
 
 impl Multiply U32 {
-    def multiply = left => right => __u32_multiply (left, right)
+    def multiply = (left, right) => __u32_multiply (left, right)
 }
 
 impl Divide U32 {
-    def divide = left => right => __u32_divide (left, right)
+    def divide = (left, right) => __u32_divide (left, right)
 }
 
 impl Add U64 {
-    def add = left => right => __u64_add (left, right)
+    def add = (left, right) => __u64_add (left, right)
 }
 
 impl Subtract U64 {
-    def subtract = left => right => __u64_subtract (left, right)
+    def subtract = (left, right) => __u64_subtract (left, right)
 }
 
 impl Multiply U64 {
-    def multiply = left => right => __u64_multiply (left, right)
+    def multiply = (left, right) => __u64_multiply (left, right)
 }
 
 impl Divide U64 {
-    def divide = left => right => __u64_divide (left, right)
+    def divide = (left, right) => __u64_divide (left, right)
 }
 
 impl Add ISize {
-    def add = left => right => __isize_add (left, right)
+    def add = (left, right) => __isize_add (left, right)
 }
 
 impl Subtract ISize {
-    def subtract = left => right => __isize_subtract (left, right)
+    def subtract = (left, right) => __isize_subtract (left, right)
 }
 
 impl Multiply ISize {
-    def multiply = left => right => __isize_multiply (left, right)
+    def multiply = (left, right) => __isize_multiply (left, right)
 }
 
 impl Divide ISize {
-    def divide = left => right => __isize_divide (left, right)
+    def divide = (left, right) => __isize_divide (left, right)
 }
 
 impl Add USize {
-    def add = left => right => __usize_add (left, right)
+    def add = (left, right) => __usize_add (left, right)
 }
 
 impl Subtract USize {
-    def subtract = left => right => __usize_subtract (left, right)
+    def subtract = (left, right) => __usize_subtract (left, right)
 }
 
 impl Multiply USize {
-    def multiply = left => right => __usize_multiply (left, right)
+    def multiply = (left, right) => __usize_multiply (left, right)
 }
 
 impl Divide USize {
-    def divide = left => right => __usize_divide (left, right)
+    def divide = (left, right) => __usize_divide (left, right)
 }
 
 impl Eq I8 {
-    def equal = left => right => __i8_equal (left, right)
-    def not_equal = left => right => __i8_not_equal (left, right)
+    def equal = (left, right) => __i8_equal (left, right)
+    def not_equal = (left, right) => __i8_not_equal (left, right)
 }
 
 impl PartialOrd I8 {
-    def partial_cmp = left => right => match (__i8_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__i8_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__i8_gt (left, right)) {
         True() => Some (Ordering.Greater satisfies Ordering),
@@ -318,7 +318,7 @@ impl PartialOrd I8 {
 }
 
 impl Ord I8 {
-    def cmp = left => right => match (__i8_lt (left, right)) {
+    def cmp = (left, right) => match (__i8_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__i8_gt (left, right)) {
             True() => Ordering.Greater,
@@ -328,12 +328,12 @@ impl Ord I8 {
 }
 
 impl Eq I16 {
-    def equal = left => right => __i16_equal (left, right)
-    def not_equal = left => right => __i16_not_equal (left, right)
+    def equal = (left, right) => __i16_equal (left, right)
+    def not_equal = (left, right) => __i16_not_equal (left, right)
 }
 
 impl PartialOrd I16 {
-    def partial_cmp = left => right => match (__i16_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__i16_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__i16_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -343,7 +343,7 @@ impl PartialOrd I16 {
 }
 
 impl Ord I16 {
-    def cmp = left => right => match (__i16_lt (left, right)) {
+    def cmp = (left, right) => match (__i16_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__i16_gt (left, right)) {
             True() => Ordering.Greater,
@@ -353,12 +353,12 @@ impl Ord I16 {
 }
 
 impl Eq I32 {
-    def equal = left => right => __i32_equal (left, right)
-    def not_equal = left => right => __i32_not_equal (left, right)
+    def equal = (left, right) => __i32_equal (left, right)
+    def not_equal = (left, right) => __i32_not_equal (left, right)
 }
 
 impl PartialOrd I32 {
-    def partial_cmp = left => right => match (__i32_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__i32_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__i32_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -368,7 +368,7 @@ impl PartialOrd I32 {
 }
 
 impl Ord I32 {
-    def cmp = left => right => match (__i32_lt (left, right)) {
+    def cmp = (left, right) => match (__i32_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__i32_gt (left, right)) {
             True() => Ordering.Greater,
@@ -378,12 +378,12 @@ impl Ord I32 {
 }
 
 impl Eq I64 {
-    def equal = left => right => __i64_equal (left, right)
-    def not_equal = left => right => __i64_not_equal (left, right)
+    def equal = (left, right) => __i64_equal (left, right)
+    def not_equal = (left, right) => __i64_not_equal (left, right)
 }
 
 impl PartialOrd I64 {
-    def partial_cmp = left => right => match (__i64_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__i64_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__i64_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -393,7 +393,7 @@ impl PartialOrd I64 {
 }
 
 impl Ord I64 {
-    def cmp = left => right => match (__i64_lt (left, right)) {
+    def cmp = (left, right) => match (__i64_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__i64_gt (left, right)) {
             True() => Ordering.Greater,
@@ -403,12 +403,12 @@ impl Ord I64 {
 }
 
 impl Eq U8 {
-    def equal = left => right => __u8_equal (left, right)
-    def not_equal = left => right => __u8_not_equal (left, right)
+    def equal = (left, right) => __u8_equal (left, right)
+    def not_equal = (left, right) => __u8_not_equal (left, right)
 }
 
 impl PartialOrd U8 {
-    def partial_cmp = left => right => match (__u8_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__u8_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__u8_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -418,7 +418,7 @@ impl PartialOrd U8 {
 }
 
 impl Ord U8 {
-    def cmp = left => right => match (__u8_lt (left, right)) {
+    def cmp = (left, right) => match (__u8_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__u8_gt (left, right)) {
             True() => Ordering.Greater,
@@ -428,12 +428,12 @@ impl Ord U8 {
 }
 
 impl Eq U16 {
-    def equal = left => right => __u16_equal (left, right)
-    def not_equal = left => right => __u16_not_equal (left, right)
+    def equal = (left, right) => __u16_equal (left, right)
+    def not_equal = (left, right) => __u16_not_equal (left, right)
 }
 
 impl PartialOrd U16 {
-    def partial_cmp = left => right => match (__u16_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__u16_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__u16_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -443,7 +443,7 @@ impl PartialOrd U16 {
 }
 
 impl Ord U16 {
-    def cmp = left => right => match (__u16_lt (left, right)) {
+    def cmp = (left, right) => match (__u16_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__u16_gt (left, right)) {
             True() => Ordering.Greater,
@@ -453,12 +453,12 @@ impl Ord U16 {
 }
 
 impl Eq U32 {
-    def equal = left => right => __u32_equal (left, right)
-    def not_equal = left => right => __u32_not_equal (left, right)
+    def equal = (left, right) => __u32_equal (left, right)
+    def not_equal = (left, right) => __u32_not_equal (left, right)
 }
 
 impl PartialOrd U32 {
-    def partial_cmp = left => right => match (__u32_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__u32_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__u32_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -468,7 +468,7 @@ impl PartialOrd U32 {
 }
 
 impl Ord U32 {
-    def cmp = left => right => match (__u32_lt (left, right)) {
+    def cmp = (left, right) => match (__u32_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__u32_gt (left, right)) {
             True() => Ordering.Greater,
@@ -478,12 +478,12 @@ impl Ord U32 {
 }
 
 impl Eq U64 {
-    def equal = left => right => __u64_equal (left, right)
-    def not_equal = left => right => __u64_not_equal (left, right)
+    def equal = (left, right) => __u64_equal (left, right)
+    def not_equal = (left, right) => __u64_not_equal (left, right)
 }
 
 impl PartialOrd U64 {
-    def partial_cmp = left => right => match (__u64_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__u64_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__u64_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -493,7 +493,7 @@ impl PartialOrd U64 {
 }
 
 impl Ord U64 {
-    def cmp = left => right => match (__u64_lt (left, right)) {
+    def cmp = (left, right) => match (__u64_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__u64_gt (left, right)) {
             True() => Ordering.Greater,
@@ -503,12 +503,12 @@ impl Ord U64 {
 }
 
 impl Eq ISize {
-    def equal = left => right => __isize_equal (left, right)
-    def not_equal = left => right => __isize_not_equal (left, right)
+    def equal = (left, right) => __isize_equal (left, right)
+    def not_equal = (left, right) => __isize_not_equal (left, right)
 }
 
 impl PartialOrd ISize {
-    def partial_cmp = left => right => match (__isize_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__isize_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__isize_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -518,7 +518,7 @@ impl PartialOrd ISize {
 }
 
 impl Ord ISize {
-    def cmp = left => right => match (__isize_lt (left, right)) {
+    def cmp = (left, right) => match (__isize_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__isize_gt (left, right)) {
             True() => Ordering.Greater,
@@ -528,12 +528,12 @@ impl Ord ISize {
 }
 
 impl Eq USize {
-    def equal = left => right => __usize_equal (left, right)
-    def not_equal = left => right => __usize_not_equal (left, right)
+    def equal = (left, right) => __usize_equal (left, right)
+    def not_equal = (left, right) => __usize_not_equal (left, right)
 }
 
 impl PartialOrd USize {
-    def partial_cmp = left => right => match (__usize_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__usize_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__usize_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -543,7 +543,7 @@ impl PartialOrd USize {
 }
 
 impl Ord USize {
-    def cmp = left => right => match (__usize_lt (left, right)) {
+    def cmp = (left, right) => match (__usize_lt (left, right)) {
         True() => Ordering.Less,
         False() => match (__usize_gt (left, right)) {
             True() => Ordering.Greater,
@@ -553,28 +553,28 @@ impl Ord USize {
 }
 
 impl Add F32 {
-    def add = left => right => __f32_add (left, right)
+    def add = (left, right) => __f32_add (left, right)
 }
 
 impl Subtract F32 {
-    def subtract = left => right => __f32_subtract (left, right)
+    def subtract = (left, right) => __f32_subtract (left, right)
 }
 
 impl Multiply F32 {
-    def multiply = left => right => __f32_multiply (left, right)
+    def multiply = (left, right) => __f32_multiply (left, right)
 }
 
 impl Divide F32 {
-    def divide = left => right => __f32_divide (left, right)
+    def divide = (left, right) => __f32_divide (left, right)
 }
 
 impl Eq F32 {
-    def equal = left => right => __f32_equal (left, right)
-    def not_equal = left => right => __f32_not_equal (left, right)
+    def equal = (left, right) => __f32_equal (left, right)
+    def not_equal = (left, right) => __f32_not_equal (left, right)
 }
 
 impl PartialOrd F32 {
-    def partial_cmp = left => right => match (__f32_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__f32_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__f32_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),
@@ -587,28 +587,28 @@ impl PartialOrd F32 {
 }
 
 impl Add F64 {
-    def add = left => right => __f64_add (left, right)
+    def add = (left, right) => __f64_add (left, right)
 }
 
 impl Subtract F64 {
-    def subtract = left => right => __f64_subtract (left, right)
+    def subtract = (left, right) => __f64_subtract (left, right)
 }
 
 impl Multiply F64 {
-    def multiply = left => right => __f64_multiply (left, right)
+    def multiply = (left, right) => __f64_multiply (left, right)
 }
 
 impl Divide F64 {
-    def divide = left => right => __f64_divide (left, right)
+    def divide = (left, right) => __f64_divide (left, right)
 }
 
 impl Eq F64 {
-    def equal = left => right => __f64_equal (left, right)
-    def not_equal = left => right => __f64_not_equal (left, right)
+    def equal = (left, right) => __f64_equal (left, right)
+    def not_equal = (left, right) => __f64_not_equal (left, right)
 }
 
 impl PartialOrd F64 {
-    def partial_cmp = left => right => match (__f64_lt (left, right)) {
+    def partial_cmp = (left, right) => match (__f64_lt (left, right)) {
         True() => Some (Ordering.Less satisfies Ordering),
         False() => match (__f64_gt (left, right)) {
             True() => Some (Ordering.Greater satisfies Ordering),

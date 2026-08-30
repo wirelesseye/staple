@@ -317,6 +317,10 @@ impl DeclarationCollector<'_> {
                 self.expression(&value.value);
                 self.expression(&value.index);
             }
+            Expression::Binary(value) => {
+                self.expression(&value.left);
+                self.expression(&value.right);
+            }
             Expression::Logical(value) => {
                 self.expression(&value.left);
                 self.expression(&value.right);
@@ -884,6 +888,10 @@ impl Collector<'_> {
             Expression::Index(value) => {
                 self.expression(&value.value);
                 self.expression(&value.index);
+            }
+            Expression::Binary(value) => {
+                self.expression(&value.left);
+                self.expression(&value.right);
             }
             Expression::Logical(value) => {
                 self.expression(&value.left);

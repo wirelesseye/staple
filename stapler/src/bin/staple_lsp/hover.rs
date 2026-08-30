@@ -278,6 +278,10 @@ impl Collector<'_> {
                 self.collect_expression_declarations(&index.value);
                 self.collect_expression_declarations(&index.index);
             }
+            Expression::Binary(binary) => {
+                self.collect_expression_declarations(&binary.left);
+                self.collect_expression_declarations(&binary.right);
+            }
             Expression::Logical(logical) => {
                 self.collect_expression_declarations(&logical.left);
                 self.collect_expression_declarations(&logical.right);
@@ -1323,6 +1327,10 @@ impl Collector<'_> {
             Expression::Index(index) => {
                 self.expression(&index.value);
                 self.expression(&index.index);
+            }
+            Expression::Binary(binary) => {
+                self.expression(&binary.left);
+                self.expression(&binary.right);
             }
             Expression::Logical(logical) => {
                 self.expression(&logical.left);

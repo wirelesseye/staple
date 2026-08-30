@@ -32,5 +32,5 @@ companion String {
 }
 
 impl Add String {
-    def add = left => right => __string_add (left, right)
+    def add = (left, right) => __string_add (left, right)
 }

@@ -1,5 +1,5 @@
 use stapler::{
-    Accessor, BindingKind, Expression, Item, LogicalOperator, Pattern, StringInterpolationFormat,
+    Accessor, BinaryOperator, BindingKind, Expression, Item, Pattern, StringInterpolationFormat,
     StringTemplatePart, TokenKind, Type, TypeDeclarationKind, UseKind, Visibility, parse,
 };
 
@@ -1326,19 +1326,13 @@ fn parses_product_parameter_and_expression_body() {
     assert!(
         matches!(function.pattern, Pattern::Product(ref product) if product.elements.len() == 2)
     );
-    let Expression::Call(outer) = function.body.as_ref() else {
-        panic!("expected desugared `+` call");
+    let Expression::Binary(binary) = function.body.as_ref() else {
+        panic!("expected surface `+` expression");
     };
-    let Expression::Call(inner) = outer.callee.as_ref() else {
-        panic!("expected desugared `+` call");
-    };
-    let Expression::Access(access) = inner.callee.as_ref() else {
-        panic!("expected `Add.add` access");
-    };
-    assert!(matches!(access.value.as_ref(), Expression::Name(name) if name.name == "Add"));
-    assert!(matches!(&access.accessor, Accessor::Name(name) if name == "add"));
-    assert!(matches!(inner.argument.as_ref(), Expression::Name(name) if name.name == "a"));
-    assert!(matches!(outer.argument.as_ref(), Expression::Name(name) if name.name == "b"));
+    assert_eq!(binary.operator, BinaryOperator::Add);
+    assert_eq!(binary.operator_syntax.text().trim(), "+");
+    assert!(matches!(binary.left.as_ref(), Expression::Name(name) if name.name == "a"));
+    assert!(matches!(binary.right.as_ref(), Expression::Name(name) if name.name == "b"));
 }
 
 #[test]
@@ -1356,7 +1350,7 @@ fn parses_low_precedence_satisfies_expression() {
         panic!("expected satisfies expression");
     };
     assert!(matches!(satisfies.ty, Type::Named(ref named) if named.name == "I32"));
-    assert!(matches!(satisfies.value.as_ref(), Expression::Call(_)));
+    assert!(matches!(satisfies.value.as_ref(), Expression::Binary(binary) if binary.operator == BinaryOperator::Add));
     assert_eq!(root.text(), source);
 }
 
@@ -1385,47 +1379,32 @@ fn parses_contextually_typed_curried_parameters() {
 fn parses_mixed_precedence_builtin_operator_expression() {
     let source = "1 + 2 * 3\n";
     let root = parse(source).expect("builtin operator expression should parse");
-    let Item::Expression(Expression::Call(outer)) = unmodified_item(&root.items[0]) else {
-        panic!("expected desugared `+` call");
+    let Item::Expression(Expression::Binary(add)) = unmodified_item(&root.items[0]) else {
+        panic!("expected surface `+` expression");
     };
-    let Expression::Call(add_call) = outer.callee.as_ref() else {
-        panic!("expected desugared `+` call");
-    };
-    let Expression::Access(access) = add_call.callee.as_ref() else {
-        panic!("expected `Add.add` access");
-    };
-    assert!(matches!(access.value.as_ref(), Expression::Name(name) if name.name == "Add"));
-    assert!(matches!(&access.accessor, Accessor::Name(name) if name == "add"));
-    assert!(matches!(add_call.argument.as_ref(), Expression::Integer(int) if int.literal == "1"));
-
-    let Expression::Call(multiply_outer) = outer.argument.as_ref() else {
+    assert_eq!(add.operator, BinaryOperator::Add);
+    assert!(matches!(add.left.as_ref(), Expression::Integer(int) if int.literal == "1"));
+    let Expression::Binary(multiply) = add.right.as_ref() else {
         panic!("expected `2 * 3` nested under `+`");
     };
-    let Expression::Call(multiply_call) = multiply_outer.callee.as_ref() else {
-        panic!("expected desugared `*` call");
-    };
-    let Expression::Access(multiply_access) = multiply_call.callee.as_ref() else {
-        panic!("expected `Multiply.multiply` access");
-    };
-    assert!(
-        matches!(multiply_access.value.as_ref(), Expression::Name(name) if name.name == "Multiply")
-    );
-    assert!(matches!(&multiply_access.accessor, Accessor::Name(name) if name == "multiply"));
+    assert_eq!(multiply.operator, BinaryOperator::Multiply);
+    assert!(matches!(multiply.left.as_ref(), Expression::Integer(int) if int.literal == "2"));
+    assert!(matches!(multiply.right.as_ref(), Expression::Integer(int) if int.literal == "3"));
     assert_eq!(root.text(), source);
 }
 
 #[test]
-fn parses_logical_and_or_as_dedicated_nodes_not_calls() {
+fn parses_logical_and_or_as_surface_binary_nodes() {
     let source = "a && b || c\n";
     let root = parse(source).expect("logical operator expression should parse");
-    let Item::Expression(Expression::Logical(or)) = unmodified_item(&root.items[0]) else {
-        panic!("expected top-level `||` as a `Logical` node, not a desugared call");
+    let Item::Expression(Expression::Binary(or)) = unmodified_item(&root.items[0]) else {
+        panic!("expected top-level surface `||`");
     };
-    assert_eq!(or.operator, LogicalOperator::Or);
-    let Expression::Logical(and) = or.left.as_ref() else {
+    assert_eq!(or.operator, BinaryOperator::Or);
+    let Expression::Binary(and) = or.left.as_ref() else {
         panic!("expected `&&` to bind tighter than `||`");
     };
-    assert_eq!(and.operator, LogicalOperator::And);
+    assert_eq!(and.operator, BinaryOperator::And);
     assert!(matches!(and.left.as_ref(), Expression::Name(name) if name.name == "a"));
     assert!(matches!(and.right.as_ref(), Expression::Name(name) if name.name == "b"));
     assert!(matches!(or.right.as_ref(), Expression::Name(name) if name.name == "c"));
@@ -1436,15 +1415,15 @@ fn parses_logical_and_or_as_dedicated_nodes_not_calls() {
 fn parses_left_associative_logical_and_chains() {
     let source = "a && b && c\n";
     let root = parse(source).expect("chained `&&` should parse");
-    let Item::Expression(Expression::Logical(outer)) = unmodified_item(&root.items[0]) else {
-        panic!("expected `&&` chain to parse as `Logical` nodes");
+    let Item::Expression(Expression::Binary(outer)) = unmodified_item(&root.items[0]) else {
+        panic!("expected `&&` chain to parse as surface binary nodes");
     };
-    assert_eq!(outer.operator, LogicalOperator::And);
+    assert_eq!(outer.operator, BinaryOperator::And);
     assert!(matches!(outer.right.as_ref(), Expression::Name(name) if name.name == "c"));
-    let Expression::Logical(inner) = outer.left.as_ref() else {
+    let Expression::Binary(inner) = outer.left.as_ref() else {
         panic!("expected `a && b` nested under the outer `&&`, confirming left-associativity");
     };
-    assert_eq!(inner.operator, LogicalOperator::And);
+    assert_eq!(inner.operator, BinaryOperator::And);
     assert!(matches!(inner.left.as_ref(), Expression::Name(name) if name.name == "a"));
     assert!(matches!(inner.right.as_ref(), Expression::Name(name) if name.name == "b"));
 }
@@ -1453,12 +1432,12 @@ fn parses_left_associative_logical_and_chains() {
 fn logical_operators_bind_looser_than_comparisons() {
     let source = "1 == 1 && 2 == 2\n";
     let root = parse(source).expect("`&&` mixed with comparisons should parse");
-    let Item::Expression(Expression::Logical(and)) = unmodified_item(&root.items[0]) else {
+    let Item::Expression(Expression::Binary(and)) = unmodified_item(&root.items[0]) else {
         panic!("expected `&&` at the top, binding looser than `==`");
     };
-    assert_eq!(and.operator, LogicalOperator::And);
-    assert!(matches!(and.left.as_ref(), Expression::Call(_)));
-    assert!(matches!(and.right.as_ref(), Expression::Call(_)));
+    assert_eq!(and.operator, BinaryOperator::And);
+    assert!(matches!(and.left.as_ref(), Expression::Binary(value) if value.operator == BinaryOperator::Equal));
+    assert!(matches!(and.right.as_ref(), Expression::Binary(value) if value.operator == BinaryOperator::Equal));
 }
 
 #[test]

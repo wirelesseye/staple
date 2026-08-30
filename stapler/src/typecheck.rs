@@ -3597,6 +3597,7 @@ impl TypeChecker {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => CheckedEffectSet::default(),
+            Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Name(name) => {
                 let state_cell = self.state_cell_symbol(module, name.syntax.id);
                 if let Some(symbol) = state_cell {
@@ -4346,6 +4347,7 @@ impl TypeChecker {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => false,
+            Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         };
         if matches!(
             self.expression_types.get(&expression.syntax().id),
@@ -4604,6 +4606,7 @@ impl TypeChecker {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
+            Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         }
     }
 
@@ -5872,6 +5875,7 @@ impl TypeChecker {
             return self.finish_expression_type(expression, value_type, expected);
         }
         let natural_type = match expression {
+            Expression::Binary(_) => unreachable!("binary expression reached type checking"),
             Expression::Function(function) => {
                 let Some(function_id) = module.function_for(function.syntax.id) else {
                     return CheckedType::Error;
@@ -6424,7 +6428,18 @@ impl TypeChecker {
                                 expected,
                             );
                         }
-                        let mut argument_type = self.check_expression(module, &call.argument);
+                        let mut argument_type = match call.argument.as_ref() {
+                            Expression::Product(product) => self
+                                .check_trait_call_product_argument(
+                                    module,
+                                    trait_methods,
+                                    product,
+                                )
+                                .unwrap_or_else(|| {
+                                    self.check_expression(module, &call.argument)
+                                }),
+                            _ => self.check_expression(module, &call.argument),
+                        };
                         if self.did_return {
                             return CheckedType::empty_product();
                         }
@@ -8383,6 +8398,96 @@ impl TypeChecker {
             },
         ));
         CheckedType::Error
+    }
+
+    /// Checks the argument of a trait-method call written as a positional
+    /// product literal (`Trait.method (left, right)`, which is how the parser
+    /// desugars the `(T, T)` operators) against a candidate method whose
+    /// parameter is a product of the same arity. Integer and float literal
+    /// elements are checked *after* the other elements, once the trait's type
+    /// parameters have been inferred, so that e.g. `usize_value == 0` still
+    /// resolves the trait's `T` to `USize` rather than defaulting the literal
+    /// to `I32`. Returns `None` when no candidate has a matching product
+    /// parameter shape, so the caller falls back to a plain check.
+    fn check_trait_call_product_argument(
+        &mut self,
+        module: &ResolvedModule,
+        methods: &[TraitMethodId],
+        product: &crate::ProductExpression,
+    ) -> Option<CheckedType> {
+        if product.elements.is_empty()
+            || product.elements.iter().any(|element| {
+                element.spread
+                    || element.named_spread
+                    || element.designated
+                    || element.name.is_some()
+            })
+        {
+            return None;
+        }
+        let parameter = methods.iter().find_map(|method| {
+            let CheckedType::Function(function) = self.trait_method_types.get(method)? else {
+                return None;
+            };
+            match function.parameter.as_ref() {
+                CheckedType::Product(parameter)
+                    if !parameter.variadic
+                        && parameter.elements.len() == product.elements.len() =>
+                {
+                    Some(parameter.clone())
+                }
+                _ => None,
+            }
+        })?;
+        let is_literal = |expression: &Expression| {
+            matches!(
+                expression,
+                Expression::Integer(_) | Expression::Float(_)
+            )
+        };
+        let mut substitutions = HashMap::new();
+        let mut element_types: Vec<CheckedType> =
+            vec![CheckedType::Error; product.elements.len()];
+        for check_literals in [false, true] {
+            for (index, element) in product.elements.iter().enumerate() {
+                if is_literal(&element.value) != check_literals {
+                    continue;
+                }
+                let expected = substitute_type(
+                    parameter.elements[index].value_type.clone(),
+                    &substitutions,
+                );
+                let expected = (!contains_type_parameter(&expected)).then_some(expected);
+                let checked = self.check_expression_expected(
+                    module,
+                    &element.value,
+                    expected.as_ref(),
+                );
+                if self.did_return {
+                    return Some(CheckedType::empty_product());
+                }
+                infer_type_parameters(
+                    &parameter.elements[index].value_type,
+                    &checked,
+                    &mut substitutions,
+                );
+                element_types[index] = checked;
+            }
+        }
+        let elements = product
+            .elements
+            .iter()
+            .zip(element_types)
+            .map(|(element, value_type)| CheckedTypeElement {
+                name: element.name.clone(),
+                value_type,
+                default: None,
+            })
+            .collect::<Vec<_>>();
+        let value_type = normalize_product_type(elements, false);
+        self.expression_types
+            .insert(product.syntax.id, value_type.clone());
+        Some(value_type)
     }
 
     fn trait_obligation_available(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
@@ -11816,6 +11921,7 @@ fn expression_reads_reactive(
         | Expression::CString(_)
         | Expression::Integer(_)
         | Expression::Float(_) => false,
+        Expression::Binary(_) => unreachable!("binary expression reached type checking"),
     }
 }
 
@@ -11881,6 +11987,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
+            Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         }
     }
     fn item_value_bindings(item: &Item, bindings: &mut Vec<Binding>) {
@@ -12034,6 +12141,7 @@ fn expression_mentions_symbols(
         | Expression::CString(_)
         | Expression::Integer(_)
         | Expression::Float(_) => false,
+        Expression::Binary(_) => unreachable!("binary expression reached type checking"),
     }
 }
 
@@ -12104,6 +12212,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
         | Expression::CString(_)
         | Expression::Integer(_)
         | Expression::Float(_) => false,
+        Expression::Binary(_) => unreachable!("binary expression reached type checking"),
     }
 }
 
@@ -12288,6 +12397,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
+            Expression::Binary(_) => unreachable!("binary expression reached type checking"),
         }
     }
 

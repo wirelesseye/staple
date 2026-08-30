@@ -3167,7 +3167,7 @@ fn compares_all_standard_library_integer_types() {
         "let greater: Bool = 2 > 1\n",
         "let greater_equal: Bool = 2 >= 1\n",
         "def same: <T where Copy T, Eq T> T -> T -> Bool = left => right => left == right\n",
-        "def before: <T where PartialOrd T> T -> T -> Bool = left => right => left < right\n",
+        "def before: <T where Copy T, PartialOrd T> T -> T -> Bool = left => right => left < right\n",
         "let generic_equal: Bool = same 1 1\n",
         "let generic_order: Bool = before 1 2\n",
         "def i8 = (x: I8, y: I8) => x < y\n",
@@ -3203,10 +3203,10 @@ fn supports_contextual_float_literals_arithmetic_and_partial_ordering() {
         "let less: Bool = 1.0 < 2.0\n",
         "let equal: Bool = 2.0 == 2.0\n",
         "let scaled: F64 = scale_float 2.0\n",
-        "let unordered: Option Ordering = PartialOrd.partial_cmp (0.0 / 0.0) 1.0\n",
-        "let ordered_less: Ordering = Ord.cmp 1 2\n",
-        "let ordered_equal: Ordering = Ord.cmp 2 2\n",
-        "let ordered_greater: Ordering = Ord.cmp 3 2\n",
+        "let unordered: Option Ordering = PartialOrd.partial_cmp ((0.0 / 0.0), 1.0)\n",
+        "let ordered_less: Ordering = Ord.cmp (1, 2)\n",
+        "let ordered_equal: Ordering = Ord.cmp (2, 2)\n",
+        "let ordered_greater: Ordering = Ord.cmp (3, 2)\n",
         "single ()\n",
     ));
     let defaulted = module
@@ -3268,7 +3268,7 @@ fn rejects_invalid_float_contexts_and_float_ord() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("def compare: <T where Ord T> T -> T -> Ordering = left => right => Ord.cmp left right\nlet invalid = compare 1.0 2.0\n"))
+        .check(resolve("def compare: <T where Copy T, Ord T> T -> T -> Ordering = left => right => Ord.cmp (left, right)\nlet invalid = compare 1.0 2.0\n"))
         .expect_err_diagnostics("floats should not implement Ord");
     assert!(!diagnostics.is_empty());
 }
@@ -6902,7 +6902,7 @@ fn preserves_the_environment_for_recursive_closures() {
         .expect("recursive closure should compile");
     assert!(llvm.contains("binding.cell"));
     assert!(llvm.contains("closure.call"));
-    assert!(llvm.contains("load { i32 }"));
+    assert!(llvm.contains("load { i32, ptr }"));
 }
 
 #[test]
@@ -7357,7 +7357,7 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
 #[test]
 fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
     let module = type_check(concat!(
-        "trait Same T where Eq T { same: (T, T) -> Bool = (left, right) => Eq.equal left right }\n",
+        "trait Same T where Copy T, Eq T { same: (T, T) -> Bool = (left, right) => Eq.equal (left, right) }\n",
         "trait Select Value { select: (Bool, move Value, move Value) -> Value = (condition, move left, move right) => when { condition => left, else => right } }\n",
         "trait First (Left, Right) { first: (move Left, Right) -> Left = (move left, right) => left }\n",
         "impl Same I32 {}\n",
@@ -7623,8 +7623,8 @@ fn prerequisite_copy_bounds_are_visible_to_ownership_checking() {
 fn substitutes_product_parameters_into_multiple_prerequisites() {
     type_check(concat!(
         "trait BothEqual (Left, Right) where Eq Left, Eq Right { equal: (Left, Left, Right, Right) -> (Bool, Bool) }\n",
-        "impl BothEqual (I32, I32) { def equal = (left_a, left_b, right_a, right_b) => (Eq.equal left_a left_b, Eq.equal right_a right_b) }\n",
-        "def compare_both: <Left, Right where BothEqual (Left, Right)> (Left, Left, Right, Right) -> (Bool, Bool) = (left_a, left_b, right_a, right_b) => (Eq.equal left_a left_b, Eq.equal right_a right_b)\n",
+        "impl BothEqual (I32, I32) { def equal = (left_a, left_b, right_a, right_b) => (Eq.equal (left_a, left_b), Eq.equal (right_a, right_b)) }\n",
+        "def compare_both: <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (Left, Left, Right, Right) -> (Bool, Bool) = (left_a, left_b, right_a, right_b) => (Eq.equal (left_a, left_b), Eq.equal (right_a, right_b))\n",
         "let result: (Bool, Bool) = compare_both (1, 1, 2, 2)\n",
     ));
 }

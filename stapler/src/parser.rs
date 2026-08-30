@@ -2502,21 +2502,17 @@ impl Grammar {
         }))
     }
 
-    /// Comparison operators recognized at precedence 4 (non-associative),
-    /// paired with the trait/method they desugar to.
-    const COMPARISON_OPERATORS: [(&'static str, &'static str, &'static str); 6] = [
-        ("==", "Eq", "equal"),
-        ("!=", "Eq", "not_equal"),
-        ("<=", "PartialOrd", "le"),
-        (">=", "PartialOrd", "ge"),
-        ("<", "PartialOrd", "lt"),
-        (">", "PartialOrd", "gt"),
+    /// Comparison operators recognized at precedence 4 (non-associative).
+    const COMPARISON_OPERATORS: [(&'static str, BinaryOperator); 6] = [
+        ("==", BinaryOperator::Equal),
+        ("!=", BinaryOperator::NotEqual),
+        ("<=", BinaryOperator::LessEqual),
+        (">=", BinaryOperator::GreaterEqual),
+        ("<", BinaryOperator::Less),
+        (">", BinaryOperator::Greater),
     ];
 
-    /// Parses `||` (precedence 1, left-associative), producing a
-    /// `LogicalExpression` rather than desugaring to a call: `||` is not
-    /// backed by a trait and cannot be overloaded, and the right operand must
-    /// be evaluated lazily.
+    /// Parses `||` (precedence 1, left-associative) as surface syntax.
     fn parse_or_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_and_expression()?;
@@ -2528,23 +2524,20 @@ impl Grammar {
             if !self.eat_operator("||") {
                 break;
             }
-            let bool_type = self.bool_type(operator_start);
+            let operator_syntax = self.syntax(operator_start);
             let right = self.parse_and_expression()?;
-            expression = Expression::Logical(LogicalExpression {
+            expression = Expression::Binary(BinaryExpression {
                 syntax: self.syntax(start),
-                operator: LogicalOperator::Or,
+                operator_syntax,
+                operator: BinaryOperator::Or,
                 left: Box::new(expression),
                 right: Box::new(right),
-                bool_type,
             });
         }
         Ok(expression)
     }
 
-    /// Parses `&&` (precedence 2, left-associative), producing a
-    /// `LogicalExpression` rather than desugaring to a call: `&&` is not
-    /// backed by a trait and cannot be overloaded, and the right operand must
-    /// be evaluated lazily.
+    /// Parses `&&` (precedence 2, left-associative) as surface syntax.
     fn parse_and_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_range_expression()?;
@@ -2556,14 +2549,14 @@ impl Grammar {
             if !self.eat_operator("&&") {
                 break;
             }
-            let bool_type = self.bool_type(operator_start);
+            let operator_syntax = self.syntax(operator_start);
             let right = self.parse_range_expression()?;
-            expression = Expression::Logical(LogicalExpression {
+            expression = Expression::Binary(BinaryExpression {
                 syntax: self.syntax(start),
-                operator: LogicalOperator::And,
+                operator_syntax,
+                operator: BinaryOperator::And,
                 left: Box::new(expression),
                 right: Box::new(right),
-                bool_type,
             });
         }
         Ok(expression)
@@ -2573,17 +2566,7 @@ impl Grammar {
     /// own span. Must be called immediately after consuming the operator
     /// token and before parsing the right operand; see
     /// `apply_trait_operator`.
-    fn bool_type(&mut self, start: usize) -> Type {
-        Type::Named(NamedType {
-            syntax: self.syntax(start),
-            namespace: None,
-            name: "Bool".to_owned(),
-        })
-    }
-
-    /// Parses a `..`/`..=` range expression (precedence 3, non-associative),
-    /// desugaring directly to a call to the prelude's `range`/`range_inclusive`
-    /// functions.
+    /// Parses a `..`/`..=` range expression (precedence 3, non-associative).
     fn parse_range_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let left = self.parse_comparison_expression()?;
@@ -2591,19 +2574,21 @@ impl Grammar {
             return Ok(left);
         }
         let operator_start = self.position;
-        let function_name = if self.eat_operator("..=") {
-            "range_inclusive"
+        let operator = if self.eat_operator("..=") {
+            BinaryOperator::RangeInclusive
         } else if self.eat_operator("..") {
-            "range"
+            BinaryOperator::Range
         } else {
             return Ok(left);
         };
-        let applied = self.apply_prelude_operator(start, operator_start, function_name, left);
+        let operator_syntax = self.syntax(operator_start);
         let right = self.parse_comparison_expression()?;
-        let expression = Expression::Call(CallExpression {
+        let expression = Expression::Binary(BinaryExpression {
             syntax: self.syntax(start),
-            callee: Box::new(applied),
-            argument: Box::new(right),
+            operator_syntax,
+            operator,
+            left: Box::new(left),
+            right: Box::new(right),
         });
         if !(self.newline_terminates_expression && self.has_newline_before_next_token())
             && (self.at_operator("..=") || self.at_operator(".."))
@@ -2615,8 +2600,7 @@ impl Grammar {
         Ok(expression)
     }
 
-    /// Parses `==`/`!=`/`<`/`<=`/`>`/`>=` (precedence 4, non-associative),
-    /// desugaring directly to the corresponding `Eq`/`PartialOrd` trait call.
+    /// Parses `==`/`!=`/`<`/`<=`/`>`/`>=` (precedence 4, non-associative).
     fn parse_comparison_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let left = self.parse_additive_expression()?;
@@ -2624,16 +2608,14 @@ impl Grammar {
             return Ok(left);
         }
         let operator_start = self.position;
-        let Some((trait_name, method_name)) = self.eat_comparison_operator() else {
+        let Some(operator) = self.eat_comparison_operator() else {
             return Ok(left);
         };
-        let applied =
-            self.apply_trait_operator(start, operator_start, trait_name, method_name, left);
+        let operator_syntax = self.syntax(operator_start);
         let right = self.parse_additive_expression()?;
-        let expression = Expression::Call(CallExpression {
-            syntax: self.syntax(start),
-            callee: Box::new(applied),
-            argument: Box::new(right),
+        let expression = Expression::Binary(BinaryExpression {
+            syntax: self.syntax(start), operator_syntax, operator,
+            left: Box::new(left), right: Box::new(right),
         });
         if !(self.newline_terminates_expression && self.has_newline_before_next_token())
             && self.at_comparison_operator()
@@ -2645,8 +2627,7 @@ impl Grammar {
         Ok(expression)
     }
 
-    /// Parses `+`/`-` (precedence 6, left-associative), desugaring each
-    /// application directly to the corresponding `Add`/`Subtract` trait call.
+    /// Parses `+`/`-` (precedence 6, left-associative).
     fn parse_additive_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_multiplicative_expression()?;
@@ -2656,34 +2637,23 @@ impl Grammar {
             }
             let operator_start = self.position;
             let operator = if self.eat(TokenKind::Plus) {
-                Some(("Add", "add"))
+                Some(BinaryOperator::Add)
             } else if self.eat(TokenKind::Minus) {
-                Some(("Subtract", "subtract"))
+                Some(BinaryOperator::Subtract)
             } else {
                 None
             };
-            let Some((trait_name, method_name)) = operator else {
+            let Some(operator) = operator else {
                 break;
             };
-            let applied = self.apply_trait_operator(
-                start,
-                operator_start,
-                trait_name,
-                method_name,
-                expression,
-            );
+            let operator_syntax = self.syntax(operator_start);
             let right = self.parse_multiplicative_expression()?;
-            expression = Expression::Call(CallExpression {
-                syntax: self.syntax(start),
-                callee: Box::new(applied),
-                argument: Box::new(right),
-            });
+            expression = Expression::Binary(BinaryExpression { syntax: self.syntax(start), operator_syntax, operator, left: Box::new(expression), right: Box::new(right) });
         }
         Ok(expression)
     }
 
-    /// Parses `*`/`/` (precedence 7, left-associative), desugaring each
-    /// application directly to the corresponding `Multiply`/`Divide` trait call.
+    /// Parses `*`/`/` (precedence 7, left-associative).
     fn parse_multiplicative_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         let mut expression = self.parse_call_expression()?;
@@ -2693,36 +2663,26 @@ impl Grammar {
             }
             let operator_start = self.position;
             let operator = if self.eat(TokenKind::Star) {
-                Some(("Multiply", "multiply"))
+                Some(BinaryOperator::Multiply)
             } else if self.eat(TokenKind::Slash) {
-                Some(("Divide", "divide"))
+                Some(BinaryOperator::Divide)
             } else {
                 None
             };
-            let Some((trait_name, method_name)) = operator else {
+            let Some(operator) = operator else {
                 break;
             };
-            let applied = self.apply_trait_operator(
-                start,
-                operator_start,
-                trait_name,
-                method_name,
-                expression,
-            );
+            let operator_syntax = self.syntax(operator_start);
             let right = self.parse_call_expression()?;
-            expression = Expression::Call(CallExpression {
-                syntax: self.syntax(start),
-                callee: Box::new(applied),
-                argument: Box::new(right),
-            });
+            expression = Expression::Binary(BinaryExpression { syntax: self.syntax(start), operator_syntax, operator, left: Box::new(expression), right: Box::new(right) });
         }
         Ok(expression)
     }
 
-    fn eat_comparison_operator(&mut self) -> Option<(&'static str, &'static str)> {
-        for (text, trait_name, method_name) in Self::COMPARISON_OPERATORS {
+    fn eat_comparison_operator(&mut self) -> Option<BinaryOperator> {
+        for (text, operator) in Self::COMPARISON_OPERATORS {
             if self.eat_operator(text) {
-                return Some((trait_name, method_name));
+                return Some(operator);
             }
         }
         None
@@ -2731,57 +2691,7 @@ impl Grammar {
     fn at_comparison_operator(&self) -> bool {
         Self::COMPARISON_OPERATORS
             .iter()
-            .any(|(text, _, _)| self.at_operator(text))
-    }
-
-    /// Builds `Trait.method left` using the operator token's own span for the
-    /// synthesized `Trait`/`method` names. Must be called immediately after
-    /// consuming the operator token and before parsing the right operand, so
-    /// the synthesized spans stay tied to the operator instead of growing to
-    /// include the right-hand side.
-    fn apply_trait_operator(
-        &mut self,
-        start: usize,
-        operator_start: usize,
-        trait_name: &str,
-        method_name: &str,
-        left: Expression,
-    ) -> Expression {
-        let name = Expression::Name(NameExpression {
-            syntax: self.syntax(operator_start),
-            name: trait_name.to_owned(),
-        });
-        let access = Expression::Access(AccessExpression {
-            syntax: self.syntax(operator_start),
-            value: Box::new(name),
-            accessor: Accessor::Name(method_name.to_owned()),
-        });
-        Expression::Call(CallExpression {
-            syntax: self.syntax(start),
-            callee: Box::new(access),
-            argument: Box::new(left),
-        })
-    }
-
-    /// Builds `function left` for a builtin operator that desugars to an
-    /// ordinary prelude function rather than a trait method (`..`/`..=`). See
-    /// `apply_trait_operator` for the span-timing requirement.
-    fn apply_prelude_operator(
-        &mut self,
-        start: usize,
-        operator_start: usize,
-        function_name: &str,
-        left: Expression,
-    ) -> Expression {
-        let name = Expression::Name(NameExpression {
-            syntax: self.syntax(operator_start),
-            name: function_name.to_owned(),
-        });
-        Expression::Call(CallExpression {
-            syntax: self.syntax(start),
-            callee: Box::new(name),
-            argument: Box::new(left),
-        })
+            .any(|(text, _)| self.at_operator(text))
     }
 
     /// Parses juxtaposition-based function calls.

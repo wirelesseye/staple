@@ -1,25 +1,25 @@
 pub mod
 
 /// Provides addition.
-pub trait Add T where Copy T {
+pub trait Add T {
     /// Adds two values.
-    add: T -> T -> T
+    add: (T, T) -> T
 }
 
 /// Provides subtraction.
-pub trait Subtract T where Copy T {
+pub trait Subtract T {
     /// Subtracts the right value from the left value.
-    subtract: T -> T -> T
+    subtract: (T, T) -> T
 }
 
 /// Provides multiplication.
-pub trait Multiply T where Copy T {
+pub trait Multiply T {
     /// Multiplies two values.
-    multiply: T -> T -> T
+    multiply: (T, T) -> T
 }
 
 /// Provides division.
-pub trait Divide T where Copy T {
+pub trait Divide T {
     /// Divides the left value by the right value.
-    divide: T -> T -> T
+    divide: (T, T) -> T
 }

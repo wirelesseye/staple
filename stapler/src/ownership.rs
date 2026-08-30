@@ -371,6 +371,7 @@ impl<'a> OwnershipChecker<'a> {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => true,
+            Expression::Binary(_) => unreachable!("binary expression reached ownership checking"),
         }
     }
 

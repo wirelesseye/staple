@@ -14,35 +14,35 @@ pub typegroup Ordering {
 }
 
 /// Provides equality and inequality comparisons.
-pub trait Eq T where Copy T {
+pub trait Eq T {
     /// Returns whether two values are equal.
-    equal: T -> T -> Bool
+    equal: (T, T) -> Bool
     /// Returns whether two values are unequal.
-    not_equal: T -> T -> Bool
+    not_equal: (T, T) -> Bool
 }
 
 /// Provides comparisons that may be unordered.
-pub trait PartialOrd T where Copy T {
+pub trait PartialOrd T {
     /// Compares two values, returning `None` when they are unordered.
-    partial_cmp: T -> T -> Option Ordering
+    partial_cmp: (T, T) -> Option Ordering
     /// Returns whether the left value is less than the right value.
-    lt: T -> T -> Bool = left => right => match (partial_cmp left right) {
+    lt: (T, T) -> Bool = (left, right) => match (partial_cmp (left, right)) {
         Some Ordering.Less() => True,
         _ => False,
     }
     /// Returns whether the left value is less than or equal to the right value.
-    le: T -> T -> Bool = left => right => match (partial_cmp left right) {
+    le: (T, T) -> Bool = (left, right) => match (partial_cmp (left, right)) {
         Some Ordering.Less() => True,
         Some Ordering.Equal() => True,
         _ => False,
     }
     /// Returns whether the left value is greater than the right value.
-    gt: T -> T -> Bool = left => right => match (partial_cmp left right) {
+    gt: (T, T) -> Bool = (left, right) => match (partial_cmp (left, right)) {
         Some Ordering.Greater() => True,
         _ => False,
     }
     /// Returns whether the left value is greater than or equal to the right value.
-    ge: T -> T -> Bool = left => right => match (partial_cmp left right) {
+    ge: (T, T) -> Bool = (left, right) => match (partial_cmp (left, right)) {
         Some Ordering.Greater() => True,
         Some Ordering.Equal() => True,
         _ => False,
@@ -52,5 +52,5 @@ pub trait PartialOrd T where Copy T {
 /// Provides a total ordering.
 pub trait Ord T where Eq T, PartialOrd T {
     /// Compares two values with a total ordering.
-    cmp: T -> T -> Ordering
+    cmp: (T, T) -> Ordering
 }

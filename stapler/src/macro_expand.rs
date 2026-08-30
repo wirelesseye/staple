@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, LogicalOperator,
+    Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, LogicalOperator,
     MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program,
     ResolvedMacro, Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
     VisibilityKind, VisibilitySyntax,
@@ -488,6 +488,301 @@ pub(crate) struct MacroAnalysis {
     pub definitions: HashMap<SyntaxId, ResolvedMacro>,
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
     pub helpers: Vec<(ModuleId, Binding)>,
+    pub next_syntax_id: usize,
+}
+
+fn freshened_syntax(syntax: &Syntax, next_syntax_id: &mut usize) -> Syntax {
+    let mut syntax = syntax.clone();
+    syntax.id = SyntaxId(*next_syntax_id);
+    *next_syntax_id += 1;
+    syntax
+}
+
+fn lower_binary_expression(
+    binary: crate::BinaryExpression,
+    next_syntax_id: &mut usize,
+) -> Expression {
+    let crate::BinaryExpression {
+        syntax,
+        operator_syntax,
+        operator,
+        left,
+        right,
+    } = binary;
+    if matches!(operator, BinaryOperator::And | BinaryOperator::Or) {
+        let bool_type = Type::Named(crate::NamedType {
+            syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+            namespace: None,
+            name: "Bool".to_owned(),
+        });
+        return Expression::Logical(crate::LogicalExpression {
+            syntax,
+            operator: if operator == BinaryOperator::And {
+                LogicalOperator::And
+            } else {
+                LogicalOperator::Or
+            },
+            left,
+            right,
+            bool_type,
+        });
+    }
+    if matches!(operator, BinaryOperator::Range | BinaryOperator::RangeInclusive) {
+        let name = Expression::Name(crate::NameExpression {
+            syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+            name: if operator == BinaryOperator::Range {
+                "range"
+            } else {
+                "range_inclusive"
+            }
+            .to_owned(),
+        });
+        let inner = Expression::Call(crate::CallExpression {
+            syntax: freshened_syntax(&syntax, next_syntax_id),
+            callee: Box::new(name),
+            argument: left,
+        });
+        return Expression::Call(crate::CallExpression {
+            syntax,
+            callee: Box::new(inner),
+            argument: right,
+        });
+    }
+    let (trait_name, method_name) = match operator {
+        BinaryOperator::Add => ("Add", "add"),
+        BinaryOperator::Subtract => ("Subtract", "subtract"),
+        BinaryOperator::Multiply => ("Multiply", "multiply"),
+        BinaryOperator::Divide => ("Divide", "divide"),
+        BinaryOperator::Equal => ("Eq", "equal"),
+        BinaryOperator::NotEqual => ("Eq", "not_equal"),
+        BinaryOperator::Less => ("PartialOrd", "lt"),
+        BinaryOperator::LessEqual => ("PartialOrd", "le"),
+        BinaryOperator::Greater => ("PartialOrd", "gt"),
+        BinaryOperator::GreaterEqual => ("PartialOrd", "ge"),
+        BinaryOperator::Range
+        | BinaryOperator::RangeInclusive
+        | BinaryOperator::And
+        | BinaryOperator::Or => unreachable!(),
+    };
+    let name = Expression::Name(crate::NameExpression {
+        syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+        name: trait_name.to_owned(),
+    });
+    let access = Expression::Access(crate::AccessExpression {
+        syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+        value: Box::new(name),
+        accessor: Accessor::Name(method_name.to_owned()),
+    });
+    let element = |value, next_syntax_id: &mut usize| crate::ProductElement {
+        syntax: freshened_syntax(&syntax, next_syntax_id),
+        name: None,
+        designated: false,
+        value,
+        spread: false,
+        named_spread: false,
+    };
+    let argument = Expression::Product(crate::ProductExpression {
+        syntax: freshened_syntax(&syntax, next_syntax_id),
+        elements: vec![
+            element(*left, next_syntax_id),
+            element(*right, next_syntax_id),
+        ],
+    });
+    Expression::Call(crate::CallExpression {
+        syntax,
+        callee: Box::new(access),
+        argument: Box::new(argument),
+    })
+}
+
+pub(crate) fn desugar_program(program: &mut Program, next_syntax_id: &mut usize) {
+    for module in program.modules_mut() {
+        for item in &mut module.syntax.items {
+            desugar_item(item, next_syntax_id);
+        }
+    }
+}
+
+pub(crate) fn desugar_macro_analysis(
+    analysis: &mut MacroAnalysis,
+    next_syntax_id: &mut usize,
+) {
+    for (_, binding) in &mut analysis.helpers {
+        if let Some(value) = &mut binding.value {
+            desugar_expression(value, next_syntax_id);
+        }
+    }
+}
+
+fn desugar_item(item: &mut Item, next_syntax_id: &mut usize) {
+    match item {
+        Item::Modified(modified) => {
+            for modifier in &mut modified.modifiers {
+                if let Some(expression) = modifier
+                    .argument
+                    .as_mut()
+                    .and_then(|argument| argument.expression.as_mut())
+                {
+                    desugar_expression(expression, next_syntax_id);
+                }
+            }
+            desugar_item(&mut modified.item, next_syntax_id);
+        }
+        Item::VisibilityMacroInvocation(invocation) => {
+            for modifier in &mut invocation.modifiers {
+                if let Some(expression) = modifier
+                    .argument
+                    .as_mut()
+                    .and_then(|argument| argument.expression.as_mut())
+                {
+                    desugar_expression(expression, next_syntax_id);
+                }
+            }
+            desugar_expression(&mut invocation.expression, next_syntax_id);
+        }
+        Item::VisibilitySplice(splice) => desugar_item(&mut splice.item, next_syntax_id),
+        Item::ExternBlock(block) => {
+            for binding in &mut block.bindings {
+                if let Some(value) = &mut binding.value {
+                    desugar_expression(value, next_syntax_id);
+                }
+            }
+        }
+        Item::TraitDeclaration(declaration) => {
+            for member in &mut declaration.members {
+                if let Some(default) = &mut member.default {
+                    desugar_expression(default, next_syntax_id);
+                }
+            }
+        }
+        Item::TraitImplementation(implementation) => {
+            for member in &mut implementation.members {
+                desugar_expression(&mut member.value, next_syntax_id);
+            }
+        }
+        Item::MacroDeclaration(declaration) => {
+            if let Some(value) = &mut declaration.value {
+                desugar_expression(value, next_syntax_id);
+            }
+        }
+        Item::Binding(binding) => {
+            if let Some(value) = &mut binding.value {
+                desugar_expression(value, next_syntax_id);
+            }
+        }
+        Item::PatternBinding(binding) => desugar_expression(&mut binding.value, next_syntax_id),
+        Item::Assignment(assignment) => {
+            desugar_expression(&mut assignment.target, next_syntax_id);
+            desugar_expression(&mut assignment.value, next_syntax_id);
+        }
+        Item::Return(return_) => desugar_expression(&mut return_.value, next_syntax_id),
+        Item::Break(break_) => {
+            if let Some(value) = &mut break_.value {
+                desugar_expression(value, next_syntax_id);
+            }
+        }
+        Item::Expression(expression) => desugar_expression(expression, next_syntax_id),
+        Item::Submodule(submodule) => {
+            for item in &mut submodule.module.items {
+                desugar_item(item, next_syntax_id);
+            }
+        }
+        Item::RepeatedItemSplice(_)
+        | Item::Continue(_)
+        | Item::TypeDeclaration(_)
+        | Item::UseDeclaration(_) => {}
+    }
+}
+
+fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
+    match expression {
+        Expression::Binary(_) => {
+            let Expression::Binary(mut binary) = std::mem::replace(
+                expression,
+                Expression::Name(crate::NameExpression {
+                    syntax: Syntax::compiler(),
+                    name: String::new(),
+                }),
+            ) else {
+                unreachable!()
+            };
+            desugar_expression(&mut binary.left, next_syntax_id);
+            desugar_expression(&mut binary.right, next_syntax_id);
+            *expression = lower_binary_expression(binary, next_syntax_id);
+        }
+        Expression::Function(function) => desugar_expression(&mut function.body, next_syntax_id),
+        Expression::Satisfies(satisfies) => {
+            desugar_expression(&mut satisfies.value, next_syntax_id)
+        }
+        Expression::Match(match_) => {
+            desugar_expression(&mut match_.subject, next_syntax_id);
+            for arm in &mut match_.arms {
+                desugar_expression(&mut arm.body, next_syntax_id);
+            }
+        }
+        Expression::Loop(loop_) => {
+            for item in &mut loop_.body.items {
+                desugar_item(item, next_syntax_id);
+            }
+        }
+        Expression::With(with) => {
+            desugar_expression(&mut with.value, next_syntax_id);
+            for item in &mut with.body.items {
+                desugar_item(item, next_syntax_id);
+            }
+        }
+        Expression::Block(block) => {
+            for item in &mut block.items {
+                desugar_item(item, next_syntax_id);
+            }
+        }
+        Expression::Product(product) => {
+            for element in &mut product.elements {
+                desugar_expression(&mut element.value, next_syntax_id);
+            }
+        }
+        Expression::Call(call) => {
+            desugar_expression(&mut call.callee, next_syntax_id);
+            desugar_expression(&mut call.argument, next_syntax_id);
+        }
+        Expression::Access(access) => desugar_expression(&mut access.value, next_syntax_id),
+        Expression::Index(index) => {
+            desugar_expression(&mut index.value, next_syntax_id);
+            desugar_expression(&mut index.index, next_syntax_id);
+        }
+        Expression::Logical(logical) => {
+            desugar_expression(&mut logical.left, next_syntax_id);
+            desugar_expression(&mut logical.right, next_syntax_id);
+        }
+        Expression::StringTemplate(template) => {
+            for part in &mut template.parts {
+                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                    desugar_expression(&mut interpolation.expression, next_syntax_id);
+                }
+            }
+        }
+        Expression::Quote(quote) => match &mut quote.template {
+            crate::QuoteTemplate::Expression(expression) => {
+                desugar_expression(expression, next_syntax_id)
+            }
+            crate::QuoteTemplate::Item(item) => desugar_item(item, next_syntax_id),
+            crate::QuoteTemplate::Items(items) => {
+                for item in items {
+                    desugar_item(item, next_syntax_id);
+                }
+            }
+            crate::QuoteTemplate::Raw => {}
+        },
+        Expression::Resource(_)
+        | Expression::SyntaxArgument(_)
+        | Expression::VisibilityArgument(_)
+        | Expression::Splice(_)
+        | Expression::Name(_)
+        | Expression::String(_)
+        | Expression::CString(_)
+        | Expression::Integer(_)
+        | Expression::Float(_) => {}
+    }
 }
 
 /// Expand every macro invocation in `program`, returning the program with its
@@ -1338,6 +1633,7 @@ impl MacroExpander {
                 .filter(|helper| binding_is_compile_time_helper(&helper.binding))
                 .map(|helper| (helper.module, helper.binding.clone()))
                 .collect(),
+            next_syntax_id: self.next_syntax_id,
         }
     }
 
@@ -2958,6 +3254,16 @@ impl MacroExpander {
                 index.index = Box::new(self.expand_expression(module, *index.index, depth));
                 Expression::Index(index)
             }
+            Expression::Binary(mut binary) => {
+                binary.left = Box::new(self.expand_expression(module, *binary.left, depth));
+                binary.right = Box::new(self.expand_expression(module, *binary.right, depth));
+                Expression::Binary(binary)
+            }
+            Expression::Logical(mut logical) => {
+                logical.left = Box::new(self.expand_expression(module, *logical.left, depth));
+                logical.right = Box::new(self.expand_expression(module, *logical.right, depth));
+                Expression::Logical(logical)
+            }
             Expression::Quote(quote) => {
                 self.diagnostics.push(Diagnostic::new(
                     quote.syntax.span.clone(),
@@ -3502,6 +3808,9 @@ impl MacroExpander {
                     );
                 }
                 self.eval_expression(module, &satisfies.value, environment)
+            }
+            Expression::Binary(binary) => {
+                self.eval_binary_expression(module, binary, environment)
             }
             Expression::Quote(quote) => {
                 let expected = match quote.kind {
@@ -4706,6 +5015,35 @@ impl MacroExpander {
         }
     }
 
+    fn eval_binary_expression(
+        &mut self,
+        module: ModuleId,
+        binary: &crate::BinaryExpression,
+        environment: &mut Environment,
+    ) -> Option<Value> {
+        let lowered = lower_binary_expression(binary.clone(), &mut self.next_syntax_id);
+        self.eval_expression(module, &lowered, environment)
+    }
+
+    /// Builds the `(left, right)` positional product used by lowered trait
+    /// operator calls.
+    fn operand_product(&mut self, left: Expression, right: Expression, span: Span) -> Expression {
+        let element = |this: &mut Self, value| crate::ProductElement {
+            syntax: Syntax::synthetic(this.fresh_id(), span.clone()),
+            name: None,
+            designated: false,
+            value,
+            spread: false,
+            named_spread: false,
+        };
+        let left = element(self, left);
+        let right = element(self, right);
+        Expression::Product(crate::ProductExpression {
+            syntax: Syntax::synthetic(self.fresh_id(), span),
+            elements: vec![left, right],
+        })
+    }
+
     /// Converts a compile-time `Value` produced by folding a `const`
     /// initializer back into a literal `Expression` the rest of the
     /// pipeline (resolve, typecheck, codegen) can treat like any other
@@ -4723,8 +5061,8 @@ impl MacroExpander {
             Value::Integer(integer) => {
                 // Integer literals can never carry a leading `-` and the
                 // language has no unary minus, so a negative compile-time
-                // result is represented the same way the parser desugars
-                // `0 - n`: `Subtract.subtract 0 |n|`.
+                // result is represented like lowered `0 - n`:
+                // `Subtract.subtract (0, |n|)`.
                 let zero = Expression::Integer(crate::IntegerExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     literal: "0".to_string(),
@@ -4743,12 +5081,8 @@ impl MacroExpander {
                 });
                 Some(Expression::Call(crate::CallExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    callee: Box::new(Expression::Call(crate::CallExpression {
-                        syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                        callee: Box::new(access),
-                        argument: Box::new(zero),
-                    })),
-                    argument: Box::new(magnitude),
+                    callee: Box::new(access),
+                    argument: Box::new(self.operand_product(zero, magnitude, span.clone())),
                 }))
             }
             Value::Float(float) if float.is_finite() && float >= 0.0 => {
@@ -4759,7 +5093,7 @@ impl MacroExpander {
             }
             // Mirrors the `Value::Integer` case above: float literals can
             // never carry a leading `-` either, so a negative compile-time
-            // result is desugared the same way, via `Subtract.subtract`.
+            // result is lowered the same way, via `Subtract.subtract`.
             Value::Float(float) if float.is_finite() => {
                 let zero = Expression::Float(crate::FloatExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
@@ -4779,12 +5113,8 @@ impl MacroExpander {
                 });
                 Some(Expression::Call(crate::CallExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    callee: Box::new(Expression::Call(crate::CallExpression {
-                        syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                        callee: Box::new(access),
-                        argument: Box::new(zero),
-                    })),
-                    argument: Box::new(magnitude),
+                    callee: Box::new(access),
+                    argument: Box::new(self.operand_product(zero, magnitude, span.clone())),
                 }))
             }
             Value::Float(float) => {
@@ -4848,14 +5178,13 @@ impl MacroExpander {
         }
     }
 
-    /// Folds a builtin arithmetic/comparison operator call the parser
-    /// desugars `+`/`-`/`*`/`/`/`==`/`!=`/`<`/`<=`/`>`/`>=` into (e.g.
+    /// Folds a lowered builtin arithmetic/comparison operator call (e.g.
     /// `Add.add left right` for `left + right`), the same way the language's
     /// former `infix` expression evaluator once folded operator chains
     /// directly by operator name. Returns `None` when `head`/`arguments`
     /// doesn't match one of these ten known trait/method pairs with exactly
     /// two arguments, so the caller falls back to ordinary call evaluation
-    /// (this also means `..`/`..=`, which desugar to plain function calls
+    /// (this also means `..`/`..=`, which lower to plain function calls
     /// rather than a trait method, are left to that fallback and remain
     /// unsupported at compile time, unchanged from before).
     fn eval_builtin_operator_call(
@@ -4877,9 +5206,24 @@ impl MacroExpander {
             ("PartialOrd", "gt", ">"),
             ("PartialOrd", "ge", ">="),
         ];
-        if arguments.len() != 2 {
+        // Lowering rewrites `left <op> right` to `Trait.method (left, right)`,
+        // a single call whose argument is a two-element positional product.
+        let [argument] = arguments else {
+            return None;
+        };
+        let Expression::Product(product) = argument else {
+            return None;
+        };
+        if product.elements.len() != 2
+            || product
+                .elements
+                .iter()
+                .any(|element| element.spread || element.named_spread || element.name.is_some())
+        {
             return None;
         }
+        let left_argument = &product.elements[0].value;
+        let right_argument = &product.elements[1].value;
         let Expression::Access(access) = head else {
             return None;
         };
@@ -4893,10 +5237,10 @@ impl MacroExpander {
             .iter()
             .find(|(trait_name, method_name, _)| *trait_name == name.name && *method_name == method)
             .map(|(_, _, operator)| *operator)?;
-        let Some(left) = self.eval_expression(module, arguments[0], environment) else {
+        let Some(left) = self.eval_expression(module, left_argument, environment) else {
             return Some(None);
         };
-        let Some(right) = self.eval_expression(module, arguments[1], environment) else {
+        let Some(right) = self.eval_expression(module, right_argument, environment) else {
             return Some(None);
         };
         Some(match (&left, &right, operator) {
@@ -5450,6 +5794,11 @@ impl MacroExpander {
             Expression::Index(index) => {
                 self.freshen_expression(&mut index.value, module, mark);
                 self.freshen_expression(&mut index.index, module, mark);
+            }
+            Expression::Binary(binary) => {
+                self.freshen_syntax(&mut binary.operator_syntax, module, mark);
+                self.freshen_expression(&mut binary.left, module, mark);
+                self.freshen_expression(&mut binary.right, module, mark);
             }
             Expression::Logical(logical) => {
                 self.freshen_expression(&mut logical.left, module, mark);
@@ -7229,6 +7578,9 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         Expression::Logical(logical) => {
             obviously_not_syntax(&logical.left, 0) || obviously_not_syntax(&logical.right, 0)
         }
+        Expression::Binary(binary) => {
+            obviously_not_syntax(&binary.left, 0) || obviously_not_syntax(&binary.right, 0)
+        }
         Expression::StringTemplate(_) => true,
         Expression::Loop(_) => true,
         Expression::Resource(_) | Expression::With(_) => true,
@@ -8008,6 +8360,10 @@ fn substitute_splices(
         Expression::Index(index) => {
             *index.value = substitute_splices(&index.value, environment, diagnostics)?;
             *index.index = substitute_splices(&index.index, environment, diagnostics)?;
+        }
+        Expression::Binary(binary) => {
+            *binary.left = substitute_splices(&binary.left, environment, diagnostics)?;
+            *binary.right = substitute_splices(&binary.right, environment, diagnostics)?;
         }
         Expression::Logical(logical) => {
             *logical.left = substitute_splices(&logical.left, environment, diagnostics)?;
@@ -9100,6 +9456,10 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut index.value, mark, scopes);
             alpha_rename_expression(&mut index.index, mark, scopes);
         }
+        Expression::Binary(binary) => {
+            alpha_rename_expression(&mut binary.left, mark, scopes);
+            alpha_rename_expression(&mut binary.right, mark, scopes);
+        }
         Expression::Logical(logical) => {
             alpha_rename_expression(&mut logical.left, mark, scopes);
             alpha_rename_expression(&mut logical.right, mark, scopes);
@@ -9186,6 +9546,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Call(value) => &mut value.syntax,
         Expression::Access(value) => &mut value.syntax,
         Expression::Index(value) => &mut value.syntax,
+        Expression::Binary(value) => &mut value.syntax,
         Expression::Logical(value) => &mut value.syntax,
         Expression::SyntaxArgument(value) => &mut value.syntax,
         Expression::VisibilityArgument(value) => &mut value.syntax,

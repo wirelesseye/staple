@@ -1109,7 +1109,10 @@ impl NameResolver {
         mut self,
         program: Program,
     ) -> Result<ResolvedModule, Vec<Diagnostic>> {
-        let (mut program, macro_analysis) = crate::macro_expand::expand_program(program)?;
+        let (mut program, mut macro_analysis) = crate::macro_expand::expand_program(program)?;
+        let mut next_syntax_id = macro_analysis.next_syntax_id;
+        crate::macro_expand::desugar_program(&mut program, &mut next_syntax_id);
+        crate::macro_expand::desugar_macro_analysis(&mut macro_analysis, &mut next_syntax_id);
         self.standard_library_core = program.standard_library_core();
         self.standard_library_prelude = program.standard_library_prelude();
         self.standard_library_syntax = program.standard_library_syntax();
@@ -1142,13 +1145,7 @@ impl NameResolver {
             })
             .count()
             > 1;
-        self.next_syntax_id = program
-            .modules()
-            .iter()
-            .map(|module| module.syntax.syntax.id.0)
-            .max()
-            .unwrap_or(0)
-            + 1;
+        self.next_syntax_id = next_syntax_id;
         self.collect_interfaces(&program);
         for span in program.resolve_dotted_imports(|module, name, namespace| {
             let interface = &self.interfaces[module.0];
@@ -3750,6 +3747,7 @@ impl NameResolver {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
+            Expression::Binary(_) => unreachable!("binary expression was not desugared"),
         }
     }
 
@@ -4323,6 +4321,7 @@ impl NameResolver {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
+            Expression::Binary(_) => unreachable!("binary expression was not desugared"),
         }
     }
 
@@ -5801,6 +5800,7 @@ impl<'a> InitializationAnalyzer<'a> {
             | Expression::CString(_)
             | Expression::Integer(_)
             | Expression::Float(_) => {}
+            Expression::Binary(_) => unreachable!("binary expression was not desugared"),
         }
     }
 
@@ -5998,6 +5998,7 @@ fn find_block_type_declarations_in_expression<'a>(
         | Expression::CString(_)
         | Expression::Integer(_)
         | Expression::Float(_) => {}
+        Expression::Binary(_) => unreachable!("binary expression was not desugared"),
     }
 }
 

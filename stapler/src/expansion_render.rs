@@ -197,12 +197,13 @@ fn render_expr(expression: &Expression) -> String {
                 .collect::<Vec<_>>();
             format!("({})", parts.join(", "))
         }
-        Expression::Call(call) => match desugared_operator(call) {
-            Some((left, operator, right)) => {
-                format!("{} {operator} {}", render_expr(left), render_expr(right))
-            }
-            None => splice(&call.syntax, &[&call.callee, &call.argument]),
-        },
+        Expression::Call(call) => splice(&call.syntax, &[&call.callee, &call.argument]),
+        Expression::Binary(binary) => format!(
+            "{} {} {}",
+            render_expr(&binary.left),
+            binary.operator.text(),
+            render_expr(&binary.right),
+        ),
         Expression::Access(access) => {
             format!(
                 "{}{}",
@@ -247,35 +248,6 @@ fn accessor_suffix(accessor: &Accessor) -> String {
         Accessor::Representation => ".*".to_owned(),
         Accessor::Method(method) => format!("^{method}"),
     }
-}
-
-/// Recognizes the shape the parser desugars a binary operator into
-/// (`Trait.method left` applied to `right`, with the synthetic callee's tokens
-/// being the operator itself) and returns the operands and operator text.
-fn desugared_operator(
-    call: &stapler::CallExpression,
-) -> Option<(&Expression, String, &Expression)> {
-    let Expression::Call(inner) = call.callee.as_ref() else {
-        return None;
-    };
-    let left = inner.argument.as_ref();
-    let right = call.argument.as_ref();
-    let operator = match inner.callee.as_ref() {
-        Expression::Access(access) => {
-            let text = access.syntax.text().trim().to_owned();
-            matches!(
-                text.as_str(),
-                "+" | "-" | "*" | "/" | "==" | "!=" | "<=" | ">=" | "<" | ">"
-            )
-            .then_some(text)?
-        }
-        Expression::Name(name) => {
-            let text = name.syntax.text().trim().to_owned();
-            matches!(text.as_str(), ".." | "..=").then_some(text)?
-        }
-        _ => return None,
-    };
-    Some((left, operator, right))
 }
 
 /// Renders `<fixed prefix> <rendered value>`, where the prefix is `base`'s
@@ -468,6 +440,9 @@ fn expr_has_generated(expression: &Expression) -> bool {
         Expression::Access(access) => expr_has_generated(&access.value),
         Expression::Index(index) => {
             expr_has_generated(&index.value) || expr_has_generated(&index.index)
+        }
+        Expression::Binary(binary) => {
+            expr_has_generated(&binary.left) || expr_has_generated(&binary.right)
         }
         Expression::Logical(logical) => {
             expr_has_generated(&logical.left) || expr_has_generated(&logical.right)

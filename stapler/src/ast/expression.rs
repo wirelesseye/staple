@@ -13,6 +13,7 @@ pub enum Expression {
     Call(CallExpression),
     Access(AccessExpression),
     Index(IndexExpression),
+    Binary(BinaryExpression),
     Logical(LogicalExpression),
     SyntaxArgument(SyntaxArgumentExpression),
     VisibilityArgument(VisibilitySyntax),
@@ -40,6 +41,7 @@ impl Expression {
             Self::Call(expression) => &expression.syntax,
             Self::Access(expression) => &expression.syntax,
             Self::Index(expression) => &expression.syntax,
+            Self::Binary(expression) => &expression.syntax,
             Self::Logical(expression) => &expression.syntax,
             Self::SyntaxArgument(expression) => &expression.syntax,
             Self::VisibilityArgument(expression) => &expression.syntax,
@@ -209,6 +211,56 @@ pub struct IndexExpression {
     pub syntax: Syntax,
     pub value: Box<Expression>,
     pub index: Box<Expression>,
+}
+
+/// A source-level infix operator expression. These nodes are retained through
+/// macro expansion and lowered before name resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryExpression {
+    pub syntax: Syntax,
+    pub operator_syntax: Syntax,
+    pub operator: BinaryOperator,
+    pub left: Box<Expression>,
+    pub right: Box<Expression>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BinaryOperator {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Equal,
+    NotEqual,
+    Less,
+    LessEqual,
+    Greater,
+    GreaterEqual,
+    Range,
+    RangeInclusive,
+    And,
+    Or,
+}
+
+impl BinaryOperator {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Add => "+",
+            Self::Subtract => "-",
+            Self::Multiply => "*",
+            Self::Divide => "/",
+            Self::Equal => "==",
+            Self::NotEqual => "!=",
+            Self::Less => "<",
+            Self::LessEqual => "<=",
+            Self::Greater => ">",
+            Self::GreaterEqual => ">=",
+            Self::Range => "..",
+            Self::RangeInclusive => "..=",
+            Self::And => "&&",
+            Self::Or => "||",
+        }
+    }
 }
 
 /// `&&`/`||`. Not backed by a trait: the operands and result are always
