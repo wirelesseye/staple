@@ -3,10 +3,11 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{
-    Accessor, Binding, BuiltinType, Diagnostic, Expression, FloatType, FunctionId, IntegerType,
-    Item, Module, ModuleId, Pattern, PatternBindingKind, ProductExpression, ProductType,
-    ResolvedFunction, ResolvedModule, Span, SymbolId, Syntax, SyntaxId, TraitId, TraitMethodId,
-    Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
+    Accessor, Binding, BuiltinType, DefinitionId, Diagnostic, Expression, FloatType, FunctionId,
+    IntegerType, Item, Module, ModuleId, Pattern, PatternBindingKind, ProductExpression,
+    ProductType, ResolvedFunction, ResolvedModule, Span, SymbolId, Syntax, SyntaxId, TraitId,
+    TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId,
+    TypeParameterPattern,
 };
 
 pub(crate) const MAX_PRODUCT_ARITY: usize = 65_535;
@@ -1985,6 +1986,33 @@ impl TypeChecker {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     "`!Copy` may only be implemented for a represented nominal type or Buffer",
+                ));
+                continue;
+            }
+            let implementation_module = module
+                .module_for_syntax(implementation.syntax)
+                .expect("resolved trait implementation module");
+            let implementation_package = module.program().package_of(implementation_module);
+            let trait_is_local = module
+                .definition_module(DefinitionId::Trait(implementation.trait_id))
+                .is_some_and(|trait_module| {
+                    module.program().package_of(trait_module) == implementation_package
+                });
+            let has_local_nominal_argument = arguments.iter().any(|argument| {
+                let id = match argument {
+                    CheckedType::Distinct { id, .. } | CheckedType::Opaque { id, .. } => *id,
+                    _ => return false,
+                };
+                module
+                    .definition_module(DefinitionId::Type(id))
+                    .is_some_and(|type_module| {
+                        module.program().package_of(type_module) == implementation_package
+                    })
+            });
+            if !trait_is_local && !has_local_nominal_argument {
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    "cannot implement an external trait for external types; the trait or at least one top-level nominal implementation argument must be defined in the current package",
                 ));
                 continue;
             }

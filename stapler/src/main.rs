@@ -2165,7 +2165,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_explicit_product_defaults() {
+    fn runs_local_trait_implementations_for_products() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -2176,8 +2176,9 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "impl Default (I32, I32, I32) { def default = () => (2, 3, 5) }\n",
-                "let values: (I32, I32, I32) = default ()\n",
+                "trait ProductDefault T { product_default: () -> T }\n",
+                "impl ProductDefault (I32, I32, I32) { def product_default = () => (2, 3, 5) }\n",
+                "let values: (I32, I32, I32) = product_default ()\n",
                 "exit (values.0 + values.1 + values.2 - 10)\n",
             ),
         )
@@ -2192,7 +2193,7 @@ mod tests {
             output.clone().into_os_string(),
             source.clone().into_os_string(),
         ])
-        .expect("explicit default-product executable should compile");
+        .expect("local product-trait executable should compile");
         let status = Command::new(&output)
             .status()
             .expect("default-product executable should run");

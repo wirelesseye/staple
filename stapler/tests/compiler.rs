@@ -2144,10 +2144,11 @@ fn derives_trait_delegated_product_indexing() {
 #[test]
 fn delegates_brackets_to_explicit_indexing_implementations() {
     let source = concat!(
-        "impl Index I32 String I32 { def index = (target, position) => target }\n",
-        "impl MutateIndex I32 String I32 { def mutate_index = (mut target, position, move value) => () }\n",
-        "let selected: I32 = 4[\"key\"]\n",
-        "4[\"key\"] = 5\n",
+        "type Target = I32\n",
+        "impl Index Target String Target { def index = (target, position) => target }\n",
+        "impl MutateIndex Target String Target { def mutate_index = (mut target, position, move value) => () }\n",
+        "let selected: Target = (Target 4)[\"key\"]\n",
+        "(Target 4)[\"key\"] = Target 5\n",
     );
     let module = type_check(source);
     let context = Context::create();
@@ -2442,12 +2443,13 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
 }
 
 #[test]
-fn allows_explicit_default_implementations_for_products() {
+fn allows_local_trait_implementations_for_products() {
     let source = concat!(
-        "impl Default (I32, Bool) { def default = () => (7, True) }\n",
-        "impl Default () { def default = () => () }\n",
-        "let pair: (I32, Bool) = default ()\n",
-        "let unit: () = default ()\n",
+        "trait ProductDefault T { product_default: () -> T }\n",
+        "impl ProductDefault (I32, Bool) { def product_default = () => (7, True) }\n",
+        "impl ProductDefault () { def product_default = () => () }\n",
+        "let pair: (I32, Bool) = product_default ()\n",
+        "let unit: () = product_default ()\n",
         "let (number, condition) = pair\n",
         "let answer: I32 = when { condition => number, else => 0 }\n",
     );
@@ -2455,8 +2457,56 @@ fn allows_explicit_default_implementations_for_products() {
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("explicit product defaults should generate LLVM");
+        .expect("local trait implementations for products should generate LLVM");
     assert!(llvm.contains("trait.call"));
+}
+
+#[test]
+fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
+    for source in [
+        "impl Default (I32, String) { def default = () => (0, \"\") }\n",
+        "impl Default () { def default = () => () }\n",
+        concat!(
+            "type Local = I32\n",
+            "impl Default (Local, I32) { def default = () => (Local 0, 0) }\n",
+        ),
+        concat!(
+            "type Local = I32\n",
+            "impl Default (Ref Local) { def default = () => loop {} }\n",
+        ),
+        concat!(
+            "type alias LocalAlias = I32\n",
+            "impl Default LocalAlias { def default = () => 0 }\n",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("external traits for external top-level types must be rejected");
+        assert!(diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("cannot implement an external trait for external types")));
+    }
+
+    type_check(concat!(
+        "type Local = I32\n",
+        "impl Default Local { def default = () => Local 0 }\n",
+        "impl !Copy Local {}\n",
+        "let value: Local = default ()\n",
+    ));
+    type_check(concat!(
+        "type Generic T = T\n",
+        "impl Default (Generic I32) { def default = () => Generic 0 }\n",
+        "let value: Generic I32 = default ()\n",
+    ));
+    type_check(concat!(
+        "type Token = opaque\n",
+        "impl Default Token { def default = () => loop {} }\n",
+    ));
+    type_check(concat!(
+        "trait LocalTrait T { value: () -> T }\n",
+        "impl LocalTrait I32 { def value = () => 0 }\n",
+        "let value: I32 = LocalTrait.value ()\n",
+    ));
 }
 
 #[test]
@@ -3411,7 +3461,7 @@ fn rejects_invalid_float_contexts_and_float_ord() {
 #[test]
 fn requires_only_the_core_ordering_methods() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("impl PartialOrd String {}\n"))
+        .check(resolve("type Text = String\nimpl PartialOrd Text {}\n"))
         .expect_err_diagnostics("partial_cmp is required");
     assert!(
         diagnostics
@@ -3420,7 +3470,7 @@ fn requires_only_the_core_ordering_methods() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("impl Ord String {}\n"))
+        .check(resolve("type Text = String\nimpl Ord Text {}\n"))
         .expect_err_diagnostics("cmp is required");
     assert!(
         diagnostics
@@ -9327,16 +9377,14 @@ fn a_non_copy_type_can_implement_clone_manually() {
 }
 
 #[test]
-fn rejects_a_concrete_clone_impl_that_overlaps_the_blanket_copy_implementation() {
+fn rejects_an_external_clone_impl_for_a_standard_library_type() {
     let diagnostics = TypeChecker::new()
         .check(resolve("impl Clone I32 { def clone = value => value }\n"))
-        .expect_err_diagnostics(
-            "`I32` already gets `Clone` from the blanket `Copy` implementation",
-        );
+        .expect_err_diagnostics("both `Clone` and `I32` are external");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("duplicate trait implementation")
+            .contains("cannot implement an external trait for external types")
     }));
 }
 

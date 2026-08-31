@@ -2203,6 +2203,78 @@ fn resolves_recursive_binder_dependencies_with_per_package_aliases() {
 }
 
 #[test]
+fn enforces_trait_implementation_orphan_rules_across_packages() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "lib/src/root.sta",
+        concat!(
+            "pub trait Convert From To { convert: From -> To }\n",
+            "pub(repr) type External = I32\n",
+            "impl Convert External I32 { def convert = value => value.* }\n",
+        ),
+    );
+    fs::create_dir_all(fixture.root.join("app")).unwrap();
+    fs::write(
+        fixture.root.join("lib/binder.kdl"),
+        "package \"lib\" { kind \"library\" }\n",
+    )
+    .unwrap();
+    fs::write(
+        fixture.root.join("app/binder.kdl"),
+        "package \"app\" { dependencies { lib path=\"../lib\" } }\n",
+    )
+    .unwrap();
+
+    fixture.write(
+        "app/src/main.sta",
+        concat!(
+            "use lib.(Convert, External)\n",
+            "impl Convert External String { def convert = value => \"external\" }\n",
+        ),
+    );
+    let graph = binder::load_package_graph(&fixture.root.join("app/binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("package graph should load");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("external trait implementation should resolve");
+    let error = TypeChecker::new()
+        .check(resolved)
+        .map(|_| ())
+        .map_err(format_diagnostics)
+        .expect_err("a consumer cannot implement an external trait for external types");
+    assert!(error.contains("cannot implement an external trait for external types"));
+
+    fixture.write(
+        "app/src/main.sta",
+        concat!(
+            "use lib.Convert\n",
+            "type Local = I32\n",
+            "impl Convert I32 Local { def convert = value => Local value }\n",
+            "let converted: Local = Convert.convert 42\n",
+        ),
+    );
+    let graph = binder::load_package_graph(&fixture.root.join("app/binder.kdl")).unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+        .with_package_graph(graph)
+        .load_package_graph()
+        .expect("package graph should load");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .map_err(format_diagnostics)
+        .expect("local nominal implementation should resolve");
+    TypeChecker::new()
+        .check(resolved)
+        .map_err(format_diagnostics)
+        .expect("one local top-level nominal argument should satisfy the orphan rule");
+}
+
+#[test]
 fn resolves_package_visible_items_within_a_binder_package() {
     let fixture = Fixture::new();
     fixture.write(

@@ -3209,6 +3209,8 @@ impl NameResolver {
                 self.pop_type_parameter_scope();
             }
             Item::TraitImplementation(implementation) => {
+                self.syntax_modules
+                    .insert(implementation.syntax.id, self.current_module);
                 self.push_type_parameter_scope();
                 let mut parameters = Vec::new();
                 for parameter in &implementation.type_parameters {

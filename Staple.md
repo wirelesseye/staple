@@ -1344,22 +1344,26 @@ be overridden. Other types may define ordinary explicit implementations of
 both traits.
 
 Products do not receive an implicit `Default` implementation, even when every
-element type implements `Default`. A product can instead provide an ordinary
-explicit implementation:
+element type implements `Default`. A downstream package cannot add one: both
+`Default` and a product of standard-library types are external to that package,
+so the trait implementation orphan rule rejects it. A package can define its
+own product-construction trait instead:
 
 ```staple
-impl Default (I32, Bool) {
-    def default = () => (0, False)
+trait ProductDefault T { product_default: () -> T }
+
+impl ProductDefault (I32, Bool) {
+    def product_default = () => (0, False)
 }
 
-let pair: (I32, Bool) = default ()
+let pair: (I32, Bool) = product_default ()
 ```
 
 This applies to heterogeneous, named, nested, and empty products. In
-particular, `()` is not default-constructible unless an explicit implementation
-is available. Because `T[1]` is normalized to `T`, it continues to use the
-`Default` implementation of `T`. `Ref T` does not implement `Default` merely
-because `T` does.
+particular, `()` is not default-constructible unless a legal implementation is
+provided by the package that owns `Default`. Because `T[1]` is normalized to
+`T`, it continues to use the `Default` implementation of `T`. `Ref T` does not
+implement `Default` merely because `T` does.
 
 ## Functions
 
@@ -2096,6 +2100,15 @@ Implementations have no visibility modifier: every implementation in the
 loaded program is available globally. Defining the same trait/argument
 combination twice, including through aliases of the same types or through
 alpha-equivalent generic headers, is an error.
+
+Trait implementations obey a package-level orphan rule. An implementation is
+legal only when the package declaring it also declares the trait or at least
+one top-level nominal implementation argument. A local nominal type nested
+inside a product, reference, buffer, function, sum, or external type
+constructor does not make that outer argument local. Type aliases likewise use
+the ownership of their resolved underlying type. This prevents downstream
+packages from defining competing implementations for the same external trait
+and external types.
 
 A trait may place one or more prerequisite bounds in a `where` clause between
 its parameters and member block. Every implementation must satisfy the
