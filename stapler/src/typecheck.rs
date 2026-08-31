@@ -900,7 +900,6 @@ pub struct TypedModule {
     ownership: crate::ownership::OwnershipInfo,
     copy_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
-    default_trait: Option<TraitId>,
     debug_trait: Option<TraitId>,
     index_trait: Option<TraitId>,
     mutate_index_trait: Option<TraitId>,
@@ -1184,10 +1183,6 @@ impl TypedModule {
                     && &implementation.arguments[0] == value_type
             })
             .and_then(|implementation| implementation.methods.values().next().copied())
-    }
-
-    pub(crate) fn is_default_trait(&self, trait_id: TraitId) -> bool {
-        self.default_trait == Some(trait_id)
     }
 
     pub(crate) fn structural_trait_method(
@@ -1622,7 +1617,6 @@ impl TypeChecker {
             ownership: crate::ownership::OwnershipInfo::default(),
             copy_trait: self.copy_trait,
             drop_trait: self.drop_trait,
-            default_trait: self.default_trait,
             debug_trait: self.debug_trait,
             index_trait: self.index_trait,
             mutate_index_trait: self.mutate_index_trait,
@@ -1921,15 +1915,6 @@ impl TypeChecker {
                 continue;
             };
             let target = &arguments[0];
-            if Some(implementation.trait_id) == self.default_trait
-                && matches!(target, CheckedType::Product(_))
-            {
-                self.diagnostics.push(Diagnostic::new(
-                    span,
-                    "`Default` is derived structurally for products and cannot be implemented explicitly",
-                ));
-                continue;
-            }
             if let Some((_, structural)) = structural_trait_arguments(
                 implementation.trait_id,
                 &arguments,
@@ -13304,9 +13289,6 @@ fn is_default_type(
         return true;
     }
     match value_type {
-        CheckedType::Product(product) => product.elements.iter().all(|element| {
-            is_default_type(&element.value_type, default_trait, implementations, bounds)
-        }),
         CheckedType::Parameter { .. } => bounds.iter().any(|bound| {
             bound.trait_id == default_trait
                 && bound.arguments.len() == 1

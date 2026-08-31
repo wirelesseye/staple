@@ -2165,7 +2165,7 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_structurally_derived_product_defaults() {
+    fn runs_explicit_product_defaults() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -2176,13 +2176,9 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "type Seed = I32\n",
-                "impl Default Seed { def default = () => Seed 7 }\n",
-                "let integers: I32[3] = default ()\n",
-                "let seeds: Seed[2] = default ()\n",
-                "let Seed first = seeds.0\n",
-                "let Seed second = seeds.1\n",
-                "exit (integers.0 + integers.1 + integers.2 + first + second - 14)\n",
+                "impl Default (I32, I32, I32) { def default = () => (2, 3, 5) }\n",
+                "let values: (I32, I32, I32) = default ()\n",
+                "exit (values.0 + values.1 + values.2 - 10)\n",
             ),
         )
         .expect("temporary default-product source should be writable");
@@ -2196,7 +2192,7 @@ mod tests {
             output.clone().into_os_string(),
             source.clone().into_os_string(),
         ])
-        .expect("default-product executable should compile");
+        .expect("explicit default-product executable should compile");
         let status = Command::new(&output)
             .status()
             .expect("default-product executable should run");

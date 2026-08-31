@@ -1343,27 +1343,23 @@ under "Functions"), so a by-value target's root binding must be declared
 be overridden. Other types may define ordinary explicit implementations of
 both traits.
 
-Products have a structural `Default` implementation when every element type
-implements `Default`. The expected type determines the result of `default ()`:
+Products do not receive an implicit `Default` implementation, even when every
+element type implements `Default`. A product can instead provide an ordinary
+explicit implementation:
 
 ```staple
-let zeros: I32[4] = default ()
-let mixed: (I32, Bool, String) = default ()
+impl Default (I32, Bool) {
+    def default = () => (0, False)
+}
+
+let pair: (I32, Bool) = default ()
 ```
 
-Each product element is initialized by a separate call to its element type's
-`Default.default` member. This is construction, not a `repeat` operation: it
-also works for heterogeneous and named products, and does not copy one value
-into every position. To copy a single evaluated value into every position, use
-the `(value; count)` repetition form described above. The standard integer
-defaults are zero, `Bool` defaults to `False`, and `String` defaults to the
-empty string.
-
-The empty product is default-constructible without an element constraint.
-Because `T[1]` is normalized to `T`, its default is simply the default of `T`.
-Distinct types can define their own explicit `Default` implementation, while
-product implementations are structural and cannot be overridden. `Ref T` does
-not implement `Default` merely because `T` does.
+This applies to heterogeneous, named, nested, and empty products. In
+particular, `()` is not default-constructible unless an explicit implementation
+is available. Because `T[1]` is normalized to `T`, it continues to use the
+`Default` implementation of `T`. `Ref T` does not implement `Default` merely
+because `T` does.
 
 ## Functions
 

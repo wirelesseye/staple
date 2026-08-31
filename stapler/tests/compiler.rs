@@ -2442,30 +2442,40 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
 }
 
 #[test]
-fn derives_default_structurally_for_products() {
+fn allows_explicit_default_implementations_for_products() {
     let source = concat!(
-        "type Seed = I32\n",
-        "impl Default Seed { def default = () => Seed 7 }\n",
-        "let integers: I32[3] = default ()\n",
-        "let mixed: (I32, Bool, String) = default ()\n",
-        "let nested: I32[2][2] = default ()\n",
-        "let seeds: Seed[2] = default ()\n",
-        "let answer: I32 = integers.0 + integers.1 + integers.2\n",
+        "impl Default (I32, Bool) { def default = () => (7, True) }\n",
+        "impl Default () { def default = () => () }\n",
+        "let pair: (I32, Bool) = default ()\n",
+        "let unit: () = default ()\n",
+        "let (number, condition) = pair\n",
+        "let answer: I32 = when { condition => number, else => 0 }\n",
     );
     let module = type_check(source);
     let context = Context::create();
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("derived product defaults should generate LLVM");
-    assert!(llvm.contains("default.element"));
-    assert!(llvm.contains("default.call"));
+        .expect("explicit product defaults should generate LLVM");
+    assert!(llvm.contains("trait.call"));
 }
 
 #[test]
-fn rejects_default_for_products_with_non_default_elements() {
+fn rejects_default_for_products_without_explicit_implementations() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("let invalid: (Ref I32)[2] = default ()\n"))
-        .expect_err_diagnostics("Ref has no Default implementation");
+        .check(resolve("let invalid: (I32, Bool) = default ()\n"))
+        .expect_err_diagnostics("products have no implicit Default implementation");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
+    );
+}
+
+#[test]
+fn rejects_default_for_the_empty_product_without_an_explicit_implementation() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let invalid: () = default ()\n"))
+        .expect_err_diagnostics("the empty product has no implicit Default implementation");
     assert!(
         diagnostics
             .iter()
@@ -8300,18 +8310,20 @@ fn monomorphizes_curried_generic_function_layers() {
 }
 
 #[test]
-fn allows_generic_locals_bound_by_the_enclosing_def() {
-    let module = type_check(concat!(
+fn a_default_bound_does_not_imply_default_for_a_product() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
         "def make_list: <T where Default T> () -> T[32] = () => {\n",
         "  let list: T[32] = default ()\n",
         "  list\n",
         "}\n",
-        "let ints: I32[32] = make_list ()\n",
-    ));
-    let context = Context::create();
-    CodeGenerator::new(&context)
-        .compile_module(&module)
-        .expect("a local bound by the enclosing generic def should specialize");
+    )))
+        .expect_err_diagnostics("Default T does not imply Default T[32]");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
+    );
 }
 
 #[test]

@@ -4129,63 +4129,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map_err(|error| Diagnostic::new(span, error.to_string()))
     }
 
-    fn compile_default_value(
-        &mut self,
-        value_type: &CheckedType,
-        default_trait: crate::TraitId,
-        method: crate::TraitMethodId,
-        span: Span,
-    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        if let CheckedType::Product(product) = value_type {
-            if product.elements.is_empty() {
-                return Ok(self.unit_value());
-            }
-            let mut values = Vec::with_capacity(product.elements.len());
-            for element in &product.elements {
-                let value = self.compile_default_value(
-                    &element.value_type,
-                    default_trait,
-                    method,
-                    span.clone(),
-                )?;
-                values.push(value_as_basic(value).ok_or_else(|| {
-                    Diagnostic::new(span.clone(), "default product element is not first-class")
-                })?);
-            }
-            if let [value] = values.as_slice() {
-                return Ok(value.as_any_value_enum());
-            }
-            let fields = values
-                .iter()
-                .map(BasicValueEnum::get_type)
-                .collect::<Vec<_>>();
-            let mut result = self.context.struct_type(&fields, true).const_zero();
-            for (index, value) in values.into_iter().enumerate() {
-                result = self
-                    .builder
-                    .build_insert_value(result, value, index as u32, "default.element")
-                    .map_err(compiler_diagnostic)?
-                    .into_struct_value();
-            }
-            return Ok(result.as_any_value_enum());
-        }
-
-        let function = self.trait_method_code(
-            default_trait,
-            std::slice::from_ref(value_type),
-            method,
-            span.clone(),
-        )?;
-        let environment = self.context.ptr_type(AddressSpace::default()).const_null();
-        self.builder
-            .build_direct_call(function, &[environment.into()], "default.call")
-            .map_err(|error| Diagnostic::new(span, error.to_string()))?
-            .try_as_basic_value()
-            .basic()
-            .map(AnyValueEnum::from)
-            .ok_or_else(|| Diagnostic::new(Span::Compiler, "default value is not first-class"))
-    }
-
     fn unit_value(&self) -> AnyValueEnum<'context> {
         self.context
             .struct_type(&[], true)
@@ -6100,21 +6043,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "could not infer functional dependency arguments",
                     )
                 })?;
-            let target = &arguments[0];
-            if self.typed_module.is_default_trait(trait_id)
-                && matches!(target, CheckedType::Product(_))
-            {
-                self.compile_expression(environment, &call.argument)?;
-                if environment.did_return {
-                    return Ok(self.unit_value());
-                }
-                return self.compile_default_value(
-                    &target,
-                    trait_id,
-                    dispatch.method,
-                    call.syntax.span.clone(),
-                );
-            }
             let function = self.trait_method_code(
                 trait_id,
                 &arguments,
