@@ -262,6 +262,10 @@ impl Collector<'_> {
                     self.collect_expression_declarations(&element.value);
                 }
             }
+            Expression::RepeatedProduct(repeated) => {
+                self.collect_expression_declarations(&repeated.value);
+                self.collect_expression_declarations(&repeated.count);
+            }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {
                     if let StringTemplatePart::Interpolation(value) = part {
@@ -1276,6 +1280,10 @@ impl Collector<'_> {
                         self.named(&element.syntax, name, self.display_type(value_type));
                     }
                 }
+            }
+            Expression::RepeatedProduct(repeated) => {
+                self.expression(&repeated.value);
+                self.expression(&repeated.count);
             }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {

@@ -23,7 +23,8 @@ use crate::{
     CallExpression, CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType,
     CheckedResource, CheckedType, CheckedTypeElement, Diagnostic, Expression, FloatType,
     FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction,
-    Item, ModuleId, NumericType, Pattern, PatternBindingKind, ProductExpression, ResolvedFunction,
+    Item, ModuleId, NumericType, Pattern, PatternBindingKind, ProductExpression,
+    RepeatedProductExpression, ResolvedFunction,
     ResolvedModule, Span, SymbolId, TypeParameterId, TypedModule,
 };
 
@@ -2904,6 +2905,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Ok(result)
             }
             Expression::Product(product) => self.compile_product_expression(environment, product),
+            Expression::RepeatedProduct(repeated) => {
+                self.compile_repeated_product_expression(environment, repeated)
+            }
             Expression::Call(call) => {
                 if self
                     .typed_module
@@ -8249,6 +8253,48 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .into_struct_value();
         }
         Ok(product_value.as_any_value_enum())
+    }
+
+    /// Compiles `(value; count)`: evaluate `value` once and copy it into every
+    /// slot of the fixed-arity product. Type checking has already normalized the
+    /// node's type to a concrete product (or, for `count == 1`, the bare element
+    /// type), so the arity is read straight from that.
+    fn compile_repeated_product_expression(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        repeated: &RepeatedProductExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let literal_count = || match repeated.count.as_ref() {
+            Expression::Integer(integer) => integer.literal.parse::<usize>().unwrap_or(1),
+            _ => 1,
+        };
+        let count = match self
+            .typed_module
+            .type_of_expression(repeated.syntax.id)
+            .cloned()
+            .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
+        {
+            Some(CheckedType::Product(product)) if !product.variadic => product.elements.len(),
+            _ => literal_count(),
+        };
+
+        let value = self.compile_adapted_call_argument(environment, &repeated.value)?;
+        if environment.did_return {
+            return Ok(self.unit_value());
+        }
+        if count == 1 {
+            return Ok(value);
+        }
+        let Some(value) = value_as_basic(value) else {
+            return Err(Diagnostic::new(
+                repeated.value.syntax().span.clone(),
+                "repeated product element has an invalid representation",
+            ));
+        };
+        let elements = vec![value; count];
+        Ok(self
+            .build_product_value(&elements, repeated.syntax.span.clone())?
+            .as_any_value_enum())
     }
 
     fn compile_product_elements(

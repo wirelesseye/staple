@@ -263,6 +263,11 @@ impl<'a> OwnershipChecker<'a> {
                 self.check_product_defaults(value.syntax.id, consume);
                 true
             }
+            Expression::RepeatedProduct(value) => {
+                self.check_expression(&value.value, consume);
+                self.check_expression(&value.count, false);
+                true
+            }
             Expression::Call(value) => {
                 self.check_expression(&value.callee, false);
                 if let Some(plan) = self.module.curried_default_plan(value.syntax.id) {

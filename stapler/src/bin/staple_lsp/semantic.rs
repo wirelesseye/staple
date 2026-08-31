@@ -707,6 +707,10 @@ impl<'a> Classifier<'a> {
                     self.expression(&element.value, resolved);
                 }
             }
+            Expression::RepeatedProduct(value) => {
+                self.expression(&value.value, resolved);
+                self.expression(&value.count, resolved);
+            }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {
                     if let StringTemplatePart::Interpolation(value) = part {

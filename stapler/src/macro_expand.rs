@@ -741,6 +741,10 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
                 desugar_expression(&mut element.value, next_syntax_id);
             }
         }
+        Expression::RepeatedProduct(repeated) => {
+            desugar_expression(&mut repeated.value, next_syntax_id);
+            desugar_expression(&mut repeated.count, next_syntax_id);
+        }
         Expression::Call(call) => {
             desugar_expression(&mut call.callee, next_syntax_id);
             desugar_expression(&mut call.argument, next_syntax_id);
@@ -3240,6 +3244,28 @@ impl MacroExpander {
                 }
                 Expression::Product(product)
             }
+            Expression::RepeatedProduct(mut repeated) => {
+                repeated.value =
+                    Box::new(self.expand_expression(module, *repeated.value, depth));
+                repeated.count =
+                    Box::new(self.expand_expression(module, *repeated.count, depth));
+                if !matches!(repeated.count.as_ref(), Expression::Integer(_)) {
+                    // Attempt to fold the count the same way `const` initializers
+                    // are folded. If it does not reduce to a literal, discard any
+                    // evaluation diagnostics and leave the original expression in
+                    // place; type checking reports a single clean error.
+                    let span = repeated.count.syntax().span.clone();
+                    let diagnostics_before = self.diagnostics.len();
+                    match self
+                        .eval_expression(module, &repeated.count, &mut Environment::new())
+                        .and_then(|value| self.value_to_expression(value, span))
+                    {
+                        Some(folded) => repeated.count = Box::new(folded),
+                        None => self.diagnostics.truncate(diagnostics_before),
+                    }
+                }
+                Expression::RepeatedProduct(repeated)
+            }
             Expression::Call(mut call) => {
                 call.callee = Box::new(self.expand_expression(module, *call.callee, depth));
                 call.argument = Box::new(self.expand_expression(module, *call.argument, depth));
@@ -3959,6 +3985,39 @@ impl MacroExpander {
                     } else {
                         values.push((element.name.clone(), value));
                     }
+                }
+                Some(Value::Product(values))
+            }
+            Expression::RepeatedProduct(repeated) => {
+                let value = self.eval_expression(module, &repeated.value, environment)?;
+                let count = self.eval_expression(module, &repeated.count, environment)?;
+                let Value::Integer(count) = count else {
+                    self.diagnostics.push(Diagnostic::new(
+                        repeated.count.syntax().span.clone(),
+                        "a repeated product count must be a compile-time integer",
+                    ));
+                    return None;
+                };
+                let Ok(count) = usize::try_from(count) else {
+                    self.diagnostics.push(Diagnostic::new(
+                        repeated.count.syntax().span.clone(),
+                        "a repeated product count must not be negative",
+                    ));
+                    return None;
+                };
+                if count > crate::typecheck::MAX_PRODUCT_ARITY {
+                    self.diagnostics.push(Diagnostic::new(
+                        repeated.syntax.span.clone(),
+                        format!(
+                            "product arity exceeds the limit of {}",
+                            crate::typecheck::MAX_PRODUCT_ARITY
+                        ),
+                    ));
+                    return None;
+                }
+                let mut values: Vec<(Option<String>, Value)> = Vec::with_capacity(count);
+                for _ in 0..count {
+                    values.push((None, value.clone()));
                 }
                 Some(Value::Product(values))
             }
@@ -5786,6 +5845,10 @@ impl MacroExpander {
                     self.freshen_expression(&mut element.value, module, mark);
                 }
             }
+            Expression::RepeatedProduct(repeated) => {
+                self.freshen_expression(&mut repeated.value, module, mark);
+                self.freshen_expression(&mut repeated.count, module, mark);
+            }
             Expression::Call(call) => {
                 self.freshen_expression(&mut call.callee, module, mark);
                 self.freshen_expression(&mut call.argument, module, mark);
@@ -7599,6 +7662,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         }),
         Expression::Function(_)
         | Expression::Product(_)
+        | Expression::RepeatedProduct(_)
         | Expression::String(_)
         | Expression::CString(_)
         | Expression::Integer(_)
@@ -8349,6 +8413,10 @@ fn substitute_splices(
             for element in &mut product.elements {
                 element.value = substitute_splices(&element.value, environment, diagnostics)?;
             }
+        }
+        Expression::RepeatedProduct(repeated) => {
+            *repeated.value = substitute_splices(&repeated.value, environment, diagnostics)?;
+            *repeated.count = substitute_splices(&repeated.count, environment, diagnostics)?;
         }
         Expression::Call(call) => {
             *call.callee = substitute_splices(&call.callee, environment, diagnostics)?;
@@ -9447,6 +9515,10 @@ fn alpha_rename_expression(
                 alpha_rename_expression(&mut element.value, mark, scopes);
             }
         }
+        Expression::RepeatedProduct(repeated) => {
+            alpha_rename_expression(&mut repeated.value, mark, scopes);
+            alpha_rename_expression(&mut repeated.count, mark, scopes);
+        }
         Expression::Call(call) => {
             alpha_rename_expression(&mut call.callee, mark, scopes);
             alpha_rename_expression(&mut call.argument, mark, scopes);
@@ -9543,6 +9615,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::With(value) => &mut value.syntax,
         Expression::Block(value) => &mut value.syntax,
         Expression::Product(value) => &mut value.syntax,
+        Expression::RepeatedProduct(value) => &mut value.syntax,
         Expression::Call(value) => &mut value.syntax,
         Expression::Access(value) => &mut value.syntax,
         Expression::Index(value) => &mut value.syntax,

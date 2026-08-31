@@ -9,7 +9,7 @@ use crate::{
     Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId, TypeParameterPattern,
 };
 
-const MAX_PRODUCT_ARITY: usize = 65_535;
+pub(crate) const MAX_PRODUCT_ARITY: usize = 65_535;
 
 enum PlaceIssue {
     /// The root binding is not declared `mut` and cannot be reassigned.
@@ -3442,6 +3442,10 @@ impl TypeChecker {
                     })
                     .collect(),
             ),
+            Expression::RepeatedProduct(value) => union(vec![
+                self.expression_effects_now(module, &value.value, target_parameters),
+                self.expression_effects_now(module, &value.count, target_parameters),
+            ]),
             Expression::StringTemplate(template) => union(
                 template
                     .parts
@@ -4319,6 +4323,10 @@ impl TypeChecker {
             Expression::Product(value) => value.elements.iter().fold(false, |changed, element| {
                 self.refresh_expression_function_types(module, &element.value) | changed
             }),
+            Expression::RepeatedProduct(value) => {
+                self.refresh_expression_function_types(module, &value.value)
+                    | self.refresh_expression_function_types(module, &value.count)
+            }
             Expression::Call(value) => {
                 let mut changed = self.refresh_expression_function_types(module, &value.callee)
                     | self.refresh_expression_function_types(module, &value.argument);
@@ -4510,6 +4518,20 @@ impl TypeChecker {
                         current_module,
                     );
                 }
+            }
+            Expression::RepeatedProduct(value) => {
+                self.record_expression_effects(
+                    module,
+                    &value.value,
+                    target_parameters,
+                    current_module,
+                );
+                self.record_expression_effects(
+                    module,
+                    &value.count,
+                    target_parameters,
+                    current_module,
+                );
             }
             Expression::Call(value) => {
                 self.record_expression_effects(
@@ -5141,6 +5163,9 @@ impl TypeChecker {
                     .elements
                     .iter()
                     .any(|element| contains_resource(&element.value)),
+                Expression::RepeatedProduct(value) => {
+                    contains_resource(&value.value) || contains_resource(&value.count)
+                }
                 _ => false,
             }
         }
@@ -6176,6 +6201,81 @@ impl TypeChecker {
                     }
                 } else {
                     normalize_product_type(elements, false)
+                }
+            }
+            Expression::RepeatedProduct(repeated) => {
+                // The element's expected type is the shared element type of an
+                // expected homogeneous product; otherwise fall back to the raw
+                // expectation (which covers the `count == 1` bare-element case).
+                let element_expected: Option<CheckedType> = match expected {
+                    Some(CheckedType::Product(product)) => {
+                        let mut iter = product.elements.iter();
+                        match iter.next() {
+                            Some(first)
+                                if iter.all(|other| other.value_type == first.value_type) =>
+                            {
+                                Some(first.value_type.clone())
+                            }
+                            _ => None,
+                        }
+                    }
+                    other => other.cloned(),
+                };
+                let value_type = self.check_expression_expected(
+                    module,
+                    &repeated.value,
+                    element_expected.as_ref(),
+                );
+                if self.did_return {
+                    return CheckedType::empty_product();
+                }
+                let parsed = match repeated.count.as_ref() {
+                    Expression::Integer(integer) => integer.literal.parse::<usize>().ok(),
+                    _ => None,
+                };
+                match parsed {
+                    None => {
+                        self.diagnostics.push(Diagnostic::new(
+                            repeated.count.syntax().span.clone(),
+                            "a repeated product count must be a compile-time non-negative integer"
+                                .to_string(),
+                        ));
+                        CheckedType::Error
+                    }
+                    Some(count) if count > MAX_PRODUCT_ARITY => {
+                        self.diagnostics.push(Diagnostic::new(
+                            repeated.syntax.span.clone(),
+                            format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
+                        ));
+                        CheckedType::Error
+                    }
+                    Some(count) => {
+                        let bounds = self
+                            .active_function_bounds
+                            .iter()
+                            .flatten()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if count != 1
+                            && value_type != CheckedType::Error
+                            && !is_copy_type(
+                                &value_type,
+                                self.copy_trait,
+                                self.drop_trait,
+                                self.io_type,
+                                &self.trait_implementations,
+                                &bounds,
+                            )
+                        {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.value.syntax().span.clone(),
+                                format!(
+                                    "a repeated product with a count other than 1 requires a `Copy` element type, found `{value_type}`"
+                                ),
+                            ));
+                        }
+                        repeated_product(value_type, count)
+                    }
                 }
             }
             Expression::Call(call) => {
@@ -11876,6 +11976,10 @@ fn expression_reads_reactive(
             .elements
             .iter()
             .any(|element| expression_reads_reactive(module, &element.value, derived)),
+        Expression::RepeatedProduct(value) => {
+            expression_reads_reactive(module, &value.value, derived)
+                || expression_reads_reactive(module, &value.count, derived)
+        }
         Expression::Block(value) => value.items.iter().any(|value| item(module, value, derived)),
         Expression::Loop(value) => value
             .body
@@ -11956,6 +12060,10 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
                 for element in &value.elements {
                     expression(&element.value, bindings);
                 }
+            }
+            Expression::RepeatedProduct(value) => {
+                expression(&value.value, bindings);
+                expression(&value.count, bindings);
             }
             Expression::Call(value) => {
                 expression(&value.callee, bindings);
@@ -12111,6 +12219,10 @@ fn expression_mentions_symbols(
             .elements
             .iter()
             .any(|element| expression_mentions_symbols(module, &element.value, symbols)),
+        Expression::RepeatedProduct(value) => {
+            expression_mentions_symbols(module, &value.value, symbols)
+                || expression_mentions_symbols(module, &value.count, symbols)
+        }
         Expression::Call(value) => {
             expression_mentions_symbols(module, &value.callee, symbols)
                 || expression_mentions_symbols(module, &value.argument, symbols)
@@ -12182,6 +12294,10 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
             .elements
             .iter()
             .any(|element| expression_contains_assignment(&element.value)),
+        Expression::RepeatedProduct(value) => {
+            expression_contains_assignment(&value.value)
+                || expression_contains_assignment(&value.count)
+        }
         Expression::Call(value) => {
             expression_contains_assignment(&value.callee)
                 || expression_contains_assignment(&value.argument)
@@ -12356,6 +12472,10 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
                 for element in &value.elements {
                     visit(module, &element.value, &declared, captures);
                 }
+            }
+            Expression::RepeatedProduct(value) => {
+                visit(module, &value.value, &declared, captures);
+                visit(module, &value.count, &declared, captures);
             }
             Expression::Call(value) => {
                 visit(module, &value.callee, &declared, captures);

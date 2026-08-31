@@ -1009,6 +1009,90 @@ fn spreads_fixed_product_values_and_call_arguments() {
 }
 
 #[test]
+fn repeated_product_values_expand_to_fixed_products() {
+    let module = type_check(concat!(
+        "let zeros: I32[3] = (7; 3)\n",
+        "let sum: I32 = zeros.0 + zeros.1 + zeros.2\n",
+        "let one: I32 = (5; 1)\n",
+        "let none = (0; 0)\n",
+    ));
+
+    let items = &module.syntax().items;
+    let Item::Binding(zeros) = &items[0] else {
+        panic!("expected binding");
+    };
+    assert!(matches!(
+        module.type_of_expression(zeros.value.as_ref().unwrap().syntax().id),
+        Some(CheckedType::Product(product)) if product.elements.len() == 3
+            && product.elements.iter().all(|element| element.value_type == CheckedType::I32),
+    ));
+
+    let Item::Binding(one) = &items[2] else {
+        panic!("expected binding");
+    };
+    assert_eq!(
+        module.type_of_expression(one.value.as_ref().unwrap().syntax().id),
+        Some(&CheckedType::I32),
+    );
+
+    let Item::Binding(none) = &items[3] else {
+        panic!("expected binding");
+    };
+    assert!(matches!(
+        module.type_of_expression(none.value.as_ref().unwrap().syntax().id),
+        Some(CheckedType::Product(product)) if product.elements.is_empty(),
+    ));
+
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("repeated product values should generate LLVM");
+}
+
+#[test]
+fn repeated_product_count_folds_compile_time_expressions() {
+    let module = type_check(concat!(
+        "const width = 2\n",
+        "let cells: I32[3] = (1; width + 1)\n",
+        "let total: I32 = cells.0 + cells.1 + cells.2\n",
+    ));
+    let Item::Binding(cells) = &module.syntax().items[1] else {
+        panic!("expected binding");
+    };
+    assert!(matches!(
+        module.type_of_expression(cells.value.as_ref().unwrap().syntax().id),
+        Some(CheckedType::Product(product)) if product.elements.len() == 3,
+    ));
+}
+
+#[test]
+fn repeated_product_rejects_non_constant_and_non_copy_and_oversized_counts() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def make: I32 -> I32[2] = size => (0; size)\n"))
+        .expect_err_diagnostics("a runtime count is not a compile-time integer");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("compile-time non-negative integer")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.*\n",
+            "let bad = (c_string \"x\"; 3)\n",
+        )))
+        .expect_err_diagnostics("a non-Copy element cannot be repeated");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("requires a `Copy` element type")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let huge = (0; 70000)\n"))
+        .expect_err_diagnostics("the arity limit is enforced");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message.contains("arity exceeds the limit")
+    }));
+}
+
+#[test]
 fn fills_anonymous_product_field_defaults_at_calls_and_construction() {
     let source = concat!(
         "def text: (String, x: I32 = 0, y: I32 = 0) -> () = (value, x, y) => ()\n",

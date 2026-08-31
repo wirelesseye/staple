@@ -3545,6 +3545,10 @@ impl NameResolver {
                     self.resolve_compile_time_expression_annotations(&element.value);
                 }
             }
+            Expression::RepeatedProduct(value) => {
+                self.resolve_compile_time_expression_annotations(&value.value);
+                self.resolve_compile_time_expression_annotations(&value.count);
+            }
             Expression::Call(value) => {
                 self.resolve_compile_time_expression_annotations(&value.callee);
                 self.resolve_compile_time_expression_annotations(&value.argument);
@@ -3698,6 +3702,10 @@ impl NameResolver {
                 for element in &value.elements {
                     self.resolve_quoted_expression(&element.value, scopes);
                 }
+            }
+            Expression::RepeatedProduct(value) => {
+                self.resolve_quoted_expression(&value.value, scopes);
+                self.resolve_quoted_expression(&value.count, scopes);
             }
             Expression::Call(value) => {
                 self.resolve_quoted_expression(&value.callee, scopes);
@@ -4124,6 +4132,10 @@ impl NameResolver {
                         singleton_suggestion,
                     );
                 }
+            }
+            Expression::RepeatedProduct(repeated) => {
+                self.resolve_expression(&repeated.value, None, None);
+                self.resolve_expression(&repeated.count, None, None);
             }
             Expression::Call(call) => {
                 if let Some(primitive) = self.resolve_primitive_macro(&call.callee) {
@@ -5449,6 +5461,10 @@ fn analyze_compile_expression(
                 analyze_compile_expression(&element.value, scope, parameter_kind, quoted);
             }
         }
+        Expression::RepeatedProduct(value) => {
+            analyze_compile_expression(&value.value, scope, parameter_kind, quoted);
+            analyze_compile_expression(&value.count, scope, parameter_kind, quoted);
+        }
         Expression::Call(value) => {
             analyze_compile_expression(&value.callee, scope, parameter_kind, quoted);
             analyze_compile_expression(&value.argument, scope, parameter_kind, quoted);
@@ -5755,6 +5771,10 @@ impl<'a> InitializationAnalyzer<'a> {
                     self.expression(&element.value, local, outer);
                 }
             }
+            Expression::RepeatedProduct(repeated) => {
+                self.expression(&repeated.value, local, outer);
+                self.expression(&repeated.count, local, outer);
+            }
             Expression::Call(call) => {
                 self.expression(&call.callee, local, outer);
                 self.expression(&call.argument, local, outer);
@@ -5972,6 +5992,10 @@ fn find_block_type_declarations_in_expression<'a>(
             for element in &product.elements {
                 find_block_type_declarations_in_expression(&element.value, out);
             }
+        }
+        Expression::RepeatedProduct(repeated) => {
+            find_block_type_declarations_in_expression(&repeated.value, out);
+            find_block_type_declarations_in_expression(&repeated.count, out);
         }
         Expression::Call(call) => {
             find_block_type_declarations_in_expression(&call.callee, out);

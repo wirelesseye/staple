@@ -663,6 +663,10 @@ impl Collector<'_> {
                     self.expression(&element.value, module_index);
                 }
             }
+            Expression::RepeatedProduct(value) => {
+                self.expression(&value.value, module_index);
+                self.expression(&value.count, module_index);
+            }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {
                     if let StringTemplatePart::Interpolation(value) = part {

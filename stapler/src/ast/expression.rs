@@ -10,6 +10,7 @@ pub enum Expression {
     With(Box<WithResourceExpression>),
     Block(BlockExpression),
     Product(ProductExpression),
+    RepeatedProduct(RepeatedProductExpression),
     Call(CallExpression),
     Access(AccessExpression),
     Index(IndexExpression),
@@ -38,6 +39,7 @@ impl Expression {
             Self::With(expression) => &expression.syntax,
             Self::Block(expression) => &expression.syntax,
             Self::Product(expression) => &expression.syntax,
+            Self::RepeatedProduct(expression) => &expression.syntax,
             Self::Call(expression) => &expression.syntax,
             Self::Access(expression) => &expression.syntax,
             Self::Index(expression) => &expression.syntax,
@@ -176,6 +178,19 @@ impl ProductExpression {
             elements: vec![],
         }
     }
+}
+
+/// A `(value; count)` product literal that repeats `value` `count` times.
+///
+/// `count` is an ordinary value expression that must fold to a non-negative
+/// integer at compile time (the same evaluator used for `const` initializers).
+/// `value` is evaluated exactly once; when the count is not `1` its type must
+/// be `Copy`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepeatedProductExpression {
+    pub syntax: Syntax,
+    pub value: Box<Expression>,
+    pub count: Box<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -197,6 +197,13 @@ fn render_expr(expression: &Expression) -> String {
                 .collect::<Vec<_>>();
             format!("({})", parts.join(", "))
         }
+        Expression::RepeatedProduct(repeated) => {
+            format!(
+                "({}; {})",
+                render_expr(&repeated.value),
+                render_expr(&repeated.count),
+            )
+        }
         Expression::Call(call) => splice(&call.syntax, &[&call.callee, &call.argument]),
         Expression::Binary(binary) => format!(
             "{} {} {}",
@@ -434,6 +441,9 @@ fn expr_has_generated(expression: &Expression) -> bool {
             .elements
             .iter()
             .any(|element| expr_has_generated(&element.value)),
+        Expression::RepeatedProduct(repeated) => {
+            expr_has_generated(&repeated.value) || expr_has_generated(&repeated.count)
+        }
         Expression::Call(call) => {
             expr_has_generated(&call.callee) || expr_has_generated(&call.argument)
         }

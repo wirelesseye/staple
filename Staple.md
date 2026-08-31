@@ -1234,6 +1234,23 @@ or a parameter bounded by `Natural` may be used as a size, for example
 `type alias Vector T N where N <: Natural = T[N]`. The size must resolve to one
 singleton literal before code generation.
 
+A product *value* whose elements are all the same may be written with the
+repetition form `(value; count)`:
+
+```staple
+let zeros: I32[3] = (0; 3) // (0, 0, 0)
+```
+
+`(value; count)` is equivalent to a product with `count` copies of `value`;
+`(value; 0)` is `()` and `(value; 1)` is `value`, and the expanded product may
+contain at most 65,535 elements. `count` is an ordinary value expression, not a
+`Natural` type, but it must fold to a non-negative integer during compilation
+under the same rules as a `const` initializer — a literal, arithmetic on
+literals, or a reference to a `const`. `value` is evaluated exactly once; when
+`count` is not `1` its type must be `Copy`, since the one value is copied into
+every position. The `;` form takes exactly one value: an element name, a `...`
+spread, or a `.name:` designator before the `;` is a syntax error.
+
 Product type elements can be flattened explicitly with `...`:
 
 ```staple
@@ -1333,8 +1350,10 @@ let mixed: (I32, Bool, String) = default ()
 Each product element is initialized by a separate call to its element type's
 `Default.default` member. This is construction, not a `repeat` operation: it
 also works for heterogeneous and named products, and does not copy one value
-into every position. The standard integer defaults are zero, `Bool` defaults
-to `False`, and `String` defaults to the empty string.
+into every position. To copy a single evaluated value into every position, use
+the `(value; count)` repetition form described above. The standard integer
+defaults are zero, `Bool` defaults to `False`, and `String` defaults to the
+empty string.
 
 The empty product is default-constructible without an element constraint.
 Because `T[1]` is normalized to `T`, its default is simply the default of `T`.

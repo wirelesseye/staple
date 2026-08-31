@@ -2865,7 +2865,7 @@ impl Grammar {
             }
             Some(TokenKind::LBrace) => self.parse_block_expression().map(Expression::Block),
             Some(TokenKind::LBracket) => self.parse_syntax_argument(),
-            Some(TokenKind::LParen) => self.parse_product_expression().map(Expression::Product),
+            Some(TokenKind::LParen) => self.parse_product_expression(),
             Some(TokenKind::Identifier | TokenKind::Package | TokenKind::Underscore) => {
                 let start = self.position;
                 let name = self.bump_token().expect("peeked name").text;
@@ -3274,8 +3274,9 @@ impl Grammar {
         })
     }
 
-    /// Parses a parenthesized product expression with optional element names.
-    fn parse_product_expression(&mut self) -> Result<ProductExpression, ParseError> {
+    /// Parses a parenthesized product expression with optional element names,
+    /// or a `(value; count)` repeated product.
+    fn parse_product_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
         self.expect(TokenKind::LParen, "expected `(`")?;
         let previous_brace_termination = self.brace_terminates_expression;
@@ -3320,6 +3321,24 @@ impl Grammar {
                     return Err(self.error("a product value spread cannot be named"));
                 }
                 let value = self.parse_expression()?;
+                if elements.is_empty()
+                    && name.is_none()
+                    && !designated
+                    && !spread
+                    && self.at(TokenKind::Semicolon)
+                {
+                    self.bump_token();
+                    let count = self.parse_expression()?;
+                    let close = self
+                        .expect(TokenKind::RParen, "expected `)` after repeated product");
+                    self.brace_terminates_expression = previous_brace_termination;
+                    close?;
+                    return Ok(Expression::RepeatedProduct(RepeatedProductExpression {
+                        syntax: self.syntax(start),
+                        value: Box::new(value),
+                        count: Box::new(count),
+                    }));
+                }
                 elements.push(ProductElement {
                     syntax: self.syntax(element_start),
                     name,
@@ -3336,10 +3355,10 @@ impl Grammar {
         let close = self.expect(TokenKind::RParen, "expected `)` after product");
         self.brace_terminates_expression = previous_brace_termination;
         close?;
-        Ok(ProductExpression {
+        Ok(Expression::Product(ProductExpression {
             syntax: self.syntax(start),
             elements,
-        })
+        }))
     }
 
     /// Returns whether the next token can begin an atom in the current context.
