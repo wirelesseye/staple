@@ -1228,11 +1228,14 @@ distinct array type. In particular, `T[0]` is `()` and `T[1]` is `T`. A fully
 expanded product may contain at most 65,535 elements.
 
 The size is a compile-time type. Non-negative integer type literals such as
-`0`, `3`, and `42` are singleton subtypes of the prelude type `Natural`; they
-are not subtypes of `I32`, `USize`, or any other runtime integer type. An alias
-or a parameter bounded by `Natural` may be used as a size, for example
-`type alias Vector T N where N <: Natural = T[N]`. The size must resolve to one
-singleton literal before code generation.
+`0`, `3`, and `42` are singleton subtypes of `USize` and automatically satisfy
+the sealed prelude trait `Natural`. An alias or a parameter constrained by that
+trait may be used as a size, for example
+`type alias Vector T N where Natural N = T[N]`. The size must resolve to one
+singleton literal before code generation. Number literal types use the `USize`
+runtime representation, so an exact value annotation such as `let three: 3 = 3`
+is valid and widens to `USize`; an unconstrained `let three = 3` still infers
+`I32`.
 
 A product *value* whose elements are all the same may be written with the
 repetition form `(value; count)`:
@@ -1243,13 +1246,14 @@ let zeros: I32[3] = (0; 3) // (0, 0, 0)
 
 `(value; count)` is equivalent to a product with `count` copies of `value`;
 `(value; 0)` is `()` and `(value; 1)` is `value`, and the expanded product may
-contain at most 65,535 elements. `count` is an ordinary value expression, not a
-`Natural` type, but it must fold to a non-negative integer during compilation
-under the same rules as a `const` initializer — a literal, arithmetic on
-literals, or a reference to a `const`. `value` is evaluated exactly once; when
-`count` is not `1` its type must be `Copy`, since the one value is copied into
-every position. The `;` form takes exactly one value: an element name, a `...`
-spread, or a `.name:` designator before the `;` is a syntax error.
+contain at most 65,535 elements. `count` must either fold to a non-negative
+integer during compilation under the same rules as a `const` initializer or
+have a singleton type satisfying `Natural`. Singleton-typed count expressions are evaluated
+once, while their type determines the product arity. `value` is evaluated
+exactly once; when `count` is not known to be `1` its type must be `Copy`, since
+the one value is copied into every position. The `;` form takes exactly one
+value: an element name, a `...` spread, or a `.name:` designator before the `;`
+is a syntax error.
 
 Product type elements can be flattened explicitly with `...`:
 
@@ -2197,8 +2201,8 @@ subtyping relation instead:
 - `T <: T` (reflexivity);
 - every string literal type is a subtype of `String`, and a literal type whose
   values are a subset of another literal type's values is a subtype of it;
-- every non-negative integer literal type is a subtype of the compile-time-only
-  type `Natural`, but not of a runtime integer type;
+- every non-negative integer literal type is a subtype of `USize` and
+  automatically satisfies the sealed marker trait `Natural`;
 - `A <: A | B` and `B <: A | B` (a type is a subtype of any union containing
   it, or containing a wider type it is a subtype of); and
 - if `A <: C` and `B <: C`, then `A | B <: C` (a union is a subtype of `C`

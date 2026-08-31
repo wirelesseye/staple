@@ -71,7 +71,6 @@ pub struct ResolvedTraitImplementation {
 pub enum BuiltinType {
     Integer(IntegerType),
     Float(FloatType),
-    Natural,
     String,
     Ref,
     Slice,
@@ -1423,7 +1422,6 @@ impl NameResolver {
         for float in FloatType::ALL {
             self.register_builtin_type(core, "std.core", float.name(), BuiltinType::Float(float));
         }
-        self.register_builtin_type(core, "std.core", "Natural", BuiltinType::Natural);
         self.register_builtin_type(core, "std.core", "Ref", BuiltinType::Ref);
         for (path, namespace, name, builtin) in [
             (

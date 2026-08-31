@@ -5247,6 +5247,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         CheckedType::StringLiteralSet(_),
                         CheckedType::StringLiteralSet(_)
                     )
+                    | (CheckedType::NumberLiteral(_), CheckedType::USize)
             )
         {
             Ok(value)
@@ -8282,6 +8283,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         if environment.did_return {
             return Ok(self.unit_value());
         }
+        if !matches!(repeated.count.as_ref(), Expression::Integer(_)) {
+            let _ = self.compile_expression(environment, &repeated.count)?;
+            if environment.did_return {
+                return Ok(self.unit_value());
+            }
+        }
         if count == 1 {
             return Ok(value);
         }
@@ -9097,10 +9104,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Span::Compiler,
                 "cannot generate code for an erroneous type",
             )),
-            CheckedType::Natural | CheckedType::NumberLiteral(_) => Err(Diagnostic::new(
-                Span::Compiler,
-                "compile-time number types have no runtime representation",
-            )),
+            CheckedType::NumberLiteral(_) => {
+                Ok(self.compile_integer_type(IntegerType::USize).into())
+            }
             CheckedType::RepeatedProduct { .. } => Err(Diagnostic::new(
                 Span::Compiler,
                 "cannot generate code for a homogeneous product with an unspecialized size",

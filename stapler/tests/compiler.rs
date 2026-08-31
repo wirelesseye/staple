@@ -952,10 +952,10 @@ fn supports_repeated_spread_and_erased_product_references() {
 fn supports_number_literal_types_as_generic_product_sizes() {
     let source = concat!(
         "type alias Three = 3\n",
-        "type alias Vector T N where N <: Natural = T[N]\n",
+        "type alias Vector T N where Natural N = T[N]\n",
         "let direct: I32[Three] = (1, 2, 3)\n",
         "let generic: Vector I32 Three = direct\n",
-        "def keep: <T, N where N <: Natural> move T[N] -> T[N] = move values => values\n",
+        "def keep: <T, N where Natural N> move T[N] -> T[N] = move values => values\n",
         "let inferred: I32[3] = keep (1, 2, 3)\n",
     );
     let module = type_check(source);
@@ -966,28 +966,69 @@ fn supports_number_literal_types_as_generic_product_sizes() {
 }
 
 #[test]
-fn number_literal_types_are_natural_but_not_runtime_integers() {
+fn number_literal_types_are_natural_usize_refinements() {
     type_check(concat!(
         "type alias Three = 3\n",
         "type alias Triple (T) = T[Three]\n",
-        "type alias NaturalIdentity (N) where N <: Natural = N\n",
+        "type alias NaturalIdentity (N) where Natural N = N\n",
         "type alias AlsoThree = NaturalIdentity Three\n",
+        "let exact: 3 = 3\n",
+        "let widened: USize = exact\n",
     ));
     let diagnostics = TypeChecker::new()
-        .check(resolve("type alias Bad (N) where N <: I32 = N\ntype alias Three = 3\nlet invalid: I32[Bad Three] = ()\n"))
-        .expect_err_diagnostics("number literal types must not subtype runtime integers");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("not a subtype of `I32`")));
+        .check(resolve("type alias Bad (N) where Natural N = N\nlet invalid: Bad USize = 0\n"))
+        .expect_err_diagnostics("USize must not implement Natural");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("trait bound")));
 
     let diagnostics = TypeChecker::new()
         .check(resolve("def invalid: <T, N> move T[N] -> T[N] = move values => values\n"))
-        .expect_err_diagnostics("dependent sizes require a Natural bound");
+        .expect_err_diagnostics("dependent sizes require a Natural trait bound");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("must have a `Natural` subtype bound")
+        diagnostic.message.contains("must have a `Natural` trait bound")
     }));
 
-    TypeChecker::new()
-        .check(resolve("let invalid: 3 = 3\n"))
-        .expect_err_diagnostics("number literal types have no runtime values");
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let invalid: 3 = 4\n"))
+        .expect_err_diagnostics("literal annotations require the exact value");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("expected `3`, found `4`")));
+}
+
+#[test]
+fn natural_count_parameters_drive_repeated_product_values() {
+    let source = concat!(
+        "def repeat: <T, N where Copy T, Natural N> T -> N -> T[N] = value => n => (value; n)\n",
+        "let repeated: I32[3] = repeat 7 3\n",
+        "let count: 3 = 3\n",
+        "let local: I32[3] = (9; count)\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("Natural-typed count parameters should specialize before code generation");
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "def invalid: <T, N where Natural N> T -> N -> T[N] = value => n => (value; n)\n",
+        ))
+        .expect_err_diagnostics("symbolic repetition requires Copy elements");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("symbolic count requires a `Copy` element type")
+    }));
+}
+
+#[test]
+fn natural_is_a_sealed_structural_trait() {
+    for source in ["impl Natural USize {}\n", "impl !Natural 3 {}\n"] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("Natural implementations must be rejected");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains("`Natural` is implemented structurally")
+        }));
+    }
 }
 
 #[test]

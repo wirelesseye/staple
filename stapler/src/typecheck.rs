@@ -174,7 +174,6 @@ pub enum CheckedType {
     USize,
     F32,
     F64,
-    Natural,
     NumberLiteral(u64),
     String,
     StringLiteralSet(Vec<String>),
@@ -638,6 +637,7 @@ impl CheckedType {
             Self::U64 => IntegerType::U64,
             Self::ISize => IntegerType::ISize,
             Self::USize => IntegerType::USize,
+            Self::NumberLiteral(_) => IntegerType::USize,
             _ => return None,
         })
     }
@@ -685,7 +685,6 @@ impl CheckedType {
             | Self::USize
             | Self::F32
             | Self::F64
-            | Self::Natural
             | Self::NumberLiteral(_)
             | Self::String
             | Self::StringLiteralSet(_)
@@ -734,12 +733,8 @@ impl CheckedType {
             | Self::CString
             | Self::CChar
             | Self::Opaque { .. } => true,
-            Self::Natural | Self::NumberLiteral(_) => false,
+            Self::NumberLiteral(_) => true,
         }
-    }
-
-    fn is_compile_time_number(&self) -> bool {
-        matches!(self, Self::Natural | Self::NumberLiteral(_))
     }
 }
 
@@ -760,7 +755,6 @@ impl fmt::Display for CheckedType {
             Self::USize => formatter.write_str("USize"),
             Self::F32 => formatter.write_str("F32"),
             Self::F64 => formatter.write_str("F64"),
-            Self::Natural => formatter.write_str("Natural"),
             Self::NumberLiteral(value) => write!(formatter, "{value}"),
             Self::String => formatter.write_str("String"),
             Self::StringLiteralSet(values) => {
@@ -1439,6 +1433,7 @@ pub struct TypeChecker {
     function_result_companion_types: HashMap<FunctionId, TypeId>,
     string_representation: Option<CheckedType>,
     copy_trait: Option<TraitId>,
+    natural_trait: Option<TraitId>,
     sized_trait: Option<TraitId>,
     drop_trait: Option<TraitId>,
     default_trait: Option<TraitId>,
@@ -1537,6 +1532,7 @@ impl TypeChecker {
             .find(|id| module.builtin_type(**id) == Some(BuiltinType::Reactive))
             .copied();
         self.copy_trait = module.standard_trait("Copy");
+        self.natural_trait = module.standard_trait("Natural");
         self.sized_trait = module.standard_trait("Sized");
         self.drop_trait = module.standard_trait("Drop");
         self.default_trait = module.standard_trait("Default");
@@ -1558,6 +1554,7 @@ impl TypeChecker {
         self.seed_declared_bindings(&module);
         self.validate_intrinsics(&module);
         self.seed_function_types(&module);
+        self.inherit_and_validate_generic_function_bounds(&module);
 
         let module_order = module.program().initialization_order().to_vec();
         for module_id in module_order {
@@ -1683,6 +1680,17 @@ impl TypeChecker {
     }
 
     fn collect_traits(&mut self, module: &ResolvedModule) {
+        match self.natural_trait.and_then(|id| module.traits().get(&id)) {
+            Some(natural)
+                if natural.declaration.visibility == crate::Visibility::Public
+                    && natural.declaration.type_parameters.len() == 1
+                    && natural.parameters.len() == 1
+                    && natural.declaration.members.is_empty() => {}
+            _ => self.diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                "standard library must declare public empty trait `Natural`",
+            )),
+        }
         match self.sized_trait.and_then(|id| module.traits().get(&id)) {
             Some(sized)
                 if sized.declaration.visibility == crate::Visibility::Public
@@ -1874,10 +1882,17 @@ impl TypeChecker {
                 .first()
                 .map(|argument| argument.syntax().span.clone())
                 .unwrap_or(Span::Compiler);
-            if Some(implementation.trait_id) == self.sized_trait {
+            if Some(implementation.trait_id) == self.sized_trait
+                || Some(implementation.trait_id) == self.natural_trait
+            {
+                let name = if Some(implementation.trait_id) == self.natural_trait {
+                    "Natural"
+                } else {
+                    "Sized"
+                };
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    "`Sized` is implemented structurally and cannot be implemented explicitly",
+                    format!("`{name}` is implemented structurally and cannot be implemented explicitly"),
                 ));
                 continue;
             }
@@ -2138,6 +2153,11 @@ impl TypeChecker {
     /// so it's assumed satisfiable, matching this check's conservative bias
     /// toward flagging overlap rather than silently accepting it.
     fn bound_could_hold(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
+        if Some(trait_id) == self.natural_trait {
+            return arguments.first().is_some_and(|argument| {
+                matches!(argument, CheckedType::NumberLiteral(_) | CheckedType::Parameter { .. })
+            });
+        }
         if Some(trait_id) == self.copy_trait
             && arguments
                 .first()
@@ -3217,7 +3237,7 @@ impl TypeChecker {
                 ));
             }
             if !bounds.is_empty() {
-                self.function_bounds.insert(function.id, bounds);
+                self.function_bounds.insert(function.id, bounds.clone());
             }
             let mut subtype_bounds = Vec::new();
             for bound in &function.subtype_bounds {
@@ -3225,20 +3245,59 @@ impl TypeChecker {
                     subtype_bounds.push(bound);
                 }
             }
-            if let Some(function_type) = self.function_types.get(&function.id)
-                && !repeated_product_counts_are_natural(
-                    &CheckedType::Function(function_type.clone()),
-                    &subtype_bounds,
-                )
-            {
-                self.diagnostics.push(Diagnostic::new(
-                    function.pattern.syntax().span.clone(),
-                    "homogeneous product size parameters must have a `Natural` subtype bound",
-                ));
-            }
             if !subtype_bounds.is_empty() {
                 self.function_subtype_bounds
                     .insert(function.id, subtype_bounds);
+            }
+        }
+    }
+
+    fn inherit_and_validate_generic_function_bounds(&mut self, module: &ResolvedModule) {
+        let declared_bounds = self
+            .function_bounds
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        for function in module.functions() {
+            let Some(function_type) = self.function_types.get(&function.id).cloned() else {
+                continue;
+            };
+            let parameter_ids = type_parameter_ids(&CheckedType::Function(function_type.clone()));
+            let inherited = declared_bounds
+                .iter()
+                .filter(|bound| {
+                    let bound_ids = bound
+                        .arguments
+                        .iter()
+                        .flat_map(type_parameter_ids)
+                        .collect::<HashSet<_>>();
+                    !bound_ids.is_empty() && bound_ids.is_subset(&parameter_ids)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            if !inherited.is_empty() {
+                let bounds = self.function_bounds.entry(function.id).or_default();
+                for bound in inherited {
+                    if !bounds.contains(&bound) {
+                        bounds.push(bound);
+                    }
+                }
+            }
+            let bounds = self
+                .function_bounds
+                .get(&function.id)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            if !repeated_product_counts_are_natural(
+                &CheckedType::Function(function_type),
+                bounds,
+                self.natural_trait,
+            ) {
+                self.diagnostics.push(Diagnostic::new(
+                    function.pattern.syntax().span.clone(),
+                    "homogeneous product size parameters must have a `Natural` trait bound",
+                ));
             }
         }
     }
@@ -6219,6 +6278,9 @@ impl TypeChecker {
                             _ => None,
                         }
                     }
+                    Some(CheckedType::RepeatedProduct { element, .. }) => {
+                        Some(element.as_ref().clone())
+                    }
                     other => other.cloned(),
                 };
                 let value_type = self.check_expression_expected(
@@ -6229,27 +6291,24 @@ impl TypeChecker {
                 if self.did_return {
                     return CheckedType::empty_product();
                 }
-                let parsed = match repeated.count.as_ref() {
+                let literal_count = match repeated.count.as_ref() {
                     Expression::Integer(integer) => integer.literal.parse::<usize>().ok(),
                     _ => None,
                 };
-                match parsed {
-                    None => {
-                        self.diagnostics.push(Diagnostic::new(
-                            repeated.count.syntax().span.clone(),
-                            "a repeated product count must be a compile-time non-negative integer"
-                                .to_string(),
-                        ));
-                        CheckedType::Error
-                    }
-                    Some(count) if count > MAX_PRODUCT_ARITY => {
+                let count_type = if literal_count.is_some() {
+                    literal_count.map(|count| CheckedType::NumberLiteral(count as u64))
+                } else {
+                    Some(self.check_expression(module, &repeated.count))
+                };
+                match (literal_count, count_type) {
+                    (Some(count), _) if count > MAX_PRODUCT_ARITY => {
                         self.diagnostics.push(Diagnostic::new(
                             repeated.syntax.span.clone(),
                             format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
                         ));
                         CheckedType::Error
                     }
-                    Some(count) => {
+                    (Some(count), _) => {
                         let bounds = self
                             .active_function_bounds
                             .iter()
@@ -6275,6 +6334,91 @@ impl TypeChecker {
                             ));
                         }
                         repeated_product(value_type, count)
+                    }
+                    (None, Some(CheckedType::NumberLiteral(count))) => {
+                        let Ok(count) = usize::try_from(count) else {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.syntax.span.clone(),
+                                "product repetition count is too large",
+                            ));
+                            return CheckedType::Error;
+                        };
+                        if count > MAX_PRODUCT_ARITY {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.syntax.span.clone(),
+                                format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
+                            ));
+                            return CheckedType::Error;
+                        }
+                        let bounds = self
+                            .active_function_bounds
+                            .iter()
+                            .flatten()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if count != 1
+                            && value_type != CheckedType::Error
+                            && !is_copy_type(
+                                &value_type,
+                                self.copy_trait,
+                                self.drop_trait,
+                                self.io_type,
+                                &self.trait_implementations,
+                                &bounds,
+                            )
+                        {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.value.syntax().span.clone(),
+                                format!(
+                                    "a repeated product with a count other than 1 requires a `Copy` element type, found `{value_type}`"
+                                ),
+                            ));
+                        }
+                        repeated_product(value_type, count)
+                    }
+                    (None, Some(count_type))
+                        if self.natural_trait.is_some_and(|natural_trait| {
+                            self.trait_obligation_available(
+                                natural_trait,
+                                std::slice::from_ref(&count_type),
+                            )
+                        }) =>
+                    {
+                        let bounds = self
+                            .active_function_bounds
+                            .iter()
+                            .flatten()
+                            .cloned()
+                            .collect::<Vec<_>>();
+                        if value_type != CheckedType::Error
+                            && !is_copy_type(
+                                &value_type,
+                                self.copy_trait,
+                                self.drop_trait,
+                                self.io_type,
+                                &self.trait_implementations,
+                                &bounds,
+                            )
+                        {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.value.syntax().span.clone(),
+                                format!(
+                                    "a repeated product with a symbolic count requires a `Copy` element type, found `{value_type}`"
+                                ),
+                            ));
+                        }
+                        CheckedType::RepeatedProduct {
+                            element: Box::new(value_type),
+                            count: Box::new(count_type),
+                        }
+                    }
+                    (_, Some(CheckedType::Error)) => CheckedType::Error,
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            repeated.count.syntax().span.clone(),
+                            "a repeated product count must be a compile-time non-negative integer or have a type satisfying `Natural`",
+                        ));
+                        CheckedType::Error
                     }
                 }
             }
@@ -6819,6 +6963,35 @@ impl TypeChecker {
                             }
                             _ => None,
                         };
+                    let bare_natural_number_literal =
+                        match (&raw_callee_type, call.argument.as_ref()) {
+                            (
+                                CheckedType::Function(function),
+                                Expression::Integer(integer),
+                            ) => match function.parameter.as_ref() {
+                                CheckedType::Parameter { id, .. }
+                                    if self.natural_trait.is_some_and(|natural_trait| {
+                                        self.function_origin(module, &call.callee)
+                                            .and_then(|function_id| {
+                                                self.function_bounds.get(&function_id)
+                                            })
+                                            .is_some_and(|bounds| {
+                                                bounds.iter().any(|bound| {
+                                                    bound.trait_id == natural_trait
+                                                        && matches!(
+                                                            bound.arguments.as_slice(),
+                                                            [CheckedType::Parameter {
+                                                                id: bound_id,
+                                                                ..
+                                                            }] if bound_id == id
+                                                        )
+                                                })
+                                            })
+                                    }) => Some(integer),
+                                _ => None,
+                            },
+                            _ => None,
+                        };
                     // A bare top-level `T` parameter and a string literal
                     // argument: decode the literal directly into its literal
                     // type, bypassing the shared expected-type-driven
@@ -6827,7 +7000,23 @@ impl TypeChecker {
                     // (not routed through `literal_is_admitted`/`merge_types`
                     // generally) so other expected-type-driven checking
                     // elsewhere in the compiler is unaffected.
-                    let argument_type = if let Some(string) = bare_parameter_string_literal {
+                    let argument_type = if let Some(integer) = bare_natural_number_literal {
+                        match integer.literal.parse::<u64>() {
+                            Ok(value) => {
+                                let literal_type = CheckedType::NumberLiteral(value);
+                                self.expression_types
+                                    .insert(integer.syntax.id, literal_type.clone());
+                                literal_type
+                            }
+                            Err(_) => {
+                                self.diagnostics.push(Diagnostic::new(
+                                    integer.syntax.span.clone(),
+                                    "number literal is too large",
+                                ));
+                                CheckedType::Error
+                            }
+                        }
+                    } else if let Some(string) = bare_parameter_string_literal {
                         match crate::string_literal::decode(&string.literal) {
                             Ok(value) => {
                                 let literal_type = CheckedType::StringLiteralSet(vec![value]);
@@ -7444,6 +7633,23 @@ impl TypeChecker {
             }
             Expression::CString(_) => CheckedType::CString,
             Expression::Integer(integer) => {
+                if let Some(CheckedType::NumberLiteral(expected_value)) = expected {
+                    let Ok(value) = integer.literal.parse::<u64>() else {
+                        self.diagnostics.push(Diagnostic::new(
+                            integer.syntax.span.clone(),
+                            "integer literal is too large",
+                        ));
+                        return CheckedType::Error;
+                    };
+                    if value != *expected_value {
+                        self.diagnostics.push(Diagnostic::new(
+                            integer.syntax.span.clone(),
+                            format!("expected `{expected_value}`, found `{value}`"),
+                        ));
+                        return CheckedType::Error;
+                    }
+                    CheckedType::NumberLiteral(value)
+                } else {
                 let integer_type = expected
                     .and_then(CheckedType::integer_type)
                     .unwrap_or(IntegerType::I32);
@@ -7467,6 +7673,7 @@ impl TypeChecker {
                     ));
                 }
                 CheckedType::integer(integer_type)
+                }
             }
             Expression::Float(float) => {
                 let float_type = expected
@@ -8731,6 +8938,12 @@ impl TypeChecker {
                 .matching_trait_implementations(trait_id, arguments)
                 .is_empty();
         };
+        if Some(trait_id) == self.natural_trait {
+            return matches!(target, CheckedType::NumberLiteral(_))
+                || self.active_function_bounds.iter().flatten().any(|bound| {
+                    bound.trait_id == trait_id && bound.arguments.as_slice() == arguments
+                });
+        }
         if Some(trait_id) == self.sized_trait {
             return target.is_sized()
                 || self.active_function_bounds.iter().flatten().any(|bound| {
@@ -8867,7 +9080,7 @@ impl TypeChecker {
         if matches!(sub, CheckedType::StringLiteralSet(_)) && *sup == CheckedType::String {
             return true;
         }
-        if matches!(sub, CheckedType::NumberLiteral(_)) && *sup == CheckedType::Natural {
+        if matches!(sub, CheckedType::NumberLiteral(_)) && *sup == CheckedType::USize {
             return true;
         }
         if let (
@@ -9442,9 +9655,7 @@ impl TypeChecker {
                         }
                         repeated_product(element, count)
                     }
-                    CheckedType::Parameter { .. }
-                        if self.active_subtype_bounds.is_empty()
-                            || self.is_subtype(&count, &CheckedType::Natural) => {
+                    CheckedType::Parameter { .. } => {
                         CheckedType::RepeatedProduct {
                             element: Box::new(element),
                             count: Box::new(count),
@@ -9454,7 +9665,7 @@ impl TypeChecker {
                     other => {
                         self.diagnostics.push(Diagnostic::new(
                             repeated.syntax.span.clone(),
-                            format!("product repetition count must be a singleton subtype of `Natural`, found `{other}`"),
+                            format!("product repetition count must satisfy `Natural`, found `{other}`"),
                         ));
                         CheckedType::Error
                     }
@@ -9953,7 +10164,6 @@ impl TypeChecker {
                 };
                 if binding.sized
                     && !argument.is_sized()
-                    && !argument.is_compile_time_number()
                     && *argument != CheckedType::Error
                 {
                     self.diagnostics.push(Diagnostic::new(
@@ -10150,7 +10360,6 @@ impl TypeChecker {
             return match builtin {
                 BuiltinType::Integer(integer) => CheckedType::integer(integer),
                 BuiltinType::Float(float) => CheckedType::float(float),
-                BuiltinType::Natural => CheckedType::Natural,
                 BuiltinType::String => CheckedType::String,
                 BuiltinType::Ref => CheckedType::TypeConstructor {
                     id,
@@ -10350,7 +10559,7 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         }
         (CheckedType::CString, CheckedType::CString) => Some(CheckedType::CString),
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
-        (CheckedType::Natural, CheckedType::Natural) => Some(CheckedType::Natural),
+        (CheckedType::NumberLiteral(_), CheckedType::USize) => Some(CheckedType::USize),
         (CheckedType::NumberLiteral(actual), CheckedType::NumberLiteral(expected))
             if actual == expected => Some(CheckedType::NumberLiteral(actual)),
         (
@@ -11720,44 +11929,52 @@ fn repeated_product(element: CheckedType, count: usize) -> CheckedType {
 
 fn repeated_product_counts_are_natural(
     value_type: &CheckedType,
-    bounds: &[CheckedSubtypeBound],
+    bounds: &[CheckedTraitBound],
+    natural_trait: Option<TraitId>,
 ) -> bool {
     match value_type {
         CheckedType::RepeatedProduct { element, count } => {
             let count_is_natural = match count.as_ref() {
                 CheckedType::NumberLiteral(_) => true,
-                CheckedType::Parameter { id, .. } => bounds.iter().any(|bound| {
-                    bound.parameter == *id && bound.supertype == CheckedType::Natural
+                CheckedType::Parameter { id, .. } => natural_trait.is_some_and(|natural_trait| {
+                    bounds.iter().any(|bound| {
+                        bound.trait_id == natural_trait
+                            && matches!(
+                                bound.arguments.as_slice(),
+                                [CheckedType::Parameter { id: bound_id, .. }] if bound_id == id
+                            )
+                    })
                 }),
                 _ => false,
             };
-            count_is_natural && repeated_product_counts_are_natural(element, bounds)
+            count_is_natural
+                && repeated_product_counts_are_natural(element, bounds, natural_trait)
         }
         CheckedType::CPointer { pointee }
         | CheckedType::Ref(pointee)
         | CheckedType::Slice(pointee)
         | CheckedType::Buffer(pointee)
         | CheckedType::ErasedProduct(pointee) => {
-            repeated_product_counts_are_natural(pointee, bounds)
+            repeated_product_counts_are_natural(pointee, bounds, natural_trait)
         }
         CheckedType::Product(product) => product.elements.iter().all(|element| {
-            repeated_product_counts_are_natural(&element.value_type, bounds)
+            repeated_product_counts_are_natural(&element.value_type, bounds, natural_trait)
         }),
         CheckedType::Sum(sum) => sum
             .alternatives
             .iter()
-            .all(|alternative| repeated_product_counts_are_natural(alternative, bounds)),
+            .all(|alternative| repeated_product_counts_are_natural(alternative, bounds, natural_trait)),
         CheckedType::Function(function) => {
-            repeated_product_counts_are_natural(&function.parameter, bounds)
-                && repeated_product_counts_are_natural(&function.result, bounds)
+            repeated_product_counts_are_natural(&function.parameter, bounds, natural_trait)
+                && repeated_product_counts_are_natural(&function.result, bounds, natural_trait)
                 && function.effects.resources.iter().all(|resource| {
-                    repeated_product_counts_are_natural(&resource.value_type, bounds)
+                    repeated_product_counts_are_natural(&resource.value_type, bounds, natural_trait)
                 })
         }
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
             arguments
                 .iter()
-                .all(|argument| repeated_product_counts_are_natural(argument, bounds))
+                .all(|argument| repeated_product_counts_are_natural(argument, bounds, natural_trait))
         }
         CheckedType::Distinct {
             arguments,
@@ -11766,8 +11983,8 @@ fn repeated_product_counts_are_natural(
         } => {
             arguments
                 .iter()
-                .all(|argument| repeated_product_counts_are_natural(argument, bounds))
-                && repeated_product_counts_are_natural(representation, bounds)
+                .all(|argument| repeated_product_counts_are_natural(argument, bounds, natural_trait))
+                && repeated_product_counts_are_natural(representation, bounds, natural_trait)
         }
         _ => true,
     }
@@ -12997,6 +13214,7 @@ fn is_copy_type(
         | CheckedType::USize
         | CheckedType::F32
         | CheckedType::F64
+        | CheckedType::NumberLiteral(_)
         | CheckedType::String
         | CheckedType::StringLiteralSet(_)
         | CheckedType::CChar
@@ -13004,11 +13222,7 @@ fn is_copy_type(
         | CheckedType::Ref(_)
         | CheckedType::Slice(_)
         | CheckedType::Function(_) => true,
-        CheckedType::CString
-        | CheckedType::Buffer(_)
-        | CheckedType::Natural
-        | CheckedType::NumberLiteral(_)
-        | CheckedType::RepeatedProduct { .. } => false,
+        CheckedType::CString | CheckedType::Buffer(_) | CheckedType::RepeatedProduct { .. } => false,
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
             bounds.iter().any(|bound| {
                 bound.trait_id == copy_trait
