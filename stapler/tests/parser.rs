@@ -1415,6 +1415,35 @@ fn parses_contextually_typed_curried_parameters() {
 }
 
 #[test]
+fn parses_juxtaposed_function_parameters_and_types() {
+    let root = parse(
+        "let add: x: I32 * y: I32 -> I32 = x: I32 * y: I32 => x + y\n",
+    )
+    .expect("juxtaposed function should parse");
+    let stapler::Item::Binding(binding) = &root.items[0] else {
+        panic!("expected binding");
+    };
+    let Some(stapler::Type::Function(annotation)) = &binding.annotation else {
+        panic!("expected function annotation");
+    };
+    assert_eq!(
+        annotation.parameter_style,
+        stapler::FunctionParameterStyle::Juxtaposed
+    );
+    let Some(stapler::Expression::Function(function)) = &binding.value else {
+        panic!("expected function expression");
+    };
+    assert_eq!(
+        function.parameter_style,
+        stapler::FunctionParameterStyle::Juxtaposed
+    );
+    assert!(matches!(
+        function.pattern,
+        stapler::Pattern::Product(ref product) if product.elements.len() == 2
+    ));
+}
+
+#[test]
 fn parses_mixed_precedence_builtin_operator_expression() {
     let source = "1 + 2 * 3\n";
     let root = parse(source).expect("builtin operator expression should parse");

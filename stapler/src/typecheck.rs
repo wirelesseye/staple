@@ -242,6 +242,8 @@ pub struct CheckedProductDefaultPlan {
     pub defaults: Vec<Option<Expression>>,
 }
 
+// Kept as an internal compatibility shape while curried defaults are rejected
+// at source-type resolution. New defaults live on juxtaposed product slots.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedFunctionParameterDefault {
     pub name: String,
@@ -257,6 +259,13 @@ pub struct CheckedCurriedDefaultPlan {
 pub struct CheckedCurriedDefault {
     pub value: Expression,
     pub function: CheckedFunctionType,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedJuxtaposedCallPlan {
+    pub function: CheckedFunctionType,
+    pub arguments: Vec<Expression>,
+    pub consumed_calls: usize,
 }
 
 impl PartialEq for CheckedTypeElement {
@@ -285,6 +294,7 @@ pub struct CheckedSumType {
 #[derive(Debug, Clone)]
 pub struct CheckedFunctionType {
     pub parameter: Box<CheckedType>,
+    pub parameter_style: crate::FunctionParameterStyle,
     pub default: Option<Box<CheckedFunctionParameterDefault>>,
     pub mutations: Vec<CheckedMutation>,
     pub moves: Vec<CheckedMutation>,
@@ -295,6 +305,7 @@ pub struct CheckedFunctionType {
 impl PartialEq for CheckedFunctionType {
     fn eq(&self, other: &Self) -> bool {
         self.parameter == other.parameter
+            && self.parameter_style == other.parameter_style
             && self.mutations == other.mutations
             && self.moves == other.moves
             && self.effects == other.effects
@@ -823,11 +834,17 @@ impl fmt::Display for CheckedType {
                 Ok(())
             }
             Self::Function(function) => {
-                let mut parameter = format_mutable_and_moved_checked_parameter(
-                    &function.parameter,
-                    &function.mutations,
-                    &function.moves,
-                );
+                let mut parameter = if function.parameter_style
+                    == crate::FunctionParameterStyle::Juxtaposed
+                {
+                    format_juxtaposed_checked_parameter(function)
+                } else {
+                    format_mutable_and_moved_checked_parameter(
+                        &function.parameter,
+                        &function.mutations,
+                        &function.moves,
+                    )
+                };
                 if let Some(default) = &function.default {
                     parameter = format!("({}: {parameter} = …)", default.name);
                 }
@@ -852,6 +869,33 @@ impl fmt::Display for CheckedType {
             }
         }
     }
+}
+
+fn format_juxtaposed_checked_parameter(function: &CheckedFunctionType) -> String {
+    let CheckedType::Product(product) = function.parameter.as_ref() else {
+        return function.parameter.to_string();
+    };
+    product
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| {
+            let marker = if function.mutations.contains(&CheckedMutation::Element(index)) {
+                "mut "
+            } else if function.moves.contains(&CheckedMutation::Element(index)) {
+                "move "
+            } else {
+                ""
+            };
+            let name = element
+                .name
+                .as_ref()
+                .map_or(String::new(), |name| format!("{name}: "));
+            let default = if element.default.is_some() { " = …" } else { "" };
+            format!("{marker}{name}{}{default}", element.value_type)
+        })
+        .collect::<Vec<_>>()
+        .join(" * ")
 }
 
 fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &CheckedType) -> fmt::Result {
@@ -879,6 +923,7 @@ pub struct TypedModule {
     expression_types: HashMap<SyntaxId, CheckedType>,
     product_default_plans: HashMap<SyntaxId, CheckedProductDefaultPlan>,
     curried_default_plans: HashMap<SyntaxId, CheckedCurriedDefaultPlan>,
+    juxtaposed_call_plans: HashMap<SyntaxId, CheckedJuxtaposedCallPlan>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
     expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
@@ -1010,6 +1055,13 @@ impl TypedModule {
         syntax_id: SyntaxId,
     ) -> Option<&CheckedCurriedDefaultPlan> {
         self.curried_default_plans.get(&syntax_id)
+    }
+
+    pub(crate) fn juxtaposed_call_plan(
+        &self,
+        syntax_id: SyntaxId,
+    ) -> Option<&CheckedJuxtaposedCallPlan> {
+        self.juxtaposed_call_plans.get(&syntax_id)
     }
 
     pub fn companion_type_of_expression(&self, expression: &Expression) -> Option<TypeId> {
@@ -1397,6 +1449,8 @@ pub struct TypeChecker {
     expression_types: HashMap<SyntaxId, CheckedType>,
     product_default_plans: HashMap<SyntaxId, CheckedProductDefaultPlan>,
     curried_default_plans: HashMap<SyntaxId, CheckedCurriedDefaultPlan>,
+    juxtaposed_call_plans: HashMap<SyntaxId, CheckedJuxtaposedCallPlan>,
+    continued_juxtaposed_calls: HashSet<SyntaxId>,
     checked_product_defaults: HashSet<SyntaxId>,
     product_default_expressions: HashMap<SyntaxId, Expression>,
     curried_default_expressions: HashSet<SyntaxId>,
@@ -1587,6 +1641,28 @@ impl TypeChecker {
         self.validate_product_default_effects(&module);
         self.infer_derived_bindings(&module);
 
+        for (syntax_id, plan) in &self.juxtaposed_call_plans {
+            let expected = match plan.function.parameter.as_ref() {
+                CheckedType::Product(product) => product.elements.len(),
+                _ => continue,
+            };
+            if plan.arguments.len() < expected
+                && !self.continued_juxtaposed_calls.contains(syntax_id)
+            {
+                let span = plan
+                    .arguments
+                    .last()
+                    .map_or(Span::Compiler, |argument| argument.syntax().span.clone());
+                self.diagnostics.push(Diagnostic::new(
+                    span,
+                    format!(
+                        "incomplete juxtaposed function call: expected {expected} arguments, found {}",
+                        plan.arguments.len()
+                    ),
+                ));
+            }
+        }
+
         if !self.diagnostics.is_empty() {
             return Err(self.diagnostics);
         }
@@ -1596,6 +1672,7 @@ impl TypeChecker {
             expression_types: self.expression_types,
             product_default_plans: self.product_default_plans,
             curried_default_plans: self.curried_default_plans,
+            juxtaposed_call_plans: self.juxtaposed_call_plans,
             symbol_types: self.symbol_types,
             function_types: self.function_types,
             expression_effects: self.expression_effects,
@@ -2236,6 +2313,7 @@ impl TypeChecker {
                 continue;
             }
             let expected = CheckedType::Function(CheckedFunctionType {
+                parameter_style: crate::FunctionParameterStyle::Single,
                 default: None,
                 parameter: Box::new(CheckedType::Product(CheckedProductType {
                     elements: parameters[..arity]
@@ -2624,6 +2702,7 @@ impl TypeChecker {
             self.symbol_types.insert(
                 *symbol,
                 CheckedType::Function(CheckedFunctionType {
+                    parameter_style: crate::FunctionParameterStyle::Single,
                     default: None,
                     parameter: Box::new(parameter),
                     mutations: Vec::new(),
@@ -2755,6 +2834,7 @@ impl TypeChecker {
                         crate::NumericType::Float(float) => CheckedType::float(*float),
                     };
                     CheckedType::Function(CheckedFunctionType {
+                        parameter_style: crate::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(parameter),
                         mutations: Vec::new(),
@@ -2765,6 +2845,7 @@ impl TypeChecker {
                 crate::IntrinsicFunction::IntegerBinary { integer, .. } => {
                     let integer = CheckedType::integer(*integer);
                     CheckedType::Function(CheckedFunctionType {
+                        parameter_style: crate::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
@@ -2797,6 +2878,7 @@ impl TypeChecker {
                             && matches!(&sum.alternatives[1], CheckedType::Distinct { name, .. } if name.ends_with("False"))
                     )).unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
+                        parameter_style: crate::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
@@ -2821,6 +2903,7 @@ impl TypeChecker {
                 crate::IntrinsicFunction::FloatBinary { float, .. } => {
                     let float = CheckedType::float(*float);
                     CheckedType::Function(CheckedFunctionType {
+                        parameter_style: crate::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
@@ -2845,6 +2928,7 @@ impl TypeChecker {
                             && matches!(&sum.alternatives[1], CheckedType::Distinct { name, .. } if name.ends_with("False"))
                     )).unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
+                        parameter_style: crate::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
@@ -2860,6 +2944,7 @@ impl TypeChecker {
                 }
                 crate::IntrinsicFunction::StringFromCString => {
                     CheckedType::Function(CheckedFunctionType {
+                        parameter_style: crate::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::CString),
                         mutations: Vec::new(),
@@ -2869,6 +2954,7 @@ impl TypeChecker {
                 }
                 crate::IntrinsicFunction::StringToCString => {
                     CheckedType::Function(CheckedFunctionType {
+                        parameter_style: crate::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::String),
                         mutations: Vec::new(),
@@ -2877,6 +2963,7 @@ impl TypeChecker {
                     })
                 }
                 crate::IntrinsicFunction::StringAdd => CheckedType::Function(CheckedFunctionType {
+                    parameter_style: crate::FunctionParameterStyle::Single,
                     default: None,
                     parameter: Box::new(CheckedType::Product(CheckedProductType {
                         elements: vec![
@@ -3210,6 +3297,7 @@ impl TypeChecker {
                 self.move_parameter_symbols.insert(symbol);
             }
             let mut function_type = CheckedFunctionType {
+                parameter_style: function.parameter_style,
                 default: None,
                 parameter: Box::new(parameter),
                 mutations,
@@ -3409,6 +3497,7 @@ impl TypeChecker {
         self.did_return = outer_did_return;
         self.return_reachable = outer_return_reachable;
         let checked_function_type = CheckedFunctionType {
+            parameter_style: function_type.parameter_style,
             default: function_type.default,
             parameter: function_type.parameter,
             mutations: function_type.mutations,
@@ -6588,6 +6677,159 @@ impl TypeChecker {
                     let trait_methods =
                         module.trait_methods_for_expression(call.callee.syntax().id);
                     if !trait_methods.is_empty() {
+                        if matches!(call.argument.as_ref(), Expression::Block(_)) {
+                            let previous = self.implicit_thunk_context;
+                            self.implicit_thunk_context = true;
+                            let block_result = self.check_expression(module, &call.argument);
+                            self.implicit_thunk_context = previous;
+                            let mut transformed = Vec::new();
+                            for method in trait_methods {
+                                let Some(CheckedType::Function(root)) =
+                                    self.trait_method_types.get(method).cloned()
+                                else {
+                                    continue;
+                                };
+                                if root.parameter_style
+                                    != crate::FunctionParameterStyle::Juxtaposed
+                                {
+                                    continue;
+                                }
+                                let CheckedType::Product(product) = root.parameter.as_ref() else {
+                                    continue;
+                                };
+                                let Some((selected, element)) = product
+                                    .elements
+                                    .iter()
+                                    .enumerate()
+                                    .find(|(index, element)| {
+                                        product.elements[..*index]
+                                            .iter()
+                                            .all(|earlier| earlier.default.is_some())
+                                            && matches!(&element.value_type,
+                                                CheckedType::Function(callback)
+                                                    if is_empty_product_type(&callback.parameter))
+                                    })
+                                else {
+                                    continue;
+                                };
+                                let CheckedType::Function(callback) = &element.value_type else {
+                                    unreachable!()
+                                };
+                                let candidate = CheckedFunctionType {
+                                    parameter_style: crate::FunctionParameterStyle::Single,
+                                    default: None,
+                                    parameter: Box::new(element.value_type.clone()),
+                                    mutations: Vec::new(),
+                                    moves: Vec::new(),
+                                    effects: root.effects.clone(),
+                                    result: root.result.clone(),
+                                };
+                                if infer_type_parameters(
+                                    &callback.result,
+                                    &block_result,
+                                    &mut HashMap::new(),
+                                ) {
+                                    transformed.push((*method, root, selected, candidate.clone()));
+                                    self.trait_method_types.insert(
+                                        *method,
+                                        CheckedType::Function(candidate),
+                                    );
+                                }
+                            }
+                            if !transformed.is_empty() {
+                                let thunk_type = self.make_implicit_thunk(
+                                    module,
+                                    &call.argument,
+                                    block_result,
+                                );
+                                let selected_type = self.resolve_trait_method_use(
+                                    module,
+                                    call.callee.syntax().id,
+                                    &trait_methods,
+                                    Some(&thunk_type),
+                                    expected,
+                                    call.callee.syntax().span.clone(),
+                                );
+                                for (method, root, _, _) in &transformed {
+                                    self.trait_method_types.insert(
+                                        *method,
+                                        CheckedType::Function(root.clone()),
+                                    );
+                                }
+                                let Some(dispatch) =
+                                    self.trait_dispatches.get(&call.callee.syntax().id).cloned()
+                                else {
+                                    return CheckedType::Error;
+                                };
+                                let Some((_, root, selected, candidate)) = transformed
+                                    .into_iter()
+                                    .find(|(method, _, _, _)| *method == dispatch.method)
+                                else {
+                                    return CheckedType::Error;
+                                };
+                                let CheckedType::Function(selected_type) = selected_type else {
+                                    return CheckedType::Error;
+                                };
+                                let mut substitutions = HashMap::new();
+                                infer_type_parameters(
+                                    &CheckedType::Function(candidate),
+                                    &CheckedType::Function(selected_type),
+                                    &mut substitutions,
+                                );
+                                let CheckedType::Function(root) = substitute_type(
+                                    CheckedType::Function(root),
+                                    &substitutions,
+                                ) else {
+                                    unreachable!()
+                                };
+                                let CheckedType::Product(product) = root.parameter.as_ref() else {
+                                    unreachable!()
+                                };
+                                let mut arguments = Vec::new();
+                                for element in &product.elements[..selected] {
+                                    let default = element.default.clone().expect("skippable slot");
+                                    let actual = self.check_expression_expected(
+                                        module,
+                                        &default,
+                                        Some(&element.value_type),
+                                    );
+                                    self.require_compatible(
+                                        actual,
+                                        element.value_type.clone(),
+                                        default.syntax().span.clone(),
+                                    );
+                                    arguments.push(default);
+                                }
+                                arguments.push(call.argument.as_ref().clone());
+                                for element in &product.elements[selected + 1..] {
+                                    let Some(default) = element.default.clone() else {
+                                        self.diagnostics.push(Diagnostic::new(
+                                            call.syntax.span.clone(),
+                                            "incomplete juxtaposed trait method call",
+                                        ));
+                                        return CheckedType::Error;
+                                    };
+                                    arguments.push(default);
+                                }
+                                self.expression_types.insert(
+                                    call.callee.syntax().id,
+                                    CheckedType::Function(root.clone()),
+                                );
+                                self.juxtaposed_call_plans.insert(
+                                    call.syntax.id,
+                                    CheckedJuxtaposedCallPlan {
+                                        function: root.clone(),
+                                        arguments,
+                                        consumed_calls: 1,
+                                    },
+                                );
+                                return self.finish_expression_type(
+                                    expression,
+                                    *root.result,
+                                    expected,
+                                );
+                            }
+                        }
                         if matches!(call.argument.as_ref(), Expression::Name(name) if name.name == "_")
                         {
                             let mut transformed = Vec::new();
@@ -6894,11 +7136,14 @@ impl TypeChecker {
                         return CheckedType::empty_product();
                     }
                     let forced_default = matches!(call.argument.as_ref(), Expression::Name(name) if name.name == "_");
-                    if forced_default {
+                    if forced_default
+                        && !matches!(raw_callee_type, CheckedType::Function(ref function)
+                            if function.parameter_style == crate::FunctionParameterStyle::Juxtaposed)
+                    {
                         let CheckedType::Function(template) = raw_callee_type.clone() else {
                             self.diagnostics.push(Diagnostic::new(
                                 call.argument.syntax().span.clone(),
-                                "`_` may only omit a defaulted curried parameter",
+                                "`_` may only omit a defaulted juxtaposed parameter",
                             ));
                             return CheckedType::Error;
                         };
@@ -6941,6 +7186,22 @@ impl TypeChecker {
                         return self.finish_expression_type(expression, *function.result, expected);
                     }
                     let argument_expected_owned = match &raw_callee_type {
+                        CheckedType::Function(function)
+                            if function.parameter_style
+                                == crate::FunctionParameterStyle::Juxtaposed =>
+                        {
+                            match function.parameter.as_ref() {
+                                CheckedType::Product(product) => product
+                                    .elements
+                                    .first()
+                                    .filter(|element| {
+                                        element.default.is_none()
+                                            || matches!(call.argument.as_ref(), Expression::Product(_))
+                                    })
+                                    .map(|element| erase_type_parameters(&element.value_type)),
+                                _ => None,
+                            }
+                        }
                         CheckedType::Function(function)
                             if function.default.is_some()
                                 && !matches!(call.argument.as_ref(), Expression::Product(_)) =>
@@ -7013,7 +7274,17 @@ impl TypeChecker {
                     // (not routed through `literal_is_admitted`/`merge_types`
                     // generally) so other expected-type-driven checking
                     // elsewhere in the compiler is unaffected.
-                    let argument_type = if let Some(integer) = bare_natural_number_literal {
+                    let argument_type = if forced_default
+                        && let CheckedType::Function(function) = &raw_callee_type
+                        && function.parameter_style
+                            == crate::FunctionParameterStyle::Juxtaposed
+                        && let CheckedType::Product(product) = function.parameter.as_ref()
+                        && let Some(first) = product.elements.first()
+                    {
+                        self.expression_types
+                            .insert(call.argument.syntax().id, first.value_type.clone());
+                        first.value_type.clone()
+                    } else if let Some(integer) = bare_natural_number_literal {
                         match integer.literal.parse::<u64>() {
                             Ok(value) => {
                                 let literal_type = CheckedType::NumberLiteral(value);
@@ -7056,6 +7327,275 @@ impl TypeChecker {
                     };
                     if self.did_return {
                         return CheckedType::empty_product();
+                    }
+                    if let CheckedType::Function(function) = raw_callee_type.clone()
+                        && function.parameter_style
+                            == crate::FunctionParameterStyle::Juxtaposed
+                    {
+                        let CheckedType::Product(product) = function.parameter.as_ref() else {
+                            self.diagnostics.push(Diagnostic::new(
+                                call.callee.syntax().span.clone(),
+                                "a juxtaposed function must have a product-shaped parameter",
+                            ));
+                            return CheckedType::Error;
+                        };
+                        let Some(first) = product.elements.first() else {
+                            return CheckedType::Error;
+                        };
+                        let previous = if let Expression::Call(previous_call) = call.callee.as_ref()
+                        {
+                            self.continued_juxtaposed_calls
+                                .insert(previous_call.syntax.id);
+                            self.juxtaposed_call_plans
+                                .get(&previous_call.syntax.id)
+                                .cloned()
+                        } else {
+                            None
+                        };
+                        let mut arguments = previous
+                            .as_ref()
+                            .map(|plan| plan.arguments.clone())
+                            .unwrap_or_default();
+                        let original = previous
+                            .as_ref()
+                            .map(|plan| plan.function.clone())
+                            .unwrap_or_else(|| function.clone());
+                        let consumed_calls = previous
+                            .as_ref()
+                            .map_or(1, |plan| plan.consumed_calls + 1);
+                        let forced_default = matches!(call.argument.as_ref(), Expression::Name(name) if name.name == "_");
+                        let compatible = |element: &CheckedTypeElement| {
+                            can_coerce_type(&argument_type, &element.value_type)
+                                || infer_type_parameters(
+                                    &element.value_type,
+                                    &argument_type,
+                                    &mut HashMap::new(),
+                                )
+                        };
+                        let callback_compatible = |element: &CheckedTypeElement| {
+                            let CheckedType::Function(callback) = &element.value_type else {
+                                return false;
+                            };
+                            is_empty_product_type(&callback.parameter)
+                                && (can_coerce_type(&argument_type, &callback.result)
+                                    || infer_type_parameters(
+                                        &callback.result,
+                                        &argument_type,
+                                        &mut HashMap::new(),
+                                    ))
+                        };
+                        let selected = if forced_default {
+                            0
+                        } else if matches!(call.argument.as_ref(), Expression::Block(_)) {
+                            product
+                                .elements
+                                .iter()
+                                .enumerate()
+                                .find(|(index, element)| {
+                                    product.elements[..*index]
+                                        .iter()
+                                        .all(|earlier| earlier.default.is_some())
+                                        && matches!(&element.value_type,
+                                            CheckedType::Function(callback)
+                                                if is_empty_product_type(&callback.parameter))
+                                })
+                                .map_or(0, |(index, _)| index)
+                        } else if compatible(first) {
+                            0
+                        } else {
+                            product
+                                .elements
+                                .iter()
+                                .enumerate()
+                                .skip(1)
+                                .find(|(index, element)| {
+                                    product.elements[..*index]
+                                        .iter()
+                                        .all(|earlier| earlier.default.is_some())
+                                        && compatible(element)
+                                })
+                                .map_or(0, |(index, _)| index)
+                        };
+                        let should_thunk = !forced_default
+                            && callback_compatible(&product.elements[selected]);
+                        let argument_type = if should_thunk {
+                            self.make_implicit_thunk(module, &call.argument, argument_type)
+                        } else {
+                            argument_type
+                        };
+                        let mut substitutions = HashMap::new();
+                        infer_type_parameters(
+                            &product.elements[selected].value_type,
+                            &argument_type,
+                            &mut substitutions,
+                        );
+                        if let Some(expected) = expected {
+                            infer_type_parameters_for_expected(
+                                &function.result,
+                                expected,
+                                &mut substitutions,
+                            );
+                        }
+                        let CheckedType::Function(instantiated_function) = substitute_type(
+                            CheckedType::Function(function.clone()),
+                            &substitutions,
+                        ) else {
+                            unreachable!()
+                        };
+                        let CheckedType::Product(product) =
+                            instantiated_function.parameter.as_ref()
+                        else {
+                            unreachable!()
+                        };
+                        let product = product.clone();
+                        let CheckedType::Function(instantiated_original) = substitute_type(
+                            CheckedType::Function(original),
+                            &substitutions,
+                        ) else {
+                            unreachable!()
+                        };
+                        let original = instantiated_original;
+                        let mut root_callee = call.callee.as_ref();
+                        for _ in 1..consumed_calls {
+                            let Expression::Call(previous) = root_callee else {
+                                break;
+                            };
+                            root_callee = previous.callee.as_ref();
+                        }
+                        self.expression_types.insert(
+                            root_callee.syntax().id,
+                            CheckedType::Function(original.clone()),
+                        );
+                        for skipped in &product.elements[..selected] {
+                            let default = skipped
+                                .default
+                                .clone()
+                                .expect("only defaulted juxtaposed slots may be skipped");
+                            let actual = self.check_expression_expected(
+                                module,
+                                &default,
+                                Some(&skipped.value_type),
+                            );
+                            self.require_compatible(
+                                actual,
+                                skipped.value_type.clone(),
+                                default.syntax().span.clone(),
+                            );
+                            arguments.push(default);
+                        }
+                        let selected_element = &product.elements[selected];
+                        let supplied = if forced_default {
+                            let Some(default) = selected_element.default.clone() else {
+                                self.diagnostics.push(Diagnostic::new(
+                                    call.argument.syntax().span.clone(),
+                                    "the current juxtaposed parameter has no default",
+                                ));
+                                return CheckedType::Error;
+                            };
+                            let actual = self.check_expression_expected(
+                                module,
+                                &default,
+                                Some(&selected_element.value_type),
+                            );
+                            self.require_compatible(
+                                actual,
+                                selected_element.value_type.clone(),
+                                default.syntax().span.clone(),
+                            );
+                            self.expression_types.insert(
+                                call.argument.syntax().id,
+                                selected_element.value_type.clone(),
+                            );
+                            default
+                        } else {
+                            self.check_call_argument(
+                                module,
+                                &call.argument,
+                                argument_type,
+                                &selected_element.value_type,
+                                call.argument.syntax().span.clone(),
+                            );
+                            call.argument.as_ref().clone()
+                        };
+                        arguments.push(supplied);
+                        let mut remaining = product.elements[selected + 1..].to_vec();
+                        if !remaining.is_empty()
+                            && remaining.iter().all(|element| element.default.is_some())
+                        {
+                            for element in &remaining {
+                                let default = element.default.clone().expect("checked above");
+                                let actual = self.check_expression_expected(
+                                    module,
+                                    &default,
+                                    Some(&element.value_type),
+                                );
+                                self.require_compatible(
+                                    actual,
+                                    element.value_type.clone(),
+                                    default.syntax().span.clone(),
+                                );
+                                arguments.push(default);
+                            }
+                            remaining.clear();
+                        }
+                        if remaining.is_empty() {
+                            self.juxtaposed_call_plans.insert(
+                                call.syntax.id,
+                                CheckedJuxtaposedCallPlan {
+                                    function: original,
+                                    arguments,
+                                    consumed_calls,
+                                },
+                            );
+                            return self.finish_expression_type(
+                                expression,
+                                *instantiated_function.result,
+                                expected,
+                            );
+                        }
+                        let residual = CheckedFunctionType {
+                            parameter_style: crate::FunctionParameterStyle::Juxtaposed,
+                            default: None,
+                            parameter: Box::new(CheckedType::Product(CheckedProductType {
+                                elements: std::mem::take(&mut remaining),
+                                variadic: false,
+                            })),
+                            mutations: function
+                                .mutations
+                                .iter()
+                                .filter_map(|mutation| match mutation {
+                                    CheckedMutation::Element(index) if *index > selected => {
+                                        Some(CheckedMutation::Element(index - selected - 1))
+                                    }
+                                    _ => None,
+                                })
+                                .collect(),
+                            moves: function
+                                .moves
+                                .iter()
+                                .filter_map(|mutation| match mutation {
+                                    CheckedMutation::Element(index) if *index > selected => {
+                                        Some(CheckedMutation::Element(index - selected - 1))
+                                    }
+                                    _ => None,
+                                })
+                                .collect(),
+                            effects: instantiated_function.effects.clone(),
+                            result: instantiated_function.result.clone(),
+                        };
+                        self.juxtaposed_call_plans.insert(
+                            call.syntax.id,
+                            CheckedJuxtaposedCallPlan {
+                                function: original,
+                                arguments,
+                                consumed_calls,
+                            },
+                        );
+                        return self.finish_expression_type(
+                            expression,
+                            CheckedType::Function(residual),
+                            expected,
+                        );
                     }
                     if let CheckedType::Function(root) = raw_callee_type.clone()
                         && root.default.is_some()
@@ -7208,6 +7748,7 @@ impl TypeChecker {
                         && !checked_type_contains_erased_product(&raw_callee_type)
                     {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
+                            parameter_style: crate::FunctionParameterStyle::Single,
                             default: None,
                             parameter: Box::new(widen_literal_type(argument_type.clone())),
                             mutations: match &raw_callee_type {
@@ -7553,7 +8094,7 @@ impl TypeChecker {
                 if name.name == "_" {
                     self.diagnostics.push(Diagnostic::new(
                         name.syntax.span.clone(),
-                        "`_` may only omit a defaulted curried parameter",
+                        "`_` may only omit a defaulted juxtaposed parameter",
                     ));
                     return CheckedType::Error;
                 }
@@ -9413,6 +9954,7 @@ impl TypeChecker {
         let function = ResolvedFunction {
             id,
             name: format!("__staple_implicit_thunk_{}", id.0),
+            parameter_style: crate::FunctionParameterStyle::Single,
             binding_syntax: None,
             pattern: Pattern::Product(crate::ProductPattern {
                 syntax: Syntax::compiler(),
@@ -9440,6 +9982,7 @@ impl TypeChecker {
         self.current_state_accesses.replace(previous_accesses);
 
         let function_type = CheckedFunctionType {
+            parameter_style: crate::FunctionParameterStyle::Single,
             default: None,
             parameter: Box::new(CheckedType::empty_product()),
             mutations: Vec::new(),
@@ -9544,27 +10087,21 @@ impl TypeChecker {
                 self.normalize_sum_type(alternatives, sum.syntax.span.clone())
             }
             Type::Function(function) => {
-                let (parameter_source, parameter_default) = if let Type::Product(product) =
-                    function.parameter.as_ref()
+                let mut parameter_source = function.parameter.as_ref().clone();
+                if function.parameter_style == crate::FunctionParameterStyle::Single
+                    && let Type::Product(product) = function.parameter.as_ref()
                     && !product.variadic
                     && product.elements.len() == 1
                     && let Some(default) = product.elements[0].default.as_deref()
                 {
-                    let mut parameter = product.clone();
-                    parameter.elements[0].default = None;
-                    (
-                        Type::Product(parameter),
-                        Some((
-                            product.elements[0]
-                                .name
-                                .clone()
-                                .expect("parser requires a name for a defaulted field"),
-                            default.clone(),
-                        )),
-                    )
-                } else {
-                    (function.parameter.as_ref().clone(), None)
-                };
+                    self.diagnostics.push(Diagnostic::new(
+                        default.syntax().span.clone(),
+                        "default parameters are only supported by juxtaposed functions",
+                    ));
+                    let mut stripped = product.clone();
+                    stripped.elements[0].default = None;
+                    parameter_source = Type::Product(stripped);
+                }
                 let parameter = self.resolve_source_type_inner(module, &parameter_source);
                 let resources = self.resolve_effect_set(module, &function.effects);
                 let mutations = canonical_mutations(
@@ -9586,34 +10123,6 @@ impl TypeChecker {
                         .collect(),
                 );
                 let result = self.resolve_source_type_inner(module, &function.result);
-                let default = parameter_default.and_then(|(name, value)| {
-                    if !matches!(result, CheckedType::Function(_)) {
-                        self.diagnostics.push(Diagnostic::new(
-                            value.syntax().span.clone(),
-                            "only a non-final curried parameter may have a default value",
-                        ));
-                        return None;
-                    }
-                    if !implicit_thunk_captures(module, &value).is_empty() {
-                        self.diagnostics.push(Diagnostic::new(
-                            value.syntax().span.clone(),
-                            "a curried parameter default cannot capture a local runtime value",
-                        ));
-                    }
-                    if !contains_type_parameter(&parameter) {
-                        let actual =
-                            self.check_expression_expected(module, &value, Some(&parameter));
-                        self.require_compatible(
-                            actual,
-                            parameter.clone(),
-                            value.syntax().span.clone(),
-                        );
-                    }
-                    self.product_default_expressions
-                        .insert(value.syntax().id, value.clone());
-                    self.curried_default_expressions.insert(value.syntax().id);
-                    Some(Box::new(CheckedFunctionParameterDefault { name, value }))
-                });
                 if (!parameter.is_sized() && parameter != CheckedType::Error)
                     || (!result.is_sized() && result != CheckedType::Error)
                 {
@@ -9624,7 +10133,8 @@ impl TypeChecker {
                     return CheckedType::Error;
                 }
                 CheckedType::Function(CheckedFunctionType {
-                    default,
+                    parameter_style: function.parameter_style,
+                    default: None,
                     parameter: Box::new(parameter),
                     mutations,
                     moves,
@@ -10681,6 +11191,11 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
                 _ => return None,
             };
             Some(CheckedType::Function(CheckedFunctionType {
+                parameter_style: if actual.parameter_style == expected.parameter_style {
+                    actual.parameter_style
+                } else {
+                    return None;
+                },
                 default: expected.default.or(actual.default),
                 parameter: Box::new(merge_types(*actual.parameter, *expected.parameter)?),
                 mutations: actual.mutations,
@@ -10846,6 +11361,7 @@ pub(crate) fn select_sum_alternative(
 
 fn effect_substitution_type(effects: CheckedEffectSet) -> CheckedType {
     CheckedType::Function(CheckedFunctionType {
+        parameter_style: crate::FunctionParameterStyle::Single,
         default: None,
         parameter: Box::new(CheckedType::Error),
         mutations: Vec::new(),
@@ -11016,6 +11532,7 @@ pub(crate) fn substitute_type(
         CheckedType::Function(function) => {
             let effects = substitute_effect_set(function.effects, substitutions);
             CheckedType::Function(CheckedFunctionType {
+                parameter_style: function.parameter_style,
                 default: function.default,
                 parameter: Box::new(substitute_type(*function.parameter, substitutions)),
                 mutations: function.mutations,
@@ -11769,7 +12286,8 @@ pub(crate) fn infer_type_parameters(
             let CheckedType::Function(actual) = actual else {
                 return false;
             };
-            infer_effect_parameter(&template.effects, &actual.effects, substitutions)
+            template.parameter_style == actual.parameter_style
+                && infer_effect_parameter(&template.effects, &actual.effects, substitutions)
                 && template.mutations == actual.mutations
                 && infer_type_parameters(&template.parameter, &actual.parameter, substitutions)
                 && infer_type_parameters(&template.result, &actual.result, substitutions)
@@ -11891,6 +12409,7 @@ fn infer_type_parameters_for_expected(
     if let (CheckedType::Function(template), CheckedType::Function(expected)) = (template, expected)
     {
         return infer_effect_parameter(&template.effects, &expected.effects, substitutions)
+            && template.parameter_style == expected.parameter_style
             && template.mutations == expected.mutations
             && infer_type_parameters(&template.parameter, &expected.parameter, substitutions)
             && infer_type_parameters_for_expected(
@@ -12049,6 +12568,9 @@ fn pattern_parameter_mutations(pattern: &Pattern) -> Vec<CheckedMutation> {
                     Some(CheckedMutation::Element(index))
                 }
                 Pattern::At(at) if at.binding.mutable => Some(CheckedMutation::Element(index)),
+                Pattern::Product(product) if product.mutable => {
+                    Some(CheckedMutation::Element(index))
+                }
                 _ => None,
             })
             .collect(),
@@ -12069,6 +12591,7 @@ fn pattern_parameter_moves(pattern: &Pattern) -> Vec<CheckedMutation> {
             .filter_map(|(index, element)| match element {
                 Pattern::Binding(binding) if binding.moved => Some(CheckedMutation::Element(index)),
                 Pattern::At(at) if at.binding.moved => Some(CheckedMutation::Element(index)),
+                Pattern::Product(product) if product.moved => Some(CheckedMutation::Element(index)),
                 _ => None,
             })
             .collect(),

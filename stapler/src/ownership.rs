@@ -269,6 +269,41 @@ impl<'a> OwnershipChecker<'a> {
                 true
             }
             Expression::Call(value) => {
+                if let Some(plan) = self.module.juxtaposed_call_plan(value.syntax.id) {
+                    let expected = match plan.function.parameter.as_ref() {
+                        crate::CheckedType::Product(product) => product.elements.len(),
+                        _ => 0,
+                    };
+                    if plan.arguments.len() == expected {
+                        let mut callee = value.callee.as_ref();
+                        for _ in 1..plan.consumed_calls {
+                            let Expression::Call(previous) = callee else {
+                                break;
+                            };
+                            callee = previous.callee.as_ref();
+                        }
+                        self.check_expression(callee, false);
+                        for (index, argument) in plan.arguments.iter().enumerate() {
+                            if let Some(thunk) =
+                                self.module.implicit_thunk_for(argument.syntax().id)
+                            {
+                                for capture in &thunk.captures {
+                                    if !self.module.has_mutable_storage(*capture) {
+                                        self.use_symbol(*capture, argument.syntax(), true);
+                                    }
+                                }
+                            } else {
+                                self.check_expression(
+                                    argument,
+                                    plan.function
+                                        .moves
+                                        .contains(&crate::CheckedMutation::Element(index)),
+                                );
+                            }
+                        }
+                        return true;
+                    }
+                }
                 self.check_expression(&value.callee, false);
                 if let Some(plan) = self.module.curried_default_plan(value.syntax.id) {
                     for default in &plan.defaults {

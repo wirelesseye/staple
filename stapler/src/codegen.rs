@@ -5981,6 +5981,48 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         if let Some(plan) = self
             .typed_module
+            .juxtaposed_call_plan(call.syntax.id)
+            .cloned()
+        {
+            let expected = match plan.function.parameter.as_ref() {
+                CheckedType::Product(product) => product.elements.len(),
+                _ => 0,
+            };
+            if plan.arguments.len() == expected {
+                let mut callee = call.callee.as_ref();
+                for _ in 1..plan.consumed_calls {
+                    let Expression::Call(previous) = callee else {
+                        break;
+                    };
+                    callee = previous.callee.as_ref();
+                }
+                let callee = self.compile_expression(environment, callee)?;
+                let argument = Expression::Product(ProductExpression {
+                    syntax: call.syntax.clone(),
+                    elements: plan
+                        .arguments
+                        .into_iter()
+                        .map(|value| crate::ProductElement {
+                            syntax: value.syntax().clone(),
+                            name: None,
+                            designated: false,
+                            value,
+                            spread: false,
+                            named_spread: false,
+                        })
+                        .collect(),
+                });
+                return self.compile_indirect_call_value(
+                    environment,
+                    callee,
+                    &argument,
+                    &plan.function,
+                    call.syntax.span.clone(),
+                );
+            }
+        }
+        if let Some(plan) = self
+            .typed_module
             .curried_default_plan(call.syntax.id)
             .cloned()
         {

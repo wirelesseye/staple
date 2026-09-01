@@ -1157,66 +1157,64 @@ fn fills_anonymous_product_field_defaults_at_calls_and_construction() {
 }
 
 #[test]
-fn fills_defaulted_curried_parameters_at_calls_and_through_aliases() {
+fn fills_defaulted_juxtaposed_parameters_at_calls_and_through_aliases() {
     let declaration = type_check(
-        "def app: (props: I32 = 7) -> (() -> I32) -> I32 = props => children => props + children ()\n",
+        "def app: (props: I32 = 7) * children: (() -> I32) -> I32 = props * children => props + children ()\n",
     );
     let app = declaration
         .functions()
         .iter()
         .find(|function| function.name == "app")
         .expect("app declaration");
-    assert!(
+    assert_eq!(
         declaration
             .type_of_function(app.id)
             .expect("app type")
-            .default
-            .is_some()
+            .parameter_style,
+        stapler::FunctionParameterStyle::Juxtaposed
     );
     let source = concat!(
-        "def app: (props: I32 = 7) -> (() -> I32) -> I32 = props => children => props + children ()\n",
+        "def app: (props: I32 = 7) * children: (() -> I32) -> I32 = props * children => props + children ()\n",
         "let explicit: I32 = app 5 { 1 }\n",
         "let omitted: I32 = app { 2 }\n",
         "let component = app\n",
         "let aliased: I32 = component { 3 }\n",
-        "let defaulted = app _\n",
-        "let partial: I32 = defaulted { 4 }\n",
+        "let forced: I32 = app _ { 4 }\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("defaulted curried calls should generate LLVM");
+        .expect("defaulted juxtaposed calls should generate LLVM");
 }
 
 #[test]
-fn rejects_a_default_on_the_final_curried_parameter() {
+fn rejects_a_default_on_a_curried_parameter() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
             "def bad: (value: I32 = 1) -> I32 = value => value\n",
         ))
-        .expect_err_diagnostics("a final arrow cannot have a default");
+        .expect_err_diagnostics("curried arrows cannot have defaults");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("only a non-final curried parameter")
+            .contains("only supported by juxtaposed functions")
     }));
 }
 
 #[test]
-fn supports_consecutive_defaulted_curried_parameters_and_direct_product_construction() {
+fn supports_consecutive_defaulted_juxtaposed_parameters_and_direct_product_construction() {
     let source = concat!(
-        "def render: (options: (width: I32 = 10, height: I32 = 20) = ()) -> (theme: String = \"light\") -> (() -> I32) -> I32 = options => theme => children => options.width + children ()\n",
+        "def render: (options: (width: I32 = 10, height: I32 = 20) = ()) * (theme: String = \"light\") * children: (() -> I32) -> I32 = options * theme * children => options.width + children ()\n",
         "let omitted: I32 = render { 1 }\n",
         "let explicit: I32 = render (.width: 20) \"dark\" { 2 }\n",
-        "let one_default = render _ \"dark\"\n",
-        "let partial: I32 = one_default { 3 }\n",
+        "let forced: I32 = render _ \"dark\" { 3 }\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("consecutive defaulted curried calls should generate LLVM");
+        .expect("consecutive defaulted juxtaposed calls should generate LLVM");
 }
 
 #[test]
@@ -1227,37 +1225,36 @@ fn rejects_default_omission_placeholder_outside_a_defaulted_call() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("may only omit a defaulted curried parameter")
+            .contains("may only omit a defaulted juxtaposed parameter")
     }));
 }
 
 #[test]
-fn infers_generic_parameters_across_a_skipped_defaulted_arrow() {
+fn infers_generic_parameters_across_a_skipped_defaulted_juxtaposed_slot() {
     let source = concat!(
-        "def fallback: <T where Default T> (value: T = default ()) -> (() -> T) -> T = value => children => children ()\n",
+        "def fallback: <T where Default T> (value: T = default ()) * children: (() -> T) -> T = value * children => children ()\n",
         "let text: String = fallback { \"chosen\" }\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("generic defaulted curried calls should specialize");
+        .expect("generic defaulted juxtaposed calls should specialize");
 }
 
 #[test]
-fn applies_defaulted_curried_parameters_on_trait_methods() {
+fn applies_defaulted_juxtaposed_parameters_on_trait_methods() {
     let source = concat!(
-        "trait Render T where Default T { render: (props: T = default ()) -> (() -> T) -> T }\n",
-        "impl Render I32 { def render = props => children => props + children () }\n",
+        "trait Render T where Default T { render: (props: T = default ()) * children: (() -> T) -> T }\n",
+        "impl Render I32 { def render = props * children => props + children () }\n",
         "let value: I32 = Render.render { 2 }\n",
-        "let renderer: (() -> I32) -> I32 = Render.render _\n",
-        "let explicit_default: I32 = renderer { 3 }\n",
+        "let another: I32 = Render.render { 3 }\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("trait method defaults should generate LLVM");
+        .expect("trait juxtaposed defaults should generate LLVM");
 }
 
 #[test]
@@ -7183,12 +7180,14 @@ fn type_checks_and_generates_curried_functions() {
         assert_eq!(
             module.type_of_function(function.id).expect("checked type"),
             &stapler::CheckedFunctionType {
+                parameter_style: stapler::FunctionParameterStyle::Single,
                 default: None,
                 parameter: Box::new(CheckedType::I32),
                 mutations: Vec::new(),
                 moves: Vec::new(),
                 effects: stapler::CheckedEffectSet::default(),
                 result: Box::new(CheckedType::Function(stapler::CheckedFunctionType {
+                    parameter_style: stapler::FunctionParameterStyle::Single,
                     default: None,
                     parameter: Box::new(CheckedType::I32),
                     mutations: Vec::new(),
@@ -7206,6 +7205,100 @@ fn type_checks_and_generates_curried_functions() {
         .expect("curried functions should compile");
     assert!(llvm.contains("closure.call"));
     assert!(llvm.contains("@malloc"));
+}
+
+#[test]
+fn type_checks_and_generates_non_curried_juxtaposed_functions() {
+    let source = concat!(
+        "let pair_add: x: I32 * y: I32 -> I32 = x: I32 * y: I32 => x + y\n",
+        "let result: I32 = pair_add 1 2\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("juxtaposed functions should generate LLVM");
+}
+
+#[test]
+fn rejects_incomplete_juxtaposed_calls() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let pair_add: x: I32 * y: I32 -> I32 = x * y => x + y\n",
+            "let partial = pair_add 1\n",
+        )))
+        .expect_err_diagnostics("juxtaposed calls cannot be partial");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("incomplete juxtaposed function call")));
+}
+
+#[test]
+fn completes_a_juxtaposed_call_before_calling_its_result() {
+    let source = concat!(
+        "let choose: x: I32 * y: I32 -> I32 -> I32 = x * y => z => x + y + z\n",
+        "let result: I32 = choose 1 2 3\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("remaining arguments should call the completed result");
+}
+
+#[test]
+fn keeps_product_and_juxtaposed_function_types_distinct() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "let juxtaposed: x: I32 * y: I32 -> I32 = x * y => x + y\n",
+            "let product: (I32, I32) -> I32 = juxtaposed\n",
+        )))
+        .expect_err_diagnostics("function parameter styles must remain distinct");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("expected `(I32, I32) -> I32`")));
+}
+
+#[test]
+fn supports_patterns_in_juxtaposed_parameter_slots() {
+    let source = concat!(
+        "let combine: (I32, I32) * I32 -> I32 = (left, right) * _ => left + right\n",
+        "let result: I32 = combine (1, 2) 3\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("juxtaposed slots should support ordinary parameter patterns");
+}
+
+#[test]
+fn lowers_mutation_markers_on_juxtaposed_parameter_slots() {
+    let source = concat!(
+        "let replace: mut target: I32 * value: I32 -> () = mut target * value => { target = value }\n",
+        "let mut number = 1\n",
+        "replace number 9\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("juxtaposed mutation slots should use the flattened parameter ABI");
+}
+
+#[test]
+fn fills_and_skips_juxtaposed_parameter_defaults() {
+    let source = concat!(
+        "let render: (width: I32 = 10) * (label: String = \"default\") * body: (() -> I32) -> I32 = width * label * body => width + body ()\n",
+        "let omitted: I32 = render { 2 }\n",
+        "let explicit: I32 = render 20 \"chosen\" { 3 }\n",
+        "let forced: I32 = render _ _ { 4 }\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("juxtaposed defaults should generate LLVM");
 }
 
 #[test]

@@ -1869,7 +1869,27 @@ impl Grammar {
     /// Parses a function parameter pattern and body.
     fn parse_function_expression(&mut self) -> Result<FunctionExpression, ParseError> {
         let start = self.position;
-        let pattern = self.parse_top_level_parameter_pattern()?;
+        let first = self.parse_top_level_parameter_pattern()?;
+        let (pattern, parameter_style) = if self.eat(TokenKind::Star) {
+            let mut elements = vec![first];
+            loop {
+                elements.push(self.parse_top_level_parameter_pattern()?);
+                if !self.eat(TokenKind::Star) {
+                    break;
+                }
+            }
+            (
+                Pattern::Product(ProductPattern {
+                    syntax: self.syntax(start),
+                    elements,
+                    mutable: false,
+                    moved: false,
+                }),
+                crate::FunctionParameterStyle::Juxtaposed,
+            )
+        } else {
+            (first, crate::FunctionParameterStyle::Single)
+        };
         if parameter_has_nested_mutable(&pattern) {
             return Err(self.error(
                 "`mut` is only allowed on a whole parameter binding or a direct element of a \
@@ -1886,6 +1906,7 @@ impl Grammar {
         let body = Box::new(self.parse_expression()?);
         Ok(FunctionExpression {
             syntax: self.syntax(start),
+            parameter_style,
             pattern,
             body,
         })
@@ -2098,6 +2119,51 @@ impl Grammar {
     /// Parses a type, treating function arrows as right-associative.
     fn parse_type(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
+        let checkpoint = self.position;
+        let syntax_checkpoint = self.next_syntax_id;
+        if self.juxtaposed_function_type_ahead()
+            && let Ok(first) = self.parse_juxtaposed_parameter_type_element()
+            && self.eat(TokenKind::Star)
+        {
+            let mut elements = vec![first];
+            loop {
+                elements.push(self.parse_juxtaposed_parameter_type_element()?);
+                if !self.eat(TokenKind::Star) {
+                    break;
+                }
+            }
+            self.expect(TokenKind::Arrow, "expected `->` after juxtaposed parameters")?;
+            if elements.len() > crate::MAX_PRODUCT_ARITY {
+                return Err(self.error(format!(
+                    "function parameter arity exceeds the limit of {}",
+                    crate::MAX_PRODUCT_ARITY
+                )));
+            }
+            let mut parameter = Type::Product(ProductType {
+                syntax: self.syntax(start),
+                elements,
+                variadic: false,
+            });
+            let mutations = self.extract_parameter_mutations(&mut parameter)?;
+            let moves = self.extract_parameter_moves(&mut parameter)?;
+            let effects = if self.at(TokenKind::LBrace) {
+                self.parse_effect_set()?
+            } else {
+                EffectSet::empty()
+            };
+            let result = self.parse_type()?;
+            return Ok(Type::Function(FunctionType {
+                syntax: self.syntax(start),
+                parameter_style: crate::FunctionParameterStyle::Juxtaposed,
+                parameter: Box::new(parameter),
+                mutations,
+                moves,
+                effects,
+                result: Box::new(result),
+            }));
+        }
+        self.position = checkpoint;
+        self.next_syntax_id = syntax_checkpoint;
         let whole_mutable = self.eat(TokenKind::Mut);
         let whole_moved = if whole_mutable {
             if self.eat(TokenKind::Move) {
@@ -2144,6 +2210,7 @@ impl Grammar {
             let result = self.parse_type()?;
             Ok(Type::Function(FunctionType {
                 syntax: self.syntax(start),
+                parameter_style: crate::FunctionParameterStyle::Single,
                 parameter: Box::new(parameter),
                 mutations,
                 moves,
@@ -2159,6 +2226,86 @@ impl Grammar {
             }
             Ok(parameter)
         }
+    }
+
+    fn parse_juxtaposed_parameter_type_element(&mut self) -> Result<TypeElement, ParseError> {
+        let start = self.position;
+        let mutable = self.eat(TokenKind::Mut);
+        let moved = !mutable && self.eat(TokenKind::Move);
+        if self.at(TokenKind::LParen) {
+            let Type::Product(mut product) = self.parse_type_atom()? else {
+                return Err(self.error("expected a parenthesized juxtaposed parameter"));
+            };
+            if !product.variadic && product.elements.len() == 1 {
+                let mut element = product.elements.remove(0);
+                if mutable || moved {
+                    if element.mutable || element.moved {
+                        return Err(
+                            self.error("a parameter cannot repeat a `mut` or `move` marker")
+                        );
+                    }
+                    element.mutable = mutable;
+                    element.moved = moved;
+                }
+                return Ok(element);
+            }
+            return Ok(TypeElement {
+                syntax: product.syntax.clone(),
+                name: None,
+                ty: Type::Product(product),
+                default: None,
+                spread: false,
+                mutable,
+                moved,
+            });
+        }
+        let name = if self.peek() == Some(TokenKind::Identifier)
+            && self.peek_n(1) == Some(TokenKind::Colon)
+        {
+            let name = self.bump_token().expect("peeked identifier").text;
+            self.expect(TokenKind::Colon, "expected `:` after parameter name")?;
+            Some(name)
+        } else {
+            None
+        };
+        let ty = self.parse_type_union()?;
+        Ok(TypeElement {
+            syntax: self.syntax(start),
+            name,
+            ty,
+            default: None,
+            spread: false,
+            mutable,
+            moved,
+        })
+    }
+
+    fn juxtaposed_function_type_ahead(&self) -> bool {
+        let mut depth = 0usize;
+        let mut saw_star = false;
+        for token in self.tokens.iter().skip(self.position) {
+            if token.kind.is_trivia() {
+                continue;
+            }
+            match token.kind {
+                TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
+                TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                TokenKind::Star if depth == 0 => saw_star = true,
+                TokenKind::Arrow if depth == 0 => return saw_star,
+                TokenKind::FatArrow | TokenKind::Equals | TokenKind::Comma | TokenKind::Semicolon
+                    if depth == 0 =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
     }
 
     fn parse_effect_set(&mut self) -> Result<EffectSet, ParseError> {

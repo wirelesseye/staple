@@ -302,6 +302,7 @@ pub enum NumericType {
 pub struct ResolvedFunction {
     pub id: FunctionId,
     pub name: String,
+    pub parameter_style: crate::FunctionParameterStyle,
     pub binding_syntax: Option<SyntaxId>,
     pub pattern: Pattern,
     pub result_annotation: Option<Type>,
@@ -4072,6 +4073,7 @@ impl NameResolver {
                 self.functions.push(ResolvedFunction {
                     id: function_id,
                     name,
+                    parameter_style: function.parameter_style,
                     binding_syntax: suggested_function.map(|(_, syntax)| syntax),
                     pattern: function.pattern.clone(),
                     result_annotation: match function.body.as_ref() {

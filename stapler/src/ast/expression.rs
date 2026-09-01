@@ -1,4 +1,4 @@
-use super::{Item, Pattern, Syntax, Type, VisibilitySyntax};
+use super::{FunctionParameterStyle, Item, Pattern, Syntax, Type, VisibilitySyntax};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expression {
@@ -148,6 +148,7 @@ pub struct MatchArm {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionExpression {
     pub syntax: Syntax,
+    pub parameter_style: FunctionParameterStyle,
     pub pattern: Pattern,
     pub body: Box<Expression>,
 }

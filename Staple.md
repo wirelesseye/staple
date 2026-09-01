@@ -2308,67 +2308,42 @@ Both calls produce `3`. `add 1` returns a function that captures the value of
 stored or passed like other values. Product-parameter functions remain the
 ordinary choice when all arguments should be supplied together.
 
-### Defaulted curried parameters
+### Juxtaposed parameters
 
-A named, non-final curried parameter may provide a default expression:
+Two or more parameters separated by `*` form one non-curried function:
 
 ```staple
-type alias AppProps = (title: String = "App", width: I32 = 800)
+let add = x: I32 * y: I32 => x + y
+// add: x: I32 * y: I32 -> I32
 
+add 1 2 // valid
+add 1   // error: the call is incomplete
+```
+
+Unlike `x => y => ...`, supplying the first argument never creates a partial
+closure. This form is also distinct from `(x, y) => ...`, which accepts one
+product value and is called as `add (1, 2)`. 
+
+Defaults may be declared on named slots in an explicit juxtaposed function
+type. Parentheses delimit a slot whose default expression could otherwise be
+confused with `*` multiplication:
+
+```staple
 def App:
-    (props: AppProps = ()) -> (() -> ()) -> ()
-= props => children => {
-    children ()
-}
+    (width: I32 = 800) * children: (() -> ()) -> ()
+= width * children => children ()
+
+App 640 { () }
+App { () }       // width defaults to 800
+App _ { () }     // explicitly select width's default
 ```
 
-When an argument does not match the current parameter, the compiler may insert
-its default and apply the argument to the next curried layer. A braced argument
-prefers a reachable zero-argument callback parameter, which supports trailing
-UI-style child blocks even when the block's result could also construct the
-defaulted parameter:
-
-```staple
-App (.title: "Settings") {
-    // children
-}
-
-App {
-    // default props and children
-}
-```
-
-Outside that braced-callback preference, direct application wins. Consecutive
-defaulted layers may be skipped in declaration order. `_` explicitly applies
-the current layer's default when overlapping or generic parameter types would
-otherwise select direct application:
-
-```staple
-let with_default_props = App _
-with_default_props { () }
-```
-
-Only a singleton named parameter on an arrow whose result is another function
-may use this form. A final arrow cannot be defaulted; use product-field defaults
-for trailing optional data. Curried defaults have the same purity, portability,
-and call-site evaluation rules as product-field defaults. They are static call
-metadata, preserved by inferred aliases and generic specialization, and do not
-change closure layout or the runtime function ABI.
-
-The fixed operators (`+ - * / == != < <= > >= .. ..=`, see
-[Values and expressions](#values-and-expressions)) desugar to the same shape:
-an operator call supplies its left and right operands through two curried
-calls against the operator's trait method or prelude function.
-
-```staple
-1 + 2
-1 == 2
-```
-
-`1 + 2` desugars to `Add.add 1 2`; there is no way to write a custom infix
-operator or to pass a builtin operator as a bare value. `&&` and `||` are the
-exception: they do not desugar to a call at all, since a call would evaluate
-both operands eagerly and lose short-circuiting.
+Arguments fill the earliest compatible slot. An incompatible argument may skip
+one or more defaulted slots, `_` explicitly fills the current slot from its
+default, and remaining trailing defaults are filled when the call completes.
+A braced expression prefers a reachable zero-argument callback slot. Defaults
+retain product-field defaults' purity, portability, generic-specialization, and
+call-site evaluation rules. Ordinary curried arrows cannot declare defaults.
 
 ## Block expressions
 

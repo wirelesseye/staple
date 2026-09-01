@@ -74,11 +74,19 @@ impl fmt::Display for Type {
                 Ok(())
             }
             Self::Function(function) => {
-                let parameter = format_mutable_parameter(
-                    &function.parameter,
-                    &function.mutations,
-                    &function.moves,
-                );
+                let parameter = if function.parameter_style == FunctionParameterStyle::Juxtaposed {
+                    format_juxtaposed_parameter(
+                        &function.parameter,
+                        &function.mutations,
+                        &function.moves,
+                    )
+                } else {
+                    format_mutable_parameter(
+                        &function.parameter,
+                        &function.mutations,
+                        &function.moves,
+                    )
+                };
                 if function.effects.is_empty() {
                     write!(formatter, "{parameter} -> {}", function.result)
                 } else {
@@ -108,6 +116,45 @@ impl fmt::Display for Type {
             }
         }
     }
+}
+
+fn format_juxtaposed_parameter(
+    parameter: &Type,
+    mutations: &[MutationTarget],
+    moves: &[MutationTarget],
+) -> String {
+    let Type::Product(product) = parameter else {
+        return parameter.to_string();
+    };
+    product
+        .elements
+        .iter()
+        .enumerate()
+        .map(|(index, element)| {
+            let mut text = String::new();
+            if mutations
+                .iter()
+                .any(|mutation| mutation.target == MutationTargetKind::Element(index))
+            {
+                text.push_str("mut ");
+            } else if moves
+                .iter()
+                .any(|target| target.target == MutationTargetKind::Element(index))
+            {
+                text.push_str("move ");
+            }
+            if let Some(name) = &element.name {
+                text.push_str(name);
+                text.push_str(": ");
+            }
+            text.push_str(&element.ty.to_string());
+            if element.default.is_some() {
+                text.push_str(" = …");
+            }
+            text
+        })
+        .collect::<Vec<_>>()
+        .join(" * ")
 }
 
 fn format_mutable_parameter(
@@ -313,11 +360,19 @@ pub struct RepeatedType {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionType {
     pub syntax: Syntax,
+    pub parameter_style: FunctionParameterStyle,
     pub parameter: Box<Type>,
     pub mutations: Vec<MutationTarget>,
     pub moves: Vec<MutationTarget>,
     pub effects: EffectSet,
     pub result: Box<Type>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FunctionParameterStyle {
+    #[default]
+    Single,
+    Juxtaposed,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
