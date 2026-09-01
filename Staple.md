@@ -1977,11 +1977,27 @@ def identity: <T> move T -> T = move value => value
 ```
 
 Constructs that consume a value outright — `drop`, a match expression's
-subject, string interpolation, indexed assignment's replacement value, and
-closure capture of a non-`mut` binding — always require ownership, the same
-as any other consuming use; a borrowed parameter cannot be passed to them
-without first being copied (if `Copy`) or received through a `move`
-parameter.
+subject, string interpolation, and indexed assignment's replacement value —
+always require ownership. Capturing an ordinary non-`Copy` parameter in a
+curried closure is the exception: the closure keeps a shared borrow of that
+parameter. Capturing a `mut` parameter similarly keeps a mutable borrow;
+`mut` does not transfer ownership.
+
+Borrowed partial applications are conservatively lexical. They may be called
+immediately or stored in an immutable local and called within that local's
+block. The source remains borrowed until the end of the block. A borrowed
+closure cannot be returned, passed as an argument, placed in a product,
+assigned, stored globally, carried out of a loop, or captured by another
+closure. Borrow-producing functions must be called through their statically
+resolved name or companion access rather than through a function alias.
+
+Use a `move` parameter when the partial application must own its captured
+value and escape independently:
+
+```staple
+def borrowed = value: File => other: File => describe value
+def owned = move value: File => other: File => { drop value; describe other }
+```
 
 ### Traits and bounded generic functions
 

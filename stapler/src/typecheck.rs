@@ -1039,6 +1039,10 @@ impl TypedModule {
         self.resolved.function_for(syntax_id)
     }
 
+    pub(crate) fn function_for_symbol(&self, symbol: SymbolId) -> Option<FunctionId> {
+        self.function_symbols.get(&symbol).copied()
+    }
+
     pub fn type_of_expression(&self, syntax_id: SyntaxId) -> Option<&CheckedType> {
         self.expression_types.get(&syntax_id)
     }
@@ -1287,6 +1291,14 @@ impl TypedModule {
 
     pub(crate) fn is_non_owning_symbol(&self, symbol: SymbolId) -> bool {
         self.ownership.is_non_owning_symbol(symbol)
+    }
+
+    pub(crate) fn is_borrowed_capture(
+        &self,
+        function: FunctionId,
+        symbol: SymbolId,
+    ) -> bool {
+        self.ownership.is_borrowed_capture(function, symbol)
     }
 
     pub fn type_of_symbol(&self, symbol: SymbolId) -> Option<&CheckedType> {

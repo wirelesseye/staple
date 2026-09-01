@@ -8750,6 +8750,114 @@ fn infers_copy_and_enforces_affine_moves() {
 }
 
 #[test]
+fn borrowed_curried_closures_are_lexically_scoped() {
+    let module = type_check(concat!(
+        "type MyString = String\n",
+        "impl !Copy MyString {}\n",
+        "companion MyString {\n",
+        "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
+        "}\n",
+        "def immediate = (left: MyString, right: MyString) => MyString.concat left right\n",
+        "def local = (left: MyString, right: MyString) => {\n",
+        "  let append = MyString.concat left\n",
+        "  append right\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("borrowed curried closures should lower through pointer captures");
+    assert!(!llvm.contains("closure.borrow"));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type MyString = String\n",
+            "impl !Copy MyString {}\n",
+            "companion MyString {\n",
+            "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
+            "}\n",
+            "def escape = (value: MyString) => MyString.concat value\n",
+        )))
+        .expect_err_diagnostics("a borrowed partial application cannot be returned");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("borrowed closure cannot escape")
+    }));
+}
+
+#[test]
+fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
+    let mutable = type_check(concat!(
+        "type MyString = String\n",
+        "impl !Copy MyString {}\n",
+        "companion MyString {\n",
+        "  pub def concat = mut a: MyString => b: MyString => MyString (a.* + b.*)\n",
+        "}\n",
+        "def local = (mut left: MyString, right: MyString) => {\n",
+        "  let append = MyString.concat left\n",
+        "  append right\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&mutable)
+        .expect("mutable borrowed captures should lower through caller storage");
+
+    for source in [
+        concat!(
+            "type MyString = String\nimpl !Copy MyString {}\n",
+            "companion MyString { pub def concat = a: MyString => b: MyString => MyString (a.* + b.*) }\n",
+            "def consume = f: (MyString -> MyString) => ()\n",
+            "def invalid = value: MyString => consume (MyString.concat value)\n",
+        ),
+        concat!(
+            "type MyString = String\nimpl !Copy MyString {}\n",
+            "companion MyString { pub def concat = a: MyString => b: MyString => MyString (a.* + b.*) }\n",
+            "def take = move value: MyString => ()\n",
+            "def invalid = move value: MyString => { let append = MyString.concat value; take value }\n",
+        ),
+        concat!(
+            "type MyString = String\nimpl !Copy MyString {}\n",
+            "companion MyString { pub def concat = a: MyString => b: MyString => MyString (a.* + b.*) }\n",
+            "def invalid = value: MyString => { let concat = MyString.concat; concat value }\n",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("borrowed closures must not escape or conflict with moves");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic.message.contains("borrowed closure")
+                || diagnostic.message.contains("borrowed by a closure")
+                || diagnostic.message.contains("borrow-producing function")
+        }));
+    }
+
+    type_check(concat!(
+        "type MyString = String\nimpl !Copy MyString {}\n",
+        "companion MyString { pub def concat = move a: MyString => b: MyString => MyString (a.* + b.*) }\n",
+        "def make = move value: MyString => MyString.concat value\n",
+    ));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type MyString = String\nimpl !Copy MyString {}\n",
+            "def combine = (left: MyString, right: MyString) => tail: MyString => MyString (left.* + right.* + tail.*)\n",
+            "def take = move value: MyString => ()\n",
+            "def invalid = (move left: MyString, move right: MyString) => {\n",
+            "  let append = combine (left, right)\n",
+            "  take right\n",
+            "}\n",
+        )))
+        .expect_err_diagnostics("every captured parameter must remain borrowed");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("borrowed by a closure")
+    }));
+}
+
+#[test]
 fn exposes_copy_but_rejects_explicit_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(

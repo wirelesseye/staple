@@ -9,6 +9,7 @@ use crate::{
 pub(crate) struct OwnershipInfo {
     moved_uses: HashMap<SyntaxId, HashSet<SymbolId>>,
     non_owning_symbols: HashSet<SymbolId>,
+    borrowed_captures: HashSet<(FunctionId, SymbolId)>,
 }
 
 impl OwnershipInfo {
@@ -22,6 +23,27 @@ impl OwnershipInfo {
     pub(crate) fn is_non_owning_symbol(&self, symbol: SymbolId) -> bool {
         self.non_owning_symbols.contains(&symbol)
     }
+
+    pub(crate) fn is_borrowed_capture(&self, function: FunctionId, symbol: SymbolId) -> bool {
+        self.borrowed_captures.contains(&(function, symbol))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BorrowKind {
+    Shared,
+    Mutable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct BorrowOrigin {
+    source: SymbolId,
+    kind: BorrowKind,
+}
+
+#[derive(Debug, Clone, Default)]
+struct BorrowResultSummary {
+    parameters: Vec<(usize, BorrowKind)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,6 +64,11 @@ pub(crate) struct OwnershipChecker<'a> {
     info: OwnershipInfo,
     diagnostics: Vec<Diagnostic>,
     loops: Vec<LoopOwnershipContext>,
+    borrow_summaries: HashMap<FunctionId, BorrowResultSummary>,
+    borrowed_closures: HashMap<SymbolId, Vec<BorrowOrigin>>,
+    active_borrows: HashMap<SymbolId, (BorrowKind, usize)>,
+    borrow_scopes: Vec<Vec<SymbolId>>,
+    parameter_symbols: HashSet<SymbolId>,
 }
 
 #[derive(Default)]
@@ -60,6 +87,11 @@ impl<'a> OwnershipChecker<'a> {
             info: OwnershipInfo::default(),
             diagnostics: vec![],
             loops: vec![],
+            borrow_summaries: infer_borrow_summaries(module),
+            borrowed_closures: HashMap::new(),
+            active_borrows: HashMap::new(),
+            borrow_scopes: vec![],
+            parameter_symbols: HashSet::new(),
         };
         checker.collect_top_level_symbols();
         checker.check_top_level();
@@ -146,6 +178,13 @@ impl<'a> OwnershipChecker<'a> {
         self.function = Some(function.id);
         self.states.clear();
         self.loops.clear();
+        self.borrowed_closures.clear();
+        self.active_borrows.clear();
+        self.borrow_scopes.clear();
+        self.parameter_symbols = top_level_parameter_symbols(self.module, &function.pattern)
+            .into_iter()
+            .flatten()
+            .collect();
 
         let drop_method = self.module.is_drop_method(function.id);
         self.bind_function_pattern(&function.pattern, drop_method);
@@ -165,6 +204,12 @@ impl<'a> OwnershipChecker<'a> {
             self.states.insert(*capture, state);
         }
 
+        if self.borrow_origins(&function.body).is_some() {
+            self.diagnostics.push(Diagnostic::new(
+                function.body.syntax().span.clone(),
+                "a borrowed closure cannot escape its lexical scope",
+            ));
+        }
         self.check_expression(&function.body, true);
     }
 
@@ -175,7 +220,22 @@ impl<'a> OwnershipChecker<'a> {
                 if let Some(function_id) = self.module.function_for(value.syntax.id) {
                     let captures = self.module.functions()[function_id.0].captures.clone();
                     for capture in captures {
-                        if !self.module.has_mutable_storage(capture) {
+                        if self.borrowed_closures.contains_key(&capture) {
+                            self.diagnostics.push(Diagnostic::new(
+                                value.syntax.span.clone(),
+                                "a borrowed closure cannot be captured by another closure",
+                            ));
+                        } else if self.parameter_symbols.contains(&capture)
+                            && !self.module.is_move_parameter(capture)
+                            && self
+                                .module
+                                .type_of_symbol(capture)
+                                .is_some_and(|ty| {
+                                    !self.module.is_copy_in_function(ty, self.function)
+                                })
+                        {
+                            self.info.borrowed_captures.insert((function_id, capture));
+                        } else if !self.module.has_mutable_storage(capture) {
                             self.use_symbol(capture, &value.syntax, true);
                         }
                     }
@@ -249,15 +309,19 @@ impl<'a> OwnershipChecker<'a> {
                 self.check_expression(&Expression::Block(value.body.clone()), consume)
             }
             Expression::Block(value) => {
+                self.borrow_scopes.push(vec![]);
                 for item in &value.items {
                     if !self.check_item(item) {
+                        self.end_borrow_scope();
                         return false;
                     }
                 }
+                self.end_borrow_scope();
                 true
             }
             Expression::Product(value) => {
                 for element in &value.elements {
+                    self.reject_borrowed_escape(&element.value);
                     self.check_expression(&element.value, consume);
                 }
                 self.check_product_defaults(value.syntax.id, consume);
@@ -269,6 +333,7 @@ impl<'a> OwnershipChecker<'a> {
                 true
             }
             Expression::Call(value) => {
+                self.reject_borrowed_argument(&value.argument);
                 if let Some(plan) = self.module.juxtaposed_call_plan(value.syntax.id) {
                     let expected = match plan.function.parameter.as_ref() {
                         crate::CheckedType::Product(product) => product.elements.len(),
@@ -435,6 +500,11 @@ impl<'a> OwnershipChecker<'a> {
             self.check_expression(argument, true);
             return;
         };
+        if callee.mutations.contains(&crate::CheckedMutation::Whole) {
+            if let Some(symbol) = self.module.symbol_for(argument.syntax().id) {
+                self.check_borrow_conflict(symbol, BorrowKind::Mutable, argument.syntax());
+            }
+        }
         if callee.moves.contains(&crate::CheckedMutation::Whole) {
             self.check_expression(argument, true);
             return;
@@ -444,6 +514,17 @@ impl<'a> OwnershipChecker<'a> {
             && product.elements.len() == parameter.elements.len()
         {
             for (index, element) in product.elements.iter().enumerate() {
+                if callee
+                    .mutations
+                    .contains(&crate::CheckedMutation::Element(index))
+                    && let Some(symbol) = self.module.symbol_for(element.value.syntax().id)
+                {
+                    self.check_borrow_conflict(
+                        symbol,
+                        BorrowKind::Mutable,
+                        element.value.syntax(),
+                    );
+                }
                 let consume = callee
                     .moves
                     .contains(&crate::CheckedMutation::Element(index));
@@ -480,11 +561,193 @@ impl<'a> OwnershipChecker<'a> {
         }
     }
 
+    fn borrow_origins(&self, expression: &Expression) -> Option<Vec<BorrowOrigin>> {
+        match expression {
+            Expression::Satisfies(value) => return self.borrow_origins(&value.value),
+            Expression::Block(block) => {
+                return match block.items.last()? {
+                    Item::Expression(value) => self.borrow_origins(value),
+                    Item::Return(value) => self.borrow_origins(&value.value),
+                    _ => None,
+                };
+            }
+            Expression::Match(value) => {
+                let mut origins = value
+                    .arms
+                    .iter()
+                    .map(|arm| self.borrow_origins(&arm.body));
+                let first = origins.next()??;
+                return origins
+                    .all(|origin| origin.as_ref() == Some(&first))
+                    .then_some(first);
+            }
+            _ => {}
+        }
+        if let Some(symbol) = self.module.symbol_for(expression.syntax().id)
+            && let Some(origin) = self.borrowed_closures.get(&symbol)
+        {
+            return Some(origin.clone());
+        }
+        let Expression::Call(call) = expression else {
+            return None;
+        };
+        let function = self.static_callee(&call.callee)?;
+        let summary = self.borrow_summaries.get(&function)?;
+        summary
+            .parameters
+            .iter()
+            .map(|(position, kind)| {
+                let argument = call_argument_at(&call.argument, *position)?;
+                let source = self.module.symbol_for(argument.syntax().id)?;
+                Some(BorrowOrigin {
+                    source,
+                    kind: *kind,
+                })
+            })
+            .collect()
+    }
+
+    fn direct_closure_borrow_origins(&self, expression: &Expression) -> Option<Vec<BorrowOrigin>> {
+        let Expression::Function(function) = expression else {
+            return None;
+        };
+        let function = self.module.function_for(function.syntax.id)?;
+        let closure = self.module.function_by_id(function)?;
+        let origins = closure
+            .captures
+            .iter()
+            .filter(|capture| {
+                self.parameter_symbols.contains(capture)
+                    && !self.module.is_move_parameter(**capture)
+                    && self.module.type_of_symbol(**capture).is_some_and(|ty| {
+                        !self.module.is_copy_in_function(ty, self.function)
+                    })
+            })
+            .map(|capture| BorrowOrigin {
+                source: *capture,
+                kind: if self.module.is_mutated_parameter(*capture) {
+                    BorrowKind::Mutable
+                } else {
+                    BorrowKind::Shared
+                },
+            })
+            .collect::<Vec<_>>();
+        (!origins.is_empty()).then_some(origins)
+    }
+
+    fn static_callee(&self, expression: &Expression) -> Option<FunctionId> {
+        self.module
+            .function_for(expression.syntax().id)
+            .or_else(|| {
+                self.module
+                    .symbol_for(expression.syntax().id)
+                    .and_then(|symbol| self.module.function_for_symbol(symbol))
+            })
+    }
+
+    fn reject_borrowed_escape(&mut self, expression: &Expression) {
+        if self.borrow_origins(expression).is_some() || self.is_borrow_producer_reference(expression)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                expression.syntax().span.clone(),
+                "a borrowed closure cannot escape its lexical scope",
+            ));
+        }
+    }
+
+    fn reject_borrowed_argument(&mut self, expression: &Expression) {
+        if self.borrow_origins(expression).is_some() || self.is_borrow_producer_reference(expression)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                expression.syntax().span.clone(),
+                "a borrowed closure cannot be passed as an argument",
+            ));
+        }
+    }
+
+    fn is_borrow_producer_reference(&self, expression: &Expression) -> bool {
+        matches!(expression, Expression::Name(_) | Expression::Access(_))
+            && self
+                .static_callee(expression)
+                .is_some_and(|function| self.borrow_summaries.contains_key(&function))
+    }
+
+    fn check_borrow_conflict(&mut self, symbol: SymbolId, requested: BorrowKind, syntax: &Syntax) {
+        let Some((active, _)) = self.active_borrows.get(&symbol).copied() else {
+            return;
+        };
+        if requested == BorrowKind::Mutable || active == BorrowKind::Mutable {
+            self.diagnostics.push(Diagnostic::new(
+                syntax.span.clone(),
+                "cannot mutate a value while it is borrowed by a closure",
+            ));
+        }
+    }
+
+    fn end_borrow_scope(&mut self) {
+        let Some(symbols) = self.borrow_scopes.pop() else {
+            return;
+        };
+        for symbol in symbols {
+            if let Some(origins) = self.borrowed_closures.remove(&symbol) {
+                for origin in origins {
+                    if let Some((_, count)) = self.active_borrows.get_mut(&origin.source) {
+                        *count -= 1;
+                        if *count == 0 {
+                            self.active_borrows.remove(&origin.source);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     fn check_item(&mut self, item: &Item) -> bool {
         match item {
             Item::Binding(binding) => {
                 if let Some(value) = &binding.value {
-                    self.check_expression(value, true);
+                    if self.is_borrow_producer_reference(value) {
+                        self.diagnostics.push(Diagnostic::new(
+                            value.syntax().span.clone(),
+                            "a borrow-producing function cannot be stored or aliased",
+                        ));
+                        self.check_expression(value, false);
+                    } else if let Some(origins) = self
+                        .borrow_origins(value)
+                        .or_else(|| self.direct_closure_borrow_origins(value))
+                    {
+                        self.check_expression(value, false);
+                        if binding.mutable || self.function.is_none() {
+                            self.diagnostics.push(Diagnostic::new(
+                                value.syntax().span.clone(),
+                                "a borrowed closure cannot escape its lexical scope",
+                            ));
+                        } else if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
+                            for origin in &origins {
+                                self.check_borrow_conflict(
+                                    origin.source,
+                                    origin.kind,
+                                    value.syntax(),
+                                );
+                                self.active_borrows
+                                    .entry(origin.source)
+                                    .and_modify(|(kind, count)| {
+                                        if *kind == BorrowKind::Shared
+                                            && origin.kind == BorrowKind::Shared
+                                        {
+                                            *count += 1;
+                                        }
+                                    })
+                                    .or_insert((origin.kind, 1));
+                            }
+                            self.borrowed_closures.insert(symbol, origins);
+                            if let Some(scope) = self.borrow_scopes.last_mut() {
+                                scope.push(symbol);
+                            }
+                        }
+                    } else {
+                        self.check_expression(value, true);
+                    }
                 }
                 if let Some(symbol) = self.module.symbol_for(binding.syntax.id) {
                     if self.module.resolved().requires_initialization_state(symbol)
@@ -514,6 +777,7 @@ impl<'a> OwnershipChecker<'a> {
                     self.check_expression(&assignment.value, true);
                     return true;
                 }
+                self.reject_borrowed_escape(&assignment.value);
                 self.check_assignment_target(&assignment.target);
                 self.check_expression(&assignment.value, true);
                 if let Some(symbol) = self.module.symbol_for(assignment.target.syntax().id) {
@@ -522,11 +786,13 @@ impl<'a> OwnershipChecker<'a> {
                 true
             }
             Item::Return(item) => {
+                self.reject_borrowed_escape(&item.value);
                 self.check_expression(&item.value, true);
                 false
             }
             Item::Break(item) => {
                 if let Some(value) = &item.value {
+                    self.reject_borrowed_escape(value);
                     self.check_expression(value, true);
                 }
                 if let Some(loop_) = self.loops.last_mut() {
@@ -540,7 +806,10 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 false
             }
-            Item::Expression(expression) => self.check_expression(expression, true),
+            Item::Expression(expression) => {
+                self.reject_borrowed_escape(expression);
+                self.check_expression(expression, true)
+            }
             Item::Submodule(_) => true,
             Item::TypeDeclaration(_) => true,
             Item::UseDeclaration(_) => true,
@@ -638,7 +907,8 @@ impl<'a> OwnershipChecker<'a> {
     }
 
     fn check_assignment_target(&mut self, expression: &Expression) {
-        if self.module.symbol_for(expression.syntax().id).is_some() {
+        if let Some(symbol) = self.module.symbol_for(expression.syntax().id) {
+            self.check_borrow_conflict(symbol, BorrowKind::Mutable, expression.syntax());
             return;
         }
         match expression {
@@ -660,6 +930,20 @@ impl<'a> OwnershipChecker<'a> {
         let Some(value_type) = self.module.type_of_symbol(symbol) else {
             return;
         };
+        if let Some((kind, _)) = self.active_borrows.get(&symbol).copied()
+            && (consume || kind == BorrowKind::Mutable)
+        {
+            self.diagnostics.push(Diagnostic::new(
+                syntax.span.clone(),
+                match kind {
+                    BorrowKind::Shared => "cannot move a value while it is borrowed by a closure",
+                    BorrowKind::Mutable => {
+                        "cannot access a value while it is mutably borrowed by a closure"
+                    }
+                },
+            ));
+            return;
+        }
         if self.module.is_copy_in_function(value_type, self.function) {
             return;
         }
@@ -701,6 +985,99 @@ impl<'a> OwnershipChecker<'a> {
             }
             ValueState::Available | ValueState::Frozen => {}
         }
+    }
+}
+
+fn infer_borrow_summaries(module: &TypedModule) -> HashMap<FunctionId, BorrowResultSummary> {
+    let mut summaries = HashMap::new();
+    for function in module.functions() {
+        let parameters = top_level_parameter_symbols(module, &function.pattern);
+        let Some(returned) = returned_closure_ids(module, &function.body) else {
+            continue;
+        };
+        let mut common: Option<Vec<(usize, BorrowKind)>> = None;
+        for closure in returned {
+            let Some(closure) = module.function_by_id(closure) else {
+                common = None;
+                break;
+            };
+            let mut borrowed = vec![];
+            for (index, parameter) in parameters.iter().enumerate() {
+                let Some(parameter) = parameter else {
+                    continue;
+                };
+                let Some(parameter_type) = module.type_of_symbol(*parameter) else {
+                    continue;
+                };
+                if closure.captures.contains(parameter)
+                    && !module.is_move_parameter(*parameter)
+                    && !module.is_copy_in_function(parameter_type, Some(function.id))
+                {
+                    borrowed.push((
+                        index,
+                        if module.is_mutated_parameter(*parameter) {
+                            BorrowKind::Mutable
+                        } else {
+                            BorrowKind::Shared
+                        },
+                    ));
+                }
+            }
+            match &common {
+                None => common = Some(borrowed),
+                Some(previous) if previous == &borrowed => {}
+                Some(_) => {
+                    common = None;
+                    break;
+                }
+            }
+        }
+        if let Some(parameters) = common.filter(|values| !values.is_empty()) {
+            summaries.insert(function.id, BorrowResultSummary { parameters });
+        }
+    }
+    summaries
+}
+
+fn returned_closure_ids(module: &TypedModule, expression: &Expression) -> Option<Vec<FunctionId>> {
+    match expression {
+        Expression::Function(function) => module
+            .function_for(function.syntax.id)
+            .map(|function| vec![function]),
+        Expression::Satisfies(value) => returned_closure_ids(module, &value.value),
+        Expression::Block(block) => match block.items.last()? {
+            Item::Expression(expression) => returned_closure_ids(module, expression),
+            Item::Return(value) => returned_closure_ids(module, &value.value),
+            _ => None,
+        },
+        Expression::Match(value) => {
+            let mut result = vec![];
+            for arm in &value.arms {
+                result.extend(returned_closure_ids(module, &arm.body)?);
+            }
+            Some(result)
+        }
+        _ => None,
+    }
+}
+
+fn top_level_parameter_symbols(module: &TypedModule, pattern: &Pattern) -> Vec<Option<SymbolId>> {
+    let symbol = |pattern: &Pattern| match pattern {
+        Pattern::Binding(binding) => module.symbol_for(binding.syntax.id),
+        Pattern::At(at) => module.symbol_for(at.binding.syntax.id),
+        _ => None,
+    };
+    match pattern {
+        Pattern::Product(product) => product.elements.iter().map(symbol).collect(),
+        _ => vec![symbol(pattern)],
+    }
+}
+
+fn call_argument_at(expression: &Expression, position: usize) -> Option<&Expression> {
+    match expression {
+        Expression::Product(product) => product.elements.get(position).map(|element| &element.value),
+        _ if position == 0 => Some(expression),
+        _ => None,
     }
 }
 

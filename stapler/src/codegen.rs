@@ -874,8 +874,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .requires_initialization_state(symbol)
                     || self.typed_module.has_mutable_storage(symbol)
                     || self.typed_module.is_derived_symbol(symbol)
+                    || self
+                        .typed_module
+                        .is_borrowed_capture(function.id, symbol)
                 {
-                    if self.typed_module.is_mutated_parameter(symbol) {
+                    if self.typed_module.is_mutated_parameter(symbol)
+                        || self
+                            .typed_module
+                            .is_borrowed_capture(function.id, symbol)
+                    {
                         environment
                             .parameter_pointers
                             .insert(symbol, value.into_pointer_value());
@@ -892,7 +899,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let raw_parameters = &parameters[1 + resource_count..];
         let whole_mutation = function_type.mutations.contains(&CheckedMutation::Whole);
         let logical_types = flattened_parameter_types(&function_type.parameter);
-        let mutation_mask = mutation_parameter_mask(logical_types.len(), &function_type.mutations);
+        let indirect_mask = self.indirect_parameter_mask(&function_type, None);
         let mut values = Vec::new();
         let mut mutable_pointers = Vec::new();
         if whole_mutation {
@@ -906,7 +913,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             mutable_pointers.push((0, pointer));
         } else {
             for (index, parameter) in raw_parameters.iter().copied().enumerate() {
-                if mutation_mask[index] {
+                if indirect_mask[index] {
                     let pointer = parameter.into_pointer_value();
                     let llvm_type = self.compile_type(logical_types[index])?;
                     values.push(
@@ -1242,10 +1249,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Diagnostic::new(span.clone(), "missing compiled Drop implementation")
             })?;
             let null_environment = self.context.ptr_type(AddressSpace::default()).const_null();
+            let pointer = self
+                .builder
+                .build_alloca(value.get_type(), "drop.borrow")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_store(pointer, value)
+                .map_err(compiler_diagnostic)?;
             self.builder
                 .build_direct_call(
                     function,
-                    &[null_environment.into(), value.into()],
+                    &[null_environment.into(), pointer.into()],
                     "drop.call",
                 )
                 .map_err(|error| Diagnostic::new(span, error.to_string()))?;
@@ -3287,28 +3301,47 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let entry = self.context.append_basic_block(function, "entry");
         self.builder.position_at_end(entry);
         let parameters = function.get_params();
-        let values = &parameters[1..];
+        let raw_values = &parameters[1..];
+        let value_types = flattened_parameter_types(&function_type.parameter);
+        let indirect_mask = self.indirect_parameter_mask(function_type, None);
+        let mutation_mask = mutation_parameter_mask(value_types.len(), &function_type.mutations);
+        let mut values = Vec::with_capacity(raw_values.len());
+        for (index, value) in raw_values.iter().copied().enumerate() {
+            if indirect_mask[index] && !mutation_mask[index] {
+                values.push(
+                    self.builder
+                        .build_load(
+                            self.compile_type(value_types[index])?,
+                            value.into_pointer_value(),
+                            "structural.borrow",
+                        )
+                        .map_err(compiler_diagnostic)?,
+                );
+            } else {
+                values.push(value);
+            }
+        }
         let result = match structural {
             crate::StructuralTraitMethod::Debug => {
-                self.compile_structural_debug_body(values, &arguments[0], span.clone())?
+                self.compile_structural_debug_body(&values, &arguments[0], span.clone())?
             }
             crate::StructuralTraitMethod::Index => self.compile_structural_index_body(
-                values,
+                &values,
                 &arguments[0],
                 &arguments[2],
                 span.clone(),
             )?,
             crate::StructuralTraitMethod::MutateIndex => self.compile_structural_mutate_body(
-                values,
+                &values,
                 &arguments[0],
                 &arguments[2],
                 span.clone(),
             )?,
             crate::StructuralTraitMethod::IntoIterator => {
-                self.compile_structural_into_iterator_body(values, span.clone())?
+                self.compile_structural_into_iterator_body(&values, span.clone())?
             }
             crate::StructuralTraitMethod::Iterator => self.compile_structural_next_body(
-                values,
+                &values,
                 &arguments[0],
                 &arguments[1],
                 &function_type.result,
@@ -5650,26 +5683,31 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .typed_module
             .instantiated_trait_method_type(trait_id, &arguments, dispatch.method)
             .ok_or_else(|| Diagnostic::new(index.syntax.span.clone(), "unchecked Index call"))?;
-        let target = self.compile_expression(environment, &index.value)?;
+        let argument = Expression::Product(ProductExpression {
+            syntax: index.syntax.clone(),
+            elements: vec![
+                crate::ProductElement {
+                    syntax: index.value.syntax().clone(),
+                    name: None,
+                    designated: false,
+                    value: index.value.as_ref().clone(),
+                    spread: false,
+                    named_spread: false,
+                },
+                crate::ProductElement {
+                    syntax: index.index.syntax().clone(),
+                    name: None,
+                    designated: false,
+                    value: index.index.as_ref().clone(),
+                    spread: false,
+                    named_spread: false,
+                },
+            ],
+        });
+        let compiled = self.compile_effect_arguments(environment, &argument, &function_type)?;
         if environment.did_return {
             return Ok(self.unit_value());
         }
-        let position = self.compile_expression(environment, &index.index)?;
-        if environment.did_return {
-            return Ok(self.unit_value());
-        }
-        let target = value_as_basic(target).ok_or_else(|| {
-            Diagnostic::new(
-                index.value.syntax().span.clone(),
-                "indexed value is not first-class",
-            )
-        })?;
-        let position = value_as_basic(position).ok_or_else(|| {
-            Diagnostic::new(
-                index.index.syntax().span.clone(),
-                "index is not first-class",
-            )
-        })?;
         let mut call_arguments = self.compile_resource_arguments(
             environment,
             &function_type.effects,
@@ -5682,17 +5720,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .const_null()
                 .into(),
         );
-        call_arguments.push(target.into());
-        call_arguments.push(position.into());
-        self.builder
+        call_arguments.extend(compiled.values.iter().copied());
+        let result = self.builder
             .build_direct_call(function, &call_arguments, "index.call")
             .map_err(|error| Diagnostic::new(index.syntax.span.clone(), error.to_string()))?
             .try_as_basic_value()
             .basic()
-            .map(AnyValueEnum::from)
             .ok_or_else(|| {
                 Diagnostic::new(index.syntax.span.clone(), "Index result is not first-class")
-            })
+            })?;
+        self.drop_mutation_temporaries(compiled.temporaries, index.syntax.span.clone())?;
+        Ok(result.into())
     }
 
     fn compile_index_load(
@@ -8017,6 +8055,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let environment_type = self.compile_capture_type(&function)?;
             let mut environment_value = environment_type.const_zero();
             for (index, symbol) in function.captures.iter().copied().enumerate() {
+                let borrowed = self
+                    .typed_module
+                    .is_borrowed_capture(function.id, symbol);
                 let value = if self
                     .typed_module
                     .resolved()
@@ -8031,6 +8072,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .or_else(|| environment.binding_cells.get(&symbol).copied())
                         .ok_or_else(|| {
                             Diagnostic::new(span.clone(), "captured binding cell is not available")
+                        })?
+                        .into()
+                } else if borrowed {
+                    environment
+                        .parameter_pointers
+                        .get(&symbol)
+                        .copied()
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                span.clone(),
+                                "borrowed parameter storage is not available",
+                            )
                         })?
                         .into()
                 } else {
@@ -8065,6 +8118,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .typed_module
                     .resolved()
                     .requires_initialization_state(symbol)
+                    && !self
+                        .typed_module
+                        .is_borrowed_capture(function.id, symbol)
                     && self
                         .typed_module
                         .type_of_symbol(symbol)
@@ -8125,6 +8181,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .requires_initialization_state(symbol)
                 || self.typed_module.has_mutable_storage(symbol)
                 || self.typed_module.is_derived_symbol(symbol)
+                || self
+                    .typed_module
+                    .is_borrowed_capture(closure.id, symbol)
             {
                 continue;
             }
@@ -8186,6 +8245,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .requires_initialization_state(*symbol)
                     || self.typed_module.has_mutable_storage(*symbol)
                     || self.typed_module.is_derived_symbol(*symbol)
+                    || self
+                        .typed_module
+                        .is_borrowed_capture(function.id, *symbol)
                 {
                     return Ok(self.context.ptr_type(AddressSpace::default()).into());
                 }
@@ -8597,7 +8659,21 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         function_type: &CheckedFunctionType,
     ) -> CodeGenerationResult<CompiledCallArguments<'context>> {
         let mutations = &function_type.mutations;
-        if mutations.is_empty() {
+        let types = flattened_parameter_types(&function_type.parameter);
+        let mut mask = self.indirect_parameter_mask(function_type, None);
+        let mutation_mask = mutation_parameter_mask(types.len(), mutations);
+        let move_mask = mutation_parameter_mask(types.len(), &function_type.moves);
+        if let Some(actual) = self.concrete_expression_type(argument) {
+            let actual_types = flattened_parameter_types(&actual);
+            if actual_types.len() == mask.len() {
+                for (index, actual) in actual_types.iter().enumerate() {
+                    if !mutation_mask[index] && !move_mask[index] {
+                        mask[index] = !self.typed_module.is_copy_in_function(actual, None);
+                    }
+                }
+            }
+        }
+        if !mask.iter().any(|indirect| *indirect) {
             let expected = self
                 .compile_parameter_types(&function_type.parameter)?
                 .len();
@@ -8617,9 +8693,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 temporaries: temporary.into_iter().collect(),
             });
         }
+        if types.len() == 1 && mask[0] {
+            let (pointer, temporary) = self.compile_indirect_argument_pointer(
+                environment,
+                argument,
+                types[0],
+                mutation_mask[0],
+            )?;
+            return Ok(CompiledCallArguments {
+                values: vec![pointer.into()],
+                temporaries: temporary.into_iter().collect(),
+            });
+        }
 
-        let types = flattened_parameter_types(&function_type.parameter);
-        let mask = mutation_parameter_mask(types.len(), mutations);
         if let Some(plan) = self
             .typed_module
             .product_default_plan(argument.syntax().id)
@@ -8656,10 +8742,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             };
             for (index, expression) in explicit {
                 if mask[index] {
-                    let (pointer, temporary) = self.compile_mutation_argument_pointer(
+                    let (pointer, temporary) = self.compile_indirect_argument_pointer(
                         environment,
                         expression,
                         types[index],
+                        mutation_mask[index],
                     )?;
                     values[index] = Some(pointer.into());
                     temporaries.extend(temporary);
@@ -8687,8 +8774,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     plan.final_type.elements[index].value_type.clone(),
                 );
                 if mask[index] {
-                    let compiled =
-                        self.compile_mutation_argument_pointer(environment, default, types[index]);
+                    let compiled = self.compile_indirect_argument_pointer(
+                        environment,
+                        default,
+                        types[index],
+                        mutation_mask[index],
+                    );
                     if let Some(previous) = previous {
                         self.expression_type_overrides
                             .insert(default.syntax().id, previous);
@@ -8739,10 +8830,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let mut temporaries = Vec::new();
             for (index, expression) in expressions.into_iter().enumerate() {
                 if mask[index] {
-                    let (pointer, temporary) = self.compile_mutation_argument_pointer(
+                    let (pointer, temporary) = self.compile_indirect_argument_pointer(
                         environment,
                         expression,
                         types[index],
+                        mutation_mask[index],
                     )?;
                     values.push(pointer.into());
                     temporaries.extend(temporary);
@@ -8807,6 +8899,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         ))
     }
 
+    fn indirect_parameter_mask(
+        &self,
+        function_type: &CheckedFunctionType,
+        function: Option<FunctionId>,
+    ) -> Vec<bool> {
+        let types = flattened_parameter_types(&function_type.parameter);
+        let mutation_mask = mutation_parameter_mask(types.len(), &function_type.mutations);
+        let move_mask = mutation_parameter_mask(types.len(), &function_type.moves);
+        types
+            .iter()
+            .enumerate()
+            .map(|(index, value_type)| {
+                mutation_mask[index]
+                    || (!move_mask[index]
+                        && !self
+                            .typed_module
+                            .is_copy_in_function(value_type, function))
+            })
+            .collect()
+    }
+
     fn compile_mutation_argument_pointer(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
@@ -8833,6 +8946,39 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_store(pointer, value)
             .map_err(compiler_diagnostic)?;
         Ok((pointer, Some((pointer, concrete))))
+    }
+
+    fn compile_indirect_argument_pointer(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        expression: &Expression,
+        value_type: &CheckedType,
+        mutable: bool,
+    ) -> CodeGenerationResult<(
+        inkwell::values::PointerValue<'context>,
+        Option<(inkwell::values::PointerValue<'context>, CheckedType)>,
+    )> {
+        if mutable {
+            return self.compile_mutation_argument_pointer(environment, expression, value_type);
+        }
+        if expression_has_place_root(self.typed_module.resolved(), expression)
+            && let Ok((pointer, _, _)) = self.compile_place_pointer(environment, expression)
+        {
+            return Ok((pointer, None));
+        }
+        let value = self.compile_expression(environment, expression)?;
+        let value = value_as_basic(value).ok_or_else(|| {
+            Diagnostic::new(expression.syntax().span.clone(), "argument is not storable")
+        })?;
+        let concrete = substitute_type(value_type.clone(), &self.active_type_substitutions);
+        let pointer = self
+            .builder
+            .build_alloca(self.compile_type(&concrete)?, "borrow.temporary")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(pointer, value)
+            .map_err(compiler_diagnostic)?;
+        Ok((pointer, None))
     }
 
     fn drop_mutation_temporaries(
@@ -9014,9 +9160,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             vec![self.context.ptr_type(AddressSpace::default()).into()]
         } else {
             let mut parameters = self.compile_parameter_types(&function_type.parameter)?;
-            let mutation_mask = mutation_parameter_mask(parameters.len(), &function_type.mutations);
+            let indirect_mask = self.indirect_parameter_mask(function_type, None);
             for (index, parameter) in parameters.iter_mut().enumerate() {
-                if mutation_mask[index] {
+                if indirect_mask[index] {
                     *parameter = self.context.ptr_type(AddressSpace::default()).into();
                 }
             }
@@ -10159,11 +10305,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .build_load(llvm_element, source_slot, "buffer.clone.source.element")
             .map_err(compiler_diagnostic)?;
         let closure_environment = self.context.ptr_type(AddressSpace::default()).const_null();
+        let clone_argument: inkwell::values::BasicMetadataValueEnum<'context> = if matches!(
+            clone_function.get_type().get_param_types().get(1),
+            Some(inkwell::types::BasicMetadataTypeEnum::PointerType(_))
+        ) {
+            source_slot.into()
+        } else {
+            source_element.into()
+        };
         let cloned = self
             .builder
             .build_direct_call(
                 clone_function,
-                &[closure_environment.into(), source_element.into()],
+                &[closure_environment.into(), clone_argument],
                 "buffer.clone.element",
             )
             .map_err(compiler_diagnostic)?
