@@ -3480,7 +3480,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .resolved()
             .functions()
             .iter()
-            .find(|function| function.name == "formatter_write")
+            .find(|function| standard_function_name_matches(&function.name, "formatter_write"))
             .map(|function| function.id)
             .ok_or_else(|| {
                 Diagnostic::new(
@@ -3671,7 +3671,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .resolved()
             .functions()
             .iter()
-            .find(|function| function.name == name)
+            .find(|function| standard_function_name_matches(&function.name, name))
             .map(|function| function.id)
             .ok_or_else(|| {
                 Diagnostic::new(span, format!("standard function `{name}` is unavailable"))
@@ -9218,6 +9218,26 @@ fn create_target_machine(target: Option<&str>) -> CodeGenerationResult<TargetMac
             CodeModel::Default,
         )
         .ok_or_else(|| Diagnostic::new(Span::Compiler, "could not create LLVM target machine"))
+}
+
+/// Whether a resolved function `candidate` denotes the standard-library
+/// function whose source name is `name`. Standard-library definitions are
+/// emitted with their bare source name in single-module builds but are
+/// mangled to `__staple_m{module}_{name}` once the program spans more than
+/// one non-standard module (see the name mangling in `resolve`), so a bare
+/// string comparison misses them in package builds.
+fn standard_function_name_matches(candidate: &str, name: &str) -> bool {
+    if candidate == name {
+        return true;
+    }
+    let Some(rest) = candidate.strip_prefix("__staple_m") else {
+        return false;
+    };
+    let digits = rest.find(|character: char| !character.is_ascii_digit());
+    match digits {
+        Some(offset) if offset > 0 => rest[offset..].strip_prefix('_') == Some(name),
+        _ => false,
+    }
 }
 
 fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {

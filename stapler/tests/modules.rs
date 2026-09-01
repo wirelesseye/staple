@@ -216,6 +216,32 @@ fn imports_public_values_and_types_through_all_use_forms() {
 }
 
 #[test]
+fn string_templates_compile_across_multiple_modules() {
+    // The formatter helpers backing string templates live in `std.fmt` and
+    // are only referenced by synthesised codegen calls. Once a build spans
+    // more than one non-standard module the resolver mangles their names to
+    // `__staple_m{module}_{name}`, so codegen must look them up by their
+    // source name rather than the mangled symbol.
+    let fixture = Fixture::new();
+    fixture.write("greeting.sta", "pub def who: () -> String = () => \"world\"\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use greeting.(who)\n",
+            "use std.io.println\n",
+            "let name: String = who ()\n",
+            "println \"hello $name\"\n",
+        ),
+    );
+
+    let llvm = fixture
+        .compile()
+        .expect("string templates should compile in a multi-module build");
+    assert!(llvm.contains("template.formatter"));
+    assert!(llvm.contains("template.finish"));
+}
+
+#[test]
 fn reexports_public_items_through_selected_renamed_glob_and_chained_uses() {
     let fixture = Fixture::new();
     fixture.write(
