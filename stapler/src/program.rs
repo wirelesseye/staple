@@ -440,6 +440,81 @@ impl Program {
         self.package_root_path.as_deref()
     }
 
+    /// The `use`-path-style dotted name of a module, e.g. `std.io`,
+    /// `std.core.list`, or `example.tools.text` — the package name followed by
+    /// the file path relative to the package source root (extension dropped,
+    /// separators turned into dots) and then any enclosing inline `mod`
+    /// segments. Returns `None` when the module has no owning package (a lone
+    /// file loaded without a package graph or a configured package root), or
+    /// when its file lies outside the package source root.
+    pub fn module_dotted_name(&self, module: ModuleId) -> Option<String> {
+        // Climb enclosing inline `mod` / block / companion submodules up to the
+        // file-backed root; those carry a `name`, a file-backed module does not.
+        let mut inline = Vec::new();
+        let mut current = module;
+        let file_root = loop {
+            let source = self.module(current);
+            match source.parent {
+                Some(parent) => {
+                    inline.push(source.name.clone()?);
+                    current = parent;
+                }
+                None => break current,
+            }
+        };
+        inline.reverse();
+
+        let root = self.module(file_root);
+        // Prefer the package graph; fall back to a configured package root path
+        // when the module carries no package (a package opened without a full
+        // manifest graph).
+        let (package_name, source_root, package_root_path): (&str, &Path, Option<&Path>) =
+            match self
+                .package_of(file_root)
+                .and_then(|id| self.package_graph.as_ref().map(|graph| graph.package(id)))
+            {
+                Some(package) => (&package.name, package.source_root(), Some(&package.root)),
+                None => {
+                    let package_root_path = self.package_root_path.as_deref()?;
+                    (
+                        self.package_name(),
+                        package_root_path.parent()?,
+                        Some(package_root_path),
+                    )
+                }
+            };
+
+        let mut segments = vec![package_name.to_owned()];
+        let is_package_root = self.package_root == Some(file_root)
+            || package_root_path.is_some_and(|path| path == root.path);
+        if !is_package_root {
+            let relative = root
+                .path
+                .strip_prefix(source_root)
+                .ok()
+                .map(Path::to_path_buf)
+                .or_else(|| {
+                    let canonical = std::fs::canonicalize(&root.path).ok()?;
+                    canonical.strip_prefix(source_root).ok().map(Path::to_path_buf)
+                })?;
+            let relative = relative.with_extension("");
+            let file_segments = relative
+                .components()
+                .filter_map(|component| match component {
+                    std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            // A `root.sta` sitting directly in the source root names the package
+            // itself, not a `.root` submodule.
+            if file_segments != ["root"] {
+                segments.extend(file_segments);
+            }
+        }
+        segments.extend(inline);
+        Some(segments.join("."))
+    }
+
     pub fn standard_library_core(&self) -> Option<ModuleId> {
         self.standard_library_core
     }
@@ -2604,5 +2679,80 @@ mod tests {
             standard_library_root_for_home(Path::new("/home/staple")),
             PathBuf::from("/home/staple/.local/lib/staple/stdlib")
         );
+    }
+
+    fn module_by_suffix(program: &Program, suffix: &str) -> ModuleId {
+        program
+            .modules()
+            .iter()
+            .find(|module| module.parent.is_none() && module.path.ends_with(suffix))
+            .unwrap_or_else(|| panic!("no module for `{suffix}`"))
+            .id
+    }
+
+    #[test]
+    fn module_dotted_name_uses_dotted_use_paths_for_the_standard_library() {
+        let entry = std::env::temp_dir().join("staple-module-dotted-name-std.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&entry, "use std.io.println\nprintln \"hi\"\n")
+            .unwrap();
+
+        assert_eq!(
+            program.module_dotted_name(program.standard_library_core().unwrap()),
+            Some("std.core".to_owned())
+        );
+        assert_eq!(
+            program.module_dotted_name(program.standard_library_io().unwrap()),
+            Some("std.io".to_owned())
+        );
+        assert_eq!(
+            program.module_dotted_name(module_by_suffix(&program, "std/core/ops.sta")),
+            Some("std.core.ops".to_owned())
+        );
+        assert_eq!(
+            program.module_dotted_name(module_by_suffix(&program, "std/core/number/types.sta")),
+            Some("std.core.number.types".to_owned())
+        );
+    }
+
+    #[test]
+    fn module_dotted_name_is_none_for_a_lone_entry_file() {
+        let entry = std::env::temp_dir().join("staple-module-dotted-name-lone.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&entry, "let answer = 42\n")
+            .unwrap();
+        assert_eq!(program.module_dotted_name(program.entry()), None);
+    }
+
+    #[test]
+    fn module_dotted_name_covers_a_configured_package_root_and_its_files() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-module-dotted-name-package-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        let root_path = root.join("root.sta");
+        std::fs::write(&root_path, "pub mod\n").unwrap();
+        std::fs::write(root.join("tools/text.sta"), "pub mod\npub let shout = 1\n").unwrap();
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_module_root(&root)
+            .with_package_root(&root_path)
+            .with_package_name("example")
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, "use tools.text.shout\nshout\n")
+            .unwrap();
+
+        assert_eq!(
+            program.module_dotted_name(program.package_root().unwrap()),
+            Some("example".to_owned())
+        );
+        assert_eq!(
+            program.module_dotted_name(module_by_suffix(&program, "tools/text.sta")),
+            Some("example.tools.text".to_owned())
+        );
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

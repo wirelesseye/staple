@@ -9,6 +9,11 @@ pub struct HoverEntry {
     pub range: Range<usize>,
     pub signature: String,
     pub documentation: Vec<String>,
+    /// The `use`-path-style name of the module that defines the hovered thing
+    /// (`std.io`, `example.tools.text`), shown as a leading fenced line —
+    /// rust-analyzer style. `None` for locals, parameters, type parameters, and
+    /// anything whose defining module can't be named.
+    pub module: Option<String>,
 }
 
 #[cfg(test)]
@@ -43,6 +48,7 @@ pub fn entries_at_path(path: &Path, module: &Module, typed: &TypedModule) -> Vec
             .then(left.range.end.cmp(&right.range.end))
             .then(left.signature.cmp(&right.signature))
             .then(left.documentation.cmp(&right.documentation))
+            .then(left.module.cmp(&right.module))
     });
     collector.entries.dedup();
     collector.entries
@@ -109,11 +115,13 @@ impl Collector<'_> {
                         .resolved()
                         .macro_invocation_for(modifier.syntax.id)
                     {
+                        let module = self.syntax_module_label(info.declaration);
                         self.named_last_with_docs(
                             &modifier.syntax,
                             &modifier.name,
                             macro_signature(info),
                             info.docs.clone(),
+                            module,
                         );
                     }
                     if let Some(expression) = modifier
@@ -406,7 +414,8 @@ impl Collector<'_> {
                         .get(&ty)
                         .map(|declaration| declaration.docs.clone())
                         .unwrap_or_default();
-                    self.named_with_docs(&submodule.syntax, &submodule.name, signature, docs);
+                    let module = self.definition_module_label(DefinitionId::Type(ty));
+                    self.named_with_docs(&submodule.syntax, &submodule.name, signature, docs, module);
                 } else {
                     let docs = self
                         .typed
@@ -424,11 +433,13 @@ impl Collector<'_> {
                             _ => None,
                         })
                         .unwrap_or_else(|| submodule.docs.clone());
+                    let module = self.child_module_label(submodule.syntax.id);
                     self.named_with_docs(
                         &submodule.syntax,
                         &submodule.name,
                         format!("mod {}", submodule.name),
                         docs,
+                        module,
                     );
                 }
                 for item in &submodule.module.items {
@@ -446,11 +457,13 @@ impl Collector<'_> {
                     .resolved()
                     .macro_definition_for(declaration.syntax.id)
                 {
+                    let module = self.syntax_module_label(info.declaration);
                     self.named_with_docs(
                         &declaration.syntax,
                         &declaration.name,
                         macro_signature(info),
                         info.docs.clone(),
+                        module,
                     );
                 }
                 for parameter in &declaration.type_parameters {
@@ -483,11 +496,13 @@ impl Collector<'_> {
                         .map(|value_type| self.display_type(value_type))
                         .or_else(|| self.implementation_member_type(implementation, member));
                     if let Some(value_type) = value_type {
+                        let module = self.syntax_module_label(member.syntax.id);
                         self.named_with_docs(
                             &member.syntax,
                             &member.name,
                             format!("def {}: {value_type}", member.name),
                             member.docs.clone(),
+                            module,
                         );
                     }
                     self.expression(&member.value);
@@ -508,11 +523,13 @@ impl Collector<'_> {
                     &declaration.subtype_bounds,
                     &declaration.functional_dependencies,
                 );
+                let module = self.syntax_module_label(declaration.syntax.id);
                 self.named_with_docs(
                     &declaration.syntax,
                     &declaration.name,
                     format!("trait {}{parameters}{where_clause}", declaration.name),
                     docs,
+                    module,
                 );
                 for parameter in &declaration.type_parameters {
                     self.type_parameter(parameter);
@@ -527,6 +544,7 @@ impl Collector<'_> {
                     self.trait_bound(prerequisite);
                 }
                 for member in &declaration.members {
+                    let module = self.syntax_module_label(declaration.syntax.id);
                     self.named_with_docs(
                         &member.syntax,
                         &member.name,
@@ -536,6 +554,7 @@ impl Collector<'_> {
                             member.annotation.syntax().text().trim()
                         ),
                         member.docs.clone(),
+                        module,
                     );
                     self.ty(&member.annotation);
                     if let Some(default) = &member.default {
@@ -597,11 +616,25 @@ impl Collector<'_> {
                         .get(&ty)
                         .map(|entry| entry.docs.clone())
                         .unwrap_or_default();
-                    self.named_with_docs(&declaration.syntax, &name, signature, docs);
+                    let module_label = self.definition_module_label(DefinitionId::Type(ty));
+                    self.named_with_docs(
+                        &declaration.syntax,
+                        &name,
+                        signature,
+                        docs,
+                        module_label,
+                    );
                 }
             } else if !file_backed {
                 let docs = self.submodule_docs(module);
-                self.named_with_docs(&declaration.syntax, &name, format!("mod {name}"), docs);
+                let module_label = self.module_id_label(module);
+                self.named_with_docs(
+                    &declaration.syntax,
+                    &name,
+                    format!("mod {name}"),
+                    docs,
+                    module_label,
+                );
             }
         }
     }
@@ -688,7 +721,7 @@ impl Collector<'_> {
             } else {
                 (format!("package {name}"), Vec::new())
             };
-            self.named_with_docs(&declaration.syntax, name, signature, docs);
+            self.named_with_docs(&declaration.syntax, name, signature, docs, None);
         }
 
         let Some(target) = self
@@ -726,17 +759,26 @@ impl Collector<'_> {
             if !path.is_file() {
                 continue;
             }
-            let docs = self
+            let segment_module = self
                 .typed
                 .resolved()
                 .program()
                 .modules()
                 .iter()
-                .find(|module| module.parent.is_none() && module.path == path)
+                .find(|module| module.parent.is_none() && module.path == path);
+            let docs = segment_module
                 .map(|module| module.syntax.docs.clone())
                 .unwrap_or_else(|| module_docs_from_file(&path));
+            let module_label =
+                segment_module.and_then(|module| self.module_id_label(module.id));
             let name = &components[index];
-            self.named_with_docs(&declaration.syntax, name, format!("mod {name}"), docs);
+            self.named_with_docs(
+                &declaration.syntax,
+                name,
+                format!("mod {name}"),
+                docs,
+                module_label,
+            );
         }
     }
 
@@ -756,10 +798,17 @@ impl Collector<'_> {
                 self.definition_signature_and_docs(*definition, declaration.syntax.id)
             });
         if let Some((signature, docs)) = signature {
+            let module = self.import_module_label(declaration.syntax.id, imported_name);
             if last {
-                self.named_last_with_docs(&declaration.syntax, token_name, signature, docs);
+                self.named_last_with_docs(
+                    &declaration.syntax,
+                    token_name,
+                    signature,
+                    docs,
+                    module,
+                );
             } else {
-                self.named_with_docs(&declaration.syntax, token_name, signature, docs);
+                self.named_with_docs(&declaration.syntax, token_name, signature, docs, module);
             }
         }
     }
@@ -843,7 +892,14 @@ impl Collector<'_> {
                 .get(id)
                 .map(|resolved| resolved.docs.clone())
                 .unwrap_or_else(|| declaration.docs.clone());
-            self.named_with_docs(&declaration.syntax, &declaration.name, signature, docs);
+            let module = self.definition_module_label(DefinitionId::Type(*id));
+            self.named_with_docs(
+                &declaration.syntax,
+                &declaration.name,
+                signature,
+                docs,
+                module,
+            );
         }
         for parameter in &declaration.type_parameters {
             self.type_parameter(parameter);
@@ -995,6 +1051,7 @@ impl Collector<'_> {
                     &name.name,
                     format!("package {}", program.package_name()),
                     docs,
+                    None,
                 );
             }
             Expression::Name(name) => {
@@ -1023,7 +1080,8 @@ impl Collector<'_> {
                     .get(&ty)
                     .map(|declaration| declaration.docs.clone())
                     .unwrap_or_default();
-                self.named_last_with_docs(syntax, name, signature, docs);
+                let module_label = self.definition_module_label(DefinitionId::Type(ty));
+                self.named_last_with_docs(syntax, name, signature, docs, module_label);
             }
             return;
         }
@@ -1041,7 +1099,8 @@ impl Collector<'_> {
                 _ => None,
             })
             .unwrap_or_else(|| resolved.program().module(module).syntax.docs.clone());
-        self.named_last_with_docs(syntax, name, format!("mod {name}"), docs);
+        let module_label = self.module_id_label(module);
+        self.named_last_with_docs(syntax, name, format!("mod {name}"), docs, module_label);
     }
 
     fn block_item(&mut self, item: &Item) {
@@ -1147,11 +1206,13 @@ impl Collector<'_> {
                 .and_then(|symbol| self.declarations.get(&symbol))
                 .map(|declaration| declaration.docs.clone())
                 .unwrap_or_else(|| binding.docs.clone());
+            let module = self.module_label(binding.syntax.id);
             self.named_with_docs(
                 &binding.syntax,
                 &binding.name,
                 format!("{prefix} {}: {generics}{value_type}", binding.name),
                 docs,
+                module,
             );
         }
         for parameter in &binding.type_parameters {
@@ -1174,12 +1235,14 @@ impl Collector<'_> {
             .resolved()
             .macro_invocation_for(expression.syntax().id)
         {
+            let module = self.syntax_module_label(info.declaration);
             match expression {
                 Expression::Name(name) => self.named_with_docs(
                     &name.syntax,
                     &name.name,
                     macro_signature(info),
                     info.docs.clone(),
+                    module,
                 ),
                 Expression::Access(access) => {
                     if let Accessor::Name(name) = &access.accessor {
@@ -1188,6 +1251,7 @@ impl Collector<'_> {
                             name,
                             macro_signature(info),
                             info.docs.clone(),
+                            module,
                         );
                     }
                 }
@@ -1196,6 +1260,7 @@ impl Collector<'_> {
                     quote.kind.name(),
                     macro_signature(info),
                     info.docs.clone(),
+                    module,
                 ),
                 _ => {}
             }
@@ -1235,7 +1300,15 @@ impl Collector<'_> {
                 .map(|declaration| declaration.docs.clone())
                 .or_else(|| trait_member.map(|member| member.docs.clone()))
                 .unwrap_or_default();
-            self.syntax_with_docs(expression.syntax(), signature, docs);
+            let module = self.module_label(expression.syntax().id).or_else(|| {
+                self.typed
+                    .resolved()
+                    .trait_methods_for_expression(expression.syntax().id)
+                    .first()
+                    .and_then(|method| self.typed.resolved().trait_for_method(*method))
+                    .and_then(|trait_id| self.definition_module_label(DefinitionId::Trait(trait_id)))
+            });
+            self.syntax_with_docs(expression.syntax(), signature, docs, module);
         }
         match expression {
             Expression::Function(function) => {
@@ -1409,7 +1482,8 @@ impl Collector<'_> {
                         .get(&id)
                         .map(|declaration| declaration.docs.clone())
                         .unwrap_or_default();
-                    self.named_with_docs(&nominal.syntax, &nominal.name, signature, docs);
+                    let module = self.definition_module_label(DefinitionId::Type(id));
+                    self.named_with_docs(&nominal.syntax, &nominal.name, signature, docs, module);
                 }
                 self.pattern(&nominal.argument);
             }
@@ -1458,11 +1532,13 @@ impl Collector<'_> {
                 &declaration.subtype_bounds,
                 &declaration.functional_dependencies,
             );
+            let module = self.definition_module_label(DefinitionId::Trait(trait_id));
             self.named_with_docs(
                 syntax,
                 name,
                 format!("trait {}{parameters}{where_clause}", declaration.name),
                 declaration.docs.clone(),
+                module,
             );
         }
     }
@@ -1480,7 +1556,8 @@ impl Collector<'_> {
                         .get(&id)
                         .map(|declaration| declaration.docs.clone())
                         .unwrap_or_default();
-                    self.named_with_docs(&named.syntax, &named.name, signature, docs);
+                    let module = self.definition_module_label(DefinitionId::Type(id));
+                    self.named_with_docs(&named.syntax, &named.name, signature, docs, module);
                 } else if self
                     .typed
                     .resolved()
@@ -1524,21 +1601,30 @@ impl Collector<'_> {
     }
 
     fn syntax(&mut self, syntax: &Syntax, signature: String) {
-        self.syntax_with_docs(syntax, signature, Vec::new());
+        let module = self.module_label(syntax.id);
+        self.syntax_with_docs(syntax, signature, Vec::new(), module);
     }
 
-    fn syntax_with_docs(&mut self, syntax: &Syntax, signature: String, documentation: Vec<String>) {
+    fn syntax_with_docs(
+        &mut self,
+        syntax: &Syntax,
+        signature: String,
+        documentation: Vec<String>,
+        module: Option<String>,
+    ) {
         if let Some(range) = crate::staple_lsp::source_projection::syntax_range(syntax, self.path) {
             self.entries.push(HoverEntry {
                 range,
                 signature,
                 documentation,
+                module,
             });
         }
     }
 
     fn named(&mut self, syntax: &Syntax, name: &str, signature: String) {
-        self.named_with_docs(syntax, name, signature, Vec::new());
+        let module = self.module_label(syntax.id);
+        self.named_with_docs(syntax, name, signature, Vec::new(), module);
     }
 
     fn named_with_docs(
@@ -1547,6 +1633,7 @@ impl Collector<'_> {
         name: &str,
         signature: String,
         documentation: Vec<String>,
+        module: Option<String>,
     ) {
         if let Some(range) =
             crate::staple_lsp::source_projection::named_range(syntax, name, false, self.path)
@@ -1555,12 +1642,14 @@ impl Collector<'_> {
                 range,
                 signature,
                 documentation,
+                module,
             });
         }
     }
 
     fn named_last(&mut self, syntax: &Syntax, name: &str, signature: String) {
-        self.named_last_with_docs(syntax, name, signature, Vec::new());
+        let module = self.module_label(syntax.id);
+        self.named_last_with_docs(syntax, name, signature, Vec::new(), module);
     }
 
     fn named_last_with_docs(
@@ -1569,6 +1658,7 @@ impl Collector<'_> {
         name: &str,
         signature: String,
         documentation: Vec<String>,
+        module: Option<String>,
     ) {
         if let Some(range) =
             crate::staple_lsp::source_projection::named_range(syntax, name, true, self.path)
@@ -1577,8 +1667,85 @@ impl Collector<'_> {
                 range,
                 signature,
                 documentation,
+                module,
             });
         }
+    }
+
+    /// The `use`-path-style name of the module that defines whatever the given
+    /// syntax node refers to — a value binding (module-level only), a named
+    /// type, a trait, or a macro. `None` for locals, parameters, and anything
+    /// that doesn't resolve to a nameable definition. Used as the default for
+    /// every hover entry; declaration and `use`-import sites override it.
+    fn module_label(&self, syntax_id: SyntaxId) -> Option<String> {
+        let resolved = self.typed.resolved();
+        if let Some(symbol) = self.typed.symbol_for(syntax_id) {
+            if !resolved.is_module_symbol(symbol) {
+                return None;
+            }
+            return resolved
+                .program()
+                .module_dotted_name(resolved.symbol_module(symbol)?);
+        }
+        if let Some(id) = resolved
+            .type_for(syntax_id)
+            .or_else(|| resolved.type_for_pattern(syntax_id))
+        {
+            return self.definition_module_label(DefinitionId::Type(id));
+        }
+        if let Some(id) = resolved.trait_for(syntax_id) {
+            return self.definition_module_label(DefinitionId::Trait(id));
+        }
+        if let Some(info) = resolved
+            .macro_invocation_for(syntax_id)
+            .or_else(|| resolved.macro_definition_for(syntax_id))
+        {
+            return self.syntax_module_label(info.declaration);
+        }
+        None
+    }
+
+    /// The dotted module name for a resolved definition.
+    fn definition_module_label(&self, definition: DefinitionId) -> Option<String> {
+        let resolved = self.typed.resolved();
+        resolved
+            .program()
+            .module_dotted_name(resolved.definition_module(definition)?)
+    }
+
+    /// The dotted name of the module a declaration node lives in (which, for a
+    /// declaration, is its defining module).
+    fn syntax_module_label(&self, syntax_id: SyntaxId) -> Option<String> {
+        let resolved = self.typed.resolved();
+        resolved
+            .program()
+            .module_dotted_name(resolved.module_for_syntax(syntax_id)?)
+    }
+
+    /// The dotted name of a module identified directly.
+    fn module_id_label(&self, module: ModuleId) -> Option<String> {
+        self.typed.resolved().program().module_dotted_name(module)
+    }
+
+    /// The dotted name of the child module a `mod` / `companion` header
+    /// introduces.
+    fn child_module_label(&self, submodule_syntax: SyntaxId) -> Option<String> {
+        let module = self
+            .typed
+            .resolved()
+            .program()
+            .child_module(submodule_syntax)?;
+        self.module_id_label(module)
+    }
+
+    /// The dotted source-module name for a name pulled in by a `use`
+    /// declaration.
+    fn import_module_label(&self, use_syntax: SyntaxId, imported_name: &str) -> Option<String> {
+        let resolved = self.typed.resolved();
+        resolved
+            .import_definitions(use_syntax, imported_name)
+            .iter()
+            .find_map(|definition| self.definition_module_label(*definition))
     }
 }
 
@@ -1651,6 +1818,118 @@ mod tests {
                 && entry.documentation == ["Root package documentation."]
         }));
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hover_shows_defining_module_for_a_standard_library_symbol() {
+        let source = "use std.io.println\nprintln \"hi\"\n";
+        let path = std::env::temp_dir().join("staple-hover-defining-module-std.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "println"
+                    && entry.module.as_deref() == Some("std.io")
+            }),
+            "no `println` hover names `std.io`: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn hover_shows_package_module_for_an_imported_name() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-hover-defining-module-package-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(root.join("tools")).unwrap();
+        let root_path = root.join("root.sta");
+        std::fs::write(&root_path, "pub mod\n").unwrap();
+        std::fs::write(root.join("tools/text.sta"), "pub mod\npub let shout = 1\n").unwrap();
+        let source = "use tools.text.shout\nshout\n";
+        let path = root.join("main.sta");
+        let program = ProgramLoader::new()
+            .with_module_root(&root)
+            .with_package_root(&root_path)
+            .with_package_name("example")
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        let named = entries
+            .iter()
+            .filter(|entry| &source[entry.range.clone()] == "shout")
+            .collect::<Vec<_>>();
+        assert!(!named.is_empty(), "no `shout` hover entries: {entries:?}");
+        assert!(
+            named
+                .iter()
+                .all(|entry| entry.module.as_deref() == Some("example.tools.text")),
+            "a `shout` hover does not name `example.tools.text`: {named:?}"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn hover_omits_the_module_line_for_locals_and_parameters() {
+        let source = "def f = (a: I32) => {\n    let x = a\n    x\n}\n";
+        let path = std::env::temp_dir().join("staple-hover-defining-module-local.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        for name in ["a", "x"] {
+            let hovers = entries
+                .iter()
+                .filter(|entry| &source[entry.range.clone()] == name)
+                .collect::<Vec<_>>();
+            assert!(!hovers.is_empty(), "no `{name}` hover entries: {entries:?}");
+            assert!(
+                hovers.iter().all(|entry| entry.module.is_none()),
+                "`{name}` hover should carry no module line: {hovers:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn hover_module_lines_never_leak_paths_or_ids() {
+        let source = "use std.io.println\nprintln \"hi\"\n";
+        let path = std::env::temp_dir().join("staple-hover-defining-module-no-leak.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        for entry in &entries {
+            if let Some(module) = &entry.module {
+                assert!(
+                    !module.contains(".sta")
+                        && !module.contains('/')
+                        && !module.contains('\\')
+                        && !module.contains("ModuleId"),
+                    "leaky module line {module:?} in {entry:?}"
+                );
+            }
+        }
     }
 
     #[test]

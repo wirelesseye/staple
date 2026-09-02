@@ -387,27 +387,14 @@ impl Server {
                     left.signature
                         .cmp(&right.signature)
                         .then(left.documentation.cmp(&right.documentation))
+                        .then(left.module.cmp(&right.module))
                 });
                 entries.dedup();
                 let entry = entries.first()?;
                 let (start_line, start_character) =
                     semantic::position(&document.text, entry.range.start);
                 let (end_line, end_character) = semantic::position(&document.text, entry.range.end);
-                let value = entries
-                    .into_iter()
-                    .map(|entry| {
-                        if entry.documentation.is_empty() {
-                            format!("```staple\n{}\n```", entry.signature)
-                        } else {
-                            format!(
-                                "```staple\n{}\n```\n\n{}",
-                                entry.signature,
-                                entry.documentation.join("\n")
-                            )
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n\n---\n\n");
+                let value = render_hover_markdown(&entries);
                 Some(Hover {
                     contents: HoverContents::Markup(MarkupContent {
                         kind: MarkupKind::Markdown,
@@ -719,6 +706,32 @@ fn merge_semantic_entries(
     entries
 }
 
+/// Renders the hover popup markdown for the entries that cover a position.
+/// rust-analyzer style: when an entry names its defining module, that module
+/// path gets its own fenced block above the signature's fenced block.
+fn render_hover_markdown(entries: &[&HoverEntry]) -> String {
+    entries
+        .iter()
+        .map(|entry| {
+            let mut rendered = String::new();
+            if let Some(module) = &entry.module {
+                rendered.push_str("```staple\n");
+                rendered.push_str(module);
+                rendered.push_str("\n```\n\n");
+            }
+            rendered.push_str("```staple\n");
+            rendered.push_str(&entry.signature);
+            rendered.push_str("\n```");
+            if !entry.documentation.is_empty() {
+                rendered.push_str("\n\n");
+                rendered.push_str(&entry.documentation.join("\n"));
+            }
+            rendered
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n---\n\n")
+}
+
 fn remap_hover_entries(source: &str, successful: &SuccessfulAnalysis) -> Vec<HoverEntry> {
     let change = TextChange::between(&successful.source, source);
     successful
@@ -732,6 +745,7 @@ fn remap_hover_entries(source: &str, successful: &SuccessfulAnalysis) -> Vec<Hov
                     range,
                     signature: entry.signature.clone(),
                     documentation: entry.documentation.clone(),
+                    module: entry.module.clone(),
                 }
             })
         })
@@ -1210,6 +1224,7 @@ mod tests {
                 range: reference..reference + 4,
                 signature: "def good: () -> I32".to_owned(),
                 documentation: Vec::new(),
+                module: None,
             }],
         };
 
@@ -1230,6 +1245,34 @@ mod tests {
         assert_eq!(hover.len(), 1);
         assert_eq!(&new[hover[0].range.clone()], "good");
         assert_eq!(hover[0].signature, "def good: () -> I32");
+        assert_eq!(hover[0].module, successful.hover_entries[0].module);
+    }
+
+    #[test]
+    fn hover_markdown_leads_with_a_fenced_module_path() {
+        let with_module = HoverEntry {
+            range: 0..1,
+            signature: "def println: String -> () / IO".to_owned(),
+            documentation: vec!["Prints a line.".to_owned()],
+            module: Some("std.io".to_owned()),
+        };
+        let rendered = render_hover_markdown(&[&with_module]);
+        assert_eq!(
+            rendered,
+            "```staple\nstd.io\n```\n\n```staple\ndef println: String -> () / IO\n```\n\nPrints a line."
+        );
+        assert!(rendered.starts_with("```staple\nstd.io\n```\n\n```staple"));
+
+        let without_module = HoverEntry {
+            range: 0..1,
+            signature: "let x: I32".to_owned(),
+            documentation: Vec::new(),
+            module: None,
+        };
+        assert_eq!(
+            render_hover_markdown(&[&without_module]),
+            "```staple\nlet x: I32\n```"
+        );
     }
 
     #[test]
@@ -1432,6 +1475,22 @@ mod tests {
             token.token_type,
             semantic::MACRO,
             "`when` should be classified as a macro"
+        );
+
+        let println = source.find("println").unwrap();
+        let println_hover = document
+            .hover_entries
+            .iter()
+            .find(|entry| {
+                entry.range.start <= println
+                    && println < entry.range.end
+                    && &source[entry.range.clone()] == "println"
+            })
+            .unwrap_or_else(|| panic!("no hover entry for `println`: {:?}", document.hover_entries));
+        assert_eq!(
+            println_hover.module.as_deref(),
+            Some("std.io"),
+            "`println` hover should name its defining module"
         );
     }
 
