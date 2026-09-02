@@ -953,11 +953,15 @@ impl Collector<'_> {
             &declaration.subtype_bounds,
             &[],
         );
+        let head = format!("type{alias} {}{parameters}{where_clause}", declaration.name);
+        // A singleton type has no representation to reveal.
+        if declaration.kind == TypeDeclarationKind::Singleton {
+            return Some(head);
+        }
+        // The representation exists but isn't reachable from the hovering
+        // module, so stand in an elision for it rather than dropping the `=`.
         if !representation_is_visible {
-            return Some(format!(
-                "type{alias} {}{parameters}{where_clause}",
-                declaration.name
-            ));
+            return Some(format!("{head} = /* … */"));
         }
         let representation = declaration
             .underlying
@@ -968,10 +972,7 @@ impl Collector<'_> {
                 TypeDeclarationKind::Singleton => "()".to_owned(),
                 TypeDeclarationKind::Alias | TypeDeclarationKind::Distinct => "...".to_owned(),
             });
-        Some(format!(
-            "type{alias} {}{parameters}{where_clause} = {representation}",
-            declaration.name
-        ))
+        Some(format!("{head} = {representation}"))
     }
 
     /// Hovers over the namespace/type segments of a resolved qualified
@@ -2693,6 +2694,28 @@ mod tests {
     }
 
     #[test]
+    fn formats_singleton_type_declarations_without_a_representation() {
+        let source = concat!(
+            "type Marker\n",
+            "def tag: Marker -> Marker = value => value\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-singleton-type-test.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "Marker" && entry.signature == "type Marker"
+        }));
+        assert!(!entries.iter().any(|entry| entry.signature.contains("Marker = ")));
+    }
+
+    #[test]
     fn respects_imported_type_representation_visibility() {
         let root = std::env::temp_dir().join(format!(
             "staple-hover-import-types-test-{}",
@@ -2728,11 +2751,12 @@ mod tests {
         let entries = entries(&module, &typed);
 
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Hidden" && entry.signature == "type Hidden"
+            &source[entry.range.clone()] == "Hidden"
+                && entry.signature == "type Hidden = /* … */"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "HiddenGeneric"
-                && entry.signature == "type HiddenGeneric T"
+                && entry.signature == "type HiddenGeneric T = /* … */"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "Visible" && entry.signature == "type Visible = I32"
