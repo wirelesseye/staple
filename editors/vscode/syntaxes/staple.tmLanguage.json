@@ -19,8 +19,15 @@
         {
           "name": "comment.line.double-slash.staple",
           "match": "//.*$"
-        }
+        },
+        { "include": "#block-comment" }
       ]
+    },
+    "block-comment": {
+      "name": "comment.block.staple",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [{ "include": "#block-comment" }]
     },
     "strings": {
       "patterns": [

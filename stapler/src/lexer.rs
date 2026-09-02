@@ -23,6 +23,9 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
             let length = text[at..].find(['\r', '\n']).unwrap_or(text.len() - at);
             Some((TokenKind::LineComment, at + length))
         };
+        let block_comment = |text: &str, at: usize| {
+            lex_block_comment(text, at).map(|end| (TokenKind::BlockComment, end))
+        };
         let string =
             |text: &str, at: usize| lex_string(text, at).map(|end| (TokenKind::String, end));
         let identifier = |text: &str, at: usize| {
@@ -37,6 +40,7 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
         let parsed = newline
             .or(whitespace)
             .or(comment)
+            .or(block_comment)
             .or(string)
             .or(tag("=>").map(|_| TokenKind::FatArrow))
             .or(tag("->").map(|_| TokenKind::Arrow))
@@ -180,6 +184,36 @@ fn lex_float(source: &str, offset: usize) -> Option<usize> {
     (has_dot || has_exponent).then_some(end)
 }
 
+/// Returns the byte offset just past a `/* ... */` block comment starting at
+/// `offset`. Block comments nest, so an inner `/*` must be balanced by a `*/`
+/// before the comment closes. An unterminated comment extends to the end of the
+/// input so incomplete documents still tokenize losslessly.
+fn lex_block_comment(source: &str, offset: usize) -> Option<usize> {
+    let bytes = source.as_bytes();
+    if bytes.get(offset) != Some(&b'/') || bytes.get(offset + 1) != Some(&b'*') {
+        return None;
+    }
+    let mut cursor = offset + 2;
+    let mut depth = 1usize;
+    while cursor + 1 < source.len() {
+        match (bytes[cursor], bytes[cursor + 1]) {
+            (b'/', b'*') => {
+                depth += 1;
+                cursor += 2;
+            }
+            (b'*', b'/') => {
+                depth -= 1;
+                cursor += 2;
+                if depth == 0 {
+                    return Some(cursor);
+                }
+            }
+            _ => cursor += 1,
+        }
+    }
+    Some(source.len())
+}
+
 fn lex_string(source: &str, offset: usize) -> Option<usize> {
     if source.as_bytes().get(offset) != Some(&b'"') {
         return None;
@@ -217,6 +251,10 @@ fn lex_string(source: &str, offset: usize) -> Option<usize> {
             cursor = source[cursor..]
                 .find(['\r', '\n'])
                 .map_or(source.len(), |relative| cursor + relative);
+            continue;
+        }
+        if source[cursor..].starts_with("/*") {
+            cursor = lex_block_comment(source, cursor)?;
             continue;
         }
         match character {

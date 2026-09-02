@@ -50,6 +50,7 @@ pub enum TokenKind {
     Whitespace,
     Newline,
     LineComment,
+    BlockComment,
     LParen,
     RParen,
     LBrace,
@@ -77,7 +78,10 @@ pub enum TokenKind {
 
 impl TokenKind {
     pub fn is_trivia(self) -> bool {
-        matches!(self, Self::Whitespace | Self::Newline | Self::LineComment)
+        matches!(
+            self,
+            Self::Whitespace | Self::Newline | Self::LineComment | Self::BlockComment
+        )
     }
 }
 

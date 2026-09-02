@@ -1663,6 +1663,41 @@ fn comments_and_crlf_are_preserved() {
 }
 
 #[test]
+fn lexes_block_comments_including_nesting_and_unterminated() {
+    let single = stapler::lex("/* comment */");
+    assert_eq!(single.len(), 1);
+    assert_eq!(single[0].kind, TokenKind::BlockComment);
+    assert_eq!(single[0].text, "/* comment */");
+
+    let nested = stapler::lex("/* outer /* inner */ still outer */rest");
+    assert_eq!(nested[0].kind, TokenKind::BlockComment);
+    assert_eq!(nested[0].text, "/* outer /* inner */ still outer */");
+    assert_eq!(nested[1].text, "rest");
+
+    let unterminated = stapler::lex("/* never closed");
+    assert_eq!(unterminated.len(), 1);
+    assert_eq!(unterminated[0].kind, TokenKind::BlockComment);
+    assert_eq!(unterminated[0].text, "/* never closed");
+
+    assert!(TokenKind::BlockComment.is_trivia());
+}
+
+#[test]
+fn block_comments_are_trivia_and_preserved() {
+    let source = "def main/* inline */: _ -> String =\n/* leading */() => {\n  \"ok\" /* trailing */\n}\n";
+    let root = parse(source).expect("block comments should parse");
+    assert_eq!(root.syntax.text(), source);
+    assert_eq!(
+        root.syntax
+            .tokens()
+            .iter()
+            .filter(|token| token.kind == TokenKind::BlockComment)
+            .count(),
+        3
+    );
+}
+
+#[test]
 fn parses_named_product_types_values_and_access() {
     let source = concat!(
         "def args: (name: String, int)\n",

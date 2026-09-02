@@ -504,7 +504,9 @@ a source file does not change its text. Newlines also separate adjacent
 statements where they would otherwise form a single expression. A semicolon may
 be written after any item as an explicit separator, including after the last item in a sequence.
 
-Line comments begin with `//` and continue to the end of the line.
+Line comments begin with `//` and continue to the end of the line. Block
+comments are delimited by `/*` and `*/`, may span multiple lines, and nest, so
+every `/*` inside a block comment must be balanced by a matching `*/`.
 
 ### Top-level statements
 

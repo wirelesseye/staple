@@ -114,7 +114,7 @@ pub fn entries_at_path(
 
 fn lexical_kind(kind: TokenKind) -> Option<u32> {
     match kind {
-        TokenKind::LineComment => Some(COMMENT),
+        TokenKind::LineComment | TokenKind::BlockComment => Some(COMMENT),
         TokenKind::String => Some(STRING),
         TokenKind::Integer | TokenKind::Float => Some(NUMBER),
         TokenKind::Use
