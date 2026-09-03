@@ -1,15 +1,13 @@
 use std::ffi::{OsStr, OsString};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use stapler::{
     CodeGenerator, Diagnostic, NameResolver, Program, ProgramLoader, TypeChecker, TypedModule,
-    expand_macros,
+    expand_macros, format_source, render_expanded_module,
 };
-
-mod expansion_render;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EmitKind {
@@ -24,12 +22,14 @@ enum Mode {
     Check,
     Run,
     Expand,
+    Format,
 }
 
 #[derive(Debug)]
 enum Outcome {
     Completed(Option<String>),
     Executed(ExitStatus),
+    FormatMismatch(String),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -51,6 +51,7 @@ struct Options {
     features: Vec<String>,
     all_features: bool,
     no_default_features: bool,
+    format_check: bool,
 }
 
 fn main() -> ExitCode {
@@ -61,6 +62,10 @@ fn main() -> ExitCode {
         }
         Ok(Outcome::Completed(None)) => ExitCode::SUCCESS,
         Ok(Outcome::Executed(status)) => exit_code(status),
+        Ok(Outcome::FormatMismatch(input)) => {
+            eprintln!("stpl: `{input}` is not formatted");
+            ExitCode::FAILURE
+        }
         Err(message) => {
             eprintln!("stpl: {message}");
             ExitCode::FAILURE
@@ -85,8 +90,14 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
         if command == "expand" {
             return Ok(Outcome::Completed(Some(format!("{}\n", expand_usage()))));
         }
+        if command == "fmt" {
+            return Ok(Outcome::Completed(Some(format!("{}\n", fmt_usage()))));
+        }
     }
     let options = parse_options(arguments)?;
+    if options.mode == Mode::Format {
+        return format_input(&options);
+    }
     let mut loader = match &options.standard_library {
         Some(root) => ProgramLoader::new().with_standard_library_root(root),
         None => ProgramLoader::new(),
@@ -128,7 +139,7 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
 
     if options.mode == Mode::Expand {
         let expanded = expand_macros(program).map_err(format_diagnostics)?;
-        let rendered = expansion_render::render_module(&expanded);
+        let rendered = render_expanded_module(&expanded);
         return match &options.output {
             Some(output) => {
                 std::fs::write(output, rendered)
@@ -212,6 +223,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             arguments.next();
             Mode::Expand
         }
+        Some("fmt") => {
+            arguments.next();
+            Mode::Format
+        }
         _ => Mode::Compile,
     };
     let mut options = Options {
@@ -232,6 +247,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
         features: Vec::new(),
         all_features: false,
         no_default_features: false,
+        format_check: false,
     };
     let mut positional_only = false;
     let mut emit_specified = false;
@@ -307,6 +323,10 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             options.no_default_features = true;
             continue;
         }
+        if !positional_only && argument == "--check" && options.mode == Mode::Format {
+            options.format_check = true;
+            continue;
+        }
         if !positional_only && argument == "-L" {
             options
                 .library_paths
@@ -347,6 +367,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
                 Mode::Run => run_usage(),
                 Mode::Check => check_usage(),
                 Mode::Expand => expand_usage(),
+                Mode::Format => fmt_usage(),
                 Mode::Compile => usage(),
             };
             return Err(format!("unknown option `{text}`\n{usage}"));
@@ -361,6 +382,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             return Err(match options.mode {
                 Mode::Check => check_usage(),
                 Mode::Expand => expand_usage(),
+                Mode::Format => fmt_usage(),
                 _ => usage(),
             });
         }
@@ -376,6 +398,7 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             Mode::Run => run_usage(),
             Mode::Check => check_usage(),
             Mode::Expand => expand_usage(),
+            Mode::Format => fmt_usage(),
             Mode::Compile => usage(),
         });
     }
@@ -435,12 +458,92 @@ fn parse_options(arguments: impl IntoIterator<Item = OsString>) -> Result<Option
             return Err("linker options are not supported by `stpl expand`".to_owned());
         }
     }
+    if options.mode == Mode::Format {
+        if options.output.is_some()
+            || emit_specified
+            || options.target.is_some()
+            || options.linker.is_some()
+            || options.standard_library.is_some()
+            || options.module_root.is_some()
+            || options.package_root.is_some()
+            || options.package_name.is_some()
+            || options.manifest_path.is_some()
+            || !options.features.is_empty()
+            || options.all_features
+            || options.no_default_features
+            || !options.library_paths.is_empty()
+            || !options.libraries.is_empty()
+        {
+            return Err(
+                "`stpl fmt` supports only `--check` and one input file (or `-`)".to_owned(),
+            );
+        }
+    }
     if options.emit != EmitKind::Executable
         && (!options.library_paths.is_empty() || !options.libraries.is_empty())
     {
         return Err("`-L` and `-l` require `--emit=exe`".to_owned());
     }
     Ok(options)
+}
+
+fn format_input(options: &Options) -> Result<Outcome, String> {
+    let source = read_source(&options.input)?;
+    let formatted = format_source(&source).map_err(|error| error.to_string())?;
+    if options.format_check {
+        return if formatted == source {
+            Ok(Outcome::Completed(None))
+        } else {
+            Ok(Outcome::FormatMismatch(
+                options.input.to_string_lossy().into_owned(),
+            ))
+        };
+    }
+    if options.input == "-" {
+        return Ok(Outcome::Completed(Some(formatted)));
+    }
+    if formatted != source {
+        atomic_write(Path::new(&options.input), formatted.as_bytes())?;
+    }
+    Ok(Outcome::Completed(None))
+}
+
+fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("could not inspect `{}`: {error}", path.display()))?;
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().unwrap_or_else(|| OsStr::new("source.sta"));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let temporary = parent.join(format!(
+        ".{}.stpl-fmt-{}-{nonce}",
+        name.to_string_lossy(),
+        std::process::id()
+    ));
+    let result = (|| {
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| format!("could not create `{}`: {error}", temporary.display()))?;
+        file.write_all(contents)
+            .and_then(|()| file.sync_all())
+            .map_err(|error| format!("could not write `{}`: {error}", temporary.display()))?;
+        std::fs::set_permissions(&temporary, metadata.permissions()).map_err(|error| {
+            format!(
+                "could not preserve permissions for `{}`: {error}",
+                path.display()
+            )
+        })?;
+        std::fs::rename(&temporary, path)
+            .map_err(|error| format!("could not replace `{}`: {error}", path.display()))
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
 }
 
 fn add_features(destination: &mut Vec<String>, value: &str) -> Result<(), String> {
@@ -615,6 +718,7 @@ fn usage() -> String {
         "       stpl check [options] <input.sta>\n",
         "       stpl run [options] <input.sta> [-- <arguments>...]\n",
         "       stpl expand [options] <input.sta>\n",
+        "       stpl fmt [--check] <input.sta|->\n",
         "\n",
         "options:\n",
         "  -h, --help                print this help\n",
@@ -700,6 +804,21 @@ fn expand_usage() -> String {
     .to_owned()
 }
 
+fn fmt_usage() -> String {
+    concat!(
+        "usage: stpl fmt [--check] <input.sta|->\n",
+        "\n",
+        "Formats one Staple source file without expanding or resolving macros.\n",
+        "A file is rewritten atomically; `-` reads standard input and writes\n",
+        "the formatted source to standard output.\n",
+        "\n",
+        "options:\n",
+        "  -h, --help  print this help\n",
+        "  --check     fail without writing when the input is not formatted",
+    )
+    .to_owned()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{EmitKind, Mode, Outcome, TemporaryArtifact, compile, parse_options, run};
@@ -729,6 +848,94 @@ mod tests {
             Outcome::Completed(Some(text)) => text,
             other => panic!("expand should print to stdout, got {other:?}"),
         }
+    }
+
+    fn temporary_source(name: &str, source: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "stpl-fmt-{name}-{}-{}.sta",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        ));
+        std::fs::write(&path, source).unwrap();
+        path
+    }
+
+    #[test]
+    fn parses_fmt_subcommand_and_check() {
+        let options = parse_options(["fmt".into(), "--check".into(), "input.sta".into()])
+            .expect("fmt options should parse");
+        assert_eq!(options.mode, Mode::Format);
+        assert!(options.format_check);
+    }
+
+    #[test]
+    fn fmt_help_describes_rewriting_and_checking() {
+        let Outcome::Completed(Some(help)) =
+            run(["fmt".into(), "--help".into()]).expect("fmt help should succeed")
+        else {
+            panic!("fmt help should be printed");
+        };
+        assert!(help.starts_with("usage: stpl fmt"));
+        assert!(help.contains("rewritten atomically"));
+        assert!(help.contains("--check"));
+    }
+
+    #[test]
+    fn fmt_rewrites_a_file_and_then_passes_check() {
+        let path = temporary_source("rewrite", "let   answer=42");
+        let outcome = run(["fmt".into(), path.clone().into_os_string()]).unwrap();
+        assert!(matches!(outcome, Outcome::Completed(None)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "let answer = 42\n");
+        let outcome = run([
+            "fmt".into(),
+            "--check".into(),
+            path.clone().into_os_string(),
+        ])
+        .unwrap();
+        assert!(matches!(outcome, Outcome::Completed(None)));
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fmt_check_does_not_rewrite_unformatted_input() {
+        let source = "let answer=42\n";
+        let path = temporary_source("check", source);
+        let outcome = run([
+            "fmt".into(),
+            "--check".into(),
+            path.clone().into_os_string(),
+        ])
+        .unwrap();
+        assert!(matches!(outcome, Outcome::FormatMismatch(_)));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn fmt_parse_failure_leaves_the_file_unchanged() {
+        let source = "let =\n";
+        let path = temporary_source("invalid", source);
+        assert!(run(["fmt".into(), path.clone().into_os_string()]).is_err());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), source);
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn fmt_preserves_file_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let path = temporary_source("permissions", "let answer=42\n");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+        run(["fmt".into(), path.clone().into_os_string()]).unwrap();
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o640
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
@@ -804,6 +1011,26 @@ mod tests {
         assert!(
             !expanded.contains("pair 41"),
             "the original macro invocation should be gone, got:\n{expanded}"
+        );
+    }
+
+    #[test]
+    fn expand_output_uses_the_shared_formatter_canonically() {
+        let expanded = expand_source(
+            "formatted",
+            concat!(
+                "// keep this comment\r\n",
+                "let condition:Bool=True\r\n",
+                "let selected:I32=if condition {1}else {2}\r\n",
+                "let clauses:I32=when {condition=>selected,else=>0}\r\n",
+            ),
+        );
+        assert!(expanded.contains("// keep this comment\n"));
+        assert!(!expanded.contains('\r'));
+        stapler::parse(&expanded).expect("valid expanded output should still parse");
+        assert_eq!(
+            stapler::format_source(&expanded).expect("expanded output should format"),
+            expanded,
         );
     }
 

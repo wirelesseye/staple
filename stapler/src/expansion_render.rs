@@ -29,20 +29,21 @@
 //!   * Macros inside a hand-written inline `mod` block render unexpanded (their
 //!     expansion lives in a separate flattened module).
 
-use stapler::{
+use crate::{
     Accessor, BlockExpression, Expression, Item, LogicalOperator, Pattern, Program, Submodule,
     Syntax, SyntaxToken, TokenKind, Visibility,
 };
+use crate::{formatter::format_token_stream, lex};
 
 /// Renders the entry module of `program` (already macro-expanded) as source.
-pub fn render_module(program: &Program) -> String {
+pub fn render_expanded_module(program: &Program) -> String {
     let module = &program.module(program.entry()).syntax;
     let mut output = String::new();
     render_items(&module.items, 0, &mut output);
     if !output.ends_with('\n') {
         output.push('\n');
     }
-    output
+    format_token_stream(&lex(&output))
 }
 
 fn render_items(items: &[Item], indent: usize, output: &mut String) {

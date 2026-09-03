@@ -93,6 +93,22 @@ a `parse_quote` that splices a name or type into a declaration
 (`type alias $name = $ty`), a non-wholesale expansion nested inside an
 already-generated node, and macros inside a hand-written inline `mod` block.
 
+## Formatting
+
+`stpl fmt` formats one source file in place without loading the standard library,
+expanding macros, resolving names, or type checking:
+
+```text
+stpl fmt examples/hello_world.sta
+stpl fmt --check examples/hello_world.sta
+```
+
+`--check` exits unsuccessfully without writing when the input is not already
+formatted. Use `stpl fmt -` to read source from standard input and print the
+formatted result. Macro calls follow the same application and delimiter rules as
+all other syntax; the formatter does not give standard-library macros special
+treatment and does not change punctuation in opaque macro arguments.
+
 ## Standard library
 
 Stapler loads the standard library at compile time. Install the repository copy
