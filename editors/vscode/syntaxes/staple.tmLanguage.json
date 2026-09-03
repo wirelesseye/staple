@@ -131,11 +131,11 @@
         },
         {
           "name": "keyword.control.import.staple",
-          "match": "\\b(?:use|as|package)\\b"
+          "match": "\\b(?:use|as|package|super)\\b"
         },
         {
           "name": "keyword.declaration.staple",
-          "match": "\\b(?:const|def|extern|impl|let|macro|mod|signal|trait|type)\\b"
+          "match": "\\b(?:companion|const|def|extern|impl|let|macro|mod|signal|trait|type)\\b"
         },
         {
           "name": "storage.modifier.staple",

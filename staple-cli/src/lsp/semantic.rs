@@ -14,11 +14,17 @@ pub const FUNCTION: u32 = 5;
 pub const PARAMETER: u32 = 6;
 pub const VARIABLE: u32 = 7;
 pub const PROPERTY: u32 = 8;
+// Keywords are left to the TextMate grammar, so no semantic token of this
+// type is emitted any more; the slot is kept in the legend for protocol
+// stability (renumbering would shift every following type) and the constant
+// is still referenced by tests.
+#[allow(dead_code)]
 pub const KEYWORD: u32 = 9;
 pub const COMMENT: u32 = 10;
 pub const STRING: u32 = 11;
 pub const NUMBER: u32 = 12;
 pub const OPERATOR: u32 = 13;
+pub const MODIFIER: u32 = 14;
 
 const DECLARATION: u32 = 1 << 0;
 const DEFINITION: u32 = 1 << 1;
@@ -43,6 +49,7 @@ pub fn legend() -> SemanticTokensLegend {
             SemanticTokenType::STRING,
             SemanticTokenType::NUMBER,
             SemanticTokenType::OPERATOR,
+            SemanticTokenType::MODIFIER,
         ],
         token_modifiers: vec![
             SemanticTokenModifier::DECLARATION,
@@ -118,33 +125,23 @@ fn lexical_kind(kind: TokenKind) -> Option<u32> {
         TokenKind::LineComment | TokenKind::BlockComment => Some(COMMENT),
         TokenKind::String => Some(STRING),
         TokenKind::Integer | TokenKind::Float => Some(NUMBER),
-        TokenKind::Use
-        | TokenKind::Package
-        | TokenKind::As
-        | TokenKind::Pub
-        | TokenKind::Let
+        // Storage modifiers (`storage.modifier` in the TextMate grammar):
+        // classified distinctly from control/declaration keywords so a theme
+        // can colour them the same way it does under syntax highlighting.
+        TokenKind::Pub
         | TokenKind::Mut
         | TokenKind::Move
         | TokenKind::Signal
-        | TokenKind::Return
-        | TokenKind::Loop
-        | TokenKind::Break
-        | TokenKind::Continue
-        | TokenKind::Def
-        | TokenKind::Const
-        | TokenKind::Extern
-        | TokenKind::Type
-        | TokenKind::Mod
-        | TokenKind::Companion
-        | TokenKind::Macro
-        | TokenKind::Trait
-        | TokenKind::Impl
-        | TokenKind::Match
         | TokenKind::Alias
-        | TokenKind::Opaque
-        | TokenKind::Where
-        | TokenKind::Satisfies
-        | TokenKind::Underscore => Some(KEYWORD),
+        | TokenKind::Opaque => Some(MODIFIER),
+        // Control / declaration / import keywords (`use`, `def`, `let`,
+        // `match`, `return`, `package`, ...) are deliberately *not* emitted
+        // as semantic tokens. They are fully covered by the TextMate grammar,
+        // and a theme that gives the semantic `keyword` type its own colour
+        // (e.g. VS Code's "Dark 2026") would otherwise repaint them a
+        // different colour from every other keyword the grammar highlights.
+        // Leaving them to the grammar keeps syntax and semantic highlighting
+        // in agreement.
         TokenKind::Operator
         | TokenKind::Equals
         | TokenKind::Arrow
@@ -318,13 +315,13 @@ impl<'a> Classifier<'a> {
             }
             Item::UseDeclaration(value) => {
                 for (index, part) in value.path.iter().enumerate() {
-                    if index == 0 && part == "package" {
-                        // The `package` root is the reserved keyword, not a
-                        // namespace segment.
-                        self.mark_first(&value.syntax, part, KEYWORD, 0, 2);
-                    } else {
-                        self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
+                    if part == "super" || (index == 0 && part == "package") {
+                        // `package` / `super` path roots are reserved keywords
+                        // the TextMate grammar already highlights; don't emit
+                        // a semantic token for them. See `lexical_kind`.
+                        continue;
                     }
+                    self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
                 }
                 match resolved
                     .map(|resolved| resolved.program().use_kind(value))
@@ -501,13 +498,13 @@ impl<'a> Classifier<'a> {
             }
             Item::UseDeclaration(value) => {
                 for (index, part) in value.path.iter().enumerate() {
-                    if index == 0 && part == "package" {
-                        // The `package` root is the reserved keyword, not a
-                        // namespace segment.
-                        self.mark_first(&value.syntax, part, KEYWORD, 0, 2);
-                    } else {
-                        self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
+                    if part == "super" || (index == 0 && part == "package") {
+                        // `package` / `super` path roots are reserved keywords
+                        // the TextMate grammar already highlights; don't emit
+                        // a semantic token for them. See `lexical_kind`.
+                        continue;
                     }
+                    self.mark_first(&value.syntax, part, NAMESPACE, 0, 1);
                 }
                 match resolved
                     .map(|resolved| resolved.program().use_kind(value))
@@ -684,11 +681,13 @@ impl<'a> Classifier<'a> {
                 }
             }
             Expression::Resource(value) => {
-                self.mark_first(&value.syntax, "resource", KEYWORD, 0, 1);
+                // `resource` is a keyword the TextMate grammar already
+                // highlights; see the note in `lexical_kind`.
                 self.ty(&value.resource, resolved);
             }
             Expression::With(value) => {
-                self.mark_first(&value.syntax, "with", KEYWORD, 0, 1);
+                // `with` is a keyword the TextMate grammar already highlights;
+                // see the note in `lexical_kind`.
                 self.ty(&value.resource, resolved);
                 self.expression(&value.value, resolved);
                 for item in &value.body.items {
@@ -827,10 +826,11 @@ impl<'a> Classifier<'a> {
                 self.mark_last(&value.syntax, &value.name, kind, READONLY, 1);
             }
             Expression::Name(value) => {
-                if value.name == "package" {
-                    // The `package` root is the reserved keyword, whether or
-                    // not the enclosing chain resolved to a qualified path.
-                    self.mark_last(&value.syntax, &value.name, KEYWORD, 0, 2);
+                if value.name == "package" || value.name == "super" {
+                    // `package` / `super` roots are reserved keywords the
+                    // TextMate grammar highlights (see `lexical_kind`); emit
+                    // nothing, but still return so they aren't classified as a
+                    // value.
                     return;
                 }
                 if resolved
@@ -922,19 +922,15 @@ impl<'a> Classifier<'a> {
     }
 
     fn visibility(&mut self, visibility: &VisibilitySyntax) {
-        self.mark_first(&visibility.syntax, "pub", KEYWORD, 0, 1);
+        self.mark_first(&visibility.syntax, "pub", MODIFIER, 0, 1);
         if matches!(
             visibility.kind,
             VisibilityKind::PublicRepr | VisibilityKind::PublicReprPackage
         ) {
-            self.mark_last(&visibility.syntax, "repr", KEYWORD, 0, 1);
+            self.mark_last(&visibility.syntax, "repr", MODIFIER, 0, 1);
         }
-        if matches!(
-            visibility.kind,
-            VisibilityKind::Package | VisibilityKind::PublicReprPackage
-        ) {
-            self.mark_last(&visibility.syntax, "package", KEYWORD, 0, 1);
-        }
+        // `package` in `pub package` is a keyword the TextMate grammar
+        // highlights; see the note in `lexical_kind`.
     }
 
     fn pattern(&mut self, pattern: &Pattern, kind: u32, resolved: Option<&ResolvedModule>) {
@@ -1119,10 +1115,9 @@ impl<'a> Classifier<'a> {
     fn qualified_receiver(&mut self, expression: &Expression, resolved: Option<&ResolvedModule>) {
         let Some(resolved) = resolved else { return };
         match expression {
-            Expression::Name(name) if name.name == "package" => {
-                // The `package` root is the reserved keyword, not a
-                // namespace segment.
-                self.mark_last(&name.syntax, &name.name, KEYWORD, 0, 2);
+            Expression::Name(name) if name.name == "package" || name.name == "super" => {
+                // `package` / `super` roots are keywords the TextMate grammar
+                // highlights, not namespace segments; emit nothing.
             }
             Expression::Name(name) => match resolved.namespace_for(name.syntax.id) {
                 Some(module) => {
@@ -1402,6 +1397,10 @@ mod tests {
         );
         assert_eq!(legend.token_types[MACRO as usize], SemanticTokenType::MACRO);
         assert_eq!(
+            legend.token_types[MODIFIER as usize],
+            SemanticTokenType::MODIFIER
+        );
+        assert_eq!(
             legend.token_modifiers[0],
             SemanticTokenModifier::DECLARATION
         );
@@ -1409,9 +1408,12 @@ mod tests {
 
     #[test]
     fn malformed_source_keeps_lexical_tokens() {
+        // Keywords are left to the TextMate grammar (see `lexical_kind`), but
+        // the lexical fallback still classifies strings/numbers/comments even
+        // when the parse fails.
         let result = tokens("def broken = \"unterminated", None, None, None);
-        assert!(result.iter().any(|token| token.token_type == KEYWORD));
         assert!(result.iter().any(|token| token.token_type == STRING));
+        assert!(result.iter().all(|token| token.token_type != KEYWORD));
     }
 
     #[test]
@@ -1456,14 +1458,17 @@ mod tests {
             ("field", PROPERTY),
             ("child", NAMESPACE),
             ("nested", VARIABLE),
-            ("resource", KEYWORD),
-            ("with", KEYWORD),
-            ("signal", KEYWORD),
+            ("signal", MODIFIER),
         ] {
             assert!(
                 labels.contains(&expected),
                 "missing {expected:?} in {labels:?}"
             );
+        }
+        // Control / declaration keywords (`resource`, `with`, `use`, `def`,
+        // ...) are left to the TextMate grammar and get no semantic token.
+        for absent in [("resource", KEYWORD), ("with", KEYWORD), ("use", KEYWORD)] {
+            assert!(!labels.contains(&absent), "unexpected {absent:?} in {labels:?}");
         }
     }
 
@@ -1767,7 +1772,7 @@ mod tests {
     }
 
     #[test]
-    fn classifies_package_root_as_keyword_and_segments_as_namespaces() {
+    fn classifies_package_root_segments_as_namespaces() {
         let root = std::env::temp_dir().join(format!(
             "staple-semantic-package-root-{}",
             std::process::id()
@@ -1798,16 +1803,11 @@ mod tests {
             &tokens(source, Some(&module), Some(typed.resolved()), Some(&typed)),
         );
 
-        assert_eq!(
-            labels
-                .iter()
-                .filter(|token| **token == ("package", KEYWORD))
-                .count(),
-            2,
-            "labels: {labels:?}"
-        );
+        // The `package` path root is a keyword left to the TextMate grammar;
+        // the classifier emits no semantic token for it (in particular it is
+        // never misclassified as a namespace segment).
         assert!(
-            !labels.contains(&("package", NAMESPACE)),
+            !labels.iter().any(|token| token.0 == "package"),
             "labels: {labels:?}"
         );
         for segment in ["outer", "inner"] {

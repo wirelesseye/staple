@@ -34,6 +34,14 @@
         "path": "./syntaxes/staple.tmLanguage.json"
       }
     ],
+    "semanticTokenScopes": [
+      {
+        "language": "staple",
+        "scopes": {
+          "modifier": ["storage.modifier.staple"]
+        }
+      }
+    ],
     "configuration": {
       "title": "Staple",
       "properties": {
