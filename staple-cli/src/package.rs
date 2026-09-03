@@ -636,7 +636,7 @@ mod tests {
         std::fs::create_dir_all(fixture.root.join("source/bin")).unwrap();
         std::fs::write(fixture.root.join("source/bin/app.sta"), "42\n").unwrap();
         let manifest = fixture.manifest(
-            "package \"hello\" {\n  root \"source/root.sta\"\n  entry \"source/bin/app.sta\"\n}\n",
+            "package \"hello\" {\n  root \"source\"\n  entry \"source/bin/app.sta\"\n}\n",
         );
         let package = load_package(&manifest).expect("manifest should parse");
 
@@ -685,7 +685,7 @@ mod tests {
         std::fs::write(&outside, "42\n").unwrap();
         let error =
             load_package(&fixture.manifest(
-                "package \"hello\" { root \"src/root.sta\"; entry \"../../main.sta\" }\n",
+                "package \"hello\" { root \"src\"; entry \"../../main.sta\" }\n",
             ))
             .expect_err("escaping entry should fail");
         let _ = std::fs::remove_file(outside);

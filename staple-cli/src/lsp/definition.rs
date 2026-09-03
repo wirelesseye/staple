@@ -1790,7 +1790,7 @@ mod tests {
         std::fs::create_dir_all(root.join("src/middle")).unwrap();
         std::fs::write(
             root.join("staple.kdl"),
-            "package \"hello_world\" {\n    root \"src/root.sta\"\n}\n",
+            "package \"hello_world\" {\n    root \"src\"\n}\n",
         )
         .unwrap();
         std::fs::write(root.join("src/root.sta"), "/// Test docs\npub mod").unwrap();

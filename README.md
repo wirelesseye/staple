@@ -49,7 +49,7 @@ A package is described by `staple.kdl`:
 
 ```kdl
 package "hello" {
-    root "src/root.sta"
+    root "src"
     entry "src/main.sta"
 }
 ```
@@ -78,9 +78,10 @@ to every graph as an implicit dependency under the alias `std`, so `use std.…`
 works without a `dependencies` entry and `std` is a reserved alias a manifest
 may not bind.
 
-`root` and `entry` are relative to the manifest directory. `root` defaults to
-`src/root.sta` and its file is optional; its parent directory still anchors
-package module paths. Executable entries default to `src/main.sta`. Libraries
+`root` and `entry` are relative to the manifest directory. `root` names the
+directory that anchors package module paths and defaults to `src`; the root
+module is always `root.sta` inside it, and that file is optional. Executable
+entries default to `src/main.sta`. Libraries
 only have an entry when one is explicitly declared. The minimal executable
 manifest is:
 

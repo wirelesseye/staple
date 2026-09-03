@@ -2318,7 +2318,7 @@ fn resolves_package_visible_items_within_a_package() {
     );
     fs::write(
         fixture.root.join("staple.kdl"),
-        "package \"app\" { root \"src/main.sta\" }\n",
+        "package \"app\"\n",
     )
     .unwrap();
 
@@ -2389,7 +2389,7 @@ fn rejects_promoting_a_package_visible_reexport() {
     );
     fs::write(
         fixture.root.join("staple.kdl"),
-        "package \"app\" { root \"src/main.sta\" }\n",
+        "package \"app\"\n",
     )
     .unwrap();
     let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
@@ -2422,7 +2422,7 @@ fn package_representation_is_usable_locally_but_not_by_a_dependency() {
     .unwrap();
     fs::write(
         fixture.root.join("lib/staple.kdl"),
-        "package \"lib\" { kind \"library\"; root \"src/root.sta\" }\n",
+        "package \"lib\" { kind \"library\" }\n",
     )
     .unwrap();
     let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
@@ -2490,7 +2490,7 @@ fn standard_library_imports_resolve_inside_a_package() {
     fixture.write("src/main.sta", "use std.io.println\nprintln \"hi\"\n");
     fs::write(
         fixture.root.join("staple.kdl"),
-        "package \"app\" { root \"src/main.sta\" }\n",
+        "package \"app\"\n",
     )
     .unwrap();
 

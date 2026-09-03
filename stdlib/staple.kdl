@@ -1,4 +1,4 @@
 package "std" {
     kind "library"
-    root "std/root.sta"
+    root "std"
 }

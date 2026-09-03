@@ -353,12 +353,9 @@ fn parse_package(manifest: &Path) -> Result<ParsedPackage, String> {
     }
     let kind = kind.unwrap_or(PackageKind::Executable);
     let directory = manifest.parent().unwrap().to_owned();
-    let root_setting = root.as_deref().unwrap_or_else(|| Path::new("src/root.sta"));
-    validate_sta_path(root_setting, "root", manifest)?;
-    let root_parent_setting = root_setting.parent().unwrap_or_else(|| Path::new("."));
-    let root_parent =
-        resolve_relative_directory(&directory, root_parent_setting, "root directory")?;
-    let root = root_parent.join(root_setting.file_name().unwrap());
+    let root_setting = root.as_deref().unwrap_or_else(|| Path::new("src"));
+    let root_directory = resolve_relative_directory(&directory, root_setting, "root")?;
+    let root = root_directory.join("root.sta");
     let entry_setting = match (kind, entry.as_deref()) {
         (PackageKind::Executable, None) => Some(Path::new("src/main.sta")),
         (_, value) => value,
@@ -367,12 +364,12 @@ fn parse_package(manifest: &Path) -> Result<ParsedPackage, String> {
         .map(|setting| {
             validate_sta_path(setting, "entry", manifest)?;
             let entry = resolve_relative_file(&directory, setting, "entry")?;
-            if !entry.starts_with(&root_parent) {
+            if !entry.starts_with(&root_directory) {
                 return Err(format!(
                     "{}: entry `{}` is outside package root directory `{}`",
                     manifest.display(),
                     entry.display(),
-                    root_parent.display()
+                    root_directory.display()
                 ));
             }
             Ok(entry)
