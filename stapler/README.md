@@ -88,10 +88,11 @@ standard input) work as elsewhere; `--emit`, `--target`, and linker options are
 not accepted.
 
 Output is reconstructed from the expanded syntax tree, so spacing is normalized
-rather than preserved. Three cases still render with placeholders or unexpanded:
-a `parse_quote` that splices a name or type into a declaration
-(`type alias $name = $ty`), a non-wholesale expansion nested inside an
-already-generated node, and macros inside a hand-written inline `mod` block.
+rather than preserved. Declaration name/type splices and macros inside
+hand-written inline modules are materialized from their expanded AST nodes.
+Rendering validates the completed source and reports an error instead of
+printing output that does not parse. Some unusual non-wholesale expansions
+nested inside already-generated syntax may still retain their original text.
 
 ## Formatting
 

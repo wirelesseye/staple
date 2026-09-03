@@ -17,46 +17,45 @@
 //!     token span of every changed child replaced by that child's rendered
 //!     text, recursively.
 //!
-//! Generated ([`Syntax::is_generated`]) nodes are emitted from their own
-//! tokens. Known limitations:
-//!
-//!   * A further non-wholesale expansion nested inside a generated node is not
-//!     re-spliced.
-//!   * A `parse_quote` that splices a name or type into a *declaration* (for
-//!     example `parse_quote { type alias $name = $ty }`) renders with the
-//!     `$name` / `$ty` placeholders still in place; substituting them needs a
-//!     type/pattern unparser this module deliberately avoids.
-//!   * Macros inside a hand-written inline `mod` block render unexpanded (their
-//!     expansion lives in a separate flattened module).
+//! Generated ([`Syntax::is_generated`]) nodes are emitted from their expanded
+//! fields, including declaration types and patterns. Inline modules are read
+//! from the expanded flattened module table rather than their parsed snapshot.
+//! The completed source is parsed again before it is returned.
 
 use crate::{
     Accessor, BlockExpression, Expression, Item, LogicalOperator, Pattern, Program, Submodule,
     Syntax, SyntaxToken, TokenKind, Visibility,
 };
-use crate::{formatter::format_token_stream, lex};
+use crate::{ParseError, formatter::format_token_stream, lex, parse};
 
 /// Renders the entry module of `program` (already macro-expanded) as source.
-pub fn render_expanded_module(program: &Program) -> String {
+pub fn render_expanded_module(program: &Program) -> Result<String, ParseError> {
     let module = &program.module(program.entry()).syntax;
     let mut output = String::new();
-    render_items(&module.items, 0, &mut output);
+    render_items(program, &module.items, 0, &mut output);
     if !output.ends_with('\n') {
         output.push('\n');
     }
-    format_token_stream(&lex(&output))
+    let output = format_token_stream(&lex(&output));
+    parse(&output)?;
+    Ok(output)
 }
 
-fn render_items(items: &[Item], indent: usize, output: &mut String) {
+fn render_items(program: &Program, items: &[Item], indent: usize, output: &mut String) {
     for item in items {
         if let Item::Submodule(submodule) = item {
             output.push_str(&indent_lines(&submodule_header(submodule), indent));
             output.push('\n');
-            render_items(&submodule.module.items, indent + 1, output);
+            let items = program
+                .child_module(submodule.syntax.id)
+                .map(|module| program.module(module).syntax.items.as_slice())
+                .unwrap_or(&submodule.module.items);
+            render_items(program, items, indent + 1, output);
             output.push_str(&indent_lines("}", indent));
             output.push_str("\n\n");
             continue;
         }
-        let text = render_item(item);
+        let text = render_item(program, item);
         let text = text.trim();
         if text.is_empty() {
             continue;
@@ -103,25 +102,38 @@ fn submodule_header(submodule: &Submodule) -> String {
 
 // --- items --------------------------------------------------------------------
 
-fn render_item(item: &Item) -> String {
+fn render_item(program: &Program, item: &Item) -> String {
     if !item_has_generated(item) {
         return item.syntax().text().trim().to_owned();
     }
     match item {
-        Item::Expression(expression) => render_expr(expression),
+        Item::Expression(expression) => render_expr(program, expression),
+        Item::Binding(binding) if binding.syntax.is_generated() => render_binding(program, binding),
         Item::Binding(binding) => match &binding.value {
-            Some(value) => prefixed(&binding.syntax, TokenKind::Equals, value),
+            Some(value) => prefixed(program, &binding.syntax, TokenKind::Equals, value),
             None => binding.syntax.text().trim().to_owned(),
         },
+        Item::PatternBinding(binding) if binding.syntax.is_generated() => format!(
+            "let {}{} = {}",
+            render_pattern(&binding.pattern),
+            if binding.kind == crate::PatternBindingKind::Propagating {
+                " ?"
+            } else {
+                ""
+            },
+            render_expr(program, &binding.value),
+        ),
         Item::PatternBinding(binding) => {
-            prefixed(&binding.syntax, TokenKind::Equals, &binding.value)
+            prefixed(program, &binding.syntax, TokenKind::Equals, &binding.value)
         }
-        Item::Assignment(assignment) => {
-            prefixed(&assignment.syntax, TokenKind::Equals, &assignment.value)
-        }
-        Item::Return(item) => prefixed(&item.syntax, TokenKind::Return, &item.value),
+        Item::Assignment(assignment) => format!(
+            "{} = {}",
+            render_expr(program, &assignment.target),
+            render_expr(program, &assignment.value),
+        ),
+        Item::Return(item) => prefixed(program, &item.syntax, TokenKind::Return, &item.value),
         Item::Break(item) => match &item.value {
-            Some(value) => prefixed(&item.syntax, TokenKind::Break, value),
+            Some(value) => prefixed(program, &item.syntax, TokenKind::Break, value),
             None => item.syntax.text().trim().to_owned(),
         },
         Item::TraitImplementation(implementation) => {
@@ -130,7 +142,7 @@ fn render_item(item: &Item) -> String {
                 .iter()
                 .map(|member| &member.value)
                 .collect::<Vec<_>>();
-            splice(&implementation.syntax, &children)
+            splice(program, &implementation.syntax, &children)
         }
         Item::TraitDeclaration(declaration) => {
             let children = declaration
@@ -138,29 +150,256 @@ fn render_item(item: &Item) -> String {
                 .iter()
                 .filter_map(|member| member.default.as_ref())
                 .collect::<Vec<_>>();
-            splice(&declaration.syntax, &children)
+            splice(program, &declaration.syntax, &children)
         }
-        Item::Modified(modified) => render_item(&modified.item),
-        Item::VisibilitySplice(splice) => render_item(&splice.item),
+        Item::TypeDeclaration(declaration) => render_type_declaration(declaration),
+        Item::Modified(modified) => render_item(program, &modified.item),
+        Item::VisibilitySplice(splice) => render_item(program, &splice.item),
         _ => item.syntax().text().trim().to_owned(),
+    }
+}
+
+fn visibility_prefix(visibility: Visibility) -> &'static str {
+    match visibility {
+        Visibility::Public => "pub ",
+        Visibility::Package => "pub(package) ",
+        Visibility::Private => "",
+    }
+}
+
+fn render_binding(program: &Program, binding: &crate::Binding) -> String {
+    let mut out = String::new();
+    out.push_str(visibility_prefix(binding.visibility));
+    if !binding.external {
+        out.push_str(binding.keyword());
+        out.push(' ');
+        if binding.mutable {
+            out.push_str("mut ");
+        }
+        if binding.signal {
+            out.push_str("signal ");
+        }
+    }
+    out.push_str(&binding.name);
+    if !binding.type_parameters.is_empty() {
+        out.push('<');
+        out.push_str(
+            &binding
+                .type_parameters
+                .iter()
+                .map(render_type_parameter)
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
+        let constraints = render_constraints(
+            &binding.type_parameters,
+            &binding.trait_bounds,
+            &binding.subtype_bounds,
+        );
+        if !constraints.is_empty() {
+            out.push_str(" where ");
+            out.push_str(&constraints);
+        }
+        out.push('>');
+    }
+    if let Some(annotation) = &binding.annotation {
+        out.push_str(": ");
+        out.push_str(&annotation.to_string());
+    }
+    if let Some(value) = &binding.value {
+        out.push_str(" = ");
+        out.push_str(&render_expr(program, value));
+    }
+    out
+}
+
+fn render_type_declaration(declaration: &crate::TypeDeclaration) -> String {
+    let mut out = String::new();
+    if declaration.representation_visibility == Visibility::Private {
+        out.push_str(visibility_prefix(declaration.visibility));
+    } else {
+        out.push_str(match declaration.representation_visibility {
+            Visibility::Public => "pub(repr) ",
+            Visibility::Package => "pub(repr(package)) ",
+            Visibility::Private => "",
+        });
+    }
+    out.push_str("type ");
+    if declaration.kind == crate::TypeDeclarationKind::Alias {
+        out.push_str("alias ");
+    }
+    out.push_str(&declaration.name);
+    for parameter in &declaration.type_parameters {
+        out.push(' ');
+        if let Some(default) = declaration
+            .default_bounds
+            .iter()
+            .find(|bound| bound.parameter.name == *parameter.names().first().unwrap_or(&""))
+        {
+            out.push('(');
+            out.push_str(&render_type_parameter(parameter));
+            out.push_str(" = ");
+            out.push_str(&default.default.to_string());
+            out.push(')');
+        } else {
+            out.push_str(&render_type_parameter(parameter));
+        }
+    }
+    let constraints = render_constraints(
+        &declaration.type_parameters,
+        &declaration.trait_bounds,
+        &declaration.subtype_bounds,
+    );
+    if !constraints.is_empty() {
+        out.push_str(" where ");
+        out.push_str(&constraints);
+    }
+    match declaration.kind {
+        crate::TypeDeclarationKind::Alias | crate::TypeDeclarationKind::Distinct => {
+            if let Some(underlying) = &declaration.underlying {
+                out.push_str(" = ");
+                out.push_str(&underlying.to_string());
+            }
+        }
+        crate::TypeDeclarationKind::Opaque => out.push_str(" = opaque"),
+        crate::TypeDeclarationKind::Singleton => {}
+    }
+    out
+}
+
+fn render_type_parameter(parameter: &crate::TypeParameterPattern) -> String {
+    match parameter {
+        crate::TypeParameterPattern::Binding(binding) => binding.name.clone(),
+        crate::TypeParameterPattern::Effect(binding) => format!("effect {}", binding.name),
+        crate::TypeParameterPattern::Product(product) => format!(
+            "({})",
+            product
+                .elements
+                .iter()
+                .map(render_type_parameter)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        crate::TypeParameterPattern::Splice(splice) => format!("${}...", splice.name),
+    }
+}
+
+fn render_constraints(
+    parameters: &[crate::TypeParameterPattern],
+    traits: &[crate::TraitBound],
+    subtypes: &[crate::SubtypeBound],
+) -> String {
+    let mut entries = parameters
+        .iter()
+        .filter_map(|parameter| match parameter {
+            crate::TypeParameterPattern::Binding(binding) if !binding.sized => {
+                Some(format!("?Sized {}", binding.name))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    entries.extend(traits.iter().map(|bound| {
+        let name = match &bound.trait_name.namespace {
+            Some(namespace) => format!("{namespace}.{}", bound.trait_name.name),
+            None => bound.trait_name.name.clone(),
+        };
+        format!(
+            "{} {}",
+            name,
+            bound
+                .arguments
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(" ")
+        )
+    }));
+    entries.extend(
+        subtypes
+            .iter()
+            .map(|bound| format!("{} <: {}", bound.parameter.name, bound.supertype)),
+    );
+    entries.join(", ")
+}
+
+fn render_pattern(pattern: &Pattern) -> String {
+    match pattern {
+        Pattern::Binding(binding) => {
+            let mut out = String::new();
+            if binding.mutable {
+                out.push_str("mut ");
+            }
+            if binding.moved {
+                out.push_str("move ");
+            }
+            out.push_str(&binding.name);
+            if !matches!(binding.ty, crate::Type::Inferred(_)) {
+                out.push_str(": ");
+                out.push_str(&binding.ty.to_string());
+            }
+            out
+        }
+        Pattern::At(at) => format!(
+            "{} @ {}",
+            render_pattern(&Pattern::Binding((*at.binding).clone())),
+            render_pattern(&at.pattern)
+        ),
+        Pattern::Wildcard(wildcard) => {
+            if matches!(wildcard.ty, crate::Type::Inferred(_)) {
+                "_".to_owned()
+            } else {
+                format!("_: {}", wildcard.ty)
+            }
+        }
+        Pattern::StringLiteral(literal) => literal.literal.clone(),
+        Pattern::Product(product) => {
+            let prefix = if product.mutable {
+                "mut "
+            } else if product.moved {
+                "move "
+            } else {
+                ""
+            };
+            format!(
+                "{}({})",
+                prefix,
+                product
+                    .elements
+                    .iter()
+                    .map(render_pattern)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        }
+        Pattern::Nominal(nominal) => format!(
+            "{}{} {}",
+            nominal
+                .namespace
+                .as_ref()
+                .map(|namespace| format!("{namespace}."))
+                .unwrap_or_default(),
+            nominal.name,
+            render_pattern(&nominal.argument),
+        ),
+        Pattern::Splice(splice) => format!("${}", splice.name),
     }
 }
 
 // --- expressions ------------------------------------------------------------
 
-fn render_expr(expression: &Expression) -> String {
+fn render_expr(program: &Program, expression: &Expression) -> String {
     if !expr_has_generated(expression) {
         return expression.syntax().text().trim().to_owned();
     }
     match expression {
-        Expression::Block(block) => render_block(block),
+        Expression::Block(block) => render_block(program, block),
         Expression::Match(match_) => {
-            let mut out = format!("match {} {{\n", render_expr(&match_.subject));
+            let mut out = format!("match {} {{\n", render_expr(program, &match_.subject));
             for arm in &match_.arms {
-                let body = indent_lines(&render_expr(&arm.body), 1);
+                let body = indent_lines(&render_expr(program, &arm.body), 1);
                 out.push_str(&format!(
                     "    {} => {},\n",
-                    arm.pattern.syntax().text().trim(),
+                    render_pattern(&arm.pattern),
                     body.trim_start(),
                 ));
             }
@@ -169,16 +408,17 @@ fn render_expr(expression: &Expression) -> String {
         }
         Expression::Function(function) => format!(
             "{} => {}",
-            function.pattern.syntax().text().trim(),
-            render_expr(&function.body),
+            render_pattern(&function.pattern),
+            render_expr(program, &function.body),
         ),
-        Expression::Loop(loop_) => format!("loop {}", render_block(&loop_.body)),
+        Expression::Loop(loop_) => format!("loop {}", render_block(program, &loop_.body)),
+        Expression::Resource(resource) => format!("resource {}", resource.resource),
         Expression::With(with) => format!(
             "with {}{} = {} {}",
             if with.mutable { "mut " } else { "" },
-            with.resource.syntax().text().trim(),
-            render_expr(&with.value),
-            render_block(&with.body),
+            with.resource,
+            render_expr(program, &with.value),
+            render_block(program, &with.body),
         ),
         Expression::Product(product) => {
             let parts = product
@@ -190,10 +430,13 @@ fn render_expr(expression: &Expression) -> String {
                         prefix.push_str(if element.named_spread { "...=" } else { "..." });
                     }
                     if let Some(name) = &element.name {
+                        if element.designated {
+                            prefix.push('.');
+                        }
                         prefix.push_str(name);
                         prefix.push_str(": ");
                     }
-                    format!("{prefix}{}", render_expr(&element.value))
+                    format!("{prefix}{}", render_expr(program, &element.value))
                 })
                 .collect::<Vec<_>>();
             format!("({})", parts.join(", "))
@@ -201,51 +444,57 @@ fn render_expr(expression: &Expression) -> String {
         Expression::RepeatedProduct(repeated) => {
             format!(
                 "({}; {})",
-                render_expr(&repeated.value),
-                render_expr(&repeated.count),
+                render_expr(program, &repeated.value),
+                render_expr(program, &repeated.count),
             )
         }
-        Expression::Call(call) => splice(&call.syntax, &[&call.callee, &call.argument]),
+        Expression::Call(call) => splice(program, &call.syntax, &[&call.callee, &call.argument]),
         Expression::Binary(binary) => format!(
             "{} {} {}",
-            render_expr(&binary.left),
+            render_expr(program, &binary.left),
             binary.operator.text(),
-            render_expr(&binary.right),
+            render_expr(program, &binary.right),
         ),
         Expression::Access(access) => {
             format!(
                 "{}{}",
-                render_expr(&access.value),
+                render_expr(program, &access.value),
                 accessor_suffix(&access.accessor),
             )
         }
         Expression::Index(index) => {
             format!(
                 "{}[{}]",
-                render_expr(&index.value),
-                render_expr(&index.index)
+                render_expr(program, &index.value),
+                render_expr(program, &index.index)
             )
         }
         Expression::Logical(logical) => format!(
             "{} {} {}",
-            render_expr(&logical.left),
+            render_expr(program, &logical.left),
             match logical.operator {
                 LogicalOperator::And => "&&",
                 LogicalOperator::Or => "||",
             },
-            render_expr(&logical.right),
+            render_expr(program, &logical.right),
         ),
-        Expression::Satisfies(satisfies) => splice(&satisfies.syntax, &[&satisfies.value]),
+        Expression::Satisfies(satisfies) => {
+            format!(
+                "{} satisfies {}",
+                render_expr(program, &satisfies.value),
+                satisfies.ty
+            )
+        }
         _ => expression.syntax().text().trim().to_owned(),
     }
 }
 
-fn render_block(block: &BlockExpression) -> String {
+fn render_block(program: &Program, block: &BlockExpression) -> String {
     if !block_has_generated(block) {
         return block.syntax.text().trim().to_owned();
     }
     let mut inner = String::new();
-    render_items(&block.items, 1, &mut inner);
+    render_items(program, &block.items, 1, &mut inner);
     format!("{{\n{}\n}}", inner.trim_end())
 }
 
@@ -262,7 +511,7 @@ fn accessor_suffix(accessor: &Accessor) -> String {
 /// tokens up to and including the last `separator` (the `=` of a binding, the
 /// `return`/`break` keyword). Falls back to a plain splice if no separator is
 /// present.
-fn prefixed(base: &Syntax, separator: TokenKind, value: &Expression) -> String {
+fn prefixed(program: &Program, base: &Syntax, separator: TokenKind, value: &Expression) -> String {
     let tokens = base.tokens();
     let split = match separator {
         // The binding `=`: the first one at bracket depth zero, so a default in
@@ -299,9 +548,9 @@ fn prefixed(base: &Syntax, separator: TokenKind, value: &Expression) -> String {
                 .iter()
                 .map(|token| token.text.as_str())
                 .collect();
-            format!("{} {}", prefix.trim(), render_expr(value))
+            format!("{} {}", prefix.trim(), render_expr(program, value))
         }
-        None => splice(base, &[value]),
+        None => splice(program, base, &[value]),
     }
 }
 
@@ -309,13 +558,13 @@ fn prefixed(base: &Syntax, separator: TokenKind, value: &Expression) -> String {
 
 /// Emits `base`'s tokens, replacing the span of each changed child with its
 /// rendered text. `children` must be in source order.
-fn splice(base: &Syntax, children: &[&Expression]) -> String {
+fn splice(program: &Program, base: &Syntax, children: &[&Expression]) -> String {
     let stream = base.token_stream();
     let range = base.token_range();
     if stream.is_empty() || range.start >= range.end {
         return children
             .iter()
-            .map(|child| render_expr(child))
+            .map(|child| render_expr(program, child))
             .collect::<Vec<_>>()
             .join(" ");
     }
@@ -340,7 +589,7 @@ fn splice(base: &Syntax, children: &[&Expression]) -> String {
         if anchored {
             out.push_str(&token_text(stream, cursor, start.max(cursor)));
             if expr_has_generated(child) {
-                append_child(&mut out, &render_expr(child));
+                append_child(&mut out, &render_expr(program, child));
             } else {
                 append_child(&mut out, &token_text(stream, start, end));
             }
@@ -356,7 +605,7 @@ fn splice(base: &Syntax, children: &[&Expression]) -> String {
                 out.push_str(&stream[trivia].text);
                 trivia += 1;
             }
-            append_child(&mut out, &render_expr(child));
+            append_child(&mut out, &render_expr(program, child));
             cursor = next_anchor.max(cursor);
         }
     }

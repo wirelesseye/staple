@@ -139,7 +139,7 @@ fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, String>
 
     if options.mode == Mode::Expand {
         let expanded = expand_macros(program).map_err(format_diagnostics)?;
-        let rendered = render_expanded_module(&expanded);
+        let rendered = render_expanded_module(&expanded).map_err(|error| error.to_string())?;
         return match &options.output {
             Some(output) => {
                 std::fs::write(output, rendered)
@@ -1012,6 +1012,39 @@ mod tests {
             !expanded.contains("pair 41"),
             "the original macro invocation should be gone, got:\n{expanded}"
         );
+    }
+
+    #[test]
+    fn expand_materializes_declaration_name_and_type_splices() {
+        let expanded = expand_source(
+            "declaration-splices",
+            concat!(
+                "use std.syntax.(parse_quote, Ident, Type, Item)\n",
+                "macro make_alias: Ident String -> Type -> Item = name => ty => parse_quote { type alias $name = $ty }\n",
+                "make_alias Generated I32\n",
+            ),
+        );
+        assert!(expanded.contains("type alias Generated = I32"));
+        assert_eq!(expanded.matches("type alias $name = $ty").count(), 1);
+        stapler::parse(&expanded).expect("expanded declaration should parse");
+        assert_eq!(stapler::format_source(&expanded).unwrap(), expanded);
+    }
+
+    #[test]
+    fn expand_uses_the_expanded_flattened_inline_module() {
+        let expanded = expand_source(
+            "inline-module",
+            concat!(
+                "mod inner {\n",
+                "    use std.syntax.(quote, Expr)\n",
+                "    macro double = value: Expr => quote { ($value) + ($value) }\n",
+                "    let value: I32 = double 2\n",
+                "}\n",
+            ),
+        );
+        assert!(expanded.contains("let value: I32 = (2) + (2)"));
+        assert!(!expanded.contains("let value: I32 = double 2"));
+        stapler::parse(&expanded).expect("expanded inline module should parse");
     }
 
     #[test]

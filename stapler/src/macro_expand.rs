@@ -910,6 +910,7 @@ pub(crate) fn expand_program(
         source_module.syntax.items = items;
     }
     program.rebuild_generated_inline_modules();
+    program.reattach_expanded_inline_modules();
     for source_module in program.modules() {
         for item in &source_module.syntax.items {
             if let Item::UseDeclaration(declaration) = item

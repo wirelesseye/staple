@@ -46,7 +46,6 @@ struct Formatter<'a> {
     at_line_start: bool,
     previous: Option<TokenKind>,
     separated: bool,
-    source_indent: Option<usize>,
 }
 
 impl<'a> Formatter<'a> {
@@ -61,30 +60,29 @@ impl<'a> Formatter<'a> {
             at_line_start: true,
             previous: None,
             separated: false,
-            source_indent: None,
         }
     }
 
     fn format(&mut self) {
         for (index, token) in self.tokens.iter().enumerate() {
+            let flat_group =
+                containing_group(&self.groups, index).is_some_and(|group| !group.multiline);
+            // Newlines inside a group that fits are soft layout opportunities,
+            // not a reason to preserve the source's line shape.
+            if !token.kind.is_trivia()
+                && containing_group(&self.groups, index).is_some_and(|group| !group.multiline)
+            {
+                self.pending_newlines = 0;
+            }
             match token.kind {
                 TokenKind::Whitespace => {
-                    self.separated = true;
-                    if self.pending_newlines > 0 {
-                        let columns = token.text.chars().fold(0usize, |column, character| {
-                            if character == '\t' {
-                                (column / 4 + 1) * 4
-                            } else {
-                                column + 1
-                            }
-                        });
-                        self.source_indent = Some(columns.div_ceil(4));
+                    if self.pending_newlines == 0 {
+                        self.separated = true;
                     }
                 }
                 TokenKind::Newline => {
                     self.pending_newlines = (self.pending_newlines + 1).min(2);
-                    self.separated = true;
-                    self.source_indent = Some(0);
+                    self.separated = !flat_group;
                 }
                 TokenKind::LineComment => {
                     self.flush_pending(true);
@@ -175,16 +173,12 @@ impl<'a> Formatter<'a> {
                     if self.separated || needs_space(self.previous, token.kind) {
                         self.space();
                     }
-                    if self.current_column() + token.text.len() > WIDTH && !self.at_line_start {
-                        self.hardline();
-                    }
                     self.text(&token.text);
                 }
             }
             if !token.kind.is_trivia() {
                 self.previous = Some(token.kind);
                 self.separated = false;
-                self.source_indent = None;
             }
         }
     }
@@ -217,9 +211,7 @@ impl<'a> Formatter<'a> {
 
     fn text(&mut self, text: &str) {
         if self.at_line_start {
-            self.line.push_str(
-                &INDENT.repeat(self.source_indent.unwrap_or(self.indent).max(self.indent)),
-            );
+            self.line.push_str(&INDENT.repeat(self.indent));
             self.at_line_start = false;
         }
         self.line.push_str(text);
@@ -248,10 +240,6 @@ impl<'a> Formatter<'a> {
         self.pending_newlines = 0;
     }
 
-    fn current_column(&self) -> usize {
-        self.line.chars().count()
-    }
-
     fn finish(mut self) -> String {
         self.trim_line();
         if !self.line.is_empty() {
@@ -275,9 +263,6 @@ fn groups(tokens: &[SyntaxToken]) -> Vec<Option<Group>> {
             TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => stack.push(index),
             TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {
                 let Some(open) = stack.pop() else { continue };
-                let source_multiline = tokens[open + 1..index]
-                    .iter()
-                    .any(|token| token.kind == TokenKind::Newline);
                 let line_comment = tokens[open + 1..index]
                     .iter()
                     .any(|token| token.kind == TokenKind::LineComment);
@@ -285,14 +270,11 @@ fn groups(tokens: &[SyntaxToken]) -> Vec<Option<Group>> {
                 let width = tokens[open..=index]
                     .iter()
                     .filter(|token| !token.kind.is_trivia())
-                    .map(|token| token.text.len() + 1)
+                    .map(|token| token.text.chars().count() + 1)
                     .sum::<usize>();
                 result[open] = Some(Group {
                     close: index,
-                    multiline: source_multiline
-                        || line_comment
-                        || top_level_separator
-                        || width > WIDTH,
+                    multiline: line_comment || top_level_separator || width > WIDTH,
                 });
             }
             _ => {}
@@ -381,7 +363,7 @@ mod tests {
             "macro choose=value: Expr=>value\nlet result=choose {\nready=>one,\nelse=>two,\n}\n";
         let formatted = format_source(source).unwrap();
         assert!(formatted.contains("macro choose = value: Expr => value"));
-        assert!(formatted.contains("choose {\n    ready => one,"));
+        assert!(formatted.contains("choose {ready => one, else => two,}"));
         assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 
@@ -397,6 +379,14 @@ mod tests {
     fn normalizes_comments_and_newlines() {
         let formatted = format_source("let x=1  // keep me\r\n\r\n\r\nlet y=2").unwrap();
         assert_eq!(formatted, "let x = 1 // keep me\n\nlet y = 2\n");
+    }
+
+    #[test]
+    fn canonicalizes_indentation_and_compacts_groups_that_fit() {
+        let formatted =
+            format_source("let value = {\n\t       (\n        1,\n        2,\n    )\n}\n").unwrap();
+        assert_eq!(formatted, "let value = {(1, 2,)}\n");
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
     }
 
     #[test]

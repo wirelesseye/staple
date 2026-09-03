@@ -409,6 +409,21 @@ impl Program {
         );
     }
 
+    /// Copies the expanded contents of flattened inline modules back into the
+    /// declaring AST nodes. Resolution continues to use the flattened module
+    /// table, while source-oriented consumers can walk the entry module without
+    /// observing the pre-expansion inline-module snapshots.
+    pub(crate) fn reattach_expanded_inline_modules(&mut self) {
+        let expanded = self
+            .child_modules
+            .iter()
+            .map(|(syntax, module)| (*syntax, self.modules[module.0].syntax.clone()))
+            .collect::<HashMap<_, _>>();
+        for module in &mut self.modules {
+            reattach_inline_items(&mut module.syntax.items, &expanded);
+        }
+    }
+
     pub fn entry(&self) -> ModuleId {
         self.entry
     }
@@ -2199,6 +2214,26 @@ fn root_scan_ignored_ranges(item: &Item, ranges: &mut Vec<Range<usize>>) {
         Item::Modified(modified) => root_scan_ignored_ranges(&modified.item, ranges),
         Item::VisibilitySplice(splice) => root_scan_ignored_ranges(&splice.item, ranges),
         _ => {}
+    }
+}
+
+fn reattach_inline_items(items: &mut [Item], expanded: &HashMap<SyntaxId, Module>) {
+    for item in items {
+        match item {
+            Item::Submodule(submodule) => {
+                if let Some(module) = expanded.get(&submodule.syntax.id) {
+                    submodule.module = module.clone();
+                }
+                reattach_inline_items(&mut submodule.module.items, expanded);
+            }
+            Item::Modified(modified) => {
+                reattach_inline_items(std::slice::from_mut(&mut modified.item), expanded)
+            }
+            Item::VisibilitySplice(splice) => {
+                reattach_inline_items(std::slice::from_mut(&mut splice.item), expanded)
+            }
+            _ => {}
+        }
     }
 }
 
