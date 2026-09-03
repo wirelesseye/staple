@@ -1,8 +1,9 @@
 use inkwell::context::Context;
 use staple_compiler::{
-    CheckedMutation, CheckedType, CodeGenerator, Diagnostic, Item, NameResolver, ProgramLoader,
-    RecursiveConstruction, TypeChecker, parse,
+    CheckedMutation, CheckedType, CodeGenerator, NameResolver, ProgramLoader, RecursiveConstruction,
+    TypeChecker,
 };
+use staple_syntax::{Diagnostic, Item, parse};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -42,7 +43,7 @@ fn resolve(source: &str) -> staple_compiler::ResolvedModule {
 #[test]
 fn applies_documentation_to_the_current_module() {
     let resolved = resolve("@doc(\"Module docs\")\npub mod\npub let answer = 42\n");
-    assert_eq!(resolved.syntax().visibility, staple_compiler::Visibility::Public);
+    assert_eq!(resolved.syntax().visibility, staple_syntax::Visibility::Public);
     assert_eq!(resolved.syntax().docs, ["Module docs"]);
 }
 
@@ -54,7 +55,7 @@ fn applies_user_modifiers_to_the_current_module() {
         "macro @identity: Item -> Item = item => item\n",
         "pub let answer = 42\n",
     ));
-    assert_eq!(resolved.syntax().visibility, staple_compiler::Visibility::Public);
+    assert_eq!(resolved.syntax().visibility, staple_syntax::Visibility::Public);
     assert!(
         resolved
             .syntax()
@@ -1171,7 +1172,7 @@ fn fills_defaulted_juxtaposed_parameters_at_calls_and_through_aliases() {
             .type_of_function(app.id)
             .expect("app type")
             .parameter_style,
-        staple_compiler::FunctionParameterStyle::Juxtaposed
+        staple_syntax::FunctionParameterStyle::Juxtaposed
     );
     let source = concat!(
         "def app: (props: I32 = 7) * children: (() -> I32) -> I32 = props * children => props + children ()\n",
@@ -4276,17 +4277,17 @@ fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
             (binding.name == "pair").then_some(binding.value.as_ref()?)
         })
         .expect("expanded pair binding");
-    let staple_compiler::Expression::Product(pair) = pair else {
+    let staple_syntax::Expression::Product(pair) = pair else {
         panic!("replacement macro should expand to a product");
     };
     let arguments = pair
         .elements
         .iter()
         .map(|element| {
-            let staple_compiler::Expression::Call(call) = &element.value else {
+            let staple_syntax::Expression::Call(call) = &element.value else {
                 panic!("pair element should remain a call");
             };
-            let staple_compiler::Expression::Integer(argument) = call.argument.as_ref() else {
+            let staple_syntax::Expression::Integer(argument) = call.argument.as_ref() else {
                 panic!("call argument should be an integer");
             };
             argument.literal.as_str()
@@ -5180,8 +5181,8 @@ fn public_repr_macro_call_can_generate_a_public_representation() {
     assert!(module.resolved().syntax().items.iter().any(|item| {
         matches!(item, Item::TypeDeclaration(declaration)
             if declaration.name == "Box"
-                && declaration.visibility == staple_compiler::Visibility::Public
-                && declaration.representation_visibility == staple_compiler::Visibility::Public)
+                && declaration.visibility == staple_syntax::Visibility::Public
+                && declaration.representation_visibility == staple_syntax::Visibility::Public)
     }));
 }
 
@@ -5198,7 +5199,7 @@ fn modifiers_compose_after_metadata_aware_item_calls() {
         matches!(item, item
             if matches!(item, Item::Binding(binding)
                 if binding.name == "generated"
-                    && binding.visibility == staple_compiler::Visibility::Public))
+                    && binding.visibility == staple_syntax::Visibility::Public))
     }));
 }
 
@@ -7180,14 +7181,14 @@ fn type_checks_and_generates_curried_functions() {
         assert_eq!(
             module.type_of_function(function.id).expect("checked type"),
             &staple_compiler::CheckedFunctionType {
-                parameter_style: staple_compiler::FunctionParameterStyle::Single,
+                parameter_style: staple_syntax::FunctionParameterStyle::Single,
                 default: None,
                 parameter: Box::new(CheckedType::I32),
                 mutations: Vec::new(),
                 moves: Vec::new(),
                 effects: staple_compiler::CheckedEffectSet::default(),
                 result: Box::new(CheckedType::Function(staple_compiler::CheckedFunctionType {
-                    parameter_style: staple_compiler::FunctionParameterStyle::Single,
+                    parameter_style: staple_syntax::FunctionParameterStyle::Single,
                     default: None,
                     parameter: Box::new(CheckedType::I32),
                     mutations: Vec::new(),

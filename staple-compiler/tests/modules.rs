@@ -4,7 +4,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inkwell::context::Context;
-use staple_compiler::{CodeGenerator, Item, NameResolver, ProgramLoader, TypeChecker};
+use staple_compiler::{CodeGenerator, NameResolver, ProgramLoader, TypeChecker};
+use staple_syntax::Item;
 
 struct Fixture {
     root: PathBuf,
@@ -110,7 +111,7 @@ impl Drop for Fixture {
     }
 }
 
-fn format_diagnostics(diagnostics: Vec<staple_compiler::Diagnostic>) -> String {
+fn format_diagnostics(diagnostics: Vec<staple_syntax::Diagnostic>) -> String {
     diagnostics
         .into_iter()
         .map(|diagnostic| diagnostic.to_string())

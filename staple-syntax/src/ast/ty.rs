@@ -2,6 +2,10 @@ use std::fmt;
 
 use super::{SpliceExpression, Syntax};
 
+/// Maximum number of elements a product type or product expression may have.
+/// Bounded by the 16-bit tuple index space used throughout the compiler.
+pub const MAX_PRODUCT_ARITY: usize = 65_535;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {
     Inferred(InferredType),

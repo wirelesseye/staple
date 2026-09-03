@@ -3,10 +3,9 @@ use std::fmt;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
-use crate::parser::parse_with_syntax_ids;
-use crate::{
+use staple_syntax::{
     BlockExpression, Expression, Item, Module, SourceLocation, Span, Submodule, Syntax, SyntaxId,
-    TokenKind, UseDeclaration, UseKind, Visibility,
+    TokenKind, UseDeclaration, UseKind, Visibility, parse_with_syntax_ids,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -878,7 +877,7 @@ impl ProgramLoader {
                     std::fs::read_to_string(&path)
                         .map_err(|error| LoadDiagnostic::source(&path, None, error.to_string()))?
                 };
-                let syntax = crate::parse(&source).map_err(|error| {
+                let syntax = staple_syntax::parse(&source).map_err(|error| {
                     LoadDiagnostic::source(&path, Some(error.offset..error.offset), error.message)
                 })?;
                 if syntax.visibility == Visibility::Public {
@@ -1763,7 +1762,7 @@ impl ProgramLoader {
                 syntax
                     .tokens()
                     .iter()
-                    .any(|token| token.kind == crate::TokenKind::Identifier && token.text == *name)
+                    .any(|token| token.kind == staple_syntax::TokenKind::Identifier && token.text == *name)
             })
     }
 
@@ -2125,7 +2124,7 @@ fn filter_feature_item(
                 "`@feature` requires a string literal argument",
             ));
         };
-        let feature = crate::string_literal::decode(&literal.literal)
+        let feature = staple_syntax::string_literal::decode(&literal.literal)
             .map_err(|message| load_diagnostic_at(&modifier.syntax.span, message))?;
         if !declared.contains_key(&feature) {
             return Err(load_diagnostic_at(
@@ -2365,7 +2364,7 @@ fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Su
         }
         Expression::StringTemplate(template) => {
             for part in &template.parts {
-                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
                     find_block_submodules_in_expression(&interpolation.expression, out);
                 }
             }
@@ -2524,7 +2523,7 @@ fn find_block_use_declarations_in_expression(
         }
         Expression::StringTemplate(template) => {
             for part in &template.parts {
-                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
                     find_block_use_declarations_in_expression(&interpolation.expression, out);
                 }
             }

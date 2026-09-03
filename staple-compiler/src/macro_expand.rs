@@ -5,11 +5,11 @@ use std::{
     sync::Arc,
 };
 
-use crate::{
-    Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item, LogicalOperator,
-    MacroDeclaration, ModifierArgument, ModifierInvocation, ModuleId, Pattern, Program,
-    ResolvedMacro, Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility,
-    VisibilityKind, VisibilitySyntax,
+use crate::{ModuleId, Program, ResolvedMacro};
+use staple_syntax::{
+    Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
+    LogicalOperator, MacroDeclaration, ModifierArgument, ModifierInvocation, Pattern, Span, Syntax,
+    SyntaxId, Type, UseDeclaration, UseKind, Visibility, VisibilityKind, VisibilitySyntax,
 };
 
 const MAX_EXPANSION_DEPTH: usize = 128;
@@ -161,8 +161,8 @@ struct HelperDefinition {
 #[derive(Clone)]
 enum SyntaxValue {
     Raw(Syntax),
-    Ident(crate::NameExpression),
-    Call(crate::CallExpression),
+    Ident(staple_syntax::NameExpression),
+    Call(staple_syntax::CallExpression),
     Unstructured(Expression),
     Type(Type),
     Pattern(Pattern),
@@ -178,7 +178,7 @@ enum SyntaxValue {
 
 #[derive(Clone)]
 struct OpaqueModifier {
-    invocation: crate::ModifierInvocation,
+    invocation: staple_syntax::ModifierInvocation,
     /// Retained on the first modifier so destructuring and reconstructing a
     /// `ModifiedItem` preserves the original lossless wrapper syntax.
     enclosing: Option<Syntax>,
@@ -283,22 +283,22 @@ impl DelimitedSyntaxValue {
                     })
                     .collect::<Option<Vec<_>>>()?;
                 if expressions.is_empty() {
-                    return Some(Expression::Product(crate::ProductExpression {
+                    return Some(Expression::Product(staple_syntax::ProductExpression {
                         syntax: self.syntax,
                         elements: Vec::new(),
                     }));
                 }
                 let first = expressions.remove(0);
                 let expression = expressions.into_iter().fold(first, |callee, argument| {
-                    Expression::Call(crate::CallExpression {
+                    Expression::Call(staple_syntax::CallExpression {
                         syntax: generated.next().unwrap_or_else(Syntax::compiler),
                         callee: Box::new(callee),
                         argument: Box::new(argument),
                     })
                 });
-                Some(Expression::Product(crate::ProductExpression {
+                Some(Expression::Product(staple_syntax::ProductExpression {
                     syntax: self.syntax,
-                    elements: vec![crate::ProductElement {
+                    elements: vec![staple_syntax::ProductElement {
                         syntax: generated.next().unwrap_or_else(Syntax::compiler),
                         name: None,
                         designated: false,
@@ -368,7 +368,7 @@ enum Value {
     Syntax(SyntaxValue),
     Function {
         module: ModuleId,
-        function: crate::FunctionExpression,
+        function: staple_syntax::FunctionExpression,
         environment: Environment,
         quote_result: Option<MetaType>,
     },
@@ -408,7 +408,7 @@ fn separated_parenthesized(
     let elements = elements
         .into_iter()
         .map(|value| match value {
-            Value::Syntax(value) => Some(crate::ProductElement {
+            Value::Syntax(value) => Some(staple_syntax::ProductElement {
                 syntax: generated.next().unwrap_or_else(Syntax::compiler),
                 name: None,
                 designated: false,
@@ -419,7 +419,7 @@ fn separated_parenthesized(
             _ => None,
         })
         .collect::<Option<Vec<_>>>()?;
-    Some(Expression::Product(crate::ProductExpression {
+    Some(Expression::Product(staple_syntax::ProductExpression {
         syntax,
         elements,
     }))
@@ -449,8 +449,8 @@ type Environment = HashMap<String, EnvironmentBinding>;
 fn quote_contains_raw_splice(contents: &Syntax, environment: &Environment) -> bool {
     let tokens = contents.tokens();
     tokens.windows(2).any(|pair| {
-        pair[0].kind == crate::TokenKind::Dollar
-            && pair[1].kind == crate::TokenKind::Identifier
+        pair[0].kind == staple_syntax::TokenKind::Dollar
+            && pair[1].kind == staple_syntax::TokenKind::Identifier
             && environment
                 .get(&pair[1].text)
                 .map(EnvironmentBinding::get)
@@ -458,7 +458,7 @@ fn quote_contains_raw_splice(contents: &Syntax, environment: &Environment) -> bo
     })
 }
 
-fn append_syntax_tokens(output: &mut Vec<crate::SyntaxToken>, syntax: &Syntax) {
+fn append_syntax_tokens(output: &mut Vec<staple_syntax::SyntaxToken>, syntax: &Syntax) {
     let mut occurrences = HashMap::<String, usize>::new();
     for token in syntax.tokens() {
         let mut token = token.clone();
@@ -499,10 +499,10 @@ fn freshened_syntax(syntax: &Syntax, next_syntax_id: &mut usize) -> Syntax {
 }
 
 fn lower_binary_expression(
-    binary: crate::BinaryExpression,
+    binary: staple_syntax::BinaryExpression,
     next_syntax_id: &mut usize,
 ) -> Expression {
-    let crate::BinaryExpression {
+    let staple_syntax::BinaryExpression {
         syntax,
         operator_syntax,
         operator,
@@ -510,12 +510,12 @@ fn lower_binary_expression(
         right,
     } = binary;
     if matches!(operator, BinaryOperator::And | BinaryOperator::Or) {
-        let bool_type = Type::Named(crate::NamedType {
+        let bool_type = Type::Named(staple_syntax::NamedType {
             syntax: freshened_syntax(&operator_syntax, next_syntax_id),
             namespace: None,
             name: "Bool".to_owned(),
         });
-        return Expression::Logical(crate::LogicalExpression {
+        return Expression::Logical(staple_syntax::LogicalExpression {
             syntax,
             operator: if operator == BinaryOperator::And {
                 LogicalOperator::And
@@ -528,7 +528,7 @@ fn lower_binary_expression(
         });
     }
     if matches!(operator, BinaryOperator::Range | BinaryOperator::RangeInclusive) {
-        let name = Expression::Name(crate::NameExpression {
+        let name = Expression::Name(staple_syntax::NameExpression {
             syntax: freshened_syntax(&operator_syntax, next_syntax_id),
             name: if operator == BinaryOperator::Range {
                 "range"
@@ -537,12 +537,12 @@ fn lower_binary_expression(
             }
             .to_owned(),
         });
-        let inner = Expression::Call(crate::CallExpression {
+        let inner = Expression::Call(staple_syntax::CallExpression {
             syntax: freshened_syntax(&syntax, next_syntax_id),
             callee: Box::new(name),
             argument: left,
         });
-        return Expression::Call(crate::CallExpression {
+        return Expression::Call(staple_syntax::CallExpression {
             syntax,
             callee: Box::new(inner),
             argument: right,
@@ -564,16 +564,16 @@ fn lower_binary_expression(
         | BinaryOperator::And
         | BinaryOperator::Or => unreachable!(),
     };
-    let name = Expression::Name(crate::NameExpression {
+    let name = Expression::Name(staple_syntax::NameExpression {
         syntax: freshened_syntax(&operator_syntax, next_syntax_id),
         name: trait_name.to_owned(),
     });
-    let access = Expression::Access(crate::AccessExpression {
+    let access = Expression::Access(staple_syntax::AccessExpression {
         syntax: freshened_syntax(&operator_syntax, next_syntax_id),
         value: Box::new(name),
         accessor: Accessor::Name(method_name.to_owned()),
     });
-    let element = |value, next_syntax_id: &mut usize| crate::ProductElement {
+    let element = |value, next_syntax_id: &mut usize| staple_syntax::ProductElement {
         syntax: freshened_syntax(&syntax, next_syntax_id),
         name: None,
         designated: false,
@@ -581,14 +581,14 @@ fn lower_binary_expression(
         spread: false,
         named_spread: false,
     };
-    let argument = Expression::Product(crate::ProductExpression {
+    let argument = Expression::Product(staple_syntax::ProductExpression {
         syntax: freshened_syntax(&syntax, next_syntax_id),
         elements: vec![
             element(*left, next_syntax_id),
             element(*right, next_syntax_id),
         ],
     });
-    Expression::Call(crate::CallExpression {
+    Expression::Call(staple_syntax::CallExpression {
         syntax,
         callee: Box::new(access),
         argument: Box::new(argument),
@@ -699,7 +699,7 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
         Expression::Binary(_) => {
             let Expression::Binary(mut binary) = std::mem::replace(
                 expression,
-                Expression::Name(crate::NameExpression {
+                Expression::Name(staple_syntax::NameExpression {
                     syntax: Syntax::compiler(),
                     name: String::new(),
                 }),
@@ -760,22 +760,22 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
         }
         Expression::StringTemplate(template) => {
             for part in &mut template.parts {
-                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
                     desugar_expression(&mut interpolation.expression, next_syntax_id);
                 }
             }
         }
         Expression::Quote(quote) => match &mut quote.template {
-            crate::QuoteTemplate::Expression(expression) => {
+            staple_syntax::QuoteTemplate::Expression(expression) => {
                 desugar_expression(expression, next_syntax_id)
             }
-            crate::QuoteTemplate::Item(item) => desugar_item(item, next_syntax_id),
-            crate::QuoteTemplate::Items(items) => {
+            staple_syntax::QuoteTemplate::Item(item) => desugar_item(item, next_syntax_id),
+            staple_syntax::QuoteTemplate::Items(items) => {
                 for item in items {
                     desugar_item(item, next_syntax_id);
                 }
             }
-            crate::QuoteTemplate::Raw => {}
+            staple_syntax::QuoteTemplate::Raw => {}
         },
         Expression::Resource(_)
         | Expression::SyntaxArgument(_)
@@ -832,7 +832,7 @@ pub(crate) fn expand_program(
     for source_module in program.modules_mut() {
         let module = source_module.id;
         if !source_module.syntax.modifiers.is_empty() {
-            let declaration = crate::Submodule {
+            let declaration = staple_syntax::Submodule {
                 syntax: source_module
                     .syntax
                     .declaration_syntax
@@ -848,7 +848,7 @@ pub(crate) fn expand_program(
                 subtype_bounds: Vec::new(),
                 companion_target: None,
             };
-            let modified = crate::ModifiedItem {
+            let modified = staple_syntax::ModifiedItem {
                 syntax: declaration.syntax.clone(),
                 modifiers: std::mem::take(&mut source_module.syntax.modifiers),
                 item: Box::new(Item::Submodule(declaration)),
@@ -1042,7 +1042,7 @@ impl MacroExpander {
                         } else if let Some(value) = &declaration.value {
                             MacroKind::User(value.clone())
                         } else {
-                            MacroKind::User(Expression::Product(crate::ProductExpression::empty()))
+                            MacroKind::User(Expression::Product(staple_syntax::ProductExpression::empty()))
                         };
                         let (arity, mut parameters, mut result) =
                             if matches!(kind, MacroKind::Quote | MacroKind::ParseQuote) {
@@ -2047,7 +2047,7 @@ impl MacroExpander {
     fn expand_macro_call_metadata_invocation(
         &mut self,
         module: ModuleId,
-        invocation: crate::VisibilityMacroInvocation,
+        invocation: staple_syntax::VisibilityMacroInvocation,
         depth: usize,
     ) -> Option<Item> {
         let (head, arguments) = flatten_call(&invocation.expression);
@@ -2147,7 +2147,7 @@ impl MacroExpander {
                     for argument in &arguments[consumed_count..] {
                         let mut syntax = expression.syntax().clone();
                         syntax.id = self.fresh_id();
-                        expression = Expression::Call(crate::CallExpression {
+                        expression = Expression::Call(staple_syntax::CallExpression {
                             syntax,
                             callee: Box::new(expression),
                             argument: Box::new((*argument).clone()),
@@ -2178,7 +2178,7 @@ impl MacroExpander {
     fn resolve_doc_modifier_text(
         &mut self,
         module: ModuleId,
-        invocation: &crate::ModifierInvocation,
+        invocation: &staple_syntax::ModifierInvocation,
     ) -> Option<String> {
         if invocation.argument.is_some() {
             let (definition, _) = self.select_modifier(module, invocation)?;
@@ -2201,7 +2201,7 @@ impl MacroExpander {
             ));
             return None;
         };
-        match crate::string_literal::decode(&literal.literal) {
+        match staple_syntax::string_literal::decode(&literal.literal) {
             Ok(doc) => Some(doc),
             Err(message) => {
                 self.diagnostics
@@ -2214,7 +2214,7 @@ impl MacroExpander {
     fn apply_modifier_chain(
         &mut self,
         module: ModuleId,
-        mut modified: crate::ModifiedItem,
+        mut modified: staple_syntax::ModifiedItem,
         depth: usize,
     ) -> Option<ModifierChainResult> {
         let Some(invocation) = modified.modifiers.first().cloned() else {
@@ -2340,7 +2340,7 @@ impl MacroExpander {
                 ));
                 return None;
             };
-            let feature = match crate::string_literal::decode(&literal.literal) {
+            let feature = match staple_syntax::string_literal::decode(&literal.literal) {
                 Ok(feature) => feature,
                 Err(message) => {
                     self.diagnostics
@@ -2567,11 +2567,11 @@ impl MacroExpander {
     ) -> Option<SyntaxValue> {
         match expected {
             MetaType::Type => {
-                crate::parser::parse_type_fragment(&argument.syntax, true, &mut self.next_syntax_id)
+                staple_syntax::parse_type_fragment(&argument.syntax, true, &mut self.next_syntax_id)
                     .ok()
                     .map(SyntaxValue::Type)
             }
-            MetaType::Pattern => crate::parser::parse_pattern_fragment(
+            MetaType::Pattern => staple_syntax::parse_pattern_fragment(
                 &argument.syntax,
                 true,
                 &mut self.next_syntax_id,
@@ -2629,7 +2629,7 @@ impl MacroExpander {
                     .collect::<Option<Vec<_>>>()
             }
             Value::Syntax(SyntaxValue::Raw(raw)) => {
-                let mut items = match crate::parser::parse_item_list_fragment(
+                let mut items = match staple_syntax::parse_item_list_fragment(
                     &raw,
                     &mut self.next_syntax_id,
                 ) {
@@ -2738,7 +2738,7 @@ impl MacroExpander {
         match result {
             SyntaxValue::Raw(raw) => {
                 let parsed =
-                    crate::parser::parse_item_list_fragment(&raw, &mut self.next_syntax_id);
+                    staple_syntax::parse_item_list_fragment(&raw, &mut self.next_syntax_id);
                 let Ok(mut items) = parsed else {
                     self.diagnostics.push(Diagnostic::new(
                         expression.syntax().span.clone(),
@@ -2774,7 +2774,7 @@ impl MacroExpander {
                         for argument in &arguments[consumed_count..] {
                             let mut syntax = result.syntax().clone();
                             syntax.id = self.fresh_id();
-                            result = Expression::Call(crate::CallExpression {
+                            result = Expression::Call(staple_syntax::CallExpression {
                                 syntax,
                                 callee: Box::new(result),
                                 argument: Box::new((*argument).clone()),
@@ -2837,7 +2837,7 @@ impl MacroExpander {
                     for argument in &arguments[consumed_count..] {
                         let mut syntax = result.syntax().clone();
                         syntax.id = self.fresh_id();
-                        result = Expression::Call(crate::CallExpression {
+                        result = Expression::Call(staple_syntax::CallExpression {
                             syntax,
                             callee: Box::new(result),
                             argument: Box::new((*argument).clone()),
@@ -3127,7 +3127,7 @@ impl MacroExpander {
                 return expression;
             };
             let result = if let SyntaxValue::Raw(raw) = result {
-                match crate::parser::parse_expression_fragment(&raw, &mut self.next_syntax_id) {
+                match staple_syntax::parse_expression_fragment(&raw, &mut self.next_syntax_id) {
                     Ok(mut parsed) => {
                         let mark = self.next_mark;
                         self.next_mark += 1;
@@ -3172,7 +3172,7 @@ impl MacroExpander {
             for argument in &arguments[consumed_count..] {
                 let mut syntax = result.syntax().clone();
                 syntax.id = self.fresh_id();
-                result = Expression::Call(crate::CallExpression {
+                result = Expression::Call(staple_syntax::CallExpression {
                     syntax,
                     callee: Box::new(result),
                     argument: Box::new((*argument).clone()),
@@ -3533,7 +3533,7 @@ impl MacroExpander {
                 let mut syntax = string.syntax.clone();
                 syntax.id = self.fresh_id();
                 Some(SyntaxValue::from_expression(Expression::CString(
-                    crate::CStringExpression {
+                    staple_syntax::CStringExpression {
                         syntax,
                         literal: string.literal.clone(),
                     },
@@ -3815,7 +3815,7 @@ impl MacroExpander {
             Expression::Satisfies(satisfies) => {
                 if let Some(expected) = meta_type(&satisfies.ty)
                     && let Expression::Quote(quote) = satisfies.value.as_ref()
-                    && quote.kind == crate::QuoteKind::ParseQuote
+                    && quote.kind == staple_syntax::QuoteKind::ParseQuote
                 {
                     if !quote_result_type(&expected) {
                         self.diagnostics.push(Diagnostic::new(
@@ -3841,8 +3841,8 @@ impl MacroExpander {
             }
             Expression::Quote(quote) => {
                 let expected = match quote.kind {
-                    crate::QuoteKind::Quote => MetaType::Syntax,
-                    crate::QuoteKind::ParseQuote => match self.quote_context.clone() {
+                    staple_syntax::QuoteKind::Quote => MetaType::Syntax,
+                    staple_syntax::QuoteKind::ParseQuote => match self.quote_context.clone() {
                         Some(expected) => expected,
                         None => {
                             self.diagnostics.push(Diagnostic::new(
@@ -3945,7 +3945,7 @@ impl MacroExpander {
                         _ => None,
                     };
                     let value = if let Expression::Quote(quote) = &element.value
-                        && quote.kind == crate::QuoteKind::ParseQuote
+                        && quote.kind == staple_syntax::QuoteKind::ParseQuote
                         && let Some(expected) = sequence_element
                     {
                         self.instantiate_contextual_quote(module, quote, environment, &expected)?
@@ -4054,7 +4054,7 @@ impl MacroExpander {
                         expression.syntax().span.clone(),
                     );
                     if let Some(SyntaxValue::Raw(raw)) = result.take() {
-                        result = match crate::parser::parse_expression_fragment(
+                        result = match staple_syntax::parse_expression_fragment(
                             &raw,
                             &mut self.next_syntax_id,
                         ) {
@@ -4101,7 +4101,7 @@ impl MacroExpander {
                             for argument in &arguments[consumed_count..] {
                                 let mut syntax = expanded.syntax().clone();
                                 syntax.id = self.fresh_id();
-                                expanded = Expression::Call(crate::CallExpression {
+                                expanded = Expression::Call(staple_syntax::CallExpression {
                                     syntax,
                                     callee: Box::new(expanded),
                                     argument: Box::new((*argument).clone()),
@@ -4321,7 +4321,7 @@ impl MacroExpander {
                             let value = if let Some(expected) =
                                 binding.annotation.as_ref().and_then(meta_type)
                                 && let Expression::Quote(quote) = value
-                                && quote.kind == crate::QuoteKind::ParseQuote
+                                && quote.kind == staple_syntax::QuoteKind::ParseQuote
                             {
                                 if !quote_result_type(&expected) {
                                     self.diagnostics.push(Diagnostic::new(
@@ -4350,7 +4350,7 @@ impl MacroExpander {
                         }
                         Item::Assignment(assignment) => {
                             let value = if let Expression::Quote(quote) = &assignment.value
-                                && quote.kind == crate::QuoteKind::ParseQuote
+                                && quote.kind == staple_syntax::QuoteKind::ParseQuote
                                 && matches!(
                                     &assignment.target,
                                     Expression::Access(access)
@@ -4445,13 +4445,13 @@ impl MacroExpander {
                         .push(Diagnostic::new(span, "`Ident` requires a string spelling"));
                     return None;
                 };
-                let spelling = crate::string_literal::decode(&literal).unwrap_or(literal);
-                let tokens = crate::lexer::lex(&spelling)
+                let spelling = staple_syntax::string_literal::decode(&literal).unwrap_or(literal);
+                let tokens = staple_syntax::lex(&spelling)
                     .into_iter()
                     .filter(|token| !token.kind.is_trivia())
                     .collect::<Vec<_>>();
                 if !matches!(tokens.as_slice(), [token]
-                    if token.kind == crate::TokenKind::Identifier && token.text == spelling)
+                    if token.kind == staple_syntax::TokenKind::Identifier && token.text == spelling)
                 {
                     self.diagnostics.push(Diagnostic::new(
                         span,
@@ -4460,7 +4460,7 @@ impl MacroExpander {
                     return None;
                 }
                 let syntax = self.generated_syntax(module, span);
-                Some(Value::Syntax(SyntaxValue::Ident(crate::NameExpression {
+                Some(Value::Syntax(SyntaxValue::Ident(staple_syntax::NameExpression {
                     syntax,
                     name: spelling,
                 })))
@@ -4504,7 +4504,7 @@ impl MacroExpander {
                     return None;
                 };
                 let syntax = self.generated_syntax(module, span);
-                Some(Value::Syntax(SyntaxValue::Call(crate::CallExpression {
+                Some(Value::Syntax(SyntaxValue::Call(staple_syntax::CallExpression {
                     syntax,
                     callee: Box::new(callee.to_expression()?),
                     argument: Box::new(argument.to_expression()?),
@@ -4518,9 +4518,9 @@ impl MacroExpander {
                 };
                 let syntax = self.generated_syntax(module, span);
                 Some(Value::Syntax(SyntaxValue::Unstructured(
-                    Expression::String(crate::StringExpression {
+                    Expression::String(staple_syntax::StringExpression {
                         syntax,
-                        literal: crate::string_literal::encode(&value),
+                        literal: staple_syntax::string_literal::encode(&value),
                     }),
                 )))
             }
@@ -4533,13 +4533,13 @@ impl MacroExpander {
                     return None;
                 };
                 Some(Value::Syntax(SyntaxValue::Pattern(Pattern::Binding(
-                    crate::BindingPattern {
+                    staple_syntax::BindingPattern {
                         syntax: identifier.syntax,
                         mutable: false,
                         moved: false,
                         name: identifier.name.clone(),
                         resolution_name: Some(identifier.name),
-                        ty: Type::Inferred(crate::InferredType::new()),
+                        ty: Type::Inferred(staple_syntax::InferredType::new()),
                     },
                 ))))
             }
@@ -4561,7 +4561,7 @@ impl MacroExpander {
                     return None;
                 };
                 Some(Value::Syntax(SyntaxValue::Pattern(Pattern::Nominal(
-                    crate::NominalPattern {
+                    staple_syntax::NominalPattern {
                         syntax: self.generated_syntax(module, span),
                         namespace: None,
                         name: name.name.clone(),
@@ -4622,7 +4622,7 @@ impl MacroExpander {
                 }
                 let syntax = enclosing.unwrap_or_else(|| self.generated_syntax(module, span));
                 Some(Value::Syntax(SyntaxValue::Item(Box::new(Item::Modified(
-                    crate::ModifiedItem {
+                    staple_syntax::ModifiedItem {
                         syntax,
                         modifiers,
                         item: item.clone(),
@@ -5078,7 +5078,7 @@ impl MacroExpander {
     fn eval_binary_expression(
         &mut self,
         module: ModuleId,
-        binary: &crate::BinaryExpression,
+        binary: &staple_syntax::BinaryExpression,
         environment: &mut Environment,
     ) -> Option<Value> {
         let lowered = lower_binary_expression(binary.clone(), &mut self.next_syntax_id);
@@ -5088,7 +5088,7 @@ impl MacroExpander {
     /// Builds the `(left, right)` positional product used by lowered trait
     /// operator calls.
     fn operand_product(&mut self, left: Expression, right: Expression, span: Span) -> Expression {
-        let element = |this: &mut Self, value| crate::ProductElement {
+        let element = |this: &mut Self, value| staple_syntax::ProductElement {
             syntax: Syntax::synthetic(this.fresh_id(), span.clone()),
             name: None,
             designated: false,
@@ -5098,7 +5098,7 @@ impl MacroExpander {
         };
         let left = element(self, left);
         let right = element(self, right);
-        Expression::Product(crate::ProductExpression {
+        Expression::Product(staple_syntax::ProductExpression {
             syntax: Syntax::synthetic(self.fresh_id(), span),
             elements: vec![left, right],
         })
@@ -5113,7 +5113,7 @@ impl MacroExpander {
     fn value_to_expression(&mut self, value: Value, span: Span) -> Option<Expression> {
         match value {
             Value::Integer(integer) if integer >= 0 => {
-                Some(Expression::Integer(crate::IntegerExpression {
+                Some(Expression::Integer(staple_syntax::IntegerExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span),
                     literal: integer.to_string(),
                 }))
@@ -5123,30 +5123,30 @@ impl MacroExpander {
                 // language has no unary minus, so a negative compile-time
                 // result is represented like lowered `0 - n`:
                 // `Subtract.subtract (0, |n|)`.
-                let zero = Expression::Integer(crate::IntegerExpression {
+                let zero = Expression::Integer(staple_syntax::IntegerExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     literal: "0".to_string(),
                 });
-                let magnitude = Expression::Integer(crate::IntegerExpression {
+                let magnitude = Expression::Integer(staple_syntax::IntegerExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     literal: integer.unsigned_abs().to_string(),
                 });
-                let access = Expression::Access(crate::AccessExpression {
+                let access = Expression::Access(staple_syntax::AccessExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    value: Box::new(Expression::Name(crate::NameExpression {
+                    value: Box::new(Expression::Name(staple_syntax::NameExpression {
                         syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                         name: "Subtract".to_string(),
                     })),
                     accessor: Accessor::Name("subtract".to_string()),
                 });
-                Some(Expression::Call(crate::CallExpression {
+                Some(Expression::Call(staple_syntax::CallExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     callee: Box::new(access),
                     argument: Box::new(self.operand_product(zero, magnitude, span.clone())),
                 }))
             }
             Value::Float(float) if float.is_finite() && float >= 0.0 => {
-                Some(Expression::Float(crate::FloatExpression {
+                Some(Expression::Float(staple_syntax::FloatExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span),
                     literal: format!("{float:?}"),
                 }))
@@ -5155,23 +5155,23 @@ impl MacroExpander {
             // never carry a leading `-` either, so a negative compile-time
             // result is lowered the same way, via `Subtract.subtract`.
             Value::Float(float) if float.is_finite() => {
-                let zero = Expression::Float(crate::FloatExpression {
+                let zero = Expression::Float(staple_syntax::FloatExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     literal: "0.0".to_string(),
                 });
-                let magnitude = Expression::Float(crate::FloatExpression {
+                let magnitude = Expression::Float(staple_syntax::FloatExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     literal: format!("{:?}", float.abs()),
                 });
-                let access = Expression::Access(crate::AccessExpression {
+                let access = Expression::Access(staple_syntax::AccessExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
-                    value: Box::new(Expression::Name(crate::NameExpression {
+                    value: Box::new(Expression::Name(staple_syntax::NameExpression {
                         syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                         name: "Subtract".to_string(),
                     })),
                     accessor: Accessor::Name("subtract".to_string()),
                 });
-                Some(Expression::Call(crate::CallExpression {
+                Some(Expression::Call(staple_syntax::CallExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                     callee: Box::new(access),
                     argument: Box::new(self.operand_product(zero, magnitude, span.clone())),
@@ -5192,7 +5192,7 @@ impl MacroExpander {
             // `eval_expression`, which clones `StringExpression::literal`
             // verbatim rather than decoding it) — reuse it as-is rather
             // than re-encoding, which would double-quote the result.
-            Value::String(string) => Some(Expression::String(crate::StringExpression {
+            Value::String(string) => Some(Expression::String(staple_syntax::StringExpression {
                 syntax: Syntax::synthetic(self.fresh_id(), span),
                 literal: string,
             })),
@@ -5200,7 +5200,7 @@ impl MacroExpander {
                 let elements = fields
                     .into_iter()
                     .map(|(name, value)| {
-                        Some(crate::ProductElement {
+                        Some(staple_syntax::ProductElement {
                             syntax: Syntax::synthetic(self.fresh_id(), span.clone()),
                             name,
                             designated: false,
@@ -5210,7 +5210,7 @@ impl MacroExpander {
                         })
                     })
                     .collect::<Option<Vec<_>>>()?;
-                Some(Expression::Product(crate::ProductExpression {
+                Some(Expression::Product(staple_syntax::ProductExpression {
                     syntax: Syntax::synthetic(self.fresh_id(), span),
                     elements,
                 }))
@@ -5347,19 +5347,19 @@ impl MacroExpander {
     fn instantiate_quote(
         &mut self,
         module: ModuleId,
-        template: &crate::QuoteTemplate,
+        template: &staple_syntax::QuoteTemplate,
         environment: &Environment,
         mark: u64,
     ) -> Option<SyntaxValue> {
         match template {
-            crate::QuoteTemplate::Expression(template) => {
+            staple_syntax::QuoteTemplate::Expression(template) => {
                 let mut expression = template.as_ref().clone();
                 alpha_rename_expression(&mut expression, mark, &mut Vec::new());
                 self.freshen_expression(&mut expression, module, mark);
                 substitute_splices(&expression, environment, &mut self.diagnostics)
                     .map(SyntaxValue::from_expression)
             }
-            crate::QuoteTemplate::Item(template) => {
+            staple_syntax::QuoteTemplate::Item(template) => {
                 let mut item = template.as_ref().clone();
                 if !item_output_supported(&item) {
                     self.diagnostics.push(Diagnostic::new(
@@ -5373,7 +5373,7 @@ impl MacroExpander {
                 substitute_item(&mut item, environment, &mut self.diagnostics)?;
                 Some(SyntaxValue::Item(Box::new(item)))
             }
-            crate::QuoteTemplate::Items(templates) => {
+            staple_syntax::QuoteTemplate::Items(templates) => {
                 let mut items = templates.clone();
                 for item in &items {
                     if !item_output_supported(item) {
@@ -5391,7 +5391,7 @@ impl MacroExpander {
                 substitute_item_list(&mut items, environment, &mut self.diagnostics)?;
                 Some(SyntaxValue::Items(items))
             }
-            crate::QuoteTemplate::Raw => {
+            staple_syntax::QuoteTemplate::Raw => {
                 self.diagnostics.push(Diagnostic::new(
                     Span::Compiler,
                     "quotation requires a contextual syntax type",
@@ -5404,7 +5404,7 @@ impl MacroExpander {
     fn instantiate_contextual_quote(
         &mut self,
         module: ModuleId,
-        quote: &crate::QuoteExpression,
+        quote: &staple_syntax::QuoteExpression,
         environment: &Environment,
         expected: &MetaType,
     ) -> Option<Value> {
@@ -5452,8 +5452,8 @@ impl MacroExpander {
             || !self.definitions.get(matching[0]).is_some_and(|definition| {
                 matches!(
                     (&definition.kind, quote.kind),
-                    (MacroKind::Quote, crate::QuoteKind::Quote)
-                        | (MacroKind::ParseQuote, crate::QuoteKind::ParseQuote)
+                    (MacroKind::Quote, staple_syntax::QuoteKind::Quote)
+                        | (MacroKind::ParseQuote, staple_syntax::QuoteKind::ParseQuote)
                 )
             })
         {
@@ -5489,7 +5489,7 @@ impl MacroExpander {
         if *expected == MetaType::Pattern {
             let mark = self.next_mark;
             self.next_mark += 1;
-            let mut pattern = crate::parser::parse_pattern_template_fragment(
+            let mut pattern = staple_syntax::parse_pattern_template_fragment(
                 &quote.contents,
                 &mut self.next_syntax_id,
             )
@@ -5528,7 +5528,7 @@ impl MacroExpander {
                 .contents
                 .tokens()
                 .iter()
-                .any(|token| token.kind == crate::TokenKind::Dollar)
+                .any(|token| token.kind == staple_syntax::TokenKind::Dollar)
         {
             let value =
                 delimiter_argument_value(expected, &quote.contents, &mut self.next_syntax_id);
@@ -5552,7 +5552,7 @@ impl MacroExpander {
             .contents
             .tokens()
             .iter()
-            .any(|token| token.kind == crate::TokenKind::Dollar)
+            .any(|token| token.kind == staple_syntax::TokenKind::Dollar)
         {
             let values = match_sequence_contents(
                 &quote.contents,
@@ -5623,7 +5623,7 @@ impl MacroExpander {
             MetaType::SyntaxNode => structural_syntax_value(syntax, &mut self.next_syntax_id)?,
             MetaType::Expr => {
                 let mut expression =
-                    crate::parser::parse_expression_fragment(syntax, &mut self.next_syntax_id)
+                    staple_syntax::parse_expression_fragment(syntax, &mut self.next_syntax_id)
                         .ok()?;
                 alpha_rename_expression(&mut expression, mark, &mut Vec::new());
                 self.freshen_expression(&mut expression, module, mark);
@@ -5631,28 +5631,28 @@ impl MacroExpander {
             }
             MetaType::Type => {
                 let mut ty =
-                    crate::parser::parse_type_fragment(syntax, false, &mut self.next_syntax_id)
+                    staple_syntax::parse_type_fragment(syntax, false, &mut self.next_syntax_id)
                         .ok()?;
                 freshen_type(self, &mut ty, module, mark);
                 SyntaxValue::Type(ty)
             }
             MetaType::Pattern => {
                 let mut pattern =
-                    crate::parser::parse_pattern_fragment(syntax, false, &mut self.next_syntax_id)
+                    staple_syntax::parse_pattern_fragment(syntax, false, &mut self.next_syntax_id)
                         .ok()?;
                 freshen_pattern(self, &mut pattern, module, mark);
                 SyntaxValue::Pattern(pattern)
             }
             MetaType::Item => {
                 let mut item =
-                    crate::parser::parse_item_fragment(syntax, &mut self.next_syntax_id).ok()?;
+                    staple_syntax::parse_item_fragment(syntax, &mut self.next_syntax_id).ok()?;
                 alpha_rename_item(&mut item, mark);
                 freshen_item(self, &mut item, module, mark);
                 SyntaxValue::Item(Box::new(item))
             }
             MetaType::Sequence(element) if **element == MetaType::Item => {
                 let mut items =
-                    crate::parser::parse_item_list_fragment(syntax, &mut self.next_syntax_id)
+                    staple_syntax::parse_item_list_fragment(syntax, &mut self.next_syntax_id)
                         .ok()?;
                 for item in &mut items {
                     alpha_rename_item(item, mark);
@@ -5675,7 +5675,7 @@ impl MacroExpander {
         let mut output = Vec::new();
         let mut cursor = 0;
         while cursor < input.len() {
-            if input[cursor].kind != crate::TokenKind::Dollar {
+            if input[cursor].kind != staple_syntax::TokenKind::Dollar {
                 output.push(input[cursor].clone());
                 cursor += 1;
                 continue;
@@ -5684,13 +5684,13 @@ impl MacroExpander {
             while name_at < input.len() && input[name_at].kind.is_trivia() {
                 name_at += 1;
             }
-            if name_at == input.len() || input[name_at].kind != crate::TokenKind::Identifier {
+            if name_at == input.len() || input[name_at].kind != staple_syntax::TokenKind::Identifier {
                 output.push(input[cursor].clone());
                 cursor += 1;
                 continue;
             }
             let mut end = name_at + 1;
-            let repeated = end < input.len() && input[end].kind == crate::TokenKind::Ellipsis;
+            let repeated = end < input.len() && input[end].kind == staple_syntax::TokenKind::Ellipsis;
             if repeated {
                 end += 1;
             }
@@ -5771,13 +5771,13 @@ impl MacroExpander {
     fn instantiate_type_quote(
         &mut self,
         module: ModuleId,
-        quote: &crate::QuoteExpression,
+        quote: &staple_syntax::QuoteExpression,
         environment: &Environment,
     ) -> Option<Value> {
         let mark = self.next_mark;
         self.next_mark += 1;
         let mut ty =
-            crate::parser::parse_type_template_fragment(&quote.contents, &mut self.next_syntax_id)
+            staple_syntax::parse_type_template_fragment(&quote.contents, &mut self.next_syntax_id)
                 .map_err(|error| {
                     self.diagnostics
                         .push(Diagnostic::new(quote.contents.span.clone(), error.message));
@@ -5871,7 +5871,7 @@ impl MacroExpander {
             }
             Expression::StringTemplate(template) => {
                 for part in &mut template.parts {
-                    if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                    if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
                         self.freshen_expression(&mut interpolation.expression, module, mark);
                     }
                 }
@@ -6046,7 +6046,7 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
                 {
                     Some(MetaType::Ident(None))
                 }
-                Type::StringLiteral(literal) => crate::string_literal::decode(&literal.literal)
+                Type::StringLiteral(literal) => staple_syntax::string_literal::decode(&literal.literal)
                     .ok()
                     .map(|spelling| MetaType::Ident(Some(spelling))),
                 _ => None,
@@ -6069,7 +6069,7 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
     }
 }
 
-fn applied_meta_type(application: &crate::TypeApplication, expected: &str) -> Option<MetaType> {
+fn applied_meta_type(application: &staple_syntax::TypeApplication, expected: &str) -> Option<MetaType> {
     let Type::Named(callee) = application.callee.as_ref() else {
         return None;
     };
@@ -6179,7 +6179,7 @@ fn sequence_meta_type(ty: &Type) -> Option<MetaType> {
                 Type::Named(name) if name.namespace.is_none() && name.name == "String" => {
                     Some(MetaType::Ident(None))
                 }
-                Type::StringLiteral(literal) => crate::string_literal::decode(&literal.literal)
+                Type::StringLiteral(literal) => staple_syntax::string_literal::decode(&literal.literal)
                     .ok()
                     .map(|spelling| MetaType::Ident(Some(spelling))),
                 _ => None,
@@ -6257,9 +6257,9 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
         | MetaType::Product(_)
         | MetaType::Optional(_)
         | MetaType::Sequence(_) => false,
-        MetaType::Comma => matches_single_token(argument.syntax(), crate::TokenKind::Comma),
-        MetaType::Equals => matches_single_token(argument.syntax(), crate::TokenKind::Equals),
-        MetaType::FatArrow => matches_single_token(argument.syntax(), crate::TokenKind::FatArrow),
+        MetaType::Comma => matches_single_token(argument.syntax(), staple_syntax::TokenKind::Comma),
+        MetaType::Equals => matches_single_token(argument.syntax(), staple_syntax::TokenKind::Equals),
+        MetaType::FatArrow => matches_single_token(argument.syntax(), staple_syntax::TokenKind::FatArrow),
         MetaType::Delimited(_, _) => {
             let mut next_syntax_id = 0;
             delimiter_argument_value(expected, argument.syntax(), &mut next_syntax_id).is_some()
@@ -6279,9 +6279,9 @@ fn delimiter_argument_value(
     let first = tokens.iter().position(|token| !token.kind.is_trivia())?;
     let last = tokens.iter().rposition(|token| !token.kind.is_trivia())?;
     let kind = match (tokens[first].kind, tokens[last].kind) {
-        (crate::TokenKind::LParen, crate::TokenKind::RParen) => DelimiterKind::Parenthesized,
-        (crate::TokenKind::LBracket, crate::TokenKind::RBracket) => DelimiterKind::Bracketed,
-        (crate::TokenKind::LBrace, crate::TokenKind::RBrace) => DelimiterKind::Braced,
+        (staple_syntax::TokenKind::LParen, staple_syntax::TokenKind::RParen) => DelimiterKind::Parenthesized,
+        (staple_syntax::TokenKind::LBracket, staple_syntax::TokenKind::RBracket) => DelimiterKind::Bracketed,
+        (staple_syntax::TokenKind::LBrace, staple_syntax::TokenKind::RBrace) => DelimiterKind::Braced,
         _ => return None,
     };
     if kind != *expected_kind {
@@ -6313,7 +6313,7 @@ fn delimiter_argument_value(
                 )
         }
     }?;
-    let expression = crate::parser::parse_expression_fragment(syntax, next_syntax_id)
+    let expression = staple_syntax::parse_expression_fragment(syntax, next_syntax_id)
         .ok()
         .map(Box::new);
     Some(SyntaxValue::Delimited(DelimitedSyntaxValue {
@@ -6376,22 +6376,22 @@ fn constructed_separator(separator: &MetaType) -> Option<Value> {
 }
 
 fn find_top_level_separator(
-    tokens: &[crate::SyntaxToken],
+    tokens: &[staple_syntax::SyntaxToken],
     cursor: usize,
     end: usize,
     separator: &MetaType,
 ) -> Option<usize> {
     let separator_kind = match separator {
-        MetaType::Comma => crate::TokenKind::Comma,
+        MetaType::Comma => staple_syntax::TokenKind::Comma,
         _ => return None,
     };
     let mut delimiters = Vec::new();
     for (index, token) in tokens.iter().enumerate().take(end).skip(cursor) {
         match token.kind {
-            crate::TokenKind::LParen => delimiters.push(crate::TokenKind::RParen),
-            crate::TokenKind::LBracket => delimiters.push(crate::TokenKind::RBracket),
-            crate::TokenKind::LBrace => delimiters.push(crate::TokenKind::RBrace),
-            crate::TokenKind::RParen | crate::TokenKind::RBracket | crate::TokenKind::RBrace => {
+            staple_syntax::TokenKind::LParen => delimiters.push(staple_syntax::TokenKind::RParen),
+            staple_syntax::TokenKind::LBracket => delimiters.push(staple_syntax::TokenKind::RBracket),
+            staple_syntax::TokenKind::LBrace => delimiters.push(staple_syntax::TokenKind::RBrace),
+            staple_syntax::TokenKind::RParen | staple_syntax::TokenKind::RBracket | staple_syntax::TokenKind::RBrace => {
                 if delimiters.last() == Some(&token.kind) {
                     delimiters.pop();
                 }
@@ -6403,7 +6403,7 @@ fn find_top_level_separator(
     None
 }
 
-fn trim_trailing_trivia(tokens: &[crate::SyntaxToken], start: usize, mut end: usize) -> usize {
+fn trim_trailing_trivia(tokens: &[staple_syntax::SyntaxToken], start: usize, mut end: usize) -> usize {
     while end > start && tokens[end - 1].kind.is_trivia() {
         end -= 1;
     }
@@ -6545,28 +6545,28 @@ fn leading_doc_modifiers(
     parent: &Syntax,
     start: usize,
     end: usize,
-) -> Option<(Vec<crate::ModifierInvocation>, usize)> {
+) -> Option<(Vec<staple_syntax::ModifierInvocation>, usize)> {
     let tokens = parent.tokens();
     let mut position = start;
     let mut line_start = start == 0
         || tokens[..start]
             .last()
-            .is_some_and(|token| token.kind == crate::TokenKind::Newline);
+            .is_some_and(|token| token.kind == staple_syntax::TokenKind::Newline);
     let mut docs = Vec::new();
     while position < end {
         let token = &tokens[position];
         match token.kind {
-            crate::TokenKind::Whitespace => position += 1,
-            crate::TokenKind::Newline => {
+            staple_syntax::TokenKind::Whitespace => position += 1,
+            staple_syntax::TokenKind::Newline => {
                 line_start = true;
                 position += 1;
             }
-            crate::TokenKind::LineComment
+            staple_syntax::TokenKind::LineComment
                 if line_start
                     && token.text.starts_with("///")
                     && !token.text.starts_with("////") =>
             {
-                docs.push(crate::ModifierInvocation {
+                docs.push(staple_syntax::ModifierInvocation {
                     syntax: syntax_slice(parent, start, position + 1),
                     namespace: None,
                     name: "doc".to_owned(),
@@ -6614,7 +6614,7 @@ fn match_syntax_fragment(
     }
     let expression = || {
         let mut ids = *next_syntax_id;
-        let value = crate::parser::parse_expression_fragment(syntax, &mut ids).ok()?;
+        let value = staple_syntax::parse_expression_fragment(syntax, &mut ids).ok()?;
         Some((value, ids))
     };
     let syntax_value = match expected {
@@ -6627,7 +6627,7 @@ fn match_syntax_fragment(
                 .iter()
                 .filter(|token| !token.kind.is_trivia());
             let token = tokens.next()?;
-            if token.kind != crate::TokenKind::Identifier
+            if token.kind != staple_syntax::TokenKind::Identifier
                 || tokens.next().is_some()
                 || spelling
                     .as_ref()
@@ -6635,25 +6635,25 @@ fn match_syntax_fragment(
             {
                 return None;
             }
-            SyntaxValue::Ident(crate::NameExpression {
+            SyntaxValue::Ident(staple_syntax::NameExpression {
                 syntax: syntax.clone(),
                 name: token.text.clone(),
             })
         }
         MetaType::Comma => {
-            if !matches_single_token(syntax, crate::TokenKind::Comma) {
+            if !matches_single_token(syntax, staple_syntax::TokenKind::Comma) {
                 return None;
             }
             SyntaxValue::Comma(syntax.clone())
         }
         MetaType::Equals => {
-            if !matches_single_token(syntax, crate::TokenKind::Equals) {
+            if !matches_single_token(syntax, staple_syntax::TokenKind::Equals) {
                 return None;
             }
             SyntaxValue::Equals(syntax.clone())
         }
         MetaType::FatArrow => {
-            if !matches_single_token(syntax, crate::TokenKind::FatArrow) {
+            if !matches_single_token(syntax, staple_syntax::TokenKind::FatArrow) {
                 return None;
             }
             SyntaxValue::FatArrow(syntax.clone())
@@ -6673,11 +6673,11 @@ fn match_syntax_fragment(
             value
         }
         MetaType::Type => SyntaxValue::Type(
-            crate::parser::parse_type_fragment(syntax, false, next_syntax_id).ok()?,
+            staple_syntax::parse_type_fragment(syntax, false, next_syntax_id).ok()?,
         ),
         MetaType::Pattern | MetaType::BindingPattern | MetaType::NominalPattern => {
             let pattern =
-                crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id).ok()?;
+                staple_syntax::parse_pattern_fragment(syntax, false, next_syntax_id).ok()?;
             if matches!(expected, MetaType::BindingPattern)
                 && !matches!(pattern, Pattern::Binding(_))
                 || matches!(expected, MetaType::NominalPattern)
@@ -6691,7 +6691,7 @@ fn match_syntax_fragment(
         | MetaType::ModifiedItem
         | MetaType::TypeDeclarationItem
         | MetaType::UnstructuredItem => {
-            let item = crate::parser::parse_item_fragment(syntax, next_syntax_id).ok()?;
+            let item = staple_syntax::parse_item_fragment(syntax, next_syntax_id).ok()?;
             if matches!(expected, MetaType::ModifiedItem) && !matches!(item, Item::Modified(_))
                 || matches!(expected, MetaType::TypeDeclarationItem)
                     && !matches!(item, Item::TypeDeclaration(_))
@@ -6703,7 +6703,7 @@ fn match_syntax_fragment(
             SyntaxValue::Item(Box::new(item))
         }
         MetaType::Modifier => {
-            let invocation = crate::parser::parse_modifier_fragment(syntax, next_syntax_id).ok()?;
+            let invocation = staple_syntax::parse_modifier_fragment(syntax, next_syntax_id).ok()?;
             SyntaxValue::Modifier(OpaqueModifier {
                 invocation,
                 enclosing: None,
@@ -6725,7 +6725,7 @@ fn match_syntax_fragment(
     Some(Value::Syntax(syntax_value))
 }
 
-fn matches_single_token(syntax: &Syntax, expected: crate::TokenKind) -> bool {
+fn matches_single_token(syntax: &Syntax, expected: staple_syntax::TokenKind) -> bool {
     let mut tokens = syntax
         .tokens()
         .iter()
@@ -6740,25 +6740,25 @@ fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Optio
         .filter(|token| !token.kind.is_trivia())
         .collect::<Vec<_>>();
     if let [token] = tokens.as_slice()
-        && token.kind == crate::TokenKind::Identifier
+        && token.kind == staple_syntax::TokenKind::Identifier
     {
-        return Some(SyntaxValue::Ident(crate::NameExpression {
+        return Some(SyntaxValue::Ident(staple_syntax::NameExpression {
             syntax: syntax.clone(),
             name: token.text.clone(),
         }));
     }
     if let [token] = tokens.as_slice()
-        && token.kind == crate::TokenKind::Comma
+        && token.kind == staple_syntax::TokenKind::Comma
     {
         return Some(SyntaxValue::Comma(syntax.clone()));
     }
     if let [token] = tokens.as_slice()
-        && token.kind == crate::TokenKind::Equals
+        && token.kind == staple_syntax::TokenKind::Equals
     {
         return Some(SyntaxValue::Equals(syntax.clone()));
     }
     if let [token] = tokens.as_slice()
-        && token.kind == crate::TokenKind::FatArrow
+        && token.kind == staple_syntax::TokenKind::FatArrow
     {
         return Some(SyntaxValue::FatArrow(syntax.clone()));
     }
@@ -6767,13 +6767,13 @@ fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Optio
             .first()
             .zip(tokens.last())
             .and_then(|(open, close)| match (open.kind, close.kind) {
-                (crate::TokenKind::LParen, crate::TokenKind::RParen) => {
+                (staple_syntax::TokenKind::LParen, staple_syntax::TokenKind::RParen) => {
                     Some((open, close, DelimiterKind::Parenthesized))
                 }
-                (crate::TokenKind::LBracket, crate::TokenKind::RBracket) => {
+                (staple_syntax::TokenKind::LBracket, staple_syntax::TokenKind::RBracket) => {
                     Some((open, close, DelimiterKind::Bracketed))
                 }
-                (crate::TokenKind::LBrace, crate::TokenKind::RBrace) => {
+                (staple_syntax::TokenKind::LBrace, staple_syntax::TokenKind::RBrace) => {
                     Some((open, close, DelimiterKind::Braced))
                 }
                 _ => None,
@@ -6786,21 +6786,21 @@ fn structural_syntax_value(syntax: &Syntax, next_syntax_id: &mut usize) -> Optio
         );
         return delimiter_argument_value(&expected, syntax, next_syntax_id);
     }
-    if let Ok(expression) = crate::parser::parse_expression_fragment(syntax, next_syntax_id) {
+    if let Ok(expression) = staple_syntax::parse_expression_fragment(syntax, next_syntax_id) {
         return Some(SyntaxValue::from_expression(expression));
     }
-    if let Ok(item) = crate::parser::parse_item_fragment(syntax, next_syntax_id) {
+    if let Ok(item) = staple_syntax::parse_item_fragment(syntax, next_syntax_id) {
         return Some(SyntaxValue::Item(Box::new(item)));
     }
-    if let Ok(ty) = crate::parser::parse_type_fragment(syntax, false, next_syntax_id) {
+    if let Ok(ty) = staple_syntax::parse_type_fragment(syntax, false, next_syntax_id) {
         return Some(SyntaxValue::Type(ty));
     }
-    crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id)
+    staple_syntax::parse_pattern_fragment(syntax, false, next_syntax_id)
         .ok()
         .map(SyntaxValue::Pattern)
 }
 
-fn skip_trivia(tokens: &[crate::SyntaxToken], mut cursor: usize, end: usize) -> usize {
+fn skip_trivia(tokens: &[staple_syntax::SyntaxToken], mut cursor: usize, end: usize) -> usize {
     while cursor < end && tokens[cursor].kind.is_trivia() {
         cursor += 1;
     }
@@ -6808,7 +6808,7 @@ fn skip_trivia(tokens: &[crate::SyntaxToken], mut cursor: usize, end: usize) -> 
 }
 
 fn candidate_ends(
-    tokens: &[crate::SyntaxToken],
+    tokens: &[staple_syntax::SyntaxToken],
     cursor: usize,
     end: usize,
 ) -> impl Iterator<Item = usize> + '_ {
@@ -6973,11 +6973,11 @@ fn modifier_argument_matches(expected: &MetaType, argument: &ModifierArgument) -
     match expected {
         MetaType::Type => {
             let mut next_syntax_id = 0;
-            crate::parser::parse_type_fragment(&argument.syntax, true, &mut next_syntax_id).is_ok()
+            staple_syntax::parse_type_fragment(&argument.syntax, true, &mut next_syntax_id).is_ok()
         }
         MetaType::Pattern => {
             let mut next_syntax_id = 0;
-            crate::parser::parse_pattern_fragment(&argument.syntax, true, &mut next_syntax_id)
+            staple_syntax::parse_pattern_fragment(&argument.syntax, true, &mut next_syntax_id)
                 .is_ok()
         }
         MetaType::Item
@@ -7010,10 +7010,10 @@ fn category_argument_syntax(argument: &Expression) -> Option<(&Syntax, bool)> {
 /// part of the type so product types can use their natural spelling.
 fn parse_type_argument(argument: &Expression, next_syntax_id: &mut usize) -> Option<Type> {
     let (syntax, grouped) = category_argument_syntax(argument)?;
-    if grouped && let Ok(ty) = crate::parser::parse_type_fragment(syntax, true, next_syntax_id) {
+    if grouped && let Ok(ty) = staple_syntax::parse_type_fragment(syntax, true, next_syntax_id) {
         return Some(ty);
     }
-    crate::parser::parse_type_fragment(syntax, false, next_syntax_id).ok()
+    staple_syntax::parse_type_fragment(syntax, false, next_syntax_id).ok()
 }
 
 /// Reinterprets an expression-shaped macro argument as pattern syntax.
@@ -7025,11 +7025,11 @@ fn parse_type_argument(argument: &Expression, next_syntax_id: &mut usize) -> Opt
 fn parse_pattern_argument(argument: &Expression, next_syntax_id: &mut usize) -> Option<Pattern> {
     let (syntax, grouped) = category_argument_syntax(argument)?;
     if grouped
-        && let Ok(pattern) = crate::parser::parse_pattern_fragment(syntax, true, next_syntax_id)
+        && let Ok(pattern) = staple_syntax::parse_pattern_fragment(syntax, true, next_syntax_id)
     {
         return Some(pattern);
     }
-    crate::parser::parse_pattern_fragment(syntax, false, next_syntax_id).ok()
+    staple_syntax::parse_pattern_fragment(syntax, false, next_syntax_id).ok()
 }
 
 fn meta_argument_expression<'a>(expected: &MetaType, argument: &'a Expression) -> &'a Expression {
@@ -7205,7 +7205,7 @@ fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
             .declaration
             .type_parameters
             .iter()
-            .flat_map(crate::TypeParameterPattern::names)
+            .flat_map(staple_syntax::TypeParameterPattern::names)
             .collect::<Vec<_>>();
         let bounds = definition
             .declaration
@@ -7356,12 +7356,12 @@ fn inferred_result_meta_type(expression: &Expression) -> MetaType {
         // `quote` always returns opaque `Syntax`, regardless of what its
         // contents would otherwise parse as; only `parse_quote` infers a
         // result from the quoted template's shape.
-        Expression::Quote(quote) if quote.kind == crate::QuoteKind::Quote => MetaType::Syntax,
+        Expression::Quote(quote) if quote.kind == staple_syntax::QuoteKind::Quote => MetaType::Syntax,
         Expression::Quote(quote) => match &quote.template {
-            crate::QuoteTemplate::Expression(_) => MetaType::Expr,
-            crate::QuoteTemplate::Item(_) => MetaType::Item,
-            crate::QuoteTemplate::Items(_) => MetaType::Sequence(Box::new(MetaType::Item)),
-            crate::QuoteTemplate::Raw => MetaType::Syntax,
+            staple_syntax::QuoteTemplate::Expression(_) => MetaType::Expr,
+            staple_syntax::QuoteTemplate::Item(_) => MetaType::Item,
+            staple_syntax::QuoteTemplate::Items(_) => MetaType::Sequence(Box::new(MetaType::Item)),
+            staple_syntax::QuoteTemplate::Raw => MetaType::Syntax,
         },
         Expression::Block(block) => block
             .items
@@ -7684,7 +7684,7 @@ fn quote_at_tail(expression: &Expression, arity: usize) -> bool {
         };
     }
     match expression {
-        Expression::Quote(quote) => quote.kind == crate::QuoteKind::Quote,
+        Expression::Quote(quote) => quote.kind == staple_syntax::QuoteKind::Quote,
         Expression::Satisfies(satisfies) => quote_at_tail(&satisfies.value, 0),
         Expression::Match(match_) => match_.arms.iter().any(|arm| quote_at_tail(&arm.body, 0)),
         Expression::Block(block) => block.items.last().is_some_and(|item| match item {
@@ -7788,7 +7788,7 @@ fn flatten_call(expression: &Expression) -> (&Expression, Vec<&Expression>) {
     (head, arguments)
 }
 
-fn is_plain_identifier(name: &crate::NameExpression) -> bool {
+fn is_plain_identifier(name: &staple_syntax::NameExpression) -> bool {
     let mut tokens = name
         .syntax
         .tokens()
@@ -7797,7 +7797,7 @@ fn is_plain_identifier(name: &crate::NameExpression) -> bool {
     if tokens.clone().next().is_none() {
         return name.syntax.definition_module().is_some();
     }
-    matches!(tokens.next(), Some(token) if token.kind == crate::TokenKind::Identifier)
+    matches!(tokens.next(), Some(token) if token.kind == staple_syntax::TokenKind::Identifier)
         && tokens.next().is_none()
 }
 
@@ -7825,7 +7825,7 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
             let Value::String(value) = value else {
                 return false;
             };
-            crate::string_literal::decode(&pattern.literal).is_ok_and(|literal| literal == value)
+            staple_syntax::string_literal::decode(&pattern.literal).is_ok_and(|literal| literal == value)
         }
         Pattern::Binding(binding) => {
             if let Value::Syntax(SyntaxValue::Visibility(visibility)) = &value
@@ -8063,12 +8063,12 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
     }
 }
 
-fn type_declaration_item_value(declaration: &crate::TypeDeclaration) -> Value {
+fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> Value {
     let kind = match declaration.kind {
-        crate::TypeDeclarationKind::Alias => "AliasDeclaration",
-        crate::TypeDeclarationKind::Distinct => "DistinctDeclaration",
-        crate::TypeDeclarationKind::Singleton => "SingletonDeclaration",
-        crate::TypeDeclarationKind::Opaque => "OpaqueDeclaration",
+        staple_syntax::TypeDeclarationKind::Alias => "AliasDeclaration",
+        staple_syntax::TypeDeclarationKind::Distinct => "DistinctDeclaration",
+        staple_syntax::TypeDeclarationKind::Singleton => "SingletonDeclaration",
+        staple_syntax::TypeDeclarationKind::Opaque => "OpaqueDeclaration",
     };
     let identifier = |name: &str| {
         let mut syntax = if name == declaration.name {
@@ -8079,12 +8079,12 @@ fn type_declaration_item_value(declaration: &crate::TypeDeclaration) -> Value {
         if let Some(index) = syntax
             .tokens()
             .iter()
-            .position(|token| token.kind == crate::TokenKind::Identifier && token.text == name)
+            .position(|token| token.kind == staple_syntax::TokenKind::Identifier && token.text == name)
         {
             let start = syntax.token_range.start + index;
             syntax.token_range = start..start + 1;
         }
-        Value::Syntax(SyntaxValue::Ident(crate::NameExpression {
+        Value::Syntax(SyntaxValue::Ident(staple_syntax::NameExpression {
             syntax,
             name: name.to_owned(),
         }))
@@ -8092,17 +8092,17 @@ fn type_declaration_item_value(declaration: &crate::TypeDeclaration) -> Value {
     let parameters = declaration
         .type_parameters
         .iter()
-        .flat_map(crate::TypeParameterPattern::names)
+        .flat_map(staple_syntax::TypeParameterPattern::names)
         .map(identifier)
         .collect();
-    let mut declared_type = Type::Named(crate::NamedType {
+    let mut declared_type = Type::Named(staple_syntax::NamedType {
         syntax: declaration.name_syntax.clone(),
         namespace: None,
         name: declaration.name.clone(),
     });
     for parameter in &declaration.type_parameters {
         let argument = type_parameter_pattern_type(parameter);
-        declared_type = Type::Application(crate::TypeApplication {
+        declared_type = Type::Application(staple_syntax::TypeApplication {
             syntax: declaration.syntax.clone(),
             callee: Box::new(declared_type),
             argument: Box::new(argument),
@@ -8137,7 +8137,7 @@ fn type_declaration_item_value(declaration: &crate::TypeDeclaration) -> Value {
     ])
 }
 
-fn modified_item_value(modified: &crate::ModifiedItem) -> Value {
+fn modified_item_value(modified: &staple_syntax::ModifiedItem) -> Value {
     let modifiers = modified
         .modifiers
         .iter()
@@ -8158,24 +8158,24 @@ fn modified_item_value(modified: &crate::ModifiedItem) -> Value {
     ])
 }
 
-fn type_parameter_pattern_type(parameter: &crate::TypeParameterPattern) -> Type {
+fn type_parameter_pattern_type(parameter: &staple_syntax::TypeParameterPattern) -> Type {
     match parameter {
-        crate::TypeParameterPattern::Binding(binding) => Type::Named(crate::NamedType {
+        staple_syntax::TypeParameterPattern::Binding(binding) => Type::Named(staple_syntax::NamedType {
             syntax: binding.syntax.clone(),
             namespace: None,
             name: binding.name.clone(),
         }),
-        crate::TypeParameterPattern::Effect(binding) => Type::Named(crate::NamedType {
+        staple_syntax::TypeParameterPattern::Effect(binding) => Type::Named(staple_syntax::NamedType {
             syntax: binding.syntax.clone(),
             namespace: None,
             name: binding.name.clone(),
         }),
-        crate::TypeParameterPattern::Product(product) => Type::Product(crate::ProductType {
+        staple_syntax::TypeParameterPattern::Product(product) => Type::Product(staple_syntax::ProductType {
             syntax: product.syntax.clone(),
             elements: product
                 .elements
                 .iter()
-                .map(|element| crate::TypeElement {
+                .map(|element| staple_syntax::TypeElement {
                     syntax: element.syntax().clone(),
                     name: None,
                     ty: type_parameter_pattern_type(element),
@@ -8187,7 +8187,7 @@ fn type_parameter_pattern_type(parameter: &crate::TypeParameterPattern) -> Type 
                 .collect(),
             variadic: false,
         }),
-        crate::TypeParameterPattern::Splice(splice) => Type::Splice(splice.clone()),
+        staple_syntax::TypeParameterPattern::Splice(splice) => Type::Splice(splice.clone()),
     }
 }
 
@@ -8441,7 +8441,7 @@ fn substitute_splices(
         }
         Expression::StringTemplate(template) => {
             for part in &mut template.parts {
-                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
                     *interpolation.expression =
                         substitute_splices(&interpolation.expression, environment, diagnostics)?;
                 }
@@ -8581,7 +8581,7 @@ fn modifier_target_supported(item: &Item) -> bool {
     }
 }
 
-fn modified_type_declaration_mut(item: &mut Item) -> Option<&mut crate::TypeDeclaration> {
+fn modified_type_declaration_mut(item: &mut Item) -> Option<&mut staple_syntax::TypeDeclaration> {
     match item {
         Item::Modified(modified) => modified_type_declaration_mut(&mut modified.item),
         Item::TypeDeclaration(declaration) => Some(declaration),
@@ -8689,7 +8689,7 @@ fn substitute_binding(
 }
 
 fn substitute_trait_bound(
-    bound: &mut crate::TraitBound,
+    bound: &mut staple_syntax::TraitBound,
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
@@ -8700,7 +8700,7 @@ fn substitute_trait_bound(
 }
 
 fn substitute_subtype_bound(
-    bound: &mut crate::SubtypeBound,
+    bound: &mut staple_syntax::SubtypeBound,
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
@@ -8708,7 +8708,7 @@ fn substitute_subtype_bound(
 }
 
 fn substitute_default_bound(
-    bound: &mut crate::DefaultTypeBound,
+    bound: &mut staple_syntax::DefaultTypeBound,
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
@@ -8716,7 +8716,7 @@ fn substitute_default_bound(
 }
 
 fn qualified_macro_access_path(
-    access: &crate::AccessExpression,
+    access: &staple_syntax::AccessExpression,
 ) -> Option<(String, String, Option<usize>)> {
     fn collect(expression: &Expression, parts: &mut Vec<String>) -> Option<Option<usize>> {
         match expression {
@@ -8765,7 +8765,7 @@ fn substitute_type(
                 Some(())
             }
             Some(Value::Syntax(SyntaxValue::Ident(identifier))) => {
-                *ty = Type::Named(crate::NamedType {
+                *ty = Type::Named(staple_syntax::NamedType {
                     syntax: identifier.syntax,
                     namespace: None,
                     name: identifier.name,
@@ -8794,10 +8794,10 @@ fn substitute_type(
                         let Value::Syntax(SyntaxValue::Ident(identifier)) = value else {
                             return None;
                         };
-                        Some(crate::TypeElement {
+                        Some(staple_syntax::TypeElement {
                             syntax: identifier.syntax.clone(),
                             name: None,
-                            ty: Type::Named(crate::NamedType {
+                            ty: Type::Named(staple_syntax::NamedType {
                                 syntax: identifier.syntax,
                                 namespace: None,
                                 name: identifier.name,
@@ -8816,7 +8816,7 @@ fn substitute_type(
                     ));
                     return None;
                 };
-                *ty = Type::Product(crate::ProductType {
+                *ty = Type::Product(staple_syntax::ProductType {
                     syntax: delimited.syntax,
                     elements,
                     variadic: false,
@@ -9175,7 +9175,7 @@ fn apply_visibility_to_item(
             if representation_modifier
                 && !matches!(
                     declaration.kind,
-                    crate::TypeDeclarationKind::Distinct | crate::TypeDeclarationKind::Singleton
+                    staple_syntax::TypeDeclarationKind::Distinct | staple_syntax::TypeDeclarationKind::Singleton
                 )
             {
                 diagnostics.push(Diagnostic::new(
@@ -9267,13 +9267,13 @@ fn substitute_item_list(
 }
 
 fn substitute_type_parameter_list(
-    parameters: &mut Vec<crate::TypeParameterPattern>,
+    parameters: &mut Vec<staple_syntax::TypeParameterPattern>,
     environment: &Environment,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Option<()> {
     let mut substituted = Vec::new();
     for parameter in std::mem::take(parameters) {
-        let crate::TypeParameterPattern::Splice(splice) = parameter else {
+        let staple_syntax::TypeParameterPattern::Splice(splice) = parameter else {
             substituted.push(parameter);
             continue;
         };
@@ -9305,8 +9305,8 @@ fn substitute_type_parameter_list(
                 ));
                 return None;
             };
-            substituted.push(crate::TypeParameterPattern::Binding(
-                crate::TypeParameterBinding {
+            substituted.push(staple_syntax::TypeParameterPattern::Binding(
+                staple_syntax::TypeParameterBinding {
                     syntax: identifier.syntax,
                     name: identifier.name,
                     sized: true,
@@ -9539,7 +9539,7 @@ fn alpha_rename_expression(
         }
         Expression::StringTemplate(template) => {
             for part in &mut template.parts {
-                if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
                     alpha_rename_expression(&mut interpolation.expression, mark, scopes);
                 }
             }
@@ -9758,24 +9758,24 @@ fn freshen_binding(
 
 fn freshen_type_parameter(
     expander: &mut MacroExpander,
-    parameter: &mut crate::TypeParameterPattern,
+    parameter: &mut staple_syntax::TypeParameterPattern,
     module: ModuleId,
     mark: u64,
 ) {
     match parameter {
-        crate::TypeParameterPattern::Binding(binding) => {
+        staple_syntax::TypeParameterPattern::Binding(binding) => {
             expander.freshen_syntax(&mut binding.syntax, module, mark)
         }
-        crate::TypeParameterPattern::Effect(binding) => {
+        staple_syntax::TypeParameterPattern::Effect(binding) => {
             expander.freshen_syntax(&mut binding.syntax, module, mark)
         }
-        crate::TypeParameterPattern::Product(product) => {
+        staple_syntax::TypeParameterPattern::Product(product) => {
             expander.freshen_syntax(&mut product.syntax, module, mark);
             for element in &mut product.elements {
                 freshen_type_parameter(expander, element, module, mark);
             }
         }
-        crate::TypeParameterPattern::Splice(splice) => {
+        staple_syntax::TypeParameterPattern::Splice(splice) => {
             expander.freshen_syntax(&mut splice.syntax, module, mark);
         }
     }
@@ -9783,7 +9783,7 @@ fn freshen_type_parameter(
 
 fn freshen_trait_bound(
     expander: &mut MacroExpander,
-    bound: &mut crate::TraitBound,
+    bound: &mut staple_syntax::TraitBound,
     module: ModuleId,
     mark: u64,
 ) {
@@ -9796,7 +9796,7 @@ fn freshen_trait_bound(
 
 fn freshen_subtype_bound(
     expander: &mut MacroExpander,
-    bound: &mut crate::SubtypeBound,
+    bound: &mut staple_syntax::SubtypeBound,
     module: ModuleId,
     mark: u64,
 ) {
@@ -9807,7 +9807,7 @@ fn freshen_subtype_bound(
 
 fn freshen_default_bound(
     expander: &mut MacroExpander,
-    bound: &mut crate::DefaultTypeBound,
+    bound: &mut staple_syntax::DefaultTypeBound,
     module: ModuleId,
     mark: u64,
 ) {

@@ -297,6 +297,7 @@ dependencies = [
  "serde_json",
  "staple-compiler",
  "staple-project",
+ "staple-syntax",
 ]
 
 [[package]]
@@ -305,6 +306,7 @@ version = "0.1.0"
 dependencies = [
  "inkwell",
  "staple-project",
+ "staple-syntax",
 ]
 
 [[package]]
@@ -313,6 +315,10 @@ version = "0.1.0"
 dependencies = [
  "kdl",
 ]
+
+[[package]]
+name = "staple-syntax"
+version = "0.1.0"
 
 [[package]]
 name = "syn"

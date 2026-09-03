@@ -22,11 +22,11 @@
 //! from the expanded flattened module table rather than their parsed snapshot.
 //! The completed source is parsed again before it is returned.
 
-use crate::{
-    Accessor, BlockExpression, Expression, Item, LogicalOperator, Pattern, Program, Submodule,
-    Syntax, SyntaxToken, TokenKind, Visibility,
+use crate::Program;
+use staple_syntax::{
+    Accessor, BlockExpression, Expression, Item, LogicalOperator, ParseError, Pattern, Submodule,
+    Syntax, SyntaxToken, TokenKind, Visibility, format_token_stream, lex, parse,
 };
-use crate::{ParseError, formatter::format_token_stream, lex, parse};
 
 /// Renders the entry module of `program` (already macro-expanded) as source.
 pub fn render_expanded_module(program: &Program) -> Result<String, ParseError> {
@@ -116,7 +116,7 @@ fn render_item(program: &Program, item: &Item) -> String {
         Item::PatternBinding(binding) if binding.syntax.is_generated() => format!(
             "let {}{} = {}",
             render_pattern(&binding.pattern),
-            if binding.kind == crate::PatternBindingKind::Propagating {
+            if binding.kind == staple_syntax::PatternBindingKind::Propagating {
                 " ?"
             } else {
                 ""
@@ -167,7 +167,7 @@ fn visibility_prefix(visibility: Visibility) -> &'static str {
     }
 }
 
-fn render_binding(program: &Program, binding: &crate::Binding) -> String {
+fn render_binding(program: &Program, binding: &staple_syntax::Binding) -> String {
     let mut out = String::new();
     out.push_str(visibility_prefix(binding.visibility));
     if !binding.external {
@@ -213,7 +213,7 @@ fn render_binding(program: &Program, binding: &crate::Binding) -> String {
     out
 }
 
-fn render_type_declaration(declaration: &crate::TypeDeclaration) -> String {
+fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> String {
     let mut out = String::new();
     if declaration.representation_visibility == Visibility::Private {
         out.push_str(visibility_prefix(declaration.visibility));
@@ -225,7 +225,7 @@ fn render_type_declaration(declaration: &crate::TypeDeclaration) -> String {
         });
     }
     out.push_str("type ");
-    if declaration.kind == crate::TypeDeclarationKind::Alias {
+    if declaration.kind == staple_syntax::TypeDeclarationKind::Alias {
         out.push_str("alias ");
     }
     out.push_str(&declaration.name);
@@ -255,23 +255,23 @@ fn render_type_declaration(declaration: &crate::TypeDeclaration) -> String {
         out.push_str(&constraints);
     }
     match declaration.kind {
-        crate::TypeDeclarationKind::Alias | crate::TypeDeclarationKind::Distinct => {
+        staple_syntax::TypeDeclarationKind::Alias | staple_syntax::TypeDeclarationKind::Distinct => {
             if let Some(underlying) = &declaration.underlying {
                 out.push_str(" = ");
                 out.push_str(&underlying.to_string());
             }
         }
-        crate::TypeDeclarationKind::Opaque => out.push_str(" = opaque"),
-        crate::TypeDeclarationKind::Singleton => {}
+        staple_syntax::TypeDeclarationKind::Opaque => out.push_str(" = opaque"),
+        staple_syntax::TypeDeclarationKind::Singleton => {}
     }
     out
 }
 
-fn render_type_parameter(parameter: &crate::TypeParameterPattern) -> String {
+fn render_type_parameter(parameter: &staple_syntax::TypeParameterPattern) -> String {
     match parameter {
-        crate::TypeParameterPattern::Binding(binding) => binding.name.clone(),
-        crate::TypeParameterPattern::Effect(binding) => format!("effect {}", binding.name),
-        crate::TypeParameterPattern::Product(product) => format!(
+        staple_syntax::TypeParameterPattern::Binding(binding) => binding.name.clone(),
+        staple_syntax::TypeParameterPattern::Effect(binding) => format!("effect {}", binding.name),
+        staple_syntax::TypeParameterPattern::Product(product) => format!(
             "({})",
             product
                 .elements
@@ -280,19 +280,19 @@ fn render_type_parameter(parameter: &crate::TypeParameterPattern) -> String {
                 .collect::<Vec<_>>()
                 .join(", ")
         ),
-        crate::TypeParameterPattern::Splice(splice) => format!("${}...", splice.name),
+        staple_syntax::TypeParameterPattern::Splice(splice) => format!("${}...", splice.name),
     }
 }
 
 fn render_constraints(
-    parameters: &[crate::TypeParameterPattern],
-    traits: &[crate::TraitBound],
-    subtypes: &[crate::SubtypeBound],
+    parameters: &[staple_syntax::TypeParameterPattern],
+    traits: &[staple_syntax::TraitBound],
+    subtypes: &[staple_syntax::SubtypeBound],
 ) -> String {
     let mut entries = parameters
         .iter()
         .filter_map(|parameter| match parameter {
-            crate::TypeParameterPattern::Binding(binding) if !binding.sized => {
+            staple_syntax::TypeParameterPattern::Binding(binding) if !binding.sized => {
                 Some(format!("?Sized {}", binding.name))
             }
             _ => None,
@@ -333,7 +333,7 @@ fn render_pattern(pattern: &Pattern) -> String {
                 out.push_str("move ");
             }
             out.push_str(&binding.name);
-            if !matches!(binding.ty, crate::Type::Inferred(_)) {
+            if !matches!(binding.ty, staple_syntax::Type::Inferred(_)) {
                 out.push_str(": ");
                 out.push_str(&binding.ty.to_string());
             }
@@ -345,7 +345,7 @@ fn render_pattern(pattern: &Pattern) -> String {
             render_pattern(&at.pattern)
         ),
         Pattern::Wildcard(wildcard) => {
-            if matches!(wildcard.ty, crate::Type::Inferred(_)) {
+            if matches!(wildcard.ty, staple_syntax::Type::Inferred(_)) {
                 "_".to_owned()
             } else {
                 format!("_: {}", wildcard.ty)

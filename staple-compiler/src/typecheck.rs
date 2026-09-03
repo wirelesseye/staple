@@ -3,11 +3,13 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::{
-    Accessor, Binding, BuiltinType, DefinitionId, Diagnostic, Expression, FloatType, FunctionId,
-    IntegerType, Item, Module, ModuleId, Pattern, PatternBindingKind, ProductExpression,
-    ProductType, ResolvedFunction, ResolvedModule, Span, SymbolId, Syntax, SyntaxId, TraitId,
-    TraitMethodId, Type, TypeDeclaration, TypeDeclarationKind, TypeId, TypeParameterId,
-    TypeParameterPattern,
+    BuiltinType, DefinitionId, FloatType, FunctionId, IntegerType, ModuleId, ResolvedFunction,
+    ResolvedModule, SymbolId, TraitId, TraitMethodId, TypeId, TypeParameterId,
+};
+use staple_syntax::{
+    Accessor, Binding, Diagnostic, Expression, Item, Module, Pattern, PatternBindingKind,
+    ProductExpression, ProductType, Span, Syntax, SyntaxId, Type, TypeDeclaration,
+    TypeDeclarationKind, TypeParameterPattern,
 };
 
 pub(crate) const MAX_PRODUCT_ARITY: usize = 65_535;
@@ -294,7 +296,7 @@ pub struct CheckedSumType {
 #[derive(Debug, Clone)]
 pub struct CheckedFunctionType {
     pub parameter: Box<CheckedType>,
-    pub parameter_style: crate::FunctionParameterStyle,
+    pub parameter_style: staple_syntax::FunctionParameterStyle,
     pub default: Option<Box<CheckedFunctionParameterDefault>>,
     pub mutations: Vec<CheckedMutation>,
     pub moves: Vec<CheckedMutation>,
@@ -774,7 +776,7 @@ impl fmt::Display for CheckedType {
                     if index > 0 {
                         formatter.write_str(" | ")?;
                     }
-                    formatter.write_str(&crate::string_literal::encode(value))?;
+                    formatter.write_str(&staple_syntax::string_literal::encode(value))?;
                 }
                 Ok(())
             }
@@ -835,7 +837,7 @@ impl fmt::Display for CheckedType {
             }
             Self::Function(function) => {
                 let mut parameter = if function.parameter_style
-                    == crate::FunctionParameterStyle::Juxtaposed
+                    == staple_syntax::FunctionParameterStyle::Juxtaposed
                 {
                     format_juxtaposed_checked_parameter(function)
                 } else {
@@ -1766,7 +1768,7 @@ impl TypeChecker {
     fn collect_traits(&mut self, module: &ResolvedModule) {
         match self.natural_trait.and_then(|id| module.traits().get(&id)) {
             Some(natural)
-                if natural.declaration.visibility == crate::Visibility::Public
+                if natural.declaration.visibility == staple_syntax::Visibility::Public
                     && natural.declaration.type_parameters.len() == 1
                     && natural.parameters.len() == 1
                     && natural.declaration.members.is_empty() => {}
@@ -1777,7 +1779,7 @@ impl TypeChecker {
         }
         match self.sized_trait.and_then(|id| module.traits().get(&id)) {
             Some(sized)
-                if sized.declaration.visibility == crate::Visibility::Public
+                if sized.declaration.visibility == staple_syntax::Visibility::Public
                     && sized.declaration.type_parameters.len() == 1
                     && sized.parameters.len() == 1
                     && sized.declaration.members.is_empty() => {}
@@ -1788,7 +1790,7 @@ impl TypeChecker {
         }
         match self.copy_trait.and_then(|id| module.traits().get(&id)) {
             Some(copy)
-                if copy.declaration.visibility == crate::Visibility::Public
+                if copy.declaration.visibility == staple_syntax::Visibility::Public
                     && copy.declaration.type_parameters.len() == 1
                     && copy.parameters.len() == 1
                     && copy.declaration.members.is_empty() => {}
@@ -1799,7 +1801,7 @@ impl TypeChecker {
         }
         match self.drop_trait.and_then(|id| module.traits().get(&id)) {
             Some(drop)
-                if drop.declaration.visibility == crate::Visibility::Public
+                if drop.declaration.visibility == staple_syntax::Visibility::Public
                     && drop.declaration.type_parameters.len() == 1
                     && drop.parameters.len() == 1
                     && drop.declaration.members.len() == 1
@@ -1811,7 +1813,7 @@ impl TypeChecker {
         }
         match self.default_trait.and_then(|id| module.traits().get(&id)) {
             Some(default)
-                if default.declaration.visibility == crate::Visibility::Public
+                if default.declaration.visibility == staple_syntax::Visibility::Public
                     && default.declaration.type_parameters.len() == 1
                     && default.parameters.len() == 1
                     && default.declaration.members.len() == 1
@@ -1828,7 +1830,7 @@ impl TypeChecker {
             let valid = trait_id
                 .and_then(|id| module.traits().get(&id))
                 .is_some_and(|resolved| {
-                    resolved.declaration.visibility == crate::Visibility::Public
+                    resolved.declaration.visibility == staple_syntax::Visibility::Public
                         && resolved.parameters.len() == 3
                         && resolved.declaration.members.len() == 1
                         && resolved.declaration.members[0].name == member_name
@@ -1853,7 +1855,7 @@ impl TypeChecker {
             let valid = trait_id
                 .and_then(|id| module.traits().get(&id))
                 .is_some_and(|resolved| {
-                    resolved.declaration.visibility == crate::Visibility::Public
+                    resolved.declaration.visibility == staple_syntax::Visibility::Public
                         && resolved.parameters.len() == 2
                         && resolved.declaration.members.len() == 1
                         && resolved.declaration.members[0].name == member_name
@@ -2325,7 +2327,7 @@ impl TypeChecker {
                 continue;
             }
             let expected = CheckedType::Function(CheckedFunctionType {
-                parameter_style: crate::FunctionParameterStyle::Single,
+                parameter_style: staple_syntax::FunctionParameterStyle::Single,
                 default: None,
                 parameter: Box::new(CheckedType::Product(CheckedProductType {
                     elements: parameters[..arity]
@@ -2402,7 +2404,7 @@ impl TypeChecker {
         {
             let mut application = source_arguments[0].clone();
             for argument in &source_arguments[1..] {
-                application = Type::Application(crate::TypeApplication {
+                application = Type::Application(staple_syntax::TypeApplication {
                     syntax: application.syntax().clone(),
                     callee: Box::new(application),
                     argument: Box::new(argument.clone()),
@@ -2554,7 +2556,7 @@ impl TypeChecker {
     fn resolve_trait_bound(
         &mut self,
         module: &ResolvedModule,
-        bound: &crate::TraitBound,
+        bound: &staple_syntax::TraitBound,
     ) -> Option<CheckedTraitBound> {
         let trait_id = module.trait_for(bound.syntax.id)?;
         let (arguments, _) = self.resolve_trait_arguments(
@@ -2573,7 +2575,7 @@ impl TypeChecker {
     fn resolve_subtype_bound(
         &mut self,
         module: &ResolvedModule,
-        bound: &crate::SubtypeBound,
+        bound: &staple_syntax::SubtypeBound,
     ) -> Option<CheckedSubtypeBound> {
         let parameter = module.type_parameter_for(bound.syntax.id)?;
         let supertype = self.resolve_source_type(module, &bound.supertype);
@@ -2586,7 +2588,7 @@ impl TypeChecker {
     fn resolve_default_bound(
         &mut self,
         module: &ResolvedModule,
-        bound: &crate::DefaultTypeBound,
+        bound: &staple_syntax::DefaultTypeBound,
     ) -> Option<CheckedDefaultBound> {
         let parameter = module.type_parameter_for(bound.syntax.id)?;
         let default = self.resolve_source_type(module, &bound.default);
@@ -2714,7 +2716,7 @@ impl TypeChecker {
             self.symbol_types.insert(
                 *symbol,
                 CheckedType::Function(CheckedFunctionType {
-                    parameter_style: crate::FunctionParameterStyle::Single,
+                    parameter_style: staple_syntax::FunctionParameterStyle::Single,
                     default: None,
                     parameter: Box::new(parameter),
                     mutations: Vec::new(),
@@ -2846,7 +2848,7 @@ impl TypeChecker {
                         crate::NumericType::Float(float) => CheckedType::float(*float),
                     };
                     CheckedType::Function(CheckedFunctionType {
-                        parameter_style: crate::FunctionParameterStyle::Single,
+                        parameter_style: staple_syntax::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(parameter),
                         mutations: Vec::new(),
@@ -2857,7 +2859,7 @@ impl TypeChecker {
                 crate::IntrinsicFunction::IntegerBinary { integer, .. } => {
                     let integer = CheckedType::integer(*integer);
                     CheckedType::Function(CheckedFunctionType {
-                        parameter_style: crate::FunctionParameterStyle::Single,
+                        parameter_style: staple_syntax::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
@@ -2890,7 +2892,7 @@ impl TypeChecker {
                             && matches!(&sum.alternatives[1], CheckedType::Distinct { name, .. } if name.ends_with("False"))
                     )).unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
-                        parameter_style: crate::FunctionParameterStyle::Single,
+                        parameter_style: staple_syntax::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
@@ -2915,7 +2917,7 @@ impl TypeChecker {
                 crate::IntrinsicFunction::FloatBinary { float, .. } => {
                     let float = CheckedType::float(*float);
                     CheckedType::Function(CheckedFunctionType {
-                        parameter_style: crate::FunctionParameterStyle::Single,
+                        parameter_style: staple_syntax::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
@@ -2940,7 +2942,7 @@ impl TypeChecker {
                             && matches!(&sum.alternatives[1], CheckedType::Distinct { name, .. } if name.ends_with("False"))
                     )).unwrap_or(CheckedType::Error);
                     CheckedType::Function(CheckedFunctionType {
-                        parameter_style: crate::FunctionParameterStyle::Single,
+                        parameter_style: staple_syntax::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::Product(CheckedProductType {
                             elements: vec![
@@ -2956,7 +2958,7 @@ impl TypeChecker {
                 }
                 crate::IntrinsicFunction::StringFromCString => {
                     CheckedType::Function(CheckedFunctionType {
-                        parameter_style: crate::FunctionParameterStyle::Single,
+                        parameter_style: staple_syntax::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::CString),
                         mutations: Vec::new(),
@@ -2966,7 +2968,7 @@ impl TypeChecker {
                 }
                 crate::IntrinsicFunction::StringToCString => {
                     CheckedType::Function(CheckedFunctionType {
-                        parameter_style: crate::FunctionParameterStyle::Single,
+                        parameter_style: staple_syntax::FunctionParameterStyle::Single,
                         default: None,
                         parameter: Box::new(CheckedType::String),
                         mutations: Vec::new(),
@@ -2975,7 +2977,7 @@ impl TypeChecker {
                     })
                 }
                 crate::IntrinsicFunction::StringAdd => CheckedType::Function(CheckedFunctionType {
-                    parameter_style: crate::FunctionParameterStyle::Single,
+                    parameter_style: staple_syntax::FunctionParameterStyle::Single,
                     default: None,
                     parameter: Box::new(CheckedType::Product(CheckedProductType {
                         elements: vec![
@@ -3624,7 +3626,7 @@ impl TypeChecker {
                     .parts
                     .iter()
                     .filter_map(|part| {
-                        let crate::StringTemplatePart::Interpolation(interpolation) = part else {
+                        let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part else {
                             return None;
                         };
                         Some(self.expression_effects_now(
@@ -3874,7 +3876,7 @@ impl TypeChecker {
                     ));
                     continue;
                 }
-                if binding.kind != crate::BindingKind::Let {
+                if binding.kind != staple_syntax::BindingKind::Let {
                     continue;
                 }
                 changed |= self.derived_symbols.insert(symbol);
@@ -3991,7 +3993,7 @@ impl TypeChecker {
     fn block_effects_now(
         &self,
         module: &ResolvedModule,
-        block: &crate::BlockExpression,
+        block: &staple_syntax::BlockExpression,
         target_parameters: &HashMap<SymbolId, usize>,
     ) -> CheckedEffectSet {
         let mut resources = CheckedEffectSet::default();
@@ -4359,7 +4361,7 @@ impl TypeChecker {
     fn refreshed_block_type(
         &self,
         module: &ResolvedModule,
-        block: &crate::BlockExpression,
+        block: &staple_syntax::BlockExpression,
     ) -> Option<CheckedType> {
         match block.items.last()? {
             Item::Expression(expression) => self.refreshed_expression_type(module, expression),
@@ -4547,7 +4549,7 @@ impl TypeChecker {
     fn refresh_implicit_thunk_call(
         &mut self,
         module: &ResolvedModule,
-        call: &crate::CallExpression,
+        call: &staple_syntax::CallExpression,
     ) -> bool {
         let Some(thunk) = self.implicit_thunks.get(&call.argument.syntax().id) else {
             return false;
@@ -4782,7 +4784,7 @@ impl TypeChecker {
             }
             Expression::StringTemplate(template) => {
                 for part in &template.parts {
-                    if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                    if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
                         self.record_expression_effects(
                             module,
                             &interpolation.expression,
@@ -4870,7 +4872,7 @@ impl TypeChecker {
         }
     }
 
-    fn require_copy_at_pattern(&mut self, pattern: &crate::AtPattern, value_type: &CheckedType) {
+    fn require_copy_at_pattern(&mut self, pattern: &staple_syntax::AtPattern, value_type: &CheckedType) {
         let bounds = self
             .active_function_bounds
             .iter()
@@ -4921,7 +4923,7 @@ impl TypeChecker {
                 }
             }
             Pattern::StringLiteral(pattern) => {
-                let Ok(value) = crate::string_literal::decode(&pattern.literal) else {
+                let Ok(value) = staple_syntax::string_literal::decode(&pattern.literal) else {
                     return;
                 };
                 if !matches!(value_type, CheckedType::StringLiteralSet(values) if values.as_slice() == [value])
@@ -5289,7 +5291,7 @@ impl TypeChecker {
         }
     }
 
-    fn check_assignment_place(&mut self, module: &ResolvedModule, assignment: &crate::Assignment) {
+    fn check_assignment_place(&mut self, module: &ResolvedModule, assignment: &staple_syntax::Assignment) {
         let current_module = module.module_for_syntax(assignment.syntax.id);
         if let Some(issue) =
             self.writable_place_issue(module, &assignment.target, current_module, false, false)
@@ -5453,7 +5455,7 @@ impl TypeChecker {
     fn check_propagating_binding(
         &mut self,
         module: &ResolvedModule,
-        binding: &crate::PatternBinding,
+        binding: &staple_syntax::PatternBinding,
         value_type: &CheckedType,
     ) {
         let mut root = &binding.pattern;
@@ -6105,10 +6107,10 @@ impl TypeChecker {
             Expression::Resource(resource) => {
                 let resources = self.resolve_effect_set(
                     module,
-                    &crate::EffectSet {
+                    &staple_syntax::EffectSet {
                         syntax: resource.resource.syntax().clone(),
                         variable: None,
-                        resources: vec![crate::ResourceEffect {
+                        resources: vec![staple_syntax::ResourceEffect {
                             syntax: resource.resource.syntax().clone(),
                             value_type: resource.resource.clone(),
                             mutable: false,
@@ -6126,10 +6128,10 @@ impl TypeChecker {
             Expression::With(with) => {
                 let resources = self.resolve_effect_set(
                     module,
-                    &crate::EffectSet {
+                    &staple_syntax::EffectSet {
                         syntax: with.resource.syntax().clone(),
                         variable: None,
-                        resources: vec![crate::ResourceEffect {
+                        resources: vec![staple_syntax::ResourceEffect {
                             syntax: with.resource.syntax().clone(),
                             value_type: with.resource.clone(),
                             mutable: with.mutable,
@@ -6702,7 +6704,7 @@ impl TypeChecker {
                                     continue;
                                 };
                                 if root.parameter_style
-                                    != crate::FunctionParameterStyle::Juxtaposed
+                                    != staple_syntax::FunctionParameterStyle::Juxtaposed
                                 {
                                     continue;
                                 }
@@ -6728,7 +6730,7 @@ impl TypeChecker {
                                     unreachable!()
                                 };
                                 let candidate = CheckedFunctionType {
-                                    parameter_style: crate::FunctionParameterStyle::Single,
+                                    parameter_style: staple_syntax::FunctionParameterStyle::Single,
                                     default: None,
                                     parameter: Box::new(element.value_type.clone()),
                                     mutations: Vec::new(),
@@ -7150,7 +7152,7 @@ impl TypeChecker {
                     let forced_default = matches!(call.argument.as_ref(), Expression::Name(name) if name.name == "_");
                     if forced_default
                         && !matches!(raw_callee_type, CheckedType::Function(ref function)
-                            if function.parameter_style == crate::FunctionParameterStyle::Juxtaposed)
+                            if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed)
                     {
                         let CheckedType::Function(template) = raw_callee_type.clone() else {
                             self.diagnostics.push(Diagnostic::new(
@@ -7200,7 +7202,7 @@ impl TypeChecker {
                     let argument_expected_owned = match &raw_callee_type {
                         CheckedType::Function(function)
                             if function.parameter_style
-                                == crate::FunctionParameterStyle::Juxtaposed =>
+                                == staple_syntax::FunctionParameterStyle::Juxtaposed =>
                         {
                             match function.parameter.as_ref() {
                                 CheckedType::Product(product) => product
@@ -7289,7 +7291,7 @@ impl TypeChecker {
                     let argument_type = if forced_default
                         && let CheckedType::Function(function) = &raw_callee_type
                         && function.parameter_style
-                            == crate::FunctionParameterStyle::Juxtaposed
+                            == staple_syntax::FunctionParameterStyle::Juxtaposed
                         && let CheckedType::Product(product) = function.parameter.as_ref()
                         && let Some(first) = product.elements.first()
                     {
@@ -7313,7 +7315,7 @@ impl TypeChecker {
                             }
                         }
                     } else if let Some(string) = bare_parameter_string_literal {
-                        match crate::string_literal::decode(&string.literal) {
+                        match staple_syntax::string_literal::decode(&string.literal) {
                             Ok(value) => {
                                 let literal_type = CheckedType::StringLiteralSet(vec![value]);
                                 self.expression_types
@@ -7342,7 +7344,7 @@ impl TypeChecker {
                     }
                     if let CheckedType::Function(function) = raw_callee_type.clone()
                         && function.parameter_style
-                            == crate::FunctionParameterStyle::Juxtaposed
+                            == staple_syntax::FunctionParameterStyle::Juxtaposed
                     {
                         let CheckedType::Product(product) = function.parameter.as_ref() else {
                             self.diagnostics.push(Diagnostic::new(
@@ -7566,7 +7568,7 @@ impl TypeChecker {
                             );
                         }
                         let residual = CheckedFunctionType {
-                            parameter_style: crate::FunctionParameterStyle::Juxtaposed,
+                            parameter_style: staple_syntax::FunctionParameterStyle::Juxtaposed,
                             default: None,
                             parameter: Box::new(CheckedType::Product(CheckedProductType {
                                 elements: std::mem::take(&mut remaining),
@@ -7760,7 +7762,7 @@ impl TypeChecker {
                         && !checked_type_contains_erased_product(&raw_callee_type)
                     {
                         let expected_callee = CheckedType::Function(CheckedFunctionType {
-                            parameter_style: crate::FunctionParameterStyle::Single,
+                            parameter_style: staple_syntax::FunctionParameterStyle::Single,
                             default: None,
                             parameter: Box::new(widen_literal_type(argument_type.clone())),
                             mutations: match &raw_callee_type {
@@ -8152,7 +8154,7 @@ impl TypeChecker {
             | Expression::Quote(_)
             | Expression::Splice(_) => CheckedType::Error,
             Expression::String(string) => {
-                let decoded = match crate::string_literal::decode(&string.literal) {
+                let decoded = match staple_syntax::string_literal::decode(&string.literal) {
                     Ok(value) => value,
                     Err(message) => {
                         self.diagnostics
@@ -8168,13 +8170,13 @@ impl TypeChecker {
             }
             Expression::StringTemplate(template) => {
                 for part in &template.parts {
-                    let crate::StringTemplatePart::Interpolation(interpolation) = part else {
+                    let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part else {
                         continue;
                     };
                     let value_type = self.check_expression(module, &interpolation.expression);
                     let trait_id = match interpolation.format {
-                        crate::StringInterpolationFormat::Display => self.display_trait,
-                        crate::StringInterpolationFormat::Debug => self.debug_trait,
+                        staple_syntax::StringInterpolationFormat::Display => self.display_trait,
+                        staple_syntax::StringInterpolationFormat::Debug => self.debug_trait,
                     };
                     let Some(trait_id) = trait_id else {
                         self.diagnostics.push(Diagnostic::new(
@@ -8275,7 +8277,7 @@ impl TypeChecker {
     fn check_logical_expression(
         &mut self,
         module: &ResolvedModule,
-        logical: &crate::LogicalExpression,
+        logical: &staple_syntax::LogicalExpression,
     ) -> CheckedType {
         let bool_type = self.resolve_source_type(module, &logical.bool_type);
         self.check_expression_expected(module, &logical.left, Some(&bool_type));
@@ -8296,7 +8298,7 @@ impl TypeChecker {
     fn check_match_expression(
         &mut self,
         module: &ResolvedModule,
-        match_: &crate::MatchExpression,
+        match_: &staple_syntax::MatchExpression,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
         let source = self.check_expression(module, &match_.subject);
@@ -8338,9 +8340,9 @@ impl TypeChecker {
             module,
             &source,
             &previous_patterns,
-            &Pattern::Wildcard(crate::WildcardPattern {
+            &Pattern::Wildcard(staple_syntax::WildcardPattern {
                 syntax: match_.syntax.clone(),
-                ty: Type::Inferred(crate::InferredType {
+                ty: Type::Inferred(staple_syntax::InferredType {
                     syntax: match_.syntax.clone(),
                 }),
             }),
@@ -8411,7 +8413,7 @@ impl TypeChecker {
     fn check_loop_expression(
         &mut self,
         module: &ResolvedModule,
-        loop_: &crate::LoopExpression,
+        loop_: &staple_syntax::LoopExpression,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
         let outer_reachable = self.return_reachable;
@@ -8551,7 +8553,7 @@ impl TypeChecker {
                 self.bind_pattern_types(module, pattern, value_type);
             }
             Pattern::StringLiteral(pattern) => {
-                let Ok(value) = crate::string_literal::decode(&pattern.literal) else {
+                let Ok(value) = staple_syntax::string_literal::decode(&pattern.literal) else {
                     return;
                 };
                 if *value_type != CheckedType::String && !literal_is_admitted(value_type, &value) {
@@ -8559,7 +8561,7 @@ impl TypeChecker {
                         pattern.syntax.span.clone(),
                         format!(
                             "string pattern `{}` cannot match `{value_type}`",
-                            crate::string_literal::encode(&value)
+                            staple_syntax::string_literal::encode(&value)
                         ),
                     ));
                 }
@@ -8739,7 +8741,7 @@ impl TypeChecker {
                         .into_iter()
                         .collect(),
                     CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
-                        crate::string_literal::decode(&pattern.literal)
+                        staple_syntax::string_literal::decode(&pattern.literal)
                             .ok()
                             .and_then(|value| {
                                 sum.alternatives.iter().position(|alternative| {
@@ -8847,7 +8849,7 @@ impl TypeChecker {
                 let candidates = match first {
                     CoveragePattern::Any => values.iter().map(String::as_str).collect::<Vec<_>>(),
                     CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
-                        let Ok(value) = crate::string_literal::decode(&pattern.literal) else {
+                        let Ok(value) = staple_syntax::string_literal::decode(&pattern.literal) else {
                             return false;
                         };
                         if !values.contains(&value) {
@@ -8879,7 +8881,7 @@ impl TypeChecker {
             }
             CheckedType::String => match first {
                 CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
-                    let Ok(literal) = crate::string_literal::decode(&pattern.literal) else {
+                    let Ok(literal) = staple_syntax::string_literal::decode(&pattern.literal) else {
                         return false;
                     };
                     let specialized_matrix = matrix
@@ -9286,7 +9288,7 @@ impl TypeChecker {
         &mut self,
         module: &ResolvedModule,
         methods: &[TraitMethodId],
-        product: &crate::ProductExpression,
+        product: &staple_syntax::ProductExpression,
     ) -> Option<CheckedType> {
         if product.elements.is_empty()
             || product.elements.iter().any(|element| {
@@ -9966,9 +9968,9 @@ impl TypeChecker {
         let function = ResolvedFunction {
             id,
             name: format!("__staple_implicit_thunk_{}", id.0),
-            parameter_style: crate::FunctionParameterStyle::Single,
+            parameter_style: staple_syntax::FunctionParameterStyle::Single,
             binding_syntax: None,
-            pattern: Pattern::Product(crate::ProductPattern {
+            pattern: Pattern::Product(staple_syntax::ProductPattern {
                 syntax: Syntax::compiler(),
                 elements: Vec::new(),
                 mutable: false,
@@ -9994,7 +9996,7 @@ impl TypeChecker {
         self.current_state_accesses.replace(previous_accesses);
 
         let function_type = CheckedFunctionType {
-            parameter_style: crate::FunctionParameterStyle::Single,
+            parameter_style: staple_syntax::FunctionParameterStyle::Single,
             default: None,
             parameter: Box::new(CheckedType::empty_product()),
             mutations: Vec::new(),
@@ -10045,7 +10047,7 @@ impl TypeChecker {
                     CheckedType::Error
                 }
             },
-            Type::StringLiteral(literal) => match crate::string_literal::decode(&literal.literal) {
+            Type::StringLiteral(literal) => match staple_syntax::string_literal::decode(&literal.literal) {
                 Ok(value) => CheckedType::StringLiteralSet(vec![value]),
                 Err(message) => {
                     self.diagnostics
@@ -10100,7 +10102,7 @@ impl TypeChecker {
             }
             Type::Function(function) => {
                 let mut parameter_source = function.parameter.as_ref().clone();
-                if function.parameter_style == crate::FunctionParameterStyle::Single
+                if function.parameter_style == staple_syntax::FunctionParameterStyle::Single
                     && let Type::Product(product) = function.parameter.as_ref()
                     && !product.variadic
                     && product.elements.len() == 1
@@ -10213,7 +10215,7 @@ impl TypeChecker {
     fn resolve_effect_set(
         &mut self,
         module: &ResolvedModule,
-        source: &crate::EffectSet,
+        source: &staple_syntax::EffectSet,
     ) -> CheckedEffectSet {
         let mut resources = Vec::new();
         let mut variable = None;
@@ -10262,9 +10264,9 @@ impl TypeChecker {
             union_state(
                 current,
                 Some(match effect {
-                    crate::StateEffect::Read => CheckedStateEffect::Read,
-                    crate::StateEffect::Write => CheckedStateEffect::Write,
-                    crate::StateEffect::ReadWrite => CheckedStateEffect::ReadWrite,
+                    staple_syntax::StateEffect::Read => CheckedStateEffect::Read,
+                    staple_syntax::StateEffect::Write => CheckedStateEffect::Write,
+                    staple_syntax::StateEffect::ReadWrite => CheckedStateEffect::ReadWrite,
                 }),
             )
         });
@@ -10281,11 +10283,11 @@ impl TypeChecker {
     fn resolve_mutation_target(
         &mut self,
         parameter: Option<&Type>,
-        mutation: &crate::MutationTarget,
+        mutation: &staple_syntax::MutationTarget,
     ) -> Option<CheckedMutation> {
         match &mutation.target {
-            crate::MutationTargetKind::Whole => Some(CheckedMutation::Whole),
-            crate::MutationTargetKind::Element(index) => {
+            staple_syntax::MutationTargetKind::Whole => Some(CheckedMutation::Whole),
+            staple_syntax::MutationTargetKind::Element(index) => {
                 let Some(Type::Product(product)) = parameter else {
                     self.diagnostics.push(Diagnostic::new(
                         mutation.syntax.span.clone(),
@@ -10883,7 +10885,7 @@ impl TypeChecker {
     fn resolve_named_type(
         &mut self,
         module: &ResolvedModule,
-        named: &crate::NamedType,
+        named: &staple_syntax::NamedType,
     ) -> CheckedType {
         if named.name == "int" {
             return CheckedType::I32;
@@ -11321,7 +11323,7 @@ fn coverage_pattern_matches_literal(pattern: CoveragePattern<'_>, literal: &str)
         CoveragePattern::Any
         | CoveragePattern::Pattern(Pattern::Binding(_) | Pattern::Wildcard(_)) => true,
         CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
-            crate::string_literal::decode(&pattern.literal)
+            staple_syntax::string_literal::decode(&pattern.literal)
                 .is_ok_and(|candidate| candidate == literal)
         }
         CoveragePattern::Pattern(Pattern::Product(product)) if product.elements.len() == 1 => {
@@ -11373,7 +11375,7 @@ pub(crate) fn select_sum_alternative(
 
 fn effect_substitution_type(effects: CheckedEffectSet) -> CheckedType {
     CheckedType::Function(CheckedFunctionType {
-        parameter_style: crate::FunctionParameterStyle::Single,
+        parameter_style: staple_syntax::FunctionParameterStyle::Single,
         default: None,
         parameter: Box::new(CheckedType::Error),
         mutations: Vec::new(),
@@ -12778,7 +12780,7 @@ fn expression_reads_reactive(
         }
         Expression::StringTemplate(value) => value.parts.iter().any(|part| {
             matches!(part,
-            crate::StringTemplatePart::Interpolation(value)
+            staple_syntax::StringTemplatePart::Interpolation(value)
                 if expression_reads_reactive(module, &value.expression, derived))
         }),
         Expression::Resource(_)
@@ -12845,7 +12847,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
             }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {
-                    if let crate::StringTemplatePart::Interpolation(value) = part {
+                    if let staple_syntax::StringTemplatePart::Interpolation(value) = part {
                         expression(&value.expression, bindings);
                     }
                 }
@@ -13004,7 +13006,7 @@ fn expression_mentions_symbols(
         Expression::StringTemplate(value) => value.parts.iter().any(|part| {
             matches!(
                 part,
-                crate::StringTemplatePart::Interpolation(value)
+                staple_syntax::StringTemplatePart::Interpolation(value)
                     if expression_mentions_symbols(module, &value.expression, symbols)
             )
         }),
@@ -13079,7 +13081,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
         Expression::StringTemplate(value) => value.parts.iter().any(|part| {
             matches!(
                 part,
-                crate::StringTemplatePart::Interpolation(value)
+                staple_syntax::StringTemplatePart::Interpolation(value)
                     if expression_contains_assignment(&value.expression)
             )
         }),
@@ -13268,7 +13270,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
             }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {
-                    if let crate::StringTemplatePart::Interpolation(value) = part {
+                    if let staple_syntax::StringTemplatePart::Interpolation(value) = part {
                         visit(module, &value.expression, &declared, captures);
                     }
                 }

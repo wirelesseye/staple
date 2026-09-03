@@ -119,7 +119,7 @@ pub struct SyntaxToken {
     pub kind: TokenKind,
     pub text: String,
     pub span: Range<usize>,
-    pub(crate) origin: Option<Span>,
+    pub origin: Option<Span>,
 }
 
 impl SyntaxToken {
@@ -133,11 +133,11 @@ impl SyntaxToken {
 pub struct Syntax {
     pub id: SyntaxId,
     pub span: Span,
-    pub(crate) tokens: Arc<[SyntaxToken]>,
-    pub(crate) token_range: Range<usize>,
-    pub(crate) definition_module: Option<usize>,
-    pub(crate) expansion_mark: Option<u64>,
-    pub(crate) identifier_origins: Vec<(String, Span)>,
+    pub tokens: Arc<[SyntaxToken]>,
+    pub token_range: Range<usize>,
+    pub definition_module: Option<usize>,
+    pub expansion_mark: Option<u64>,
+    pub identifier_origins: Vec<(String, Span)>,
 }
 
 impl Syntax {
@@ -192,7 +192,7 @@ impl Syntax {
         }
     }
 
-    pub(crate) fn synthetic(id: SyntaxId, span: Span) -> Self {
+    pub fn synthetic(id: SyntaxId, span: Span) -> Self {
         Self {
             id,
             span,
@@ -204,17 +204,17 @@ impl Syntax {
         }
     }
 
-    pub(crate) fn generated(mut self, definition_module: usize, expansion_mark: u64) -> Self {
+    pub fn generated(mut self, definition_module: usize, expansion_mark: u64) -> Self {
         self.definition_module = Some(definition_module);
         self.expansion_mark = Some(expansion_mark);
         self
     }
 
-    pub(crate) fn definition_module(&self) -> Option<usize> {
+    pub fn definition_module(&self) -> Option<usize> {
         self.definition_module
     }
 
-    pub(crate) fn record_identifier_origin(&mut self, name: String, syntax: &Syntax) {
+    pub fn record_identifier_origin(&mut self, name: String, syntax: &Syntax) {
         if let Some(origin) = syntax.identifier_origin(&name, false) {
             self.identifier_origins.push((name, origin.clone()));
             return;

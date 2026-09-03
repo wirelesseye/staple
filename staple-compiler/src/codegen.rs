@@ -20,12 +20,14 @@ use crate::typecheck::{
     substitute_type,
 };
 use crate::{
-    CallExpression, CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType,
-    CheckedResource, CheckedType, CheckedTypeElement, Diagnostic, Expression, FloatType,
-    FunctionId, IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction,
-    Item, ModuleId, NumericType, Pattern, PatternBindingKind, ProductExpression,
-    RepeatedProductExpression, ResolvedFunction,
-    ResolvedModule, Span, SymbolId, TypeParameterId, TypedModule,
+    CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType, CheckedResource,
+    CheckedType, CheckedTypeElement, FloatType, FunctionId, IntegerBinaryOperation,
+    IntegerCompareOperation, IntegerType, IntrinsicFunction, ModuleId, NumericType, ResolvedFunction,
+    ResolvedModule, SymbolId, TypeParameterId, TypedModule,
+};
+use staple_syntax::{
+    CallExpression, Diagnostic, Expression, Item, Pattern, PatternBindingKind, ProductExpression,
+    RepeatedProductExpression, Span,
 };
 
 pub struct CodeGenerator<'context> {
@@ -48,7 +50,7 @@ struct ModuleEmitter<'module, 'context> {
         HashMap<TypeParameterId, CheckedType>,
     )>,
     active_type_substitutions: HashMap<TypeParameterId, CheckedType>,
-    expression_type_overrides: HashMap<crate::SyntaxId, CheckedType>,
+    expression_type_overrides: HashMap<staple_syntax::SyntaxId, CheckedType>,
     function_symbols: HashMap<SymbolId, FunctionId>,
     globals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
     closure_codes: HashMap<SymbolId, inkwell::values::FunctionValue<'context>>,
@@ -1177,7 +1179,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn release_moved_ownership(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        syntax: crate::SyntaxId,
+        syntax: staple_syntax::SyntaxId,
     ) -> CodeGenerationResult<()> {
         for symbol in self.typed_module.moved_symbols(syntax) {
             if let Some((_, _, live)) = environment.owned.get(&symbol) {
@@ -1769,7 +1771,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let Item::Binding(binding) = item else {
                 continue;
             };
-            if binding.kind != crate::BindingKind::Def {
+            if binding.kind != staple_syntax::BindingKind::Def {
                 continue;
             }
             let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
@@ -2188,7 +2190,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_assignment(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        assignment: &crate::Assignment,
+        assignment: &staple_syntax::Assignment,
     ) -> CodeGenerationResult<()> {
         if let Expression::Index(index) = &assignment.target {
             return self.compile_mutate_index_assignment(environment, assignment, index);
@@ -2253,8 +2255,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_mutate_index_assignment(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        assignment: &crate::Assignment,
-        index: &crate::IndexExpression,
+        assignment: &staple_syntax::Assignment,
+        index: &staple_syntax::IndexExpression,
     ) -> CodeGenerationResult<()> {
         let dispatch = self
             .typed_module
@@ -2554,7 +2556,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_propagating_binding(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        binding: &crate::PatternBinding,
+        binding: &staple_syntax::PatternBinding,
         value: BasicValueEnum<'context>,
     ) -> CodeGenerationResult<()> {
         let propagation = self
@@ -3154,7 +3156,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 )
             }
             Expression::String(string) => {
-                let value = crate::string_literal::decode(&string.literal)
+                let value = staple_syntax::string_literal::decode(&string.literal)
                     .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
                 let source = self
                     .builder
@@ -3558,7 +3560,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_string_template(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        template: &crate::StringTemplateExpression,
+        template: &staple_syntax::StringTemplateExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let new_id = self.standard_function_named("formatter_new", template.syntax.span.clone())?;
         let new_type = self
@@ -3595,14 +3597,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map_err(compiler_diagnostic)?;
         for part in &template.parts {
             match part {
-                crate::StringTemplatePart::Literal(literal) => {
+                staple_syntax::StringTemplatePart::Literal(literal) => {
                     self.compile_formatter_write_literal(
                         storage.into(),
                         literal,
                         template.syntax.span.clone(),
                     )?;
                 }
-                crate::StringTemplatePart::Interpolation(interpolation) => {
+                staple_syntax::StringTemplatePart::Interpolation(interpolation) => {
                     let value = self.compile_expression(environment, &interpolation.expression)?;
                     if environment.did_return {
                         return Ok(self.unit_value());
@@ -3616,8 +3618,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             )
                         })?;
                     let trait_name = match interpolation.format {
-                        crate::StringInterpolationFormat::Display => "Display",
-                        crate::StringInterpolationFormat::Debug => "Debug",
+                        staple_syntax::StringInterpolationFormat::Display => "Display",
+                        staple_syntax::StringInterpolationFormat::Debug => "Debug",
                     };
                     let trait_id = self
                         .typed_module
@@ -4172,7 +4174,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_loop_expression(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        loop_: &crate::LoopExpression,
+        loop_: &staple_syntax::LoopExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let function = self
             .builder
@@ -4253,7 +4255,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_logical_expression(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        logical: &crate::LogicalExpression,
+        logical: &staple_syntax::LogicalExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let left = self.compile_expression(environment, &logical.left)?;
         if environment.did_return {
@@ -4325,8 +4327,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .context
             .append_basic_block(function, "logical.short_circuit");
         let (true_target, false_target) = match logical.operator {
-            crate::LogicalOperator::And => (right_block, short_circuit_block),
-            crate::LogicalOperator::Or => (short_circuit_block, right_block),
+            staple_syntax::LogicalOperator::And => (right_block, short_circuit_block),
+            staple_syntax::LogicalOperator::Or => (short_circuit_block, right_block),
         };
         self.builder
             .build_conditional_branch(is_true, true_target, false_target)
@@ -4384,7 +4386,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_match_expression(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        match_: &crate::MatchExpression,
+        match_: &staple_syntax::MatchExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let subject = self.compile_expression(environment, &match_.subject)?;
         if environment.did_return {
@@ -4660,7 +4662,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map_err(compiler_diagnostic)?;
             }
             Pattern::StringLiteral(pattern) => {
-                let literal = crate::string_literal::decode(&pattern.literal)
+                let literal = staple_syntax::string_literal::decode(&pattern.literal)
                     .map_err(|message| Diagnostic::new(pattern.syntax.span.clone(), message))?;
                 match value_type {
                     CheckedType::String | CheckedType::StringLiteralSet(_) => {
@@ -5297,7 +5299,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "`c_string` requires a string literal",
             ));
         };
-        let value = crate::string_literal::decode(&string.literal)
+        let value = staple_syntax::string_literal::decode(&string.literal)
             .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
         if value.as_bytes().contains(&0) {
             return Err(Diagnostic::new(
@@ -5310,9 +5312,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
 
     fn compile_c_string_literal(
         &mut self,
-        string: &crate::CStringExpression,
+        string: &staple_syntax::CStringExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let value = crate::string_literal::decode(&string.literal)
+        let value = staple_syntax::string_literal::decode(&string.literal)
             .map_err(|message| Diagnostic::new(string.syntax.span.clone(), message))?;
         if value.as_bytes().contains(&0) {
             return Err(Diagnostic::new(
@@ -5650,7 +5652,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_index_expression(
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
-        index: &crate::IndexExpression,
+        index: &staple_syntax::IndexExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let dispatch = self
             .typed_module
@@ -5686,7 +5688,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let argument = Expression::Product(ProductExpression {
             syntax: index.syntax.clone(),
             elements: vec![
-                crate::ProductElement {
+                staple_syntax::ProductElement {
                     syntax: index.value.syntax().clone(),
                     name: None,
                     designated: false,
@@ -5694,7 +5696,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     spread: false,
                     named_spread: false,
                 },
-                crate::ProductElement {
+                staple_syntax::ProductElement {
                     syntax: index.index.syntax().clone(),
                     name: None,
                     designated: false,
@@ -6040,7 +6042,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     elements: plan
                         .arguments
                         .into_iter()
-                        .map(|value| crate::ProductElement {
+                        .map(|value| staple_syntax::ProductElement {
                             syntax: value.syntax().clone(),
                             name: None,
                             designated: false,
@@ -7450,7 +7452,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn compile_bool(
         &self,
         condition: inkwell::values::IntValue<'context>,
-        syntax: crate::SyntaxId,
+        syntax: staple_syntax::SyntaxId,
         span: Span,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
         let CheckedType::Sum(sum) = self

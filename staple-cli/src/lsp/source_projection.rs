@@ -1,7 +1,7 @@
 use std::ops::Range;
 use std::path::Path;
 
-use staple_compiler::{Span, Syntax, SyntaxToken};
+use staple_syntax::{Span, Syntax, SyntaxToken};
 
 fn belongs_to(span: &Span, path: &Path) -> bool {
     if path.as_os_str().is_empty() {

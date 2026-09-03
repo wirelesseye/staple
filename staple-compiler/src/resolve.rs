@@ -1,9 +1,10 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{
+use crate::{ModuleId, Program};
+use staple_syntax::{
     Accessor, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
-    MacroDeclaration, Module, ModuleId, Pattern, PatternBindingKind, Program, Span, Submodule,
-    SyntaxId, Type, TypeDeclaration, TypeParameterPattern, UseDeclaration, UseKind, Visibility,
+    MacroDeclaration, Module, Pattern, PatternBindingKind, Span, Submodule, SyntaxId, Type,
+    TypeDeclaration, TypeParameterPattern, UseDeclaration, UseKind, Visibility,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -42,7 +43,7 @@ pub enum DefinitionId {
 #[derive(Debug, Clone)]
 pub struct ResolvedTrait {
     pub id: TraitId,
-    pub declaration: crate::TraitDeclaration,
+    pub declaration: staple_syntax::TraitDeclaration,
     pub parameters: Vec<TypeParameterId>,
     pub functional_dependencies: Vec<ResolvedFunctionalDependency>,
     pub methods: Vec<TraitMethodId>,
@@ -61,8 +62,8 @@ pub struct ResolvedTraitImplementation {
     pub trait_id: TraitId,
     pub parameters: Vec<TypeParameterId>,
     pub arguments: Vec<Type>,
-    pub trait_bounds: Vec<crate::TraitBound>,
-    pub subtype_bounds: Vec<crate::SubtypeBound>,
+    pub trait_bounds: Vec<staple_syntax::TraitBound>,
+    pub subtype_bounds: Vec<staple_syntax::SubtypeBound>,
     pub negative: bool,
     pub methods: HashMap<TraitMethodId, FunctionId>,
 }
@@ -302,14 +303,14 @@ pub enum NumericType {
 pub struct ResolvedFunction {
     pub id: FunctionId,
     pub name: String,
-    pub parameter_style: crate::FunctionParameterStyle,
+    pub parameter_style: staple_syntax::FunctionParameterStyle,
     pub binding_syntax: Option<SyntaxId>,
     pub pattern: Pattern,
     pub result_annotation: Option<Type>,
     pub binding_annotation: Option<Type>,
     pub type_parameters: Vec<TypeParameterPattern>,
-    pub trait_bounds: Vec<crate::TraitBound>,
-    pub subtype_bounds: Vec<crate::SubtypeBound>,
+    pub trait_bounds: Vec<staple_syntax::TraitBound>,
+    pub subtype_bounds: Vec<staple_syntax::SubtypeBound>,
     pub captures: Vec<SymbolId>,
     pub body: Expression,
 }
@@ -345,7 +346,7 @@ pub struct ResolvedModule {
     singleton_values: HashMap<SymbolId, TypeId>,
     type_modules: HashMap<TypeId, ModuleId>,
     traits: HashMap<TraitId, ResolvedTrait>,
-    trait_methods: HashMap<TraitMethodId, crate::TraitMember>,
+    trait_methods: HashMap<TraitMethodId, staple_syntax::TraitMember>,
     trait_method_traits: HashMap<TraitMethodId, TraitId>,
     trait_references: HashMap<SyntaxId, TraitId>,
     trait_method_references: HashMap<SyntaxId, Vec<TraitMethodId>>,
@@ -609,7 +610,7 @@ impl ResolvedModule {
 
     pub fn representation_visible_from(&self, id: TypeId, module: ModuleId) -> bool {
         let declaration = &self.type_declarations[&id];
-        let visibility = if declaration.kind == crate::TypeDeclarationKind::Singleton {
+        let visibility = if declaration.kind == staple_syntax::TypeDeclarationKind::Singleton {
             declaration.visibility
         } else {
             declaration.representation_visibility
@@ -706,7 +707,7 @@ impl ResolvedModule {
         &self.traits
     }
 
-    pub fn trait_method(&self, id: TraitMethodId) -> Option<&crate::TraitMember> {
+    pub fn trait_method(&self, id: TraitMethodId) -> Option<&staple_syntax::TraitMember> {
         self.trait_methods.get(&id)
     }
 
@@ -866,7 +867,7 @@ fn item_uses_package_visibility(item: &Item) -> bool {
         Item::VisibilitySplice(item) => item_uses_package_visibility(&item.item),
         Item::VisibilityMacroInvocation(item) => matches!(
             item.visibility.kind,
-            crate::VisibilityKind::Package | crate::VisibilityKind::PublicReprPackage
+            staple_syntax::VisibilityKind::Package | staple_syntax::VisibilityKind::PublicReprPackage
         ),
         _ => false,
     }
@@ -1036,7 +1037,7 @@ pub struct NameResolver {
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     type_names: HashMap<TypeId, String>,
     traits: HashMap<TraitId, ResolvedTrait>,
-    trait_methods: HashMap<TraitMethodId, crate::TraitMember>,
+    trait_methods: HashMap<TraitMethodId, staple_syntax::TraitMember>,
     trait_method_traits: HashMap<TraitMethodId, TraitId>,
     trait_member_ids: HashMap<(TraitId, String), TraitMethodId>,
     trait_modules: HashMap<TraitId, ModuleId>,
@@ -1061,8 +1062,8 @@ pub struct NameResolver {
     definition_context_types: Vec<HashMap<String, TypeId>>,
     definition_context_namespaces: Vec<HashMap<String, ModuleId>>,
     binding_type_parameters: HashMap<SyntaxId, Vec<TypeParameterPattern>>,
-    binding_trait_bounds: HashMap<SyntaxId, Vec<crate::TraitBound>>,
-    binding_subtype_bounds: HashMap<SyntaxId, Vec<crate::SubtypeBound>>,
+    binding_trait_bounds: HashMap<SyntaxId, Vec<staple_syntax::TraitBound>>,
+    binding_subtype_bounds: HashMap<SyntaxId, Vec<staple_syntax::SubtypeBound>>,
     declared_types: Vec<HashMap<String, TypeId>>,
     declared_macros: Vec<HashMap<String, Vec<MacroId>>>,
     declared_traits: Vec<HashMap<String, TraitId>>,
@@ -1825,7 +1826,7 @@ impl NameResolver {
             ));
         }
         if builtin == BuiltinType::String {
-            if declaration.kind != crate::TypeDeclarationKind::Distinct {
+            if declaration.kind != staple_syntax::TypeDeclarationKind::Distinct {
                 self.diagnostics.push(Diagnostic::new(
                     declaration.syntax.span.clone(),
                     "standard library type `String` must be a represented distinct type",
@@ -1845,13 +1846,13 @@ impl NameResolver {
             }
         } else if builtin != BuiltinType::Syntax {
             let valid_kind = if builtin == BuiltinType::Ref {
-                declaration.kind == crate::TypeDeclarationKind::Distinct
+                declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
                     && declaration.representation_visibility == Visibility::Public
             } else if builtin == BuiltinType::Slice {
-                declaration.kind == crate::TypeDeclarationKind::Distinct
+                declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
                     && declaration.representation_visibility == Visibility::Private
             } else {
-                declaration.kind == crate::TypeDeclarationKind::Opaque
+                declaration.kind == staple_syntax::TypeDeclarationKind::Opaque
             };
             if !valid_kind {
                 self.diagnostics.push(Diagnostic::new(
@@ -1890,7 +1891,7 @@ impl NameResolver {
         let recursive_construction = match builtin {
             BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
             BuiltinType::Slice => Some(RecursiveConstruction::Slice),
-            BuiltinType::Syntax if declaration.kind == crate::TypeDeclarationKind::Distinct => {
+            BuiltinType::Syntax if declaration.kind == staple_syntax::TypeDeclarationKind::Distinct => {
                 Some(RecursiveConstruction::Syntax)
             }
             _ => None,
@@ -2127,9 +2128,9 @@ impl NameResolver {
         }
         self.type_declarations.insert(id, declaration.clone());
         self.type_modules.insert(id, module);
-        if (declaration.kind == crate::TypeDeclarationKind::Distinct
+        if (declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
             && declaration.underlying.is_some())
-            || declaration.kind == crate::TypeDeclarationKind::Singleton
+            || declaration.kind == staple_syntax::TypeDeclarationKind::Singleton
         {
             let symbol = SymbolId(self.next_symbol_id);
             self.next_symbol_id += 1;
@@ -2138,13 +2139,13 @@ impl NameResolver {
             if top_level {
                 self.module_values[module.0].insert(declaration.name.clone(), symbol);
             }
-            if declaration.kind == crate::TypeDeclarationKind::Singleton {
+            if declaration.kind == staple_syntax::TypeDeclarationKind::Singleton {
                 self.singleton_values.insert(symbol, id);
             } else {
                 self.constructors.insert(symbol, id);
             }
             let constructor_visibility =
-                if declaration.kind == crate::TypeDeclarationKind::Singleton {
+                if declaration.kind == staple_syntax::TypeDeclarationKind::Singleton {
                     declaration.visibility
                 } else {
                     declaration.representation_visibility
@@ -2429,7 +2430,7 @@ impl NameResolver {
 
     fn representation_visible(&self, id: TypeId, from: ModuleId) -> bool {
         let declaration = &self.type_declarations[&id];
-        let visibility = if declaration.kind == crate::TypeDeclarationKind::Singleton {
+        let visibility = if declaration.kind == staple_syntax::TypeDeclarationKind::Singleton {
             declaration.visibility
         } else {
             declaration.representation_visibility
@@ -2671,7 +2672,7 @@ impl NameResolver {
     fn record_private_glob_items(
         &mut self,
         module: ModuleId,
-        declaration: &crate::UseDeclaration,
+        declaration: &staple_syntax::UseDeclaration,
         imported: &Interface,
     ) {
         let local = self.local_interface(module);
@@ -3569,22 +3570,22 @@ impl NameResolver {
                     self.quote_macros.insert(value.syntax.id, id);
                 }
                 match &value.template {
-                    crate::QuoteTemplate::Expression(value) => {
+                    staple_syntax::QuoteTemplate::Expression(value) => {
                         self.resolve_compile_time_expression_annotations(value);
                         self.resolve_quoted_expression(value, &mut vec![HashMap::new()]);
                     }
-                    crate::QuoteTemplate::Item(item) => {
+                    staple_syntax::QuoteTemplate::Item(item) => {
                         self.resolve_compile_time_item_annotations(item);
                         self.resolve_quoted_item(item, &mut vec![HashMap::new()]);
                     }
-                    crate::QuoteTemplate::Items(items) => {
+                    staple_syntax::QuoteTemplate::Items(items) => {
                         let mut scopes = vec![HashMap::new()];
                         for item in items {
                             self.resolve_compile_time_item_annotations(item);
                             self.resolve_quoted_item(item, &mut scopes);
                         }
                     }
-                    crate::QuoteTemplate::Raw => {}
+                    staple_syntax::QuoteTemplate::Raw => {}
                 }
             }
             _ => {}
@@ -4307,7 +4308,7 @@ impl NameResolver {
             },
             Expression::StringTemplate(template) => {
                 for part in &template.parts {
-                    if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                    if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
                         self.resolve_expression(&interpolation.expression, None, None);
                     }
                 }
@@ -4449,7 +4450,7 @@ impl NameResolver {
         }
     }
 
-    fn resolve_trait_name(&mut self, name: &crate::NamedType) -> Option<TraitId> {
+    fn resolve_trait_name(&mut self, name: &staple_syntax::NamedType) -> Option<TraitId> {
         let resolved = if let Some(namespace) = &name.namespace {
             self.lookup_namespace(namespace)
                 .as_ref()
@@ -4550,7 +4551,7 @@ impl NameResolver {
             }
             Pattern::Nominal(pattern) => {
                 self.resolve_type_with(
-                    &Type::Named(crate::NamedType {
+                    &Type::Named(staple_syntax::NamedType {
                         syntax: pattern.syntax.clone(),
                         namespace: pattern.namespace.clone(),
                         name: pattern.name.clone(),
@@ -4806,9 +4807,9 @@ impl NameResolver {
             Pattern::Nominal(pattern) => {
                 if let Some(id) = self.named_types.get(&pattern.syntax.id).copied() {
                     let declaration = &self.type_declarations[&id];
-                    let represented = (declaration.kind == crate::TypeDeclarationKind::Distinct
+                    let represented = (declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
                         && declaration.underlying.is_some())
-                        || declaration.kind == crate::TypeDeclarationKind::Singleton;
+                        || declaration.kind == staple_syntax::TypeDeclarationKind::Singleton;
                     if !represented {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
@@ -5348,8 +5349,8 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
             .then(|| name.name.clone())
         }),
         Expression::Quote(quote) => Some(match quote.kind {
-            crate::QuoteKind::Quote => "Syntax".to_owned(),
-            crate::QuoteKind::ParseQuote => "SyntaxNode".to_owned(),
+            staple_syntax::QuoteKind::Quote => "Syntax".to_owned(),
+            staple_syntax::QuoteKind::ParseQuote => "SyntaxNode".to_owned(),
         }),
         Expression::String(_) => Some("String".to_owned()),
         Expression::Integer(_) => Some("Integer".to_owned()),
@@ -5420,18 +5421,18 @@ fn analyze_compile_expression(
             scope.frames.pop();
         }
         Expression::Quote(quote) => match &quote.template {
-            crate::QuoteTemplate::Expression(value) => {
+            staple_syntax::QuoteTemplate::Expression(value) => {
                 analyze_compile_expression(value, scope, parameter_kind, true)
             }
-            crate::QuoteTemplate::Item(item) => {
+            staple_syntax::QuoteTemplate::Item(item) => {
                 analyze_compile_item(item, scope, parameter_kind, true)
             }
-            crate::QuoteTemplate::Items(items) => {
+            staple_syntax::QuoteTemplate::Items(items) => {
                 for item in items {
                     analyze_compile_item(item, scope, parameter_kind, true);
                 }
             }
-            crate::QuoteTemplate::Raw => {}
+            staple_syntax::QuoteTemplate::Raw => {}
         },
         Expression::Splice(value) => scope.reference(value.syntax.id, &value.name),
         Expression::Name(value) if !quoted => {
@@ -6044,7 +6045,7 @@ fn find_block_type_declarations_in_block<'a>(
 type QualifiedAccessSegments = Vec<SyntaxId>;
 
 fn qualified_access_path(
-    access: &crate::AccessExpression,
+    access: &staple_syntax::AccessExpression,
 ) -> Option<(String, String, Option<usize>, QualifiedAccessSegments)> {
     fn collect(
         expression: &Expression,

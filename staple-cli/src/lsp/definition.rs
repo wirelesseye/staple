@@ -4,6 +4,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use staple_compiler::*;
+use staple_syntax::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefinitionTarget {

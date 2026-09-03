@@ -103,7 +103,7 @@ pub fn parse_at(source: &str, first_syntax_id: usize) -> Result<Module, ParseErr
 ///
 /// On success, `next_syntax_id` is advanced past every ID assigned to the
 /// module. The source name is retained in the spans produced by the parser.
-pub(crate) fn parse_with_syntax_ids(
+pub fn parse_with_syntax_ids(
     source: &str,
     next_syntax_id: &mut usize,
     source_name: &str,
@@ -121,7 +121,7 @@ pub(crate) fn parse_with_syntax_ids(
 }
 
 /// Reinterprets one macro argument's original tokens as exactly one type.
-pub(crate) fn parse_type_fragment(
+pub fn parse_type_fragment(
     syntax: &Syntax,
     grouped: bool,
     next_syntax_id: &mut usize,
@@ -132,7 +132,7 @@ pub(crate) fn parse_type_fragment(
 }
 
 /// Reinterprets quotation contents as a type template, permitting splices.
-pub(crate) fn parse_type_template_fragment(
+pub fn parse_type_template_fragment(
     syntax: &Syntax,
     next_syntax_id: &mut usize,
 ) -> Result<Type, ParseError> {
@@ -143,7 +143,7 @@ pub(crate) fn parse_type_template_fragment(
 }
 
 /// Reinterprets one macro argument's original tokens as exactly one pattern.
-pub(crate) fn parse_pattern_fragment(
+pub fn parse_pattern_fragment(
     syntax: &Syntax,
     grouped: bool,
     next_syntax_id: &mut usize,
@@ -154,7 +154,7 @@ pub(crate) fn parse_pattern_fragment(
 }
 
 /// Reinterprets quotation contents as a pattern template, permitting splices.
-pub(crate) fn parse_pattern_template_fragment(
+pub fn parse_pattern_template_fragment(
     syntax: &Syntax,
     next_syntax_id: &mut usize,
 ) -> Result<Pattern, ParseError> {
@@ -165,7 +165,7 @@ pub(crate) fn parse_pattern_template_fragment(
 }
 
 /// Reinterprets original tokens as exactly one expression.
-pub(crate) fn parse_expression_fragment(
+pub fn parse_expression_fragment(
     syntax: &Syntax,
     next_syntax_id: &mut usize,
 ) -> Result<Expression, ParseError> {
@@ -175,7 +175,7 @@ pub(crate) fn parse_expression_fragment(
 }
 
 /// Reinterprets original tokens as exactly one modifier invocation.
-pub(crate) fn parse_modifier_fragment(
+pub fn parse_modifier_fragment(
     syntax: &Syntax,
     next_syntax_id: &mut usize,
 ) -> Result<ModifierInvocation, ParseError> {
@@ -185,7 +185,7 @@ pub(crate) fn parse_modifier_fragment(
 }
 
 /// Reinterprets original tokens as exactly one item.
-pub(crate) fn parse_item_fragment(
+pub fn parse_item_fragment(
     syntax: &Syntax,
     next_syntax_id: &mut usize,
 ) -> Result<Item, ParseError> {
@@ -195,7 +195,7 @@ pub(crate) fn parse_item_fragment(
 }
 
 /// Reinterprets original tokens as a complete list of zero or more items.
-pub(crate) fn parse_item_list_fragment(
+pub fn parse_item_list_fragment(
     syntax: &Syntax,
     next_syntax_id: &mut usize,
 ) -> Result<Vec<Item>, ParseError> {

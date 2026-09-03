@@ -1,4 +1,4 @@
-pub(crate) fn decode(literal: &str) -> Result<String, String> {
+pub fn decode(literal: &str) -> Result<String, String> {
     let content = literal
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
@@ -32,7 +32,7 @@ pub(crate) fn decode(literal: &str) -> Result<String, String> {
     Ok(output)
 }
 
-pub(crate) fn encode(value: &str) -> String {
+pub fn encode(value: &str) -> String {
     format!("{value:?}").replace('$', "\\$")
 }
 

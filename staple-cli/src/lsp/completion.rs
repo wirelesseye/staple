@@ -3,6 +3,7 @@ use std::ops::Range;
 
 use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
 use staple_compiler::*;
+use staple_syntax::*;
 
 const KEYWORDS: &[&str] = &[
     "alias",

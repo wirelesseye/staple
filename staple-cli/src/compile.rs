@@ -5,9 +5,10 @@ use std::process::{Command, ExitCode, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use staple_compiler::{
-    CodeGenerator, Diagnostic, NameResolver, Program, ProgramLoader, TypeChecker, TypedModule,
-    expand_macros, format_source, render_expanded_module,
+    CodeGenerator, NameResolver, Program, ProgramLoader, TypeChecker, TypedModule, expand_macros,
+    render_expanded_module,
 };
+use staple_syntax::{Diagnostic, format_source};
 
 use crate::Outcome;
 
@@ -1002,8 +1003,8 @@ mod tests {
         );
         assert!(expanded.contains("type alias Generated = I32"));
         assert_eq!(expanded.matches("type alias $name = $ty").count(), 1);
-        staple_compiler::parse(&expanded).expect("expanded declaration should parse");
-        assert_eq!(staple_compiler::format_source(&expanded).unwrap(), expanded);
+        staple_syntax::parse(&expanded).expect("expanded declaration should parse");
+        assert_eq!(staple_syntax::format_source(&expanded).unwrap(), expanded);
     }
 
     #[test]
@@ -1020,7 +1021,7 @@ mod tests {
         );
         assert!(expanded.contains("let value: I32 = (2) + (2)"));
         assert!(!expanded.contains("let value: I32 = double 2"));
-        staple_compiler::parse(&expanded).expect("expanded inline module should parse");
+        staple_syntax::parse(&expanded).expect("expanded inline module should parse");
     }
 
     #[test]
@@ -1036,9 +1037,9 @@ mod tests {
         );
         assert!(expanded.contains("// keep this comment\n"));
         assert!(!expanded.contains('\r'));
-        staple_compiler::parse(&expanded).expect("valid expanded output should still parse");
+        staple_syntax::parse(&expanded).expect("valid expanded output should still parse");
         assert_eq!(
-            staple_compiler::format_source(&expanded).expect("expanded output should format"),
+            staple_syntax::format_source(&expanded).expect("expanded output should format"),
             expanded,
         );
     }

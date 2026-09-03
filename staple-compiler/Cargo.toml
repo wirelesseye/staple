@@ -5,4 +5,5 @@ edition = "2024"
 
 [dependencies]
 staple-project = { path = "../staple-project" }
+staple-syntax = { path = "../staple-syntax" }
 inkwell = { version = "0.10.0", features = ["llvm21-1"] }

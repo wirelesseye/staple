@@ -3,6 +3,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use staple_compiler::*;
+use staple_syntax::*;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HoverEntry {

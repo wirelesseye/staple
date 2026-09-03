@@ -1,9 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::{
-    Diagnostic, Expression, FunctionId, Item, Pattern, ResolvedFunction, SymbolId, Syntax,
-    SyntaxId, TypedModule,
-};
+use crate::{FunctionId, ResolvedFunction, SymbolId, TypedModule};
+use staple_syntax::{Diagnostic, Expression, Item, Pattern, Syntax, SyntaxId};
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct OwnershipInfo {
@@ -462,7 +460,7 @@ impl<'a> OwnershipChecker<'a> {
             }
             Expression::StringTemplate(template) => {
                 for part in &template.parts {
-                    if let crate::StringTemplatePart::Interpolation(interpolation) = part {
+                    if let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part {
                         self.check_expression(&interpolation.expression, true);
                     }
                 }
@@ -552,7 +550,7 @@ impl<'a> OwnershipChecker<'a> {
         }
     }
 
-    fn check_product_defaults(&mut self, syntax: crate::SyntaxId, consume: bool) {
+    fn check_product_defaults(&mut self, syntax: staple_syntax::SyntaxId, consume: bool) {
         let Some(plan) = self.module.product_default_plan(syntax).cloned() else {
             return;
         };

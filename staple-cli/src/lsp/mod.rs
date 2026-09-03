@@ -17,7 +17,8 @@ use lsp_types::request::{
     Completion, GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest,
 };
 use lsp_types::*;
-use staple_compiler::{Diagnostic as StapleDiagnostic, NameResolver, ProgramLoader, Span, TypeChecker};
+use staple_compiler::{NameResolver, ProgramLoader, TypeChecker};
+use staple_syntax::{Diagnostic as StapleDiagnostic, Span};
 
 use crate::lsp::completion::CompletionIndex;
 use crate::lsp::definition::DefinitionEntry;
@@ -92,9 +93,9 @@ fn normalized_source_path(path: &Path) -> PathBuf {
 fn rebased_surface(
     resolved: &staple_compiler::ResolvedModule,
     path: &Path,
-    editor_module: &staple_compiler::Module,
+    editor_module: &staple_syntax::Module,
     text: &str,
-) -> Option<staple_compiler::Module> {
+) -> Option<staple_syntax::Module> {
     let program = resolved.program();
     let program_last_id = program
         .modules()
@@ -114,7 +115,7 @@ fn rebased_surface(
     if base == 0 {
         return None;
     }
-    staple_compiler::parse_at(text, base).ok()
+    staple_syntax::parse_at(text, base).ok()
 }
 
 fn is_standard_library_source(config: &staple_project::PackageGraph, path: &Path) -> bool {
@@ -479,7 +480,7 @@ impl Server {
         let text = document.text.clone();
         let version = document.version;
         let Some(path) = uri_to_path(uri) else {
-            let tokens = semantic::tokens(&text, staple_compiler::parse(&text).ok().as_ref(), None, None);
+            let tokens = semantic::tokens(&text, staple_syntax::parse(&text).ok().as_ref(), None, None);
             self.documents.get_mut(uri).unwrap().semantic_tokens = tokens;
             self.documents.get_mut(uri).unwrap().hover_entries.clear();
             self.documents
@@ -498,7 +499,7 @@ impl Server {
             );
         };
 
-        let parsed = staple_compiler::parse(&text).ok();
+        let parsed = staple_syntax::parse(&text).ok();
         let mut grouped: HashMap<Uri, Vec<lsp_types::Diagnostic>> = HashMap::new();
         let mut resolved_for_tokens = None;
         let mut typed_for_tokens = None;
@@ -511,7 +512,7 @@ impl Server {
         // Once the program is loaded we re-parse the buffer starting from the
         // id the program assigned this module, so hover/definition/semantic
         // walks over the surface tree query the resolver with matching ids.
-        let mut rebased_module: Option<staple_compiler::Module> = None;
+        let mut rebased_module: Option<staple_syntax::Module> = None;
         let mut analysis_succeeded = false;
         if let Some(module) = &parsed {
             let mut loader = ProgramLoader::new();
@@ -586,7 +587,7 @@ impl Server {
                     }
                 },
             }
-        } else if let Err(error) = staple_compiler::parse(&text) {
+        } else if let Err(error) = staple_syntax::parse(&text) {
             grouped.entry(uri.clone()).or_default().push(lsp_diagnostic(
                 &text,
                 error.offset..error.offset,
@@ -1038,7 +1039,7 @@ mod tests {
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
         let typed = TypeChecker::new().check(resolved).unwrap();
-        let surface = staple_compiler::parse(source).unwrap();
+        let surface = staple_syntax::parse(source).unwrap();
         let analysis_path = typed
             .resolved()
             .program()
@@ -1120,7 +1121,7 @@ mod tests {
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
         let typed = TypeChecker::new().check(resolved).unwrap();
-        let surface = staple_compiler::parse(source).unwrap();
+        let surface = staple_syntax::parse(source).unwrap();
         let analysis_path = typed
             .resolved()
             .program()

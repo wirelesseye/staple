@@ -1,4 +1,4 @@
-use staple_compiler::{
+use staple_syntax::{
     Accessor, BinaryOperator, BindingKind, Expression, Item, Pattern, StringInterpolationFormat,
     StringTemplatePart, TokenKind, Type, TypeDeclarationKind, UseKind, Visibility, parse,
 };
@@ -94,7 +94,7 @@ fn parses_effect_parameters_and_open_effect_rows() {
         panic!("expected binding")
     };
     assert!(
-        matches!(binding.type_parameters.as_slice(), [staple_compiler::TypeParameterPattern::Binding(_), staple_compiler::TypeParameterPattern::Effect(value)] if value.name == "E")
+        matches!(binding.type_parameters.as_slice(), [staple_syntax::TypeParameterPattern::Binding(_), staple_syntax::TypeParameterPattern::Effect(value)] if value.name == "E")
     );
 }
 
@@ -111,7 +111,7 @@ fn parses_fully_qualified_quote_expressions_losslessly() {
 
 #[test]
 fn parses_mutable_parameter_types_losslessly() {
-    use staple_compiler::{MutationTarget, MutationTargetKind};
+    use staple_syntax::{MutationTarget, MutationTargetKind};
 
     fn mutations(annotation: &Option<Type>) -> &[MutationTarget] {
         let Some(Type::Function(function)) = annotation else {
@@ -207,7 +207,7 @@ fn parses_float_literals_losslessly_without_stealing_access_dots() {
             if access.accessor == Accessor::Index("0".into())
     ));
     assert_eq!(
-        staple_compiler::lex("1e+")[0].kind,
+        staple_syntax::lex("1e+")[0].kind,
         TokenKind::Float,
         "an incomplete exponent should remain one diagnostic token"
     );
@@ -216,7 +216,7 @@ fn parses_float_literals_losslessly_without_stealing_access_dots() {
 #[test]
 fn lexes_only_the_fixed_operator_vocabulary() {
     let source = "..= && || == != <= >= .. <: ~> ? | < > ^ *^ *. ++ %";
-    let tokens = staple_compiler::lex(source)
+    let tokens = staple_syntax::lex(source)
         .into_iter()
         .filter(|token| !token.kind.is_trivia())
         .map(|token| (token.kind, token.text))
@@ -1019,7 +1019,7 @@ fn reserves_repeated_splice_syntax() {
     };
     assert!(matches!(
         &quote.template,
-        staple_compiler::QuoteTemplate::Expression(template)
+        staple_syntax::QuoteTemplate::Expression(template)
             if matches!(template.as_ref(), Expression::Splice(splice) if splice.repeated)
     ));
 }
@@ -1052,17 +1052,17 @@ fn parses_expression_and_single_item_quotations_losslessly() {
         .collect::<Vec<_>>();
     assert!(matches!(
         templates[0],
-        staple_compiler::QuoteTemplate::Expression(_)
+        staple_syntax::QuoteTemplate::Expression(_)
     ));
     assert!(matches!(
         templates[1],
-        staple_compiler::QuoteTemplate::Item(item)
+        staple_syntax::QuoteTemplate::Item(item)
             if matches!(item.as_ref(), item
                 if matches!(item, Item::Binding(_)))
     ));
     assert!(matches!(
         templates[2],
-        staple_compiler::QuoteTemplate::Item(item)
+        staple_syntax::QuoteTemplate::Item(item)
             if matches!(item.as_ref(), Item::TypeDeclaration(_))
     ));
 
@@ -1076,7 +1076,7 @@ fn parses_expression_and_single_item_quotations_losslessly() {
     };
     assert!(matches!(
         function.body.as_ref(),
-        Expression::Quote(quote) if matches!(&quote.template, staple_compiler::QuoteTemplate::Items(items) if items.len() == 2)
+        Expression::Quote(quote) if matches!(&quote.template, staple_syntax::QuoteTemplate::Items(items) if items.len() == 2)
     ));
 }
 
@@ -1165,18 +1165,18 @@ fn parses_metadata_aware_macro_calls_losslessly() {
     };
     assert!(matches!(
         &quote.template,
-        staple_compiler::QuoteTemplate::Item(item)
+        staple_syntax::QuoteTemplate::Item(item)
             if matches!(item.as_ref(), Item::TypeDeclaration(_))
     ));
     assert!(matches!(
         &root.items[1],
         Item::VisibilityMacroInvocation(invocation)
-            if invocation.visibility.kind == staple_compiler::VisibilityKind::Public
+            if invocation.visibility.kind == staple_syntax::VisibilityKind::Public
     ));
     assert!(matches!(
         &root.items[2],
         Item::VisibilityMacroInvocation(invocation)
-            if invocation.visibility.kind == staple_compiler::VisibilityKind::PublicRepr
+            if invocation.visibility.kind == staple_syntax::VisibilityKind::PublicRepr
     ));
 }
 
@@ -1201,7 +1201,7 @@ fn parses_modifier_prefixes_as_macro_call_metadata() {
     let Item::VisibilityMacroInvocation(invocation) = &root.items[1] else {
         panic!("expected metadata macro invocation");
     };
-    assert_eq!(invocation.visibility.kind, staple_compiler::VisibilityKind::Public);
+    assert_eq!(invocation.visibility.kind, staple_syntax::VisibilityKind::Public);
     assert_eq!(invocation.modifiers.len(), 3);
     assert_eq!(invocation.modifiers[0].name, "doc");
     assert_eq!(invocation.modifiers[1].name, "outer");
@@ -1268,7 +1268,7 @@ fn parses_declaration_style_item_macro_punctuation_losslessly() {
     assert!(matches!(
         &root.items[1],
         Item::VisibilityMacroInvocation(invocation)
-            if invocation.visibility.kind == staple_compiler::VisibilityKind::PublicRepr
+            if invocation.visibility.kind == staple_syntax::VisibilityKind::PublicRepr
     ));
     assert!(matches!(
         unmodified_item(&root.items[2]),
@@ -1338,7 +1338,7 @@ fn parses_grouped_type_and_pattern_macro_arguments_losslessly() {
 
 #[test]
 fn parses_hello_world_losslessly() {
-    let source = include_str!("../examples/hello_world.sta");
+    let source = include_str!("../../staple-compiler/examples/hello_world.sta");
     let root = parse(source).expect("hello_world should parse");
 
     assert_eq!(root.text(), source);
@@ -1420,26 +1420,26 @@ fn parses_juxtaposed_function_parameters_and_types() {
         "let add: x: I32 * y: I32 -> I32 = x: I32 * y: I32 => x + y\n",
     )
     .expect("juxtaposed function should parse");
-    let staple_compiler::Item::Binding(binding) = &root.items[0] else {
+    let staple_syntax::Item::Binding(binding) = &root.items[0] else {
         panic!("expected binding");
     };
-    let Some(staple_compiler::Type::Function(annotation)) = &binding.annotation else {
+    let Some(staple_syntax::Type::Function(annotation)) = &binding.annotation else {
         panic!("expected function annotation");
     };
     assert_eq!(
         annotation.parameter_style,
-        staple_compiler::FunctionParameterStyle::Juxtaposed
+        staple_syntax::FunctionParameterStyle::Juxtaposed
     );
-    let Some(staple_compiler::Expression::Function(function)) = &binding.value else {
+    let Some(staple_syntax::Expression::Function(function)) = &binding.value else {
         panic!("expected function expression");
     };
     assert_eq!(
         function.parameter_style,
-        staple_compiler::FunctionParameterStyle::Juxtaposed
+        staple_syntax::FunctionParameterStyle::Juxtaposed
     );
     assert!(matches!(
         function.pattern,
-        staple_compiler::Pattern::Product(ref product) if product.elements.len() == 2
+        staple_syntax::Pattern::Product(ref product) if product.elements.len() == 2
     ));
 }
 
@@ -1664,17 +1664,17 @@ fn comments_and_crlf_are_preserved() {
 
 #[test]
 fn lexes_block_comments_including_nesting_and_unterminated() {
-    let single = staple_compiler::lex("/* comment */");
+    let single = staple_syntax::lex("/* comment */");
     assert_eq!(single.len(), 1);
     assert_eq!(single[0].kind, TokenKind::BlockComment);
     assert_eq!(single[0].text, "/* comment */");
 
-    let nested = staple_compiler::lex("/* outer /* inner */ still outer */rest");
+    let nested = staple_syntax::lex("/* outer /* inner */ still outer */rest");
     assert_eq!(nested[0].kind, TokenKind::BlockComment);
     assert_eq!(nested[0].text, "/* outer /* inner */ still outer */");
     assert_eq!(nested[1].text, "rest");
 
-    let unterminated = staple_compiler::lex("/* never closed");
+    let unterminated = staple_syntax::lex("/* never closed");
     assert_eq!(unterminated.len(), 1);
     assert_eq!(unterminated[0].kind, TokenKind::BlockComment);
     assert_eq!(unterminated[0].text, "/* never closed");
@@ -1952,7 +1952,7 @@ fn parses_sized_relaxations_losslessly() {
     };
     assert!(matches!(
         reference.type_parameters.as_slice(),
-        [staple_compiler::TypeParameterPattern::Binding(binding)] if !binding.sized
+        [staple_syntax::TypeParameterPattern::Binding(binding)] if !binding.sized
     ));
 
     let Item::Binding(preserve) = unmodified_item(&root.items[1]) else {
@@ -1960,7 +1960,7 @@ fn parses_sized_relaxations_losslessly() {
     };
     assert!(matches!(
         preserve.type_parameters.as_slice(),
-        [staple_compiler::TypeParameterPattern::Binding(binding)] if !binding.sized
+        [staple_syntax::TypeParameterPattern::Binding(binding)] if !binding.sized
     ));
 
     let Item::Binding(ordinary) = unmodified_item(&root.items[2]) else {
@@ -1968,7 +1968,7 @@ fn parses_sized_relaxations_losslessly() {
     };
     assert!(matches!(
         ordinary.type_parameters.as_slice(),
-        [staple_compiler::TypeParameterPattern::Binding(binding)] if binding.sized
+        [staple_syntax::TypeParameterPattern::Binding(binding)] if binding.sized
     ));
 
     assert!(parse("type alias Bad T where ?Other T = T\n").is_err());
@@ -2141,7 +2141,7 @@ fn parses_sum_types_and_propagating_patterns_losslessly() {
     assert!(matches!(
         block.items[0],
         Item::PatternBinding(ref binding)
-            if binding.kind == staple_compiler::PatternBindingKind::Propagating
+            if binding.kind == staple_syntax::PatternBindingKind::Propagating
     ));
 }
 

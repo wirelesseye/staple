@@ -24,7 +24,7 @@ pub fn format_source(source: &str) -> Result<String, ParseError> {
 /// Formats an already-tokenized source fragment without requiring it to be a
 /// complete, independently parseable module. Macro expansion uses this for
 /// reconstructed output which may retain documented splice placeholders.
-pub(crate) fn format_token_stream(tokens: &[SyntaxToken]) -> String {
+pub fn format_token_stream(tokens: &[SyntaxToken]) -> String {
     let mut formatter = Formatter::new(tokens);
     formatter.format();
     formatter.finish()

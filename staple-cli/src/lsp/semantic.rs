@@ -3,6 +3,7 @@ use std::path::Path;
 
 use lsp_types::{SemanticToken, SemanticTokenModifier, SemanticTokenType, SemanticTokensLegend};
 use staple_compiler::*;
+use staple_syntax::*;
 
 pub const NAMESPACE: u32 = 0;
 pub const TYPE: u32 = 1;
