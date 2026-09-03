@@ -51,14 +51,32 @@ name_syntax => name => target => parameters => representation => {
     }
 }
 
-/// Derives `Debug` for a represented nominal type by prefixing its name and
-/// delegating formatting to its representation.
+/// Derives `Debug` for a bodyless singleton type, formatting it as its name.
+/// Singleton types cannot carry compile-time parameters, so the implementation
+/// is always unparameterized.
+def derived_singleton_debug_implementation: String -> Type -> Item =
+name => target => {
+    let name_expression: Expr = StringExpr name
+    parse_quote {
+        impl Debug $target {
+            def fmt = (_, mut formatter) => Formatter.write (formatter, $name_expression)
+        }
+    } satisfies Item
+}
+
+/// Derives `Debug` for a nominal type.
+///
+/// A represented type prefixes its name and delegates formatting to its
+/// representation; a bodyless singleton type formats as its name alone.
 ///
 /// # Example
 ///
 /// ```staple
 /// @derive_debug
 /// pub(repr) type UserId = I32
+///
+/// @derive_debug
+/// type Enabled
 /// ```
 pub macro @derive_debug: Item -> Sequence Item = item => match item {
     TypeDeclarationItem (
@@ -71,11 +89,11 @@ pub macro @derive_debug: Item -> Sequence Item = item => match item {
         ),
     ),
     TypeDeclarationItem (
-        SingletonDeclaration(), name_syntax, name, target, parameters, Some representation,
+        SingletonDeclaration(), _, name, target, _, None,
     ) => Sequence (
         first: item,
         rest: Sequence (
-            first: derived_debug_implementation name_syntax name target parameters representation,
+            first: derived_singleton_debug_implementation name target,
             rest: Sequence (),
         ),
     ),

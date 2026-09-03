@@ -7523,6 +7523,27 @@ fn derives_debug_for_nominal_representations() {
 }
 
 #[test]
+fn derives_debug_for_bodyless_singleton_types() {
+    let module = type_check(concat!(
+        "use std.fmt.*\n",
+        "@derive_debug\ntype Enabled\n",
+        "@derive_debug\npub type Disabled\n",
+        "let enabled_debug: String = Formatter.debug Enabled\n",
+        "let disabled_debug: String = Formatter.debug Disabled\n",
+        "let choice_debug: String = Formatter.debug (Enabled satisfies Enabled | Disabled)\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("derived singleton Debug implementations should generate LLVM");
+    // Each singleton's name is emitted as a string literal for its Debug impl,
+    // and the sum reuses those per-variant impls through structural sum Debug.
+    assert!(llvm.contains("c\"Enabled\\00\""));
+    assert!(llvm.contains("c\"Disabled\\00\""));
+    assert!(llvm.contains("debug.sum.fmt"));
+}
+
+#[test]
 fn exposes_type_declarations_as_structured_items() {
     let module = type_check(concat!(
         "macro @inspect_item: Item -> Item = item => match item {\n",
