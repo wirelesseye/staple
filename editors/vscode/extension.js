@@ -8,9 +8,9 @@ let client;
 
 async function activate(context) {
   const configuration = vscode.workspace.getConfiguration("staple");
-  const command = configuration.get("languageServer.path", "staple-lsp");
+  const command = configuration.get("languageServer.path", "staple");
   const standardLibrary = configuration.get("standardLibrary.path", "");
-  const args = standardLibrary ? ["--stdlib", standardLibrary] : [];
+  const args = ["lsp", ...(standardLibrary ? ["--stdlib", standardLibrary] : [])];
   const outputChannel = vscode.window.createOutputChannel("Staple");
   context.subscriptions.push(outputChannel);
 

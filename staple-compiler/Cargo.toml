@@ -1,0 +1,8 @@
+[package]
+name = "staple-compiler"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+staple-project = { path = "../staple-project" }
+inkwell = { version = "0.10.0", features = ["llvm21-1"] }

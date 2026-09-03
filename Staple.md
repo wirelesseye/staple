@@ -1,8 +1,8 @@
 # The staple language
 
-**staple** is a programming language with reactive signals and powerful,
-approachable metaprogramming as core language features. Its compiler is
-called **Stapler**.
+**Staple** is a programming language with reactive signals and powerful,
+approachable metaprogramming as core language features. Its compiler and tooling ship as a
+single executable called **`staple`**.
 
 This document describes the language as it currently exists. Details listed as
 unspecified are not yet part of the language design.
@@ -562,7 +562,7 @@ modifier list as another declaration. It must precede ordinary module items and
 may appear at most once. It is distinct from `pub mod api { ... }`, which
 declares a public child named `api` in the current module.
 
-Each package has a root module. Binder defaults it to `src/root.sta`; the file
+Each package has a root module. The package manifest defaults it to `src/root.sta`; the file
 is optional, but its directory still anchors dotted module paths. Paths are
 resolved relative to that directory by replacing dots with path separators and
 adding `.sta`:
@@ -572,7 +572,7 @@ use tools.format
 // loads tools/format.sta
 ```
 
-The standard library is a library package (`stdlib/binder.kdl`) that every
+The standard library is a library package (`stdlib/staple.kdl`) that every
 package implicitly depends on under the alias `std`; no `dependencies` entry is
 needed, and a manifest may not bind `std` itself. Paths beginning with `std`
 therefore resolve from the standard-library source root through the same
@@ -584,7 +584,7 @@ iteration, formatting traits, defaults, results, and flow macros. Lower-level
 modules such as `std.buffer`, `std.slice`, `std.io`, `std.syntax`, and
 `std.cinterop` require explicit imports.
 
-A package disables its implicit prelude with `prelude #false` in `binder.kdl`.
+A package disables its implicit prelude with `prelude #false` in `staple.kdl`.
 A file module may opt out independently:
 
 ```staple
@@ -596,7 +596,7 @@ Core names remain available. `use std.prelude.*` explicitly restores the
 prelude regardless of either opt-out. A module-level opt-out does not propagate
 to inline child modules.
 
-Binder packages conditionally include items with the compiler-provided
+Packages conditionally include items with the compiler-provided
 `@feature` modifier declared by `std.core`:
 
 ```staple
@@ -609,7 +609,7 @@ Each modifier takes one declared feature name, and repeated modifiers require
 all names. Disabled items are removed before import discovery, macro expansion,
 name resolution, and type checking. The unqualified modifier is reserved like
 `@doc`; qualified user modifiers named `feature` remain ordinary modifiers.
-Using `@feature` without a Binder manifest is an error.
+Using `@feature` without a package manifest is an error.
 
 The keyword `package` always selects the current package root, bypassing inline
 children with the same name:
@@ -625,7 +625,7 @@ so its public items are available as `package.main.item`. Custom entry paths use
 the same relative mapping. A file named `package.sta` is addressed as `use
 package.package`.
 
-Binder packages may declare `kind "library"` and be used through local path
+Packages may declare `kind "library"` and be used through local path
 dependencies. A dependency declaration's key is a logical Staple root:
 
 ```kdl
@@ -3068,7 +3068,7 @@ including through namespace, selected, renamed, or glob imports. Every named
 type directly referenced by a public representation must also be public.
 `pub(repr)` is rejected on aliases and opaque declarations.
 
-Binder packages add a middle visibility level between private and public:
+Packages add a middle visibility level between private and public:
 
 ```staple
 pub(package) def internal_helper = 42
@@ -3076,11 +3076,11 @@ pub(repr(package)) type Shared = (value: I32)
 ```
 
 `pub(package)` names are available from any module with the same canonical
-Binder package identity. `pub(repr(package))` makes the type name public while
+package identity. `pub(repr(package))` makes the type name public while
 allowing representation access only inside that package. A package-visible
 re-export uses `pub(package) use`; ordinary `pub use` cannot promote a
 package-visible declaration into an external interface. Package visibility is
-rejected when Stapler is run without a Binder manifest. Thus visibility forms
+rejected when run without a package manifest. Thus visibility forms
 the lattice `private < package < public`: public representations may reference
 only public types, while package representations may also reference
 package-visible types.

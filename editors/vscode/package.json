@@ -39,8 +39,8 @@
       "properties": {
         "staple.languageServer.path": {
           "type": "string",
-          "default": "staple-lsp",
-          "description": "Path to the staple-lsp executable."
+          "default": "staple",
+          "description": "Path to the staple executable (run as `staple lsp`)."
         },
         "staple.standardLibrary.path": {
           "type": "string",
