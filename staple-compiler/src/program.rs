@@ -2697,7 +2697,7 @@ mod tests {
     fn source_at_reports_a_structured_missing_import() {
         let entry = std::env::temp_dir().join("staple-loader-structured-test.sta");
         let error = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&entry, "use module_that_does_not_exist\n")
             .unwrap_err();
         assert_eq!(
@@ -2729,7 +2729,7 @@ mod tests {
     fn module_dotted_name_uses_dotted_use_paths_for_the_standard_library() {
         let entry = std::env::temp_dir().join("staple-module-dotted-name-std.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&entry, "use std.io.println\nprintln \"hi\"\n")
             .unwrap();
 
@@ -2755,7 +2755,7 @@ mod tests {
     fn module_dotted_name_is_none_for_a_lone_entry_file() {
         let entry = std::env::temp_dir().join("staple-module-dotted-name-lone.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&entry, "let answer = 42\n")
             .unwrap();
         assert_eq!(program.module_dotted_name(program.entry()), None);
@@ -2776,7 +2776,7 @@ mod tests {
             .with_module_root(&root)
             .with_package_root(&root_path)
             .with_package_name("example")
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, "use tools.text.shout\nshout\n")
             .unwrap();
 

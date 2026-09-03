@@ -25,7 +25,7 @@ provided.
 Install the standard library and build the toolchain from the repository:
 
 ```sh
-./staple-compiler/scripts/install-stdlib.sh
+./scripts/install-stdlib.sh
 cargo build
 ```
 
@@ -34,7 +34,7 @@ The language server is the `staple` executable's `lsp` subcommand. Install
 the built executable; the extension invokes it as `staple lsp`. If the compiler
 cannot discover the standard library from its executable-relative or per-user
 installation, or from `STAPLE_STDLIB`, set `staple.standardLibrary.path` to the
-repository's `staple-compiler/stdlib` directory.
+repository's `stdlib` directory.
 
 ## Local development
 

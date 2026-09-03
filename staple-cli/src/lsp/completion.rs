@@ -1022,7 +1022,7 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1059,7 +1059,7 @@ mod tests {
         let source = "let signal count = 0\ncount = 1\n";
         let path = std::env::temp_dir().join("staple-completion-signal.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1079,7 +1079,7 @@ mod tests {
         let source = "let value = 1\ndef choose = value: I32 => value\n";
         let path = std::env::temp_dir().join("staple-completion-shadow.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1103,7 +1103,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-completion-at-patterns.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1130,7 +1130,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-completion-trait-bare.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1168,7 +1168,7 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1204,7 +1204,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-completion-methods.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1234,7 +1234,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-completion-qualified.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1257,7 +1257,7 @@ mod tests {
         let source = "";
         let path = std::env::temp_dir().join("staple-completion-empty-qualified.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1301,7 +1301,7 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1338,7 +1338,7 @@ mod tests {
         let source = "let mut numbers: List I32 = List.new ()\n";
         let path = std::env::temp_dir().join("staple-completion-new-method-receiver.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();

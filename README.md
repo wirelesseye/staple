@@ -73,7 +73,7 @@ dependency package has a different name. Dependencies resolve recursively;
 cycles and executable dependency targets are rejected.
 
 The standard library is itself a library package
-(`staple-compiler/stdlib/staple.kdl`, shipped beside the compiler). It is added
+(`stdlib/staple.kdl`, shipped with the toolchain). It is added
 to every graph as an implicit dependency under the alias `std`, so `use std.…`
 works without a `dependencies` entry and `std` is a reserved alias a manifest
 may not bind.
@@ -123,7 +123,7 @@ The compiler loads the standard library at compile time. Install the repository
 copy to the default per-user location with:
 
 ```sh
-./staple-compiler/scripts/install-stdlib.sh
+./scripts/install-stdlib.sh
 ```
 
 This installs to `~/.local/lib/staple/stdlib`; an optional first argument selects

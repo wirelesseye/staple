@@ -1033,7 +1033,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-lsp-macro-argument-features.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1115,7 +1115,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-lsp-raw-macro-argument-features.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1303,7 +1303,7 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-diagnostic-leading-trivia.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib"))
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
             .load_source_at(&path, source)
             .unwrap();
         let diagnostics = NameResolver::new().resolve_program(program).unwrap_err();
@@ -1347,7 +1347,7 @@ mod tests {
                 },
             )]),
             published_by_root: HashMap::new(),
-            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib")),
+            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
         };
 
         server
@@ -1359,7 +1359,7 @@ mod tests {
 
     #[test]
     fn analyzes_an_open_standard_library_module_from_its_package() {
-        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         let path = std::fs::canonicalize(stdlib.join("std/flow.sta")).unwrap();
         let source = std::fs::read_to_string(&path).unwrap();
         let uri = path_to_uri(&path).unwrap();
@@ -1438,7 +1438,7 @@ mod tests {
                 },
             )]),
             published_by_root: HashMap::new(),
-            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib")),
+            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
         };
 
         server.analyze(&uri).unwrap();
@@ -1504,7 +1504,7 @@ mod tests {
                 connection: server_connection,
                 documents: HashMap::new(),
                 published_by_root: HashMap::new(),
-                stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib")),
+                stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
             }
             .event_loop()
             .unwrap();

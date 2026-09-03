@@ -28,7 +28,7 @@ impl<T> ExpectErrDiagnostics for Result<T, Vec<Diagnostic>> {
 }
 
 fn resolve(source: &str) -> staple_compiler::ResolvedModule {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let source = with_syntax_imports(source);
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
@@ -816,7 +816,7 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
         );
     }
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -874,7 +874,7 @@ fn copy_directory(source: &Path, target: &Path) {
 }
 
 fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let nonce = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .expect("clock should be after the Unix epoch")
@@ -884,7 +884,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
         std::process::id()
     ));
     copy_directory(&root.join("stdlib"), &temporary);
-    let production_string = include_str!("../stdlib/std/string.sta");
+    let production_string = include_str!("../../stdlib/std/string.sta");
     let production_body = production_string
         .split_once("pub type String = Slice U8\n")
         .map(|(_, body)| body)
@@ -3027,7 +3027,7 @@ fn rejects_invalid_propagation_and_sum_ffi() {
 
 #[test]
 fn rejects_propagation_outside_functions_and_non_nominal_roots() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -3495,7 +3495,7 @@ fn compares_library_defined_bool_values() {
 
 #[test]
 fn lowercase_i32_is_an_ordinary_unresolved_type_name() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("let value: i32 = 1\n", root)
@@ -3541,7 +3541,7 @@ fn bool_is_an_auto_loaded_standard_library_type() {
 
 #[test]
 fn lowercase_bool_is_an_ordinary_unresolved_type_name() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("def predicate: bool\n", root)
@@ -3559,7 +3559,7 @@ fn lowercase_bool_is_an_ordinary_unresolved_type_name() {
 
 #[test]
 fn cinterop_types_require_an_explicit_import() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("def text: CString\n", root)
@@ -3583,7 +3583,7 @@ fn cinterop_types_require_an_explicit_import() {
 
 #[test]
 fn syntax_types_and_quote_require_an_explicit_import() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
 
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
@@ -4079,7 +4079,7 @@ fn c_string_is_an_imported_primitive_macro() {
 
 #[test]
 fn c_string_rejects_non_literal_arguments() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -4186,7 +4186,7 @@ fn bare_ident_defaults_spelling_to_string() {
 
 #[test]
 fn bare_ident_and_explicit_ident_string_are_the_same_type() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -4302,7 +4302,7 @@ fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
 
 #[test]
 fn diagnoses_invalid_structured_syntax_operations() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             "macro invalid = value: CallExpr => { value.argument = parse_quote { 1 }; value }\ninvalid (f 0)\n",
@@ -4339,7 +4339,7 @@ fn diagnoses_invalid_structured_syntax_operations() {
 
 #[test]
 fn rejects_structured_syntax_values_at_runtime() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             "let generated: CallExpr = 1\n",
@@ -4575,7 +4575,7 @@ fn block_modifiers_may_generate_supported_declarations() {
 
 #[test]
 fn block_modifiers_reject_unsupported_and_public_outputs() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
         concat!(
             "macro @invalid: Item -> Item = _ => parse_quote { trait Invalid T { value: T } }\n",
@@ -5010,7 +5010,7 @@ fn parse_quote_produces_delimited_result_types() {
 
 #[test]
 fn parse_quote_rejects_spliced_delimited_result() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -5036,7 +5036,7 @@ fn parse_quote_rejects_spliced_delimited_result() {
 
 #[test]
 fn parse_quote_rejects_spliced_visibility_result() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -5062,7 +5062,7 @@ fn parse_quote_rejects_spliced_visibility_result() {
 
 #[test]
 fn rejects_legacy_typegroup_call_syntax() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
         "typegroup Legacy = { Unit, }\n",
         "typegroup Legacy = T => { Wrapped T, }\n",
@@ -5089,7 +5089,7 @@ fn rejects_legacy_typegroup_call_syntax() {
 
 #[test]
 fn typegroup_variants_require_an_explicit_reexport() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -5143,7 +5143,7 @@ fn public_repr_is_allowed_on_singleton_types() {
 
 #[test]
 fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             "typegroup Empty {}\n",
@@ -5249,7 +5249,7 @@ fn metadata_aware_calls_can_return_expression_syntax() {
 
 #[test]
 fn diagnoses_invalid_metadata_macro_uses() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             "macro invalid: Expr -> MacroCallMetadata -> Expr = left => metadata => left\n",
@@ -5294,7 +5294,7 @@ fn diagnoses_invalid_metadata_macro_uses() {
 
 #[test]
 fn implicit_macro_call_metadata_can_make_overloads_ambiguous() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let source = concat!(
         "macro choose: Expr -> Expr = value => parse_quote { $value }\n",
         "macro choose: MacroCallMetadata -> Expr -> Expr = metadata => value => parse_quote { $value }\n",
@@ -5316,7 +5316,7 @@ fn implicit_macro_call_metadata_can_make_overloads_ambiguous() {
 
 #[test]
 fn diagnoses_invalid_modifier_definitions_and_applications() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             "macro @invalid: SyntaxNode -> Item -> Item = value => item => item\n",
@@ -5489,7 +5489,7 @@ fn quote_uses_contextual_results_and_reinterprets_opaque_fragments() {
 
 #[test]
 fn quote_never_validates_or_reinterprets_its_result_unlike_parse_quote() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
 
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
@@ -5523,7 +5523,7 @@ fn quote_never_validates_or_reinterprets_its_result_unlike_parse_quote() {
 
 #[test]
 fn quote_result_excludes_syntax_which_remains_quotes_alone() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
 
     for source in [
         concat!(
@@ -5555,7 +5555,7 @@ fn quote_result_excludes_syntax_which_remains_quotes_alone() {
 
 #[test]
 fn parse_quote_without_a_contextual_type_is_an_error() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -5582,7 +5582,7 @@ fn parse_quote_without_a_contextual_type_is_an_error() {
 
 #[test]
 fn macro_declaring_a_concrete_syntax_result_rejects_a_bare_quote_tail() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -5636,7 +5636,7 @@ fn opaque_syntax_captures_whole_delimiter_contents_and_is_the_broadest_overload(
 
 #[test]
 fn syntax_node_quotation_requires_one_shortest_structural_node() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -5680,7 +5680,7 @@ fn contextual_item_sequence_quotes_flatten_empty_single_and_multiple_results() {
 
 #[test]
 fn generic_user_macros_and_unsupported_parse_quote_contexts_are_rejected() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("macro generic: <T> Expr -> T = value => value\n", root)
@@ -5732,7 +5732,7 @@ fn type_and_pattern_macro_inputs_support_atomic_and_compound_forms() {
 
 #[test]
 fn type_and_pattern_overlaps_with_expression_overloads_are_ambiguous() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
         concat!(
             "macro choose = _: Expr => parse_quote { 1 }\n",
@@ -5762,7 +5762,7 @@ fn type_and_pattern_overlaps_with_expression_overloads_are_ambiguous() {
 
 #[test]
 fn diagnoses_invalid_type_and_pattern_macro_inputs_and_splices() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             "macro consume = _: Type => parse_quote { 1 }\nlet result = consume (I32 ->)\n",
@@ -5889,7 +5889,7 @@ fn generates_traits_with_functional_dependencies() {
 
 #[test]
 fn diagnoses_invalid_item_macro_outputs_and_placements() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             "macro invalid: Expr -> Item = value => parse_quote { $value }\ninvalid 1\n",
@@ -6033,7 +6033,7 @@ fn constructs_and_destructures_delimited_syntax_values() {
 
 #[test]
 fn rejects_invalid_sequence_positions_and_source_punctuation() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -6170,7 +6170,7 @@ fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguou
         .compile_module(&module)
         .expect("annotated top-level sequences should compile");
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -6194,7 +6194,7 @@ fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguou
 
 #[test]
 fn rejects_invalid_top_level_macro_sequence_signatures() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             "macro invalid = first: Sequence (Ident String) => second: Sequence Expr => _: Equals => parse_quote { 0 }\n",
@@ -6293,7 +6293,7 @@ fn constructs_and_destructures_separated_syntax() {
 
 #[test]
 fn rejects_malformed_separated_syntax() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for argument in ["(,)", "(, one)", "(one,, two)", "(one two)", "(one, 2)"] {
         let source = format!(
             "macro names = _: Parenthesized (Separated (Ident String) Comma) => parse_quote {{ 0 }}\nlet value: I32 = names {argument}\n"
@@ -6346,7 +6346,7 @@ fn expands_standard_braced_when_clauses() {
 
 #[test]
 fn requires_else_to_be_the_last_braced_when_clause() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("let invalid = when { else => (), True => () }\n", root)
@@ -6464,7 +6464,7 @@ fn macro_overloads_choose_longest_then_most_specific() {
 
 #[test]
 fn rejects_braced_clause_syntax_for_if_now_that_it_belongs_to_when() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -6485,7 +6485,7 @@ fn rejects_braced_clause_syntax_for_if_now_that_it_belongs_to_when() {
 
 #[test]
 fn diagnoses_duplicate_and_ambiguous_macro_overloads() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let duplicate = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -6528,7 +6528,7 @@ fn diagnoses_duplicate_and_ambiguous_macro_overloads() {
 
 #[test]
 fn rejects_a_mismatched_literal_identifier_macro_argument() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -6551,7 +6551,7 @@ fn rejects_a_mismatched_literal_identifier_macro_argument() {
 
 #[test]
 fn rejects_bare_literal_identifier_macro_parameters() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -6778,7 +6778,7 @@ fn inline_default_type_bound_for_trait_parameter_fills_missing_argument() {
 
 #[test]
 fn rejects_duplicate_default_type_bound_for_the_same_parameter() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("type alias Bad (T = I32) (T = String) = T\n", root)
@@ -6845,7 +6845,7 @@ fn applies_excess_arguments_to_a_bare_quote_invoked_as_a_top_level_item() {
 
 #[test]
 fn diagnoses_incomplete_and_non_syntax_macros() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let incomplete = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -6878,7 +6878,7 @@ fn diagnoses_incomplete_and_non_syntax_macros() {
 
 #[test]
 fn rejects_runtime_syntax_values() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("let generated: Syntax = 1\n", root)
@@ -6895,7 +6895,7 @@ fn rejects_runtime_syntax_values() {
 
 #[test]
 fn diagnoses_recursive_macro_expansion() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -6917,7 +6917,7 @@ fn diagnoses_recursive_macro_expansion() {
 
 #[test]
 fn rejects_repeated_splices_with_a_specific_diagnostic() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -7690,7 +7690,7 @@ fn rejects_invalid_default_trait_member_bodies() {
             .any(|diagnostic| { diagnostic.message.contains("expected `T`, found `String`") })
     );
 
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("trait Invalid T { identity: T -> T = 42 }\n", root)
@@ -7809,7 +7809,7 @@ fn rejects_invalid_functional_dependency_uses_and_conflicting_impls() {
 
 #[test]
 fn rejects_invalid_functional_dependency_declarations() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
             "trait Invalid A B where Missing ~> B { convert: A -> B }\n",
@@ -7909,7 +7909,7 @@ fn substitutes_product_parameters_into_multiple_prerequisites() {
 
 #[test]
 fn rejects_cyclic_trait_prerequisites() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
@@ -9461,7 +9461,7 @@ fn folds_const_float_arithmetic_at_compile_time() {
 
 #[test]
 fn rejects_const_float_initializers_that_fold_to_non_finite_values() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("const x: F64 = 1.0 / 0.0\n", root)
@@ -9480,7 +9480,7 @@ fn rejects_const_float_initializers_that_fold_to_non_finite_values() {
 
 #[test]
 fn rejects_const_initializers_that_cannot_be_folded_to_a_compile_time_constant() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("const f = () => 1\n", root)
@@ -9497,7 +9497,7 @@ fn rejects_const_initializers_that_cannot_be_folded_to_a_compile_time_constant()
 
 #[test]
 fn rejects_self_referential_const_bindings() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source("const x = x + 1\n", root)
@@ -9520,7 +9520,7 @@ fn resolves_local_const_names_before_their_textual_position_like_def() {
     // *resolution* succeeds (the `resolve_block` hoisting change in
     // `resolve.rs` finds `later` at all, the same way it already does for
     // `def`), rather than failing earlier with "unknown name `later`".
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(

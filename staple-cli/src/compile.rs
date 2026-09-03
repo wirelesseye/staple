@@ -573,13 +573,10 @@ fn read_source(input: &OsStr) -> Result<String, String> {
 
 #[cfg(test)]
 fn compile(source: &str) -> Result<TypedModule, String> {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("staple-compiler");
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(root.join("stdlib"))
-        .load_source(source, &root)?;
+        .with_standard_library_root(workspace_root.join("stdlib"))
+        .load_source(source, workspace_root)?;
     compile_program(program)
 }
 
@@ -815,7 +812,7 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::write(&path, source).expect("temporary expand source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         let outcome = run([
             "expand".into(),
             "--stdlib".into(),
@@ -1151,7 +1148,7 @@ mod tests {
             "pub mod\npub let answer: I32 = 42\n",
         )
         .unwrap();
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
 
         let outcome = run([
             "check".into(),
@@ -1274,7 +1271,7 @@ mod tests {
         let source = std::env::temp_dir().join(format!("staple-compiler-run-{nonce}.sta"));
         std::fs::write(&source, "extern \"c\" { exit: I32 -> () }\nexit 7\n")
             .expect("temporary run source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         let outcome = run([
             "run".into(),
             "--stdlib".into(),
@@ -1314,7 +1311,7 @@ mod tests {
             ),
         )
         .expect("temporary run source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         let outcome = run([
             "run".into(),
             "--stdlib".into(),
@@ -1339,7 +1336,7 @@ mod tests {
             .as_nanos();
         let source = std::env::temp_dir().join(format!("staple-compiler-run-error-{nonce}.sta"));
         std::fs::write(&source, "missing\n").expect("temporary invalid source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         let error = run([
             "run".into(),
             "--stdlib".into(),
@@ -1360,7 +1357,7 @@ mod tests {
             .as_nanos();
         let source = std::env::temp_dir().join(format!("staple-compiler-run-linker-{nonce}.sta"));
         std::fs::write(&source, "()\n").expect("temporary source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         let error = run([
             "run".into(),
             "--stdlib".into(),
@@ -1463,7 +1460,7 @@ mod tests {
             ),
         )
         .expect("temporary source-main source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1520,7 +1517,7 @@ mod tests {
             ),
         )
         .expect("temporary resource source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1569,7 +1566,7 @@ mod tests {
             ),
         )
         .expect("temporary Ref source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1633,7 +1630,7 @@ mod tests {
             ),
         )
         .expect("temporary Buffer source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1705,7 +1702,7 @@ mod tests {
             ),
         )
         .expect("temporary Buffer.transfer source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1779,7 +1776,7 @@ mod tests {
             ),
         )
         .expect("temporary List source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1837,7 +1834,7 @@ mod tests {
             ),
         )
         .expect("temporary List index source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1899,7 +1896,7 @@ mod tests {
             ),
         )
         .expect("temporary List.of source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1951,7 +1948,7 @@ mod tests {
             ),
         )
         .expect("temporary erased-product source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2011,7 +2008,7 @@ mod tests {
             ),
         )
         .expect("temporary mutable source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2055,7 +2052,7 @@ mod tests {
             ),
         )
         .expect("temporary thunk source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2098,7 +2095,7 @@ mod tests {
             ),
         )
         .expect("temporary reactive source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2153,7 +2150,7 @@ mod tests {
             ),
         )
         .expect("temporary batch source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2197,7 +2194,7 @@ mod tests {
             ),
         )
         .expect("temporary self-triggering source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2252,7 +2249,7 @@ mod tests {
             ),
         )
         .expect("temporary queued reaction source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2291,7 +2288,7 @@ mod tests {
             ),
         )
         .expect("temporary nonconvergent source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2335,7 +2332,7 @@ mod tests {
             ),
         )
         .expect("temporary top-level reactive source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2383,7 +2380,7 @@ mod tests {
             ),
         )
         .expect("temporary derived source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2422,7 +2419,7 @@ mod tests {
             ),
         )
         .expect("temporary default-product source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2462,7 +2459,7 @@ mod tests {
             ),
         )
         .expect("temporary product-spread source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2507,7 +2504,7 @@ mod tests {
             ),
         )
         .expect("temporary named-product-spread source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2546,7 +2543,7 @@ mod tests {
             ),
         )
         .expect("temporary designated-product source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2585,7 +2582,7 @@ mod tests {
             ),
         )
         .expect("temporary product-default source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2624,7 +2621,7 @@ mod tests {
             ),
         )
         .expect("temporary repeated-product source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2670,7 +2667,7 @@ mod tests {
             ),
         )
         .expect("temporary Drop source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2728,7 +2725,7 @@ mod tests {
             ),
         )
         .expect("temporary string-literal source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2773,7 +2770,7 @@ mod tests {
             ),
         )
         .expect("temporary loop source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2821,7 +2818,7 @@ mod tests {
             ),
         )
         .expect("temporary for-loop source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2864,7 +2861,7 @@ mod tests {
             ),
         )
         .expect("temporary float source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2925,7 +2922,7 @@ mod tests {
             ),
         )
         .expect("temporary ToString source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2969,7 +2966,7 @@ mod tests {
             ),
         )
         .expect("temporary string-template source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3014,7 +3011,7 @@ mod tests {
             ),
         )
         .expect("temporary string-add source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
