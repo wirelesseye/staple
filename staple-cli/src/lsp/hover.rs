@@ -550,7 +550,8 @@ impl Collector<'_> {
                         &member.syntax,
                         &member.name,
                         format!(
-                            "<trait member> {}: {}",
+                            "{}.{}: {}",
+                            declaration.name,
                             member.name,
                             member.annotation.syntax().text().trim()
                         ),
@@ -859,10 +860,10 @@ impl Collector<'_> {
             }),
             DefinitionId::TraitMethod(id) => resolved.trait_method(id).map(|member| {
                 (
-                    format!(
-                        "<trait member> {}: {}",
-                        member.name,
-                        member.annotation.syntax().text().trim()
+                    self.trait_member_signature(
+                        id,
+                        &member.name,
+                        member.annotation.syntax().text().trim(),
                     ),
                     member.docs.clone(),
                 )
@@ -1289,17 +1290,23 @@ impl Collector<'_> {
                 .resolved()
                 .trait_methods_for_expression(expression.syntax().id)
                 .first()
-                .and_then(|method| self.typed.resolved().trait_method(*method));
+                .and_then(|method| {
+                    self.typed
+                        .resolved()
+                        .trait_method(*method)
+                        .map(|member| (*method, member))
+                });
             let signature = declaration
                 .map(|declaration| declaration.signature(&value_type))
                 .or_else(|| {
-                    trait_member
-                        .map(|member| format!("<trait member> {}: {value_type}", member.name))
+                    trait_member.map(|(method, member)| {
+                        self.trait_member_signature(method, &member.name, &value_type)
+                    })
                 })
                 .unwrap_or(value_type);
             let docs = declaration
                 .map(|declaration| declaration.docs.clone())
-                .or_else(|| trait_member.map(|member| member.docs.clone()))
+                .or_else(|| trait_member.map(|(_, member)| member.docs.clone()))
                 .unwrap_or_default();
             let module = self.module_label(expression.syntax().id).or_else(|| {
                 self.typed
@@ -1541,6 +1548,27 @@ impl Collector<'_> {
                 declaration.docs.clone(),
                 module,
             );
+        }
+    }
+
+    /// Formats a trait member hover as `Trait.member: Type`, falling back
+    /// to a bare `<trait member> member: Type` when the owning trait can't
+    /// be recovered.
+    fn trait_member_signature(
+        &self,
+        method: TraitMethodId,
+        member_name: &str,
+        annotation: &str,
+    ) -> String {
+        if let Some(resolved) = self
+            .typed
+            .resolved()
+            .trait_for_method(method)
+            .and_then(|trait_id| self.typed.resolved().traits().get(&trait_id))
+        {
+            format!("{}.{member_name}: {annotation}", resolved.declaration.name)
+        } else {
+            format!("<trait member> {member_name}: {annotation}")
         }
     }
 
@@ -2532,7 +2560,7 @@ mod tests {
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "identity"
-                && entry.signature.starts_with("<trait member> identity: ")
+                && entry.signature.starts_with("Identity.identity: ")
         }));
         assert!(
             entries.iter().any(|entry| {
