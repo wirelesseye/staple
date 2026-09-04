@@ -1494,6 +1494,120 @@ mod tests {
             Some("std.io"),
             "`println` hover should name its defining module"
         );
+
+        let x_decl = source.find("let x = 3").unwrap() + "let ".len();
+        let x_hover = document
+            .hover_entries
+            .iter()
+            .find(|entry| {
+                entry.range.start == x_decl && &source[entry.range.clone()] == "x"
+            })
+            .unwrap_or_else(|| panic!("no hover entry for `x`: {:?}", document.hover_entries));
+        assert_eq!(
+            x_hover.module.as_deref(),
+            Some("hello_world.main"),
+            "a current-package binding should also name its defining module"
+        );
+    }
+
+    #[test]
+    fn hover_names_the_defining_module_for_a_sibling_package_module() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-lsp-sibling-module-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("staple.kdl"), "package \"widgets\"\n").unwrap();
+        std::fs::write(root.join("src/root.sta"), "pub mod\n").unwrap();
+        std::fs::write(
+            root.join("src/helpers.sta"),
+            "pub mod\npub let greeting = \"hi\"\n",
+        )
+        .unwrap();
+        let source = "use helpers.greeting\ngreeting\n";
+        std::fs::write(root.join("src/main.sta"), source).unwrap();
+        let path = std::fs::canonicalize(root.join("src/main.sta")).unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        let (connection, _client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: source.to_owned(),
+                    version: 1,
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+        };
+
+        server.analyze(&uri).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let document = &server.documents[&uri];
+        let reference = source.rfind("greeting").unwrap();
+        let hover = document
+            .hover_entries
+            .iter()
+            .find(|entry| {
+                entry.range.start == reference && &source[entry.range.clone()] == "greeting"
+            })
+            .unwrap_or_else(|| panic!("no hover entry for `greeting`: {:?}", document.hover_entries));
+        assert_eq!(
+            hover.module.as_deref(),
+            Some("widgets.helpers"),
+            "a reference to a sibling module's binding should name that module"
+        );
+    }
+
+    #[test]
+    fn hover_names_the_defining_module_without_a_manifest() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-lsp-no-manifest-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("helpers.sta"), "pub mod\npub let greeting = \"hi\"\n").unwrap();
+        let source = "use helpers.greeting\ngreeting\n";
+        std::fs::write(root.join("main.sta"), source).unwrap();
+        let path = std::fs::canonicalize(root.join("main.sta")).unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        let (connection, _client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: source.to_owned(),
+                    version: 1,
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+        };
+
+        server.analyze(&uri).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let document = &server.documents[&uri];
+        let reference = source.rfind("greeting").unwrap();
+        let hover = document
+            .hover_entries
+            .iter()
+            .find(|entry| {
+                entry.range.start == reference && &source[entry.range.clone()] == "greeting"
+            })
+            .unwrap_or_else(|| panic!("no hover entry for `greeting`: {:?}", document.hover_entries));
+        assert_eq!(
+            hover.module.as_deref(),
+            Some("helpers"),
+            "without a manifest the module is named by its module-root-relative path"
+        );
     }
 
     #[test]

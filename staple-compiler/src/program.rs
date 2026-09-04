@@ -101,6 +101,7 @@ pub struct Program {
     package_name: String,
     package_root: Option<ModuleId>,
     package_root_path: Option<PathBuf>,
+    module_root: Option<PathBuf>,
     standard_library_core: Option<ModuleId>,
     standard_library_prelude: Option<ModuleId>,
     standard_library_syntax: Option<ModuleId>,
@@ -135,6 +136,7 @@ impl Program {
             package_name: "package".to_owned(),
             package_root: None,
             package_root_path: None,
+            module_root: None,
             standard_library_core: None,
             standard_library_prelude: None,
             standard_library_syntax: None,
@@ -454,13 +456,20 @@ impl Program {
         self.package_root_path.as_deref()
     }
 
+    /// The directory imported modules are resolved against, when one was
+    /// configured (the package source root, or the entry file's directory).
+    pub fn module_root(&self) -> Option<&Path> {
+        self.module_root.as_deref()
+    }
+
     /// The `use`-path-style dotted name of a module, e.g. `std.io`,
     /// `std.core.list`, or `example.tools.text` — the package name followed by
     /// the file path relative to the package source root (extension dropped,
     /// separators turned into dots) and then any enclosing inline `mod`
-    /// segments. Returns `None` when the module has no owning package (a lone
-    /// file loaded without a package graph or a configured package root), or
-    /// when its file lies outside the package source root.
+    /// segments. When there is no manifest at all, the package name is dropped
+    /// and the result is just the module-root-relative path (`tools.text`).
+    /// Returns `None` when neither a package nor a module root is known (a lone
+    /// in-memory program), or when the file lies outside that root.
     pub fn module_dotted_name(&self, module: ModuleId) -> Option<String> {
         // Climb enclosing inline `mod` / block / companion submodules up to the
         // file-backed root; those carry a `name`, a file-backed module does not.
@@ -479,26 +488,30 @@ impl Program {
         inline.reverse();
 
         let root = self.module(file_root);
-        // Prefer the package graph; fall back to a configured package root path
-        // when the module carries no package (a package opened without a full
-        // manifest graph).
-        let (package_name, source_root, package_root_path): (&str, &Path, Option<&Path>) =
+        // Prefer the package graph; fall back to a configured package-root file,
+        // then to the bare module root. Only the last of these carries no
+        // package identity, so its name is left off (a relative path).
+        let (package_name, source_root, package_root_path): (Option<&str>, &Path, Option<&Path>) =
             match self
                 .package_of(file_root)
                 .and_then(|id| self.package_graph.as_ref().map(|graph| graph.package(id)))
             {
-                Some(package) => (&package.name, package.source_root(), Some(&package.root)),
-                None => {
-                    let package_root_path = self.package_root_path.as_deref()?;
-                    (
-                        self.package_name(),
+                Some(package) => {
+                    (Some(&package.name), package.source_root(), Some(&package.root))
+                }
+                None => match self.package_root_path.as_deref() {
+                    Some(package_root_path) => (
+                        Some(self.package_name()),
                         package_root_path.parent()?,
                         Some(package_root_path),
-                    )
-                }
+                    ),
+                    // No manifest: a relative path rooted at the module root.
+                    None => (None, self.module_root.as_deref()?, None),
+                },
             };
 
-        let mut segments = vec![package_name.to_owned()];
+        let mut segments: Vec<String> =
+            package_name.map(str::to_owned).into_iter().collect();
         let is_package_root = self.package_root == Some(file_root)
             || package_root_path.is_some_and(|path| path == root.path);
         if !is_package_root {
@@ -526,6 +539,9 @@ impl Program {
             }
         }
         segments.extend(inline);
+        if segments.is_empty() {
+            return None;
+        }
         Some(segments.join("."))
     }
 
@@ -2022,6 +2038,7 @@ impl ProgramLoader {
             },
             package_root: self.package_root,
             package_root_path: self.package_root_path,
+            module_root: self.module_root,
             standard_library_core: self.standard_library_core,
             standard_library_prelude: self.standard_library_prelude,
             standard_library_syntax: self.standard_library_syntax,
@@ -2751,12 +2768,40 @@ mod tests {
     }
 
     #[test]
-    fn module_dotted_name_is_none_for_a_lone_entry_file() {
-        let entry = std::env::temp_dir().join("staple-module-dotted-name-lone.sta");
+    fn module_dotted_name_is_a_relative_path_without_a_manifest() {
+        // A directory opened with no `staple.kdl`: there is no package identity,
+        // so the module is named by its path relative to the module root, with
+        // no leading package segment.
+        let dir = std::env::temp_dir().join(format!(
+            "staple-module-dotted-name-lone-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(dir.join("tools")).unwrap();
+        std::fs::write(
+            dir.join("tools/text.sta"),
+            "pub mod\npub let shout = 1\n",
+        )
+        .unwrap();
+        let entry = dir.join("main.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
-            .load_source_at(&entry, "let answer = 42\n")
+            .load_source_at(&entry, "use tools.text.shout\nshout\n")
             .unwrap();
+        assert_eq!(
+            program.module_dotted_name(program.entry()),
+            Some("main".to_owned())
+        );
+        assert_eq!(
+            program.module_dotted_name(module_by_suffix(&program, "tools/text.sta")),
+            Some("tools.text".to_owned())
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn module_dotted_name_is_none_for_an_in_memory_program() {
+        let module = staple_syntax::parse("let answer = 42\n").unwrap();
+        let program = Program::single(module);
         assert_eq!(program.module_dotted_name(program.entry()), None);
     }
 
