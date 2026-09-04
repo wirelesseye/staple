@@ -14,7 +14,8 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, GotoDefinition, HoverRequest, Request as _, SemanticTokensFullRequest,
+    Completion, GotoDefinition, HoverRequest, Request as _, ResolveCompletionItem,
+    SemanticTokensFullRequest,
 };
 use lsp_types::*;
 use staple_compiler::{NameResolver, ProgramLoader, TypeChecker};
@@ -169,7 +170,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
         completion_provider: Some(CompletionOptions {
-            resolve_provider: Some(false),
+            resolve_provider: Some(true),
             trigger_characters: Some(vec!["^".to_owned(), ".".to_owned()]),
             all_commit_characters: None,
             work_done_progress_options: WorkDoneProgressOptions::default(),
@@ -261,7 +262,7 @@ impl Server {
                 serde_json::from_value(request.params).map_err(|error| error.to_string())?;
             let uri = &params.text_document_position.text_document.uri;
             let requested_position = params.text_document_position.position;
-            let items = self
+            let mut items = self
                 .documents
                 .get(uri)
                 .and_then(|document| {
@@ -304,12 +305,54 @@ impl Server {
                     })
                 })
                 .unwrap_or_else(crate::lsp::completion::keywords);
+            // Cross-module suggestions carry a `data` payload; stamp the
+            // document URI onto it so `completionItem/resolve` can locate the
+            // buffer when computing the `use` insertion edit.
+            let uri_string = uri.as_str().to_owned();
+            for item in &mut items {
+                if let Some(data) = item.data.as_mut()
+                    && let Some(object) = data.as_object_mut()
+                    && object.contains_key("staple.import")
+                {
+                    object.insert(
+                        "staple.uri".to_owned(),
+                        serde_json::Value::String(uri_string.clone()),
+                    );
+                }
+            }
             let result = CompletionResponse::Array(items);
             self.connection
                 .sender
                 .send(Message::Response(Response::new_ok(
                     request.id,
                     serde_json::to_value(result).unwrap(),
+                )))
+                .map_err(|error| error.to_string())?;
+        } else if request.method == ResolveCompletionItem::METHOD {
+            let mut item: CompletionItem =
+                serde_json::from_value(request.params).map_err(|error| error.to_string())?;
+            if let Some(data) = item.data.clone() {
+                let import = data.get("staple.import").and_then(|value| value.as_str());
+                let name = data.get("staple.item").and_then(|value| value.as_str());
+                let document_uri = data.get("staple.uri").and_then(|value| value.as_str());
+                if let (Some(import), Some(name), Some(document_uri)) = (import, name, document_uri)
+                {
+                    let text = document_uri
+                        .parse::<Uri>()
+                        .ok()
+                        .and_then(|uri| self.documents.get(&uri))
+                        .map(|document| document.text.clone());
+                    if let Some(text) = text {
+                        item.additional_text_edits =
+                            crate::lsp::completion::resolve_import_edits(&text, import, name);
+                    }
+                }
+            }
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(
+                    request.id,
+                    serde_json::to_value(item).unwrap(),
                 )))
                 .map_err(|error| error.to_string())?;
         } else if request.method == GotoDefinition::METHOD {
@@ -1770,12 +1813,50 @@ mod tests {
         };
         let completion: CompletionResponse =
             serde_json::from_value(response.response_result.unwrap()).unwrap();
-        assert!(matches!(
-            completion,
-            CompletionResponse::Array(items)
-                if items.iter().any(|item| item.label == "okay")
-                    && items.iter().any(|item| item.label == "def")
-        ));
+        let CompletionResponse::Array(items) = completion else {
+            panic!("expected a completion array")
+        };
+        assert!(items.iter().any(|item| item.label == "okay"));
+        assert!(items.iter().any(|item| item.label == "def"));
+        // A cross-module suggestion from the standard library, carrying the
+        // payload the resolve step turns into a `use` insertion.
+        let external = items
+            .iter()
+            .find(|item| {
+                item.data
+                    .as_ref()
+                    .and_then(|data| data.get("staple.import"))
+                    .is_some()
+            })
+            .expect("a standard-library suggestion should be offered")
+            .clone();
+        let import_path = external.data.as_ref().unwrap()["staple.import"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        client
+            .sender
+            .send(Message::Request(Request {
+                id: 9.into(),
+                method: ResolveCompletionItem::METHOD.to_owned(),
+                params: serde_json::to_value(&external).unwrap(),
+            }))
+            .unwrap();
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected completion resolve response")
+        };
+        assert_eq!(response.id, 9.into());
+        let resolved: CompletionItem =
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
+        let edits = resolved
+            .additional_text_edits
+            .expect("resolve attaches a use insertion");
+        assert!(
+            edits
+                .iter()
+                .any(|edit| edit.new_text.contains(&format!("use {import_path}."))),
+            "edits: {edits:?}"
+        );
 
         client
             .sender

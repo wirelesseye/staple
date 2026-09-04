@@ -1,9 +1,18 @@
 use std::collections::{HashMap, HashSet};
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 
-use lsp_types::{CompletionItem, CompletionItemKind, Documentation, MarkupContent, MarkupKind};
+use lsp_types::{
+    CompletionItem, CompletionItemKind, CompletionItemLabelDetails, Documentation, MarkupContent,
+    MarkupKind, TextEdit,
+};
 use staple_compiler::*;
+use staple_project::PackageId;
 use staple_syntax::*;
+
+/// Upper bound on `.sta` files scanned when building the cross-module suggestion
+/// index, a guard against a pathologically large workspace stalling analysis.
+const MAX_EXTERNAL_FILES: usize = 4000;
 
 const KEYWORDS: &[&str] = &[
     "alias",
@@ -73,6 +82,45 @@ pub struct CompletionIndex {
     qualifiers: Vec<MethodSite>,
     named_qualifiers: Vec<NamedQualifier>,
     named_methods: Vec<NamedQualifier>,
+    /// Public items defined in other modules / dependency packages that the
+    /// edited file has not imported. Offered by [`CompletionIndex::items`] with
+    /// a `data` payload the LSP resolves into a `use` insertion edit.
+    external: Vec<ExternalSymbol>,
+}
+
+/// A completion candidate for an item that is not in scope yet. Accepting it
+/// inserts the bare name and, via `completionItem/resolve`, a matching `use`.
+#[derive(Debug, Clone)]
+struct ExternalSymbol {
+    label: String,
+    namespace: Namespace,
+    kind: CompletionItemKind,
+    detail: Option<String>,
+    docs: Vec<String>,
+    /// Dotted path of the defining module as written in a `use`, e.g. `std.io`.
+    module_path: String,
+}
+
+impl ExternalSymbol {
+    fn to_completion_item(&self) -> CompletionItem {
+        CompletionItem {
+            label: self.label.clone(),
+            kind: Some(self.kind),
+            detail: self.detail.clone(),
+            documentation: markup_documentation(&self.docs),
+            label_details: Some(CompletionItemLabelDetails {
+                detail: None,
+                description: Some(self.module_path.clone()),
+            }),
+            // Sort cross-module suggestions after everything already in scope.
+            sort_text: Some(format!("~{}", self.label)),
+            data: Some(serde_json::json!({
+                "staple.import": self.module_path,
+                "staple.item": self.label,
+            })),
+            ..CompletionItem::default()
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -101,7 +149,9 @@ pub fn index(module: &Module, typed: &TypedModule) -> CompletionIndex {
     };
     let entry = typed.resolved().program().entry();
     collector.module(module, entry);
-    collector.index
+    let mut index = collector.index;
+    index.external = collect_external_symbols(typed);
+    index
 }
 
 /// Walks module and submodule items, recording the doc comments attached to
@@ -211,7 +261,24 @@ impl CompletionIndex {
                     .then(left.detail.cmp(&right.detail))
             },
         );
-        items.into_iter().map(|(_, item)| item).collect()
+        let in_scope = items
+            .iter()
+            .map(|((label, namespace), _)| (label.clone(), *namespace))
+            .collect::<HashSet<_>>();
+        let mut result = items.into_iter().map(|(_, item)| item).collect::<Vec<_>>();
+        let mut external = self
+            .external
+            .iter()
+            .filter(|symbol| !in_scope.contains(&(symbol.label.clone(), symbol.namespace)))
+            .map(ExternalSymbol::to_completion_item)
+            .collect::<Vec<_>>();
+        external.sort_by(|left, right| {
+            left.label
+                .cmp(&right.label)
+                .then(left.detail.cmp(&right.detail))
+        });
+        result.extend(external);
+        result
     }
 
     pub fn method_items(&self, receiver_end: usize) -> Vec<CompletionItem> {
@@ -997,6 +1064,378 @@ fn contains(range: &Range<usize>, offset: usize) -> bool {
     range.start <= offset && offset <= range.end
 }
 
+/// Scans every `.sta` file in the package graph (workspace packages, their
+/// dependencies, and the standard library) for public declarations that the
+/// edited file could import. Only the AST is read — no name resolution — so a
+/// broken file elsewhere in the workspace is skipped rather than failing the
+/// whole analysis.
+fn collect_external_symbols(typed: &TypedModule) -> Vec<ExternalSymbol> {
+    let resolved = typed.resolved();
+    let program = resolved.program();
+    let Some(graph) = program.package_graph() else {
+        return Vec::new();
+    };
+    let entry = program.entry();
+    let current_package = program.package_of(entry);
+    let current_path = canonical(&program.module(entry).path);
+
+    // Names already reachable in the edited module (locals, prelude, existing
+    // imports) — never offer these as cross-module suggestions.
+    let visible = resolved
+        .visible_definitions(entry)
+        .map(|definitions| definitions.keys().cloned().collect::<HashSet<_>>())
+        .unwrap_or_default();
+
+    let mut symbols = Vec::new();
+    let mut seen_files = HashSet::new();
+    let mut budget = MAX_EXTERNAL_FILES;
+    for index in 0..graph.packages.len() {
+        let target_package = PackageId(index);
+        let package = &graph.packages[index];
+
+        // The leading segment of the `use` path: nothing for a file in the
+        // edited file's own package (imported by a source-root-relative path),
+        // otherwise the alias this package declares for the dependency.
+        let base_segment = if current_package == Some(target_package) {
+            None
+        } else {
+            let alias = current_package.and_then(|current| {
+                graph
+                    .package(current)
+                    .dependencies
+                    .iter()
+                    .find(|dependency| dependency.package == target_package)
+                    .map(|dependency| dependency.alias.clone())
+            });
+            match alias {
+                Some(alias) => Some(alias),
+                // A lone file with no real package can still import `std`.
+                None if current_package.is_none() && package.name == "std" => {
+                    Some("std".to_owned())
+                }
+                None => continue,
+            }
+        };
+
+        let source_root = canonical(package.source_root());
+        let mut files = Vec::new();
+        collect_sta_files(&source_root, &mut files);
+        files.sort();
+        for file in files {
+            if budget == 0 {
+                return symbols;
+            }
+            let file = canonical(&file);
+            if file == current_path || !seen_files.insert(file.clone()) {
+                continue;
+            }
+            budget -= 1;
+            let Some(module_path) =
+                dotted_module_path(base_segment.as_deref(), &source_root, &file)
+            else {
+                continue;
+            };
+            let Ok(source) = std::fs::read_to_string(&file) else {
+                continue;
+            };
+            let Ok(parsed) = parse(&source) else {
+                continue;
+            };
+            let mut scan = ExternalScan {
+                module_path: &module_path,
+                same_package: current_package == Some(target_package),
+                visible: &visible,
+                symbols: &mut symbols,
+            };
+            for item in &parsed.items {
+                scan.item(item);
+            }
+        }
+    }
+    symbols
+}
+
+fn canonical(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
+}
+
+fn collect_sta_files(directory: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_sta_files(&path, files);
+        } else if path.extension().is_some_and(|extension| extension == "sta") {
+            files.push(path);
+        }
+    }
+}
+
+/// The dotted `use` path of a file, e.g. `std.io` or `tools.text`. Mirrors
+/// `staple_compiler::Program::module_dotted_name` but works from a file path
+/// alone, for modules that were never loaded. Returns `None` when the file is
+/// the package root itself (nothing to import by module path) or lies outside
+/// the source root.
+fn dotted_module_path(
+    base_segment: Option<&str>,
+    source_root: &Path,
+    file: &Path,
+) -> Option<String> {
+    let relative = file.strip_prefix(source_root).ok()?.with_extension("");
+    let mut segments = relative
+        .components()
+        .filter_map(|component| match component {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    // A `root.sta` directly in the source root names the package, not a
+    // `.root` submodule.
+    if segments == ["root"] {
+        segments.clear();
+    }
+    let mut path = base_segment
+        .map(str::to_owned)
+        .into_iter()
+        .collect::<Vec<_>>();
+    path.extend(segments);
+    (!path.is_empty()).then(|| path.join("."))
+}
+
+struct ExternalScan<'a> {
+    module_path: &'a str,
+    same_package: bool,
+    visible: &'a HashSet<String>,
+    symbols: &'a mut Vec<ExternalSymbol>,
+}
+
+impl ExternalScan<'_> {
+    fn item(&mut self, item: &Item) {
+        match item {
+            Item::Modified(value) => self.item(&value.item),
+            Item::VisibilitySplice(value) => self.item(&value.item),
+            Item::TypeDeclaration(declaration) => self.push(
+                declaration.visibility,
+                &declaration.name,
+                Namespace::Type,
+                CompletionItemKind::CLASS,
+                Some(format!("type {}", declaration.name)),
+                &declaration.docs,
+            ),
+            Item::TraitDeclaration(declaration) => self.push(
+                declaration.visibility,
+                &declaration.name,
+                Namespace::Trait,
+                CompletionItemKind::INTERFACE,
+                Some(format!("trait {}", declaration.name)),
+                &declaration.docs,
+            ),
+            Item::MacroDeclaration(declaration) => {
+                let detail = match &declaration.annotation {
+                    Some(annotation) => format!(
+                        "macro {}: {}",
+                        declaration.name,
+                        annotation.syntax().text().trim()
+                    ),
+                    None => format!("macro {}", declaration.name),
+                };
+                self.push(
+                    declaration.visibility,
+                    &declaration.name,
+                    Namespace::Macro,
+                    CompletionItemKind::FUNCTION,
+                    Some(detail),
+                    &declaration.docs,
+                );
+            }
+            Item::Binding(binding) => self.binding(binding.visibility, binding),
+            Item::ExternBlock(block) => {
+                for binding in &block.bindings {
+                    self.binding(block.visibility, binding);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn binding(&mut self, visibility: Visibility, binding: &Binding) {
+        let kind = if matches!(binding.kind, BindingKind::Def) {
+            CompletionItemKind::FUNCTION
+        } else {
+            CompletionItemKind::VARIABLE
+        };
+        let name = &binding.name;
+        let detail = match (&binding.annotation, binding.external) {
+            (Some(annotation), true) => {
+                format!("{}: {}", name, annotation.syntax().text().trim())
+            }
+            (Some(annotation), false) => format!(
+                "{} {}: {}",
+                binding.declaration_prefix(),
+                name,
+                annotation.syntax().text().trim()
+            ),
+            (None, true) => name.clone(),
+            (None, false) => format!("{} {}", binding.declaration_prefix(), name),
+        };
+        self.push(
+            visibility,
+            name,
+            Namespace::Value,
+            kind,
+            Some(detail),
+            &binding.docs,
+        );
+    }
+
+    fn push(
+        &mut self,
+        visibility: Visibility,
+        name: &str,
+        namespace: Namespace,
+        kind: CompletionItemKind,
+        detail: Option<String>,
+        docs: &[String],
+    ) {
+        let importable = match visibility {
+            Visibility::Public => true,
+            Visibility::Package => self.same_package,
+            Visibility::Private => false,
+        };
+        if !importable || self.visible.contains(name) {
+            return;
+        }
+        self.symbols.push(ExternalSymbol {
+            label: name.to_owned(),
+            namespace,
+            kind,
+            detail,
+            docs: docs.to_vec(),
+            module_path: self.module_path.to_owned(),
+        });
+    }
+}
+
+/// Computes the `use`-declaration edit for an accepted cross-module completion.
+/// Merges into an existing `use` for the same module when possible, otherwise
+/// inserts a fresh line. `None` means "no edit" — either the item is already
+/// imported or the buffer could not be parsed.
+pub fn resolve_import_edits(text: &str, module_path: &str, item: &str) -> Option<Vec<TextEdit>> {
+    let module = parse(text).ok()?;
+
+    for top_level in &module.items {
+        let Some(declaration) = top_level_use(top_level) else {
+            continue;
+        };
+        let span = declaration.syntax.span.to_range();
+        let declaration_text = text.get(span.clone())?;
+        match &declaration.kind {
+            UseKind::Selected(names) => {
+                if declaration.path.join(".") != module_path {
+                    continue;
+                }
+                if names.iter().any(|name| name == item) {
+                    return Some(Vec::new());
+                }
+                let close = span.start + declaration_text.rfind(')')?;
+                return Some(vec![insert_edit(text, close, format!(", {item}"))]);
+            }
+            UseKind::Glob => {
+                if declaration.path.join(".") == module_path {
+                    return Some(Vec::new());
+                }
+            }
+            UseKind::Dotted => {
+                if let Some((last, head)) = declaration.path.split_last()
+                    && !head.is_empty()
+                    && head.join(".") == module_path
+                {
+                    if last == item {
+                        return Some(Vec::new());
+                    }
+                    let new_text = format!(
+                        "{}use {}.({}, {})",
+                        visibility_prefix(declaration.visibility),
+                        module_path,
+                        last,
+                        item
+                    );
+                    return Some(vec![replace_edit(text, span, new_text)]);
+                }
+            }
+            UseKind::Namespace | UseKind::Renamed { .. } => {}
+        }
+    }
+
+    let insertion = new_use_offset(&module);
+    let new_text = if insertion == 0 {
+        format!("use {module_path}.{item}\n")
+    } else {
+        format!("\nuse {module_path}.{item}")
+    };
+    Some(vec![insert_edit(text, insertion, new_text)])
+}
+
+fn top_level_use(item: &Item) -> Option<&UseDeclaration> {
+    match item {
+        Item::UseDeclaration(declaration) => Some(declaration),
+        Item::Modified(value) => top_level_use(&value.item),
+        Item::VisibilitySplice(value) => top_level_use(&value.item),
+        _ => None,
+    }
+}
+
+fn visibility_prefix(visibility: Visibility) -> &'static str {
+    match visibility {
+        Visibility::Public => "pub ",
+        Visibility::Package => "pub(package) ",
+        Visibility::Private => "",
+    }
+}
+
+/// Byte offset for a newly inserted `use` line: after the last top-level `use`,
+/// else after the bare `mod` header, else the start of the file.
+fn new_use_offset(module: &Module) -> usize {
+    let last_use_end = module
+        .items
+        .iter()
+        .filter_map(top_level_use)
+        .map(|declaration| declaration.syntax.span.to_range().end)
+        .max();
+    if let Some(end) = last_use_end {
+        return end;
+    }
+    if let Some(declaration) = &module.declaration_syntax {
+        return declaration.span.to_range().end;
+    }
+    0
+}
+
+fn insert_edit(text: &str, offset: usize, new_text: String) -> TextEdit {
+    let position = offset_to_position(text, offset);
+    TextEdit {
+        range: lsp_types::Range::new(position, position),
+        new_text,
+    }
+}
+
+fn replace_edit(text: &str, range: Range<usize>, new_text: String) -> TextEdit {
+    TextEdit {
+        range: lsp_types::Range::new(
+            offset_to_position(text, range.start),
+            offset_to_position(text, range.end),
+        ),
+        new_text,
+    }
+}
+
+fn offset_to_position(text: &str, offset: usize) -> lsp_types::Position {
+    let (line, character) = crate::lsp::semantic::position(text, offset.min(text.len()));
+    lsp_types::Position::new(line, character)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1354,5 +1793,172 @@ mod tests {
                 .any(|item| item.label == "push" && item.kind == Some(CompletionItemKind::METHOD))
         );
         assert!(!items.iter().any(|item| item.label == "new"));
+    }
+
+    #[test]
+    fn dotted_module_path_covers_same_package_dependency_and_root() {
+        assert_eq!(
+            dotted_module_path(None, Path::new("/ws/src"), Path::new("/ws/src/tools/text.sta")),
+            Some("tools.text".to_owned())
+        );
+        assert_eq!(
+            dotted_module_path(Some("std"), Path::new("/std"), Path::new("/std/io.sta")),
+            Some("std.io".to_owned())
+        );
+        assert_eq!(
+            dotted_module_path(Some("std"), Path::new("/std"), Path::new("/std/core/list.sta")),
+            Some("std.core.list".to_owned())
+        );
+        // A dependency `root.sta` collapses to the package name.
+        assert_eq!(
+            dotted_module_path(Some("dep"), Path::new("/dep"), Path::new("/dep/root.sta")),
+            Some("dep".to_owned())
+        );
+        // The edited package's own `root.sta` is not importable by module path.
+        assert_eq!(
+            dotted_module_path(None, Path::new("/ws/src"), Path::new("/ws/src/root.sta")),
+            None
+        );
+        // A file outside the source root is skipped.
+        assert_eq!(
+            dotted_module_path(None, Path::new("/ws/src"), Path::new("/other/x.sta")),
+            None
+        );
+    }
+
+    fn apply_edits(text: &str, edits: &[TextEdit]) -> String {
+        let mut spans = edits
+            .iter()
+            .map(|edit| {
+                let start = crate::lsp::semantic::offset(text, edit.range.start).unwrap();
+                let end = crate::lsp::semantic::offset(text, edit.range.end).unwrap();
+                (start, end, edit.new_text.clone())
+            })
+            .collect::<Vec<_>>();
+        spans.sort_by_key(|(start, ..)| std::cmp::Reverse(*start));
+        let mut result = text.to_owned();
+        for (start, end, new_text) in spans {
+            result.replace_range(start..end, &new_text);
+        }
+        result
+    }
+
+    #[test]
+    fn resolve_import_edits_inserts_a_new_use_line() {
+        let text = "pub mod\n\ndef main = () => 0\n";
+        let edits = resolve_import_edits(text, "std.io", "println").unwrap();
+        assert_eq!(
+            apply_edits(text, &edits),
+            "pub mod\nuse std.io.println\n\ndef main = () => 0\n"
+        );
+
+        let bare = "def main = () => 0\n";
+        let edits = resolve_import_edits(bare, "std.io", "println").unwrap();
+        assert_eq!(
+            apply_edits(bare, &edits),
+            "use std.io.println\ndef main = () => 0\n"
+        );
+    }
+
+    #[test]
+    fn resolve_import_edits_appends_after_the_last_use() {
+        let text = "pub mod\nuse std.list.map\n\ndef main = () => 0\n";
+        let edits = resolve_import_edits(text, "std.io", "println").unwrap();
+        assert_eq!(
+            apply_edits(text, &edits),
+            "pub mod\nuse std.list.map\nuse std.io.println\n\ndef main = () => 0\n"
+        );
+    }
+
+    #[test]
+    fn resolve_import_edits_merges_into_an_existing_selected_use() {
+        let text = "use std.io.(read)\n\ndef main = () => 0\n";
+        let edits = resolve_import_edits(text, "std.io", "println").unwrap();
+        assert_eq!(
+            apply_edits(text, &edits),
+            "use std.io.(read, println)\n\ndef main = () => 0\n"
+        );
+
+        let public = "pub use std.io.(read)\n";
+        let edits = resolve_import_edits(public, "std.io", "println").unwrap();
+        assert_eq!(apply_edits(public, &edits), "pub use std.io.(read, println)\n");
+    }
+
+    #[test]
+    fn resolve_import_edits_merges_a_single_item_dotted_use() {
+        let text = "use std.io.read\n";
+        let edits = resolve_import_edits(text, "std.io", "println").unwrap();
+        assert_eq!(apply_edits(text, &edits), "use std.io.(read, println)\n");
+
+        let public = "pub use std.io.read\n";
+        let edits = resolve_import_edits(public, "std.io", "println").unwrap();
+        assert_eq!(apply_edits(public, &edits), "pub use std.io.(read, println)\n");
+    }
+
+    #[test]
+    fn resolve_import_edits_is_empty_when_already_imported() {
+        assert_eq!(
+            resolve_import_edits("use std.io.(println)\n", "std.io", "println"),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            resolve_import_edits("use std.io.*\n", "std.io", "println"),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            resolve_import_edits("use std.io.println\n", "std.io", "println"),
+            Some(Vec::new())
+        );
+    }
+
+    #[test]
+    fn suggests_public_items_from_an_unimported_sibling_module() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-completion-external-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("staple.kdl"), "package \"demo\" {\n    root \"src\"\n}\n").unwrap();
+        std::fs::write(root.join("src/root.sta"), "pub mod\n").unwrap();
+        std::fs::write(
+            root.join("src/helpers.sta"),
+            "pub mod\n\n/// Greets.\npub def greet = () => 0\npub type Widget = ()\nlet secret = 1\n",
+        )
+        .unwrap();
+        let source = "pub mod\n\ndef main = () => 0\n";
+        std::fs::write(root.join("src/main.sta"), source).unwrap();
+        let path = std::fs::canonicalize(root.join("src/main.sta")).unwrap();
+        let graph = staple_project::load_package_graph(&root.join("staple.kdl")).unwrap();
+        let program = ProgramLoader::new()
+            .with_package_graph(graph)
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .load_package_graph_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let index = index(&module, &typed);
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let items = index.items(source.find("0").unwrap());
+        let greet = items
+            .iter()
+            .find(|item| item.label == "greet")
+            .expect("greet should be offered from the sibling module");
+        assert_eq!(greet.kind, Some(CompletionItemKind::FUNCTION));
+        let data = greet.data.as_ref().expect("external item carries data");
+        assert_eq!(data.get("staple.import").and_then(|v| v.as_str()), Some("helpers"));
+        assert_eq!(data.get("staple.item").and_then(|v| v.as_str()), Some("greet"));
+
+        assert!(items.iter().any(|item| item.label == "Widget"));
+        // Private items are never offered.
+        assert!(!items.iter().any(|item| item.label == "secret"));
+        // A name already in scope is not duplicated as a cross-module entry.
+        assert!(
+            !items
+                .iter()
+                .any(|item| item.label == "main" && item.data.is_some())
+        );
     }
 }
