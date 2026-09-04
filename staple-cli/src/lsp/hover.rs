@@ -2457,7 +2457,7 @@ mod tests {
         assert!(signatures.contains(&("choose", "macro choose: Expr -> Expr")));
         assert!(signatures.contains(&("choose", "macro choose: CallExpr -> Expr")));
         assert!(signatures.contains(&("identity", "macro @identity: Item -> Item")));
-        assert!(signatures.contains(&("doc", "macro @doc: Parenthesized (Expr) -> Item -> Item")));
+        assert!(signatures.contains(&("doc", "macro @doc: Parenthesized (Expr) * Item -> Item")));
         assert!(signatures.contains(&("inferred", "macro inferred: SyntaxNode -> Expr")));
         assert!(signatures.contains(&("satisfied", "macro satisfied: Expr -> Expr")));
         assert!(signatures.contains(&("imported", "macro imported: Expr -> Expr")));

@@ -7,10 +7,10 @@ use std::{
 
 use crate::{ModuleId, Program, ResolvedMacro};
 use staple_syntax::{
-    Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
-    LogicalOperator, MacroDeclaration, ModifierArgument, ModifierInvocation, Pattern, SelectedImport,
-    Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility, VisibilityKind,
-    VisibilitySyntax,
+    Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression,
+    FunctionParameterStyle, Item, LogicalOperator, MacroDeclaration, ModifierArgument,
+    ModifierInvocation, Pattern, SelectedImport, Span, Syntax, SyntaxId, Type, UseDeclaration,
+    UseKind, Visibility, VisibilityKind, VisibilitySyntax,
 };
 
 const MAX_EXPANSION_DEPTH: usize = 128;
@@ -5980,7 +5980,16 @@ fn expression_arity(expression: &Expression) -> usize {
 
 fn macro_annotation_arity(annotation: &Type) -> usize {
     match annotation {
-        Type::Function(function) => 1 + macro_annotation_arity(&function.result),
+        Type::Function(function) => {
+            let this = if function.parameter_style == FunctionParameterStyle::Juxtaposed
+                && let Type::Product(product) = function.parameter.as_ref()
+            {
+                product.elements.len()
+            } else {
+                1
+            };
+            this + macro_annotation_arity(&function.result)
+        }
         _ => 0,
     }
 }
@@ -7195,7 +7204,7 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Delimited(_, _) => format_meta_type(parameter),
         })
         .collect::<Vec<_>>()
-        .join(" -> ")
+        .join(" * ")
 }
 
 fn resolved_macro(definition: &MacroDefinition) -> ResolvedMacro {
@@ -7316,15 +7325,40 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
     }
 }
 
+/// Reads a macro annotation's parameter list and result. Multiple
+/// parameters are written juxtaposed (`A * B -> C`), a single
+/// `Type::Function` whose parameter is a product; a curried chain of nested
+/// `Type::Function`s (the removed `A -> B -> C` spelling) is rejected by
+/// `meta_type` failing on the nested `Type::Function` result, same as any
+/// other malformed annotation shape.
 fn macro_signature(annotation: &Type) -> Option<(Vec<MetaType>, MetaType)> {
-    let mut parameters = Vec::new();
-    let mut current = annotation;
-    while let Type::Function(function) = current {
-        parameters.push(meta_type(&function.parameter)?);
-        current = &function.result;
-    }
-    let result = meta_type(current)?;
+    let Type::Function(function) = annotation else {
+        return None;
+    };
+    let parameters = juxtaposed_meta_types(function)?;
+    let result = meta_type(&function.result)?;
     (!parameters.is_empty()).then_some((parameters, result))
+}
+
+/// Reads one function type's parameter(s) as meta types: a juxtaposed
+/// parameter list becomes one entry per element, and a single parameter
+/// (including a genuine, non-juxtaposed product) becomes one entry.
+fn juxtaposed_meta_types(function: &staple_syntax::FunctionType) -> Option<Vec<MetaType>> {
+    if function.parameter_style != FunctionParameterStyle::Juxtaposed {
+        return Some(vec![meta_type(&function.parameter)?]);
+    }
+    let Type::Product(product) = function.parameter.as_ref() else {
+        return None;
+    };
+    product
+        .elements
+        .iter()
+        .map(|element| {
+            (element.name.is_none() && !element.spread && !element.mutable && !element.moved)
+                .then(|| meta_type(&element.ty))
+                .flatten()
+        })
+        .collect()
 }
 
 fn compiler_macro_signature(annotation: &Type) -> Option<(Vec<MetaType>, MetaType)> {

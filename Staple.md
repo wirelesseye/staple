@@ -69,12 +69,14 @@ the three delimited syntax types. `Expr` is currently the sum of `Ident String`,
 `CallExpr`, and `UnstructuredExpr`.
 `CallExpr` exposes `callee: Expr` and
 `argument: Expr`; `UnstructuredExpr` preserves every other expression form
-without exposing its fields yet. A macro body is a curried compile-time Staple
-function. Every parameter consumes one atomic syntax unit; an omitted parameter
-type means `SyntaxNode`, not opaque `Syntax`:
+without exposing its fields yet. A macro body is a compile-time Staple function
+whose parameters are juxtaposed with `*`, followed by a single `=>` before the
+body — never a curried `a => b => body` chain. Every parameter consumes one
+atomic syntax unit; an omitted parameter type means `SyntaxNode`, not opaque
+`Syntax`:
 
 ```staple
-macro choose = condition => then => else => parse_quote {
+macro choose = condition * then * else => parse_quote {
     match $condition {
         True => $then,
         False => $else,
@@ -94,9 +96,9 @@ a typed wildcard when its syntax is not needed, or a binding when it is:
 
 ```staple
 macro conditional =
-    condition: Expr =>
-    then_branch: Expr =>
-    _: Ident "else" =>
+    condition: Expr *
+    then_branch: Expr *
+    _: Ident "else" *
     else_branch: Expr =>
     parse_quote {
         match $condition {
@@ -117,8 +119,8 @@ parameter:
 
 ```staple
 macro collect =
-    values: Sequence (Ident String) =>
-    _: Equals =>
+    values: Sequence (Ident String) *
+    _: Equals *
     body: Braced Syntax => ...
 ```
 
@@ -250,7 +252,7 @@ Identifiers and calls may also be inspected, constructed, and changed as
 compile-time values:
 
 ```staple
-macro replace_argument = value: CallExpr => replacement: Expr => {
+macro replace_argument = value: CallExpr * replacement: Expr => {
     let original = value
     let mut changed = value
     changed.argument = replacement
@@ -296,8 +298,8 @@ and applied immediately before a resolver-safe definition:
 ```staple
 macro @identity: Item -> Item = item => item
 
-macro @replace: Parenthesized Expr -> Item -> Item =
-    value => item => parse_quote { let generated = $value }
+macro @replace: Parenthesized Expr * Item -> Item =
+    value * item => parse_quote { let generated = $value }
 
 @identity
 @replace(42)
@@ -386,7 +388,7 @@ pub type MacroCallMetadata = (
 
 ```staple
 macro define_alias =
-    metadata: MacroCallMetadata =>
+    metadata: MacroCallMetadata *
     ty: Type =>
     {
         let visibility = metadata.visibility
@@ -410,8 +412,8 @@ position each visibility form consumes one source atom; if none is present,
 
 ```staple
 macro configure =
-    value: Expr =>
-    vis: Visibility =>
+    value: Expr *
+    vis: Visibility *
     ty: Type => ...
 
 configure value I32

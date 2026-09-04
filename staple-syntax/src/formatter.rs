@@ -368,6 +368,16 @@ mod tests {
     }
 
     #[test]
+    fn formats_juxtaposed_macro_parameters() {
+        let source = "macro choose=condition: Expr*when_true: Expr*_: Ident \"else\"*when_false: Expr=>quote {}\n";
+        let formatted = format_source(source).unwrap();
+        assert!(formatted.contains(
+            "macro choose = condition: Expr * when_true: Expr * _: Ident \"else\" * when_false: Expr => quote {}"
+        ));
+        assert_eq!(format_source(&formatted).unwrap(), formatted);
+    }
+
+    #[test]
     fn preserves_opaque_trailing_separator_state() {
         let without = format_source("let value = unknown { first => 1 }\n").unwrap();
         let with = format_source("let value = unknown { first => 1, }\n").unwrap();

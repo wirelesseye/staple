@@ -834,7 +834,7 @@ impl Grammar {
             None
         };
         let value = if self.eat(TokenKind::Equals) {
-            Some(self.parse_expression()?)
+            Some(self.parse_macro_value()?)
         } else {
             None
         };
@@ -850,6 +850,63 @@ impl Grammar {
             annotation,
             value,
         })
+    }
+
+    /// Parses a macro declaration's value: a juxtaposed parameter list whose
+    /// elements are separated by `*`, a single `=>`, and then the macro body
+    /// (`quote`/`parse_quote`, a `match`, a block, or a bare syntax
+    /// expression). Multiple parameters are written `a * b => body`, not as a
+    /// curried `a => b => body` chain — the value is desugared here into the
+    /// nested single-parameter `Function` chain that the rest of the compiler
+    /// consumes, so a body that itself parses as a bare function is rejected as
+    /// the old curried spelling.
+    fn parse_macro_value(&mut self) -> Result<Expression, ParseError> {
+        let mut parameter_starts = vec![self.position];
+        let mut patterns = vec![self.parse_top_level_parameter_pattern()?];
+        while self.eat(TokenKind::Star) {
+            parameter_starts.push(self.position);
+            patterns.push(self.parse_top_level_parameter_pattern()?);
+        }
+        for pattern in &patterns {
+            if parameter_has_nested_mutable(pattern) {
+                return Err(self.error(
+                    "`mut` is only allowed on a whole parameter binding or a direct element of a \
+                     top-level product parameter",
+                ));
+            }
+            if parameter_has_nested_move(pattern) {
+                return Err(self.error(
+                    "`move` is only allowed on a whole parameter binding or a direct element of a \
+                     top-level product parameter",
+                ));
+            }
+        }
+        self.expect(TokenKind::FatArrow, "expected `=>` before the macro body")?;
+        let body_start = self.next_non_trivia(self.position);
+        let body = self.parse_expression()?;
+        if macro_body_is_bare_function(&body) {
+            let offset = self
+                .tokens
+                .get(body_start)
+                .map_or(self.source_len, |token| token.span.start);
+            return Err(ParseError {
+                offset,
+                location: self.location(offset),
+                message: "macro parameters are juxtaposed with `*`; write `a * b => body` \
+                          instead of a curried `a => b => body`"
+                    .to_owned(),
+            });
+        }
+        let mut expression = body;
+        for (start, pattern) in parameter_starts.into_iter().zip(patterns).rev() {
+            expression = Expression::Function(Box::new(FunctionExpression {
+                syntax: self.syntax(start),
+                parameter_style: crate::FunctionParameterStyle::Single,
+                pattern,
+                body: Box::new(expression),
+            }));
+        }
+        Ok(expression)
     }
 
     fn parse_trait_declaration(
@@ -4007,6 +4064,18 @@ fn parameter_has_nested_move(pattern: &Pattern) -> bool {
             other => pattern_has_move(other),
         }),
         other => pattern_has_move(other),
+    }
+}
+
+/// Whether a macro body's tail position is a bare function expression, which
+/// signals the removed curried `a => b => body` spelling rather than the
+/// juxtaposed `a * b => body` form. Looks through a trailing `satisfies` so the
+/// diagnostic still fires on `a => b => body satisfies T`.
+fn macro_body_is_bare_function(expression: &Expression) -> bool {
+    match expression {
+        Expression::Function(_) => true,
+        Expression::Satisfies(satisfies) => macro_body_is_bare_function(&satisfies.value),
+        _ => false,
     }
 }
 

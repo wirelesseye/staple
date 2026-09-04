@@ -26,7 +26,7 @@ use std.syntax.(
 // non-expression input during expansion, and a literal Ident matches a keyword-
 // like word without making it part of the runtime language.
 macro choose =
-    condition: Expr =>
+    condition: Expr *
     when_true: Expr =>
     quote {
         match $condition {
@@ -38,9 +38,9 @@ macro choose =
 // Macros may be overloaded. Complete matches that consume more syntax win, so
 // this form is selected when an `else` branch is present.
 macro choose =
-    condition: Expr =>
-    when_true: Expr =>
-    _: Ident "else" =>
+    condition: Expr *
+    when_true: Expr *
+    _: Ident "else" *
     when_false: Expr =>
     quote {
         match $condition {
@@ -64,13 +64,13 @@ macro describe =
 // include that pair. Contextual quotation then accepts each splice in its
 // corresponding grammatical position. This macro returns one complete item.
 macro bind =
-    pattern: Pattern =>
-    ty: Type =>
+    pattern: Pattern *
+    ty: Type *
     value: Expr => {
         quote { let $pattern: $ty = $value }
     }
 
-macro destructure = pattern: Pattern => value: Expr => quote {
+macro destructure = pattern: Pattern * value: Expr => quote {
     let $pattern = $value
 }
 
@@ -81,7 +81,7 @@ destructure ((left, right)) pair
 // Ident and CallExpr are the currently structured expression syntax. They can
 // be inspected, copied, constructed, and mutated with ordinary Staple code.
 // Mutation follows value semantics: changing `changed` leaves `original` alone.
-macro replace_argument = value: CallExpr => replacement: Expr => {
+macro replace_argument = value: CallExpr * replacement: Expr => {
     let original = value
     let mut changed = value
     changed.argument = replacement
@@ -112,7 +112,7 @@ generate_pair 41
 // first; here @identity returns the ModifiedItem it receives, explicitly
 // continuing expansion with @replace.
 macro @identity: Item -> Item = item => item
-macro @replace: Parenthesized Expr -> Item -> Item = value => item => parse_quote {
+macro @replace: Parenthesized Expr * Item -> Item = value * item => parse_quote {
     let replaced: I32 = $value
 }
 
@@ -133,9 +133,9 @@ def duplicated_original = () => 0
 
 // MacroCallMetadata receives ordered modifiers and Private, Public, Package,
 // or representation visibility from the call prefix.
-macro define_alias: MacroCallMetadata -> Ident String -> Type -> Item =
-    metadata =>
-    name =>
+macro define_alias: MacroCallMetadata * Ident String * Type -> Item =
+    metadata *
+    name *
     ty =>
     {
         let visibility = metadata.visibility

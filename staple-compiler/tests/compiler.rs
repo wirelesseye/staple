@@ -4157,7 +4157,7 @@ fn inspects_identifier_and_call_syntax() {
 fn constructs_identifier_and_call_syntax() {
     let module = type_check(concat!(
         "macro generated_name = _: Expr => Ident \"answer\"\n",
-        "macro generated_call = callee: Expr => argument: Expr =>\n",
+        "macro generated_call = callee: Expr * argument: Expr =>\n",
         "    CallExpr (callee: callee, argument: argument)\n",
         "def identity = (value: I32) => value\n",
         "let answer: I32 = 40\n",
@@ -4231,7 +4231,7 @@ fn structured_syntax_overloads_use_leaf_specificity() {
 fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygiene() {
     let module = type_check(concat!(
         "macro definition_name = _: Expr => Ident \"captured\"\n",
-        "macro apply = callee: Expr => argument: Expr =>\n",
+        "macro apply = callee: Expr * argument: Expr =>\n",
         "    CallExpr (callee: callee, argument: argument)\n",
         "let captured: I32 = 7\n",
         "def definition_site = (captured: String) => definition_name ()\n",
@@ -4248,13 +4248,13 @@ fn constructed_identifiers_use_definition_hygiene_and_children_keep_caller_hygie
 #[test]
 fn mutates_call_syntax_with_value_semantics_and_shared_capture_cells() {
     let module = type_check(concat!(
-        "macro replace_call = value: CallExpr => replacement: Expr => {\n",
+        "macro replace_call = value: CallExpr * replacement: Expr => {\n",
         "    let original = value\n",
         "    let mut changed = value\n",
         "    changed.argument = replacement\n",
         "    parse_quote { ($original, $changed) }\n",
         "}\n",
-        "macro replace_from_closure = value: CallExpr => replacement: Expr => {\n",
+        "macro replace_from_closure = value: CallExpr * replacement: Expr => {\n",
         "    let mut changed = value\n",
         "    let update = () => { changed.argument = replacement; () }\n",
         "    update ()\n",
@@ -4429,9 +4429,9 @@ fn expands_item_modifier_macros_with_nearest_modifier_first() {
 #[test]
 fn modifier_arguments_support_expression_type_and_pattern_syntax() {
     let module = type_check(concat!(
-        "macro @value = value => _ => parse_quote { let generated: I32 = $value }\n",
-        "macro @typed: Parenthesized (Type) -> Item -> Item = ty => _ => parse_quote { let typed: $ty = 1 }\n",
-        "macro @bind: Parenthesized (Pattern) -> Item -> Item = pattern => _ => parse_quote { let $pattern = (40, 2) }\n",
+        "macro @value = value * _ => parse_quote { let generated: I32 = $value }\n",
+        "macro @typed: Parenthesized (Type) * Item -> Item = ty * _ => parse_quote { let typed: $ty = 1 }\n",
+        "macro @bind: Parenthesized (Pattern) * Item -> Item = pattern * _ => parse_quote { let $pattern = (40, 2) }\n",
         "@value(42)\n",
         "let replaced = 0\n",
         "@typed(I32)\n",
@@ -4676,7 +4676,7 @@ fn modified_item_can_be_destructured_and_reconstructed_losslessly() {
         "macro @outer: Item -> Item = item => match item {\n",
         "    ModifiedItem (modifiers, inner) => ModifiedItem (modifiers: modifiers, item: inner),\n",
         "}\n",
-        "macro @inner: Parenthesized (Expr) -> Item -> Item = value => _ => parse_quote { let reconstructed: I32 = $value }\n",
+        "macro @inner: Parenthesized (Expr) * Item -> Item = value * _ => parse_quote { let reconstructed: I32 = $value }\n",
         "@outer\n",
         "@inner(1)\n",
         "let original: I32 = 0\n",
@@ -4699,17 +4699,17 @@ fn expands_metadata_aware_macros_and_contextual_visibility_splices() {
         "    PublicReprPackage => parse_quote { 4 },\n",
         "    PublicRepr => parse_quote { 5 },\n",
         "}\n",
-        "macro define_alias = metadata: MacroCallMetadata => ty: Type => {\n",
+        "macro define_alias = metadata: MacroCallMetadata * ty: Type => {\n",
         "    let actual = normalize_visibility metadata.visibility\n",
         "    parse_quote { $actual type alias Generated = $ty }\n",
         "}\n",
-        "macro classify = before: Expr => vis: Visibility => after: Expr => {\n",
+        "macro classify = before: Expr * vis: Visibility * after: Expr => {\n",
         "    let number = visibility_number vis\n",
         "    number\n",
         "}\n",
         "macro call_visibility = metadata: MacroCallMetadata => visibility_number metadata.visibility\n",
-        "macro first_visibility = vis: Visibility => value: Expr => visibility_number vis\n",
-        "macro final_visibility = value: Expr => vis: Visibility => visibility_number vis\n",
+        "macro first_visibility = vis: Visibility * value: Expr => visibility_number vis\n",
+        "macro final_visibility = value: Expr * vis: Visibility => visibility_number vis\n",
         "pub define_alias I32\n",
         "let implicit: I32 = classify 10 20\n",
         "let public: I32 = classify 10 pub 20\n",
@@ -4932,7 +4932,7 @@ fn typegroup_supports_generic_groups_and_reexports_their_variants() {
 #[test]
 fn equals_and_fat_arrow_are_structured_syntax_nodes() {
     let module = type_check(concat!(
-        "macro punctuation = _: Ident String => equal: Equals => _: Ident String => arrow: FatArrow => _: Braced (Sequence SyntaxNode) =>\n",
+        "macro punctuation = _: Ident String * equal: Equals * _: Ident String * arrow: FatArrow * _: Braced (Sequence SyntaxNode) =>\n",
         "    match (equal, arrow, Equals, FatArrow) {\n",
         "        (Equals, FatArrow, Equals, FatArrow) => parse_quote { let punctuated: I32 = 42 },\n",
         "    }\n",
@@ -5253,7 +5253,7 @@ fn diagnoses_invalid_metadata_macro_uses() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro invalid: Expr -> MacroCallMetadata -> Expr = left => metadata => left\n",
+            "macro invalid: Expr * MacroCallMetadata -> Expr = left * metadata => left\n",
             "macro `invalid` may use `MacroCallMetadata` only as its first parameter",
         ),
         (
@@ -5298,7 +5298,7 @@ fn implicit_macro_call_metadata_can_make_overloads_ambiguous() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let source = concat!(
         "macro choose: Expr -> Expr = value => parse_quote { $value }\n",
-        "macro choose: MacroCallMetadata -> Expr -> Expr = metadata => value => parse_quote { $value }\n",
+        "macro choose: MacroCallMetadata * Expr -> Expr = metadata * value => parse_quote { $value }\n",
         "let result = choose 1\n",
     );
     let program = ProgramLoader::new()
@@ -5320,11 +5320,11 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro @invalid: SyntaxNode -> Item -> Item = value => item => item\n",
+            "macro @invalid: SyntaxNode * Item -> Item = value * item => item\n",
             "modifier macro `@invalid` must have signature `Item -> Item`, `Item -> Sequence Item`, or `Item -> Syntax`, optionally with a leading `Parenthesized (Expr | Type | Pattern) ->` argument",
         ),
         (
-            "macro @required: Parenthesized (Expr) -> Item -> Item = value => item => item\n@required\nlet value = 1\n",
+            "macro @required: Parenthesized (Expr) * Item -> Item = value * item => item\n@required\nlet value = 1\n",
             "modifier macro `@required` requires a parenthesized argument",
         ),
         (
@@ -5414,11 +5414,11 @@ fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
     let module = type_check(concat!(
         "def type_identity: Type -> Type = value => value\n",
         "def pattern_identity: Pattern -> Pattern = value => value\n",
-        "macro define_value = ty: Type => value: Expr => {\n",
+        "macro define_value = ty: Type * value: Expr => {\n",
         "    let actual = type_identity ty\n",
         "    parse_quote { let generated: $actual = $value }\n",
         "}\n",
-        "macro destructure = pattern: Pattern => value: Expr => {\n",
+        "macro destructure = pattern: Pattern * value: Expr => {\n",
         "    let actual = pattern_identity pattern\n",
         "    parse_quote { let $actual = $value }\n",
         "}\n",
@@ -5435,10 +5435,10 @@ fn accepts_opaque_type_and_pattern_macro_inputs_and_contextual_splices() {
 #[test]
 fn accepts_product_type_and_pattern_macro_inputs_without_extra_grouping() {
     let module = type_check(concat!(
-        "macro for = pattern: Pattern => _: Ident \"in\" => value: Expr => body: Expr => parse_quote {\n",
+        "macro for = pattern: Pattern * _: Ident \"in\" * value: Expr * body: Expr => parse_quote {\n",
         "    { let $pattern = $value; $body }\n",
         "}\n",
-        "macro ascribe = ty: Type => value: Expr => parse_quote { $value satisfies $ty }\n",
+        "macro ascribe = ty: Type * value: Expr => parse_quote { $value satisfies $ty }\n",
         "let direct: I32 = for (left, right) in (40, 2) { left + right }\n",
         "let legacy: I32 = for ((left, right)) in (40, 2) { left + right }\n",
         "let empty: () = for () in () { () }\n",
@@ -5937,7 +5937,7 @@ fn diagnoses_invalid_item_macro_outputs_and_placements() {
 fn evaluates_pure_syntax_helpers_and_conditional_macros() {
     let module = type_check(concat!(
         "def syntax_identity: SyntaxNode -> SyntaxNode = value => value\n",
-        "macro choose = condition => then => else => parse_quote {\n",
+        "macro choose = condition * then * else => parse_quote {\n",
         "    match $condition { True => $then, False => $else, }\n",
         "}\n",
         "macro passthrough = value => syntax_identity value\n",
@@ -5954,9 +5954,9 @@ fn evaluates_pure_syntax_helpers_and_conditional_macros() {
 fn expands_typed_macros_with_literal_identifier_parameters() {
     let module = type_check(concat!(
         "macro conditional =\n",
-        "    condition: Expr =>\n",
-        "    then_branch: Expr =>\n",
-        "    _: Ident \"else\" =>\n",
+        "    condition: Expr *\n",
+        "    then_branch: Expr *\n",
+        "    _: Ident \"else\" *\n",
         "    else_branch: Expr => parse_quote {\n",
         "        match $condition {\n",
         "            True() => $then_branch,\n",
@@ -6070,7 +6070,7 @@ fn rejects_invalid_sequence_positions_and_source_punctuation() {
 #[test]
 fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
     let module = type_check(concat!(
-        "macro count = _: Ident \"marker\" => values: Sequence (Ident String) => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => match values {\n",
+        "macro count = _: Ident \"marker\" * values: Sequence (Ident String) * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => match values {\n",
         "    Sequence () => quote { let $name: I32 = 0 },\n",
         "    Sequence (first: Ident String, rest: Sequence Ident String) => match rest {\n",
         "        Sequence () => quote { let $name: I32 = 1 },\n",
@@ -6090,11 +6090,11 @@ fn top_level_macro_sequences_capture_zero_one_and_many_arguments() {
 #[test]
 fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
     let module = type_check(concat!(
-        "macro classify = _: Ident \"marker\" =>\n",
-        "    values: Sequence (Ident String) =>\n",
-        "    visibility: Visibility =>\n",
-        "    _: Equals =>\n",
-        "    name: Ident String => _: FatArrow => _: Braced Syntax => match (values, visibility) {\n",
+        "macro classify = _: Ident \"marker\" *\n",
+        "    values: Sequence (Ident String) *\n",
+        "    visibility: Visibility *\n",
+        "    _: Equals *\n",
+        "    name: Ident String * _: FatArrow * _: Braced Syntax => match (values, visibility) {\n",
         "        (Sequence (), Private) => quote { let $name: I32 = 40 },\n",
         "        (Sequence (first: Ident String, rest: Sequence Ident String), Public) => quote { let $name: I32 = 41 },\n",
         "        (Sequence (first: Ident String, rest: Sequence Ident String), PublicRepr) => quote { let $name: I32 = 42 },\n",
@@ -6113,7 +6113,7 @@ fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
 #[test]
 fn top_level_macro_sequence_may_be_the_final_parameter() {
     let module = type_check(concat!(
-        "macro tail = _: Ident \"marker\" => name: Ident String => values: Sequence (Ident String) => match values {\n",
+        "macro tail = _: Ident \"marker\" * name: Ident String * values: Sequence (Ident String) => match values {\n",
         "    Sequence () => quote { let $name: I32 = 0 },\n",
         "    Sequence (first: Ident String, rest: Sequence Ident String) => match rest {\n",
         "        Sequence () => quote { let $name: I32 = 1 },\n",
@@ -6133,8 +6133,8 @@ fn top_level_macro_sequence_may_be_the_final_parameter() {
 #[test]
 fn longer_complete_overload_still_beats_a_trailing_sequence_overload() {
     let module = type_check(concat!(
-        "macro pick = value: Ident String => _: Sequence (Ident String) => quote { let $value: I32 = 0 }\n",
-        "macro pick = value: Ident String => _: Sequence (Ident String) => _: Equals => _: Braced Syntax => quote { let $value: I32 = 1 }\n",
+        "macro pick = value: Ident String * _: Sequence (Ident String) => quote { let $value: I32 = 0 }\n",
+        "macro pick = value: Ident String * _: Sequence (Ident String) * _: Equals * _: Braced Syntax => quote { let $value: I32 = 1 }\n",
         "pick alpha one two\n",
         "pick beta one two = {}\n",
     ));
@@ -6147,9 +6147,9 @@ fn longer_complete_overload_still_beats_a_trailing_sequence_overload() {
 #[test]
 fn fixed_and_more_specific_overloads_beat_top_level_sequences() {
     let module = type_check(concat!(
-        "macro choose = _: Sequence Expr => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => quote { let $name: String = \"wrong\" }\n",
-        "macro choose = _: Sequence (Ident String) => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => quote { let $name: I32 = 1 }\n",
-        "macro choose = _: Ident String => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => quote { let $name: I32 = 2 }\n",
+        "macro choose = _: Sequence Expr * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => quote { let $name: String = \"wrong\" }\n",
+        "macro choose = _: Sequence (Ident String) * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => quote { let $name: I32 = 1 }\n",
+        "macro choose = _: Ident String * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => quote { let $name: I32 = 2 }\n",
         "choose value = fixed => {}\n",
         "choose left right = repeated => {}\n",
     ));
@@ -6162,8 +6162,8 @@ fn fixed_and_more_specific_overloads_beat_top_level_sequences() {
 #[test]
 fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguous() {
     let module = type_check(concat!(
-        "macro annotated: Sequence (Ident String) -> Equals -> Ident String -> FatArrow -> Braced Syntax -> Syntax =\n",
-        "    values: Sequence (Ident String) => _: Equals => name: Ident String => _: FatArrow => _: Braced Syntax => quote { let $name: I32 = 42 }\n",
+        "macro annotated: Sequence (Ident String) * Equals * Ident String * FatArrow * Braced Syntax -> Syntax =\n",
+        "    values: Sequence (Ident String) * _: Equals * name: Ident String * _: FatArrow * _: Braced Syntax => quote { let $name: I32 = 42 }\n",
         "annotated first second = generated => {}\n",
     ));
     let context = Context::create();
@@ -6176,8 +6176,8 @@ fn annotated_top_level_sequences_compile_and_incomparable_sequences_are_ambiguou
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             &with_syntax_imports(concat!(
-                "macro clash = _: Sequence Type => _: Equals => _: Ident String => _: FatArrow => _: Braced Syntax => quote { let generated: I32 = 1 }\n",
-                "macro clash = _: Sequence Pattern => _: Equals => _: Ident String => _: FatArrow => _: Braced Syntax => quote { let generated: I32 = 2 }\n",
+                "macro clash = _: Sequence Type * _: Equals * _: Ident String * _: FatArrow * _: Braced Syntax => quote { let generated: I32 = 1 }\n",
+                "macro clash = _: Sequence Pattern * _: Equals * _: Ident String * _: FatArrow * _: Braced Syntax => quote { let generated: I32 = 2 }\n",
                 "clash Value = output => {}\n",
             )),
             root,
@@ -6198,15 +6198,15 @@ fn rejects_invalid_top_level_macro_sequence_signatures() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for (source, expected) in [
         (
-            "macro invalid = first: Sequence (Ident String) => second: Sequence Expr => _: Equals => parse_quote { 0 }\n",
+            "macro invalid = first: Sequence (Ident String) * second: Sequence Expr * _: Equals => parse_quote { 0 }\n",
             "a macro signature may contain at most one top-level `Sequence` parameter",
         ),
         (
-            "macro @invalid: Sequence (Ident String) -> Item -> Item = values => item => item\n",
+            "macro @invalid: Sequence (Ident String) * Item -> Item = values * item => item\n",
             "top-level `Sequence` parameters are not supported by modifier macros",
         ),
         (
-            "macro invalid = values: Sequence (Sequence (Ident String)) => _: Equals => parse_quote { 0 }\n",
+            "macro invalid = values: Sequence (Sequence (Ident String)) * _: Equals => parse_quote { 0 }\n",
             "a top-level `Sequence` element must be a single syntax category, found `Sequence Ident String`",
         ),
     ] {
@@ -6224,6 +6224,29 @@ fn rejects_invalid_top_level_macro_sequence_signatures() {
             "expected {expected:?}, found {diagnostics:#?}",
         );
     }
+}
+
+#[test]
+fn rejects_curried_macro_annotations() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            &with_syntax_imports(
+                "macro invalid: Expr -> Expr -> Item = left * right => parse_quote { $left }\n",
+            ),
+            root,
+        )
+        .expect("a curried macro annotation should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("a curried macro annotation should be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic.message
+            == "a macro annotation must accept one or more syntax-category parameters and \
+                return a syntax category"),
+        "expected the curried annotation to be rejected, found {diagnostics:#?}",
+    );
 }
 
 #[test]
@@ -6449,7 +6472,7 @@ fn provides_integer_range_iterator_implementations() {
 fn macro_overloads_choose_longest_then_most_specific() {
     let module = type_check(concat!(
         "macro select = value: Expr => parse_quote { 10 }\n",
-        "macro select = value: Expr => _: Ident \"with\" => replacement: Expr => parse_quote { $replacement }\n",
+        "macro select = value: Expr * _: Ident \"with\" * replacement: Expr => parse_quote { $replacement }\n",
         "macro classify = value: SyntaxNode => parse_quote { 1 }\n",
         "macro classify = value: Expr => parse_quote { 2 }\n",
         "macro classify = value: Ident String => parse_quote { 3 }\n",
@@ -6510,8 +6533,8 @@ fn diagnoses_duplicate_and_ambiguous_macro_overloads() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "macro crossed = left: Ident String => right: Expr => parse_quote { 1 }\n",
-                "macro crossed = left: Expr => right: Ident String => parse_quote { 2 }\n",
+                "macro crossed = left: Ident String * right: Expr => parse_quote { 1 }\n",
+                "macro crossed = left: Expr * right: Ident String => parse_quote { 2 }\n",
                 "crossed first second\n",
             ),
             root,
@@ -6534,7 +6557,7 @@ fn rejects_a_mismatched_literal_identifier_macro_argument() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "macro conditional = value: Expr => _: Ident \"else\" => parse_quote { $value }\n",
+                "macro conditional = value: Expr * _: Ident \"else\" => parse_quote { $value }\n",
                 "conditional 1 otherwise\n",
             ),
             root,
@@ -6556,7 +6579,7 @@ fn rejects_bare_literal_identifier_macro_parameters() {
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro conditional = value: Expr => Ident \"else\" => parse_quote { $value }\n",
+            "macro conditional = value: Expr * Ident \"else\" => parse_quote { $value }\n",
             root,
         )
         .expect("source should parse");
@@ -6850,7 +6873,7 @@ fn diagnoses_incomplete_and_non_syntax_macros() {
     let incomplete = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
-            "macro pair = left => right => parse_quote { ($left, $right) }\npair 1\n",
+            "macro pair = left * right => parse_quote { ($left, $right) }\npair 1\n",
             root,
         )
         .expect("source should parse");

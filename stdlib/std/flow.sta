@@ -99,8 +99,8 @@ condition => consequent => rest => {
 /// if ready { start () } else { wait () }
 /// ```
 pub macro if =
-    condition: Expr =>
-    consequent: Expr =>
+    condition: Expr *
+    consequent: Expr *
     rest: Sequence Expr =>
     if_branches condition consequent rest
 
@@ -112,7 +112,7 @@ pub macro if =
 /// while (index < limit) { index = index + 1 }
 /// ```
 pub macro while =
-    condition: Expr =>
+    condition: Expr *
     body: Expr =>
     parse_quote {
         loop {
@@ -131,9 +131,9 @@ pub macro while =
 /// for item in items { process item }
 /// ```
 pub macro for =
-    pattern: Pattern =>
-    _: Ident "in" =>
-    source: Expr =>
+    pattern: Pattern *
+    _: Ident "in" *
+    source: Expr *
     body: Expr =>
     parse_quote {
         {

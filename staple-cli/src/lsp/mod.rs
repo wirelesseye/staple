@@ -1229,8 +1229,8 @@ mod tests {
     fn projects_type_and_pattern_arguments_through_raw_quotes() {
         let source = concat!(
             "use std.syntax.(quote, Expr, Type, Pattern)\n",
-            "macro bind = pattern: Pattern => ty: Type => value: Expr => quote { let $pattern: $ty = $value }\n",
-            "macro destructure = pattern: Pattern => value: Expr => quote { let $pattern = $value }\n",
+            "macro bind = pattern: Pattern * ty: Type * value: Expr => quote { let $pattern: $ty = $value }\n",
+            "macro destructure = pattern: Pattern * value: Expr => quote { let $pattern = $value }\n",
             "bind pair ((I32, I32)) (20, 22)\n",
             "destructure ((left, right)) pair\n",
         );

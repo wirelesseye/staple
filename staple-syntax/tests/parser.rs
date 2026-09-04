@@ -980,7 +980,7 @@ fn parses_the_opaque_parse_quote_signature() {
 #[test]
 fn parses_macro_bodies_quotes_and_splices_losslessly() {
     let source = concat!(
-        "macro choose = condition => then => else => quote {\n",
+        "macro choose = condition * then * else => quote {\n",
         "    match $condition { True() => $then, False() => $else, }\n",
         "}\n",
     );
@@ -996,8 +996,8 @@ fn parses_macro_bodies_quotes_and_splices_losslessly() {
 #[test]
 fn parses_typed_macro_parameters_and_literal_identifiers() {
     let source = concat!(
-        "macro conditional = condition: Expr => then_branch: Expr => ",
-        "_: Ident \"else\" => else_branch: Expr => quote { $else_branch }\n",
+        "macro conditional = condition: Expr * then_branch: Expr * ",
+        "_: Ident \"else\" * else_branch: Expr => quote { $else_branch }\n",
     );
     let root = parse(source).expect("typed macro parameters should parse");
     assert_eq!(root.text(), source);
@@ -1017,6 +1017,16 @@ fn parses_typed_macro_parameters_and_literal_identifiers() {
         keyword.pattern,
         Pattern::Wildcard(ref pattern) if !matches!(pattern.ty, Type::Inferred(_))
     ));
+}
+
+#[test]
+fn rejects_curried_macro_parameter_chains() {
+    let error = parse("macro choose = condition => when_true => quote { $when_true }\n")
+        .expect_err("a curried macro parameter chain should be rejected");
+    assert!(
+        error.message.contains("juxtaposed with `*`"),
+        "unexpected error: {error:?}"
+    );
 }
 
 #[test]
@@ -1099,7 +1109,7 @@ fn parses_expression_and_single_item_quotations_losslessly() {
 fn parses_modifier_macro_definitions_and_item_modifiers_losslessly() {
     let source = concat!(
         "macro @identity: Item -> Item = item => item\n",
-        "macro @replace: Parenthesized (Expr) -> Item -> Item = value => item => quote { let generated = $value }\n",
+        "macro @replace: Parenthesized (Expr) * Item -> Item = value * item => quote { let generated = $value }\n",
         "@identity\n",
         "@replace(42)\n",
         "def original = () => 0\n",
@@ -1158,7 +1168,7 @@ fn parses_triple_slash_docs_on_named_declarations_and_members() {
 #[test]
 fn parses_metadata_aware_macro_calls_losslessly() {
     let source = concat!(
-        "macro define = metadata: MacroCallMetadata => ty: Type => quote { type Generated = $ty }\n",
+        "macro define = metadata: MacroCallMetadata * ty: Type => quote { type Generated = $ty }\n",
         "pub define I32\n",
         "pub(repr) define I32\n",
         "configure value pub I32\n",

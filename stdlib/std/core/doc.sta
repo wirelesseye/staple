@@ -10,4 +10,4 @@ use std.syntax.(Expr, Item, Parenthesized)
 /// @doc("Returns the configured port.")
 /// pub def port = () => 8080
 /// ```
-pub macro @doc: Parenthesized (Expr) -> Item -> Item
+pub macro @doc: Parenthesized (Expr) * Item -> Item
