@@ -14,8 +14,8 @@ use lsp_types::notification::{
     PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, GotoDefinition, HoverRequest, Request as _, ResolveCompletionItem,
-    SemanticTokensFullRequest,
+    CodeActionRequest, Completion, GotoDefinition, HoverRequest, Request as _,
+    ResolveCompletionItem, SemanticTokensFullRequest,
 };
 use lsp_types::*;
 use staple_compiler::{NameResolver, ProgramLoader, TypeChecker};
@@ -169,6 +169,7 @@ fn initialize(connection: &Connection) -> Result<(), String> {
         )),
         hover_provider: Some(HoverProviderCapability::Simple(true)),
         definition_provider: Some(OneOf::Left(true)),
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         completion_provider: Some(CompletionOptions {
             resolve_provider: Some(true),
             trigger_characters: Some(vec!["^".to_owned(), ".".to_owned()]),
@@ -353,6 +354,21 @@ impl Server {
                 .send(Message::Response(Response::new_ok(
                     request.id,
                     serde_json::to_value(item).unwrap(),
+                )))
+                .map_err(|error| error.to_string())?;
+        } else if request.method == CodeActionRequest::METHOD {
+            let params: CodeActionParams =
+                serde_json::from_value(request.params).map_err(|error| error.to_string())?;
+            let actions: CodeActionResponse = self
+                .documents
+                .get(&params.text_document.uri)
+                .map(|document| import_code_actions(&params.text_document.uri, document, &params))
+                .unwrap_or_default();
+            self.connection
+                .sender
+                .send(Message::Response(Response::new_ok(
+                    request.id,
+                    serde_json::to_value(actions).unwrap(),
                 )))
                 .map_err(|error| error.to_string())?;
         } else if request.method == GotoDefinition::METHOD {
@@ -829,6 +845,67 @@ fn remap_definition_entries(source: &str, resolved: &ResolvedDefinitions) -> Vec
             (!targets.is_empty()).then_some(DefinitionEntry { range, targets })
         })
         .collect()
+}
+
+/// "Import `name` from `module`" quick fixes for the unknown-name diagnostics
+/// the client passed in `params.context`. Candidate modules come from the last
+/// successful analysis's cross-module index, so this needs one prior clean
+/// compile of the file's package.
+fn import_code_actions(
+    uri: &Uri,
+    document: &Document,
+    params: &CodeActionParams,
+) -> CodeActionResponse {
+    if let Some(only) = &params.context.only
+        && !only.contains(&CodeActionKind::QUICKFIX)
+    {
+        return Vec::new();
+    }
+    let Some(successful) = document.last_successful.as_ref() else {
+        return Vec::new();
+    };
+
+    let mut actions = Vec::new();
+    let mut seen = HashSet::new();
+    for diagnostic in &params.context.diagnostics {
+        if !diagnostic.message.starts_with("unknown ") {
+            continue;
+        }
+        let Some(name) = diagnostic.message.split('`').nth(1) else {
+            continue;
+        };
+        let modules = successful.completion_index.modules_exporting(name);
+        let preferred = modules.len() == 1;
+        for module_path in modules {
+            let title = format!("Import `{name}` from `{module_path}`");
+            if !seen.insert(title.clone()) {
+                continue;
+            }
+            let Some(edits) =
+                crate::lsp::completion::resolve_import_edits(&document.text, &module_path, name)
+            else {
+                continue;
+            };
+            if edits.is_empty() {
+                continue;
+            }
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title,
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![diagnostic.clone()]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(HashMap::from([(uri.clone(), edits)])),
+                    document_changes: None,
+                    change_annotations: None,
+                }),
+                command: None,
+                is_preferred: preferred.then_some(true),
+                disabled: None,
+                data: None,
+            }));
+        }
+    }
+    actions
 }
 
 fn lsp_range(source: &str, range: std::ops::Range<usize>) -> Range {
@@ -2029,5 +2106,207 @@ mod tests {
             .receiver
             .recv_timeout(Duration::from_secs(5))
             .unwrap()
+    }
+
+    #[test]
+    fn offers_an_import_quick_fix_for_an_unknown_name() {
+        let root = std::env::temp_dir().join(format!(
+            "staple-lsp-import-quick-fix-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        std::fs::write(root.join("staple.kdl"), "package \"demo\" {\n    root \"src\"\n}\n").unwrap();
+        std::fs::write(root.join("src/root.sta"), "pub mod\n").unwrap();
+        std::fs::write(
+            root.join("src/helpers.sta"),
+            "pub mod\n\npub def greet = () => 0\n",
+        )
+        .unwrap();
+        let path = std::fs::canonicalize({
+            std::fs::write(root.join("src/main.sta"), "pub mod\n").unwrap();
+            root.join("src/main.sta")
+        })
+        .unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        let (connection, client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: "pub mod\n\ndef main = () => 0\n".to_owned(),
+                    version: 1,
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+        };
+
+        // A clean analysis first, so the cross-module index is available.
+        server.analyze(&uri).unwrap();
+        assert!(server.documents[&uri].last_successful.is_some());
+
+        // Now introduce a reference to an item that lives in a sibling module.
+        let broken = "pub mod\n\ndef main = () => greet ()\n";
+        server.documents.get_mut(&uri).unwrap().text = broken.to_owned();
+        server.analyze(&uri).unwrap();
+
+        let diagnostic = loop {
+            match recv(&client) {
+                Message::Notification(notification)
+                    if notification.method == PublishDiagnostics::METHOD =>
+                {
+                    let params: PublishDiagnosticsParams =
+                        serde_json::from_value(notification.params).unwrap();
+                    if let Some(diagnostic) = params
+                        .diagnostics
+                        .into_iter()
+                        .find(|diagnostic| diagnostic.message.starts_with("unknown "))
+                    {
+                        break diagnostic;
+                    }
+                }
+                _ => {}
+            }
+        };
+
+        server
+            .request(Request {
+                id: 1.into(),
+                method: CodeActionRequest::METHOD.to_owned(),
+                params: serde_json::to_value(CodeActionParams {
+                    text_document: TextDocumentIdentifier::new(uri.clone()),
+                    range: diagnostic.range,
+                    context: CodeActionContext {
+                        diagnostics: vec![diagnostic.clone()],
+                        only: None,
+                        trigger_kind: None,
+                    },
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .unwrap(),
+            })
+            .unwrap();
+
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected a code action response")
+        };
+        let actions: CodeActionResponse =
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        let CodeActionOrCommand::CodeAction(action) = actions
+            .into_iter()
+            .find(|action| {
+                matches!(action, CodeActionOrCommand::CodeAction(action)
+                    if action.title == "Import `greet` from `helpers`")
+            })
+            .expect("an import quick fix should be offered")
+        else {
+            unreachable!()
+        };
+        assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
+        assert_eq!(action.is_preferred, Some(true));
+        let edits = action
+            .edit
+            .and_then(|edit| edit.changes)
+            .and_then(|mut changes| changes.remove(&uri))
+            .expect("the quick fix edits the current document");
+        assert!(edits.iter().any(|edit| edit.new_text.contains("use helpers.greet")));
+    }
+
+    #[test]
+    fn offers_an_import_quick_fix_after_a_standalone_file_drops_its_use() {
+        // Mirrors commenting out `use std.io.println` in a lone `.sta` file that
+        // has no `staple.kdl`: it compiled a moment ago, so the last successful
+        // cross-module index still knows where `println` lives.
+        let root = std::env::temp_dir().join(format!(
+            "staple-lsp-import-quick-fix-standalone-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let path = std::fs::canonicalize({
+            std::fs::write(root.join("hello.sta"), "use std.io.println\n").unwrap();
+            root.join("hello.sta")
+        })
+        .unwrap();
+        let uri = path_to_uri(&path).unwrap();
+        let (connection, client) = Connection::memory();
+        let mut server = Server {
+            connection,
+            documents: HashMap::from([(
+                uri.clone(),
+                Document {
+                    text: "use std.io.println\n\nprintln \"Hello, world!\"\n".to_owned(),
+                    version: 1,
+                    ..Document::default()
+                },
+            )]),
+            published_by_root: HashMap::new(),
+            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+        };
+
+        server.analyze(&uri).unwrap();
+        assert!(server.documents[&uri].last_successful.is_some());
+
+        let broken = "\n\nprintln \"Hello, world!\"\n";
+        server.documents.get_mut(&uri).unwrap().text = broken.to_owned();
+        server.analyze(&uri).unwrap();
+
+        let diagnostic = loop {
+            match recv(&client) {
+                Message::Notification(notification)
+                    if notification.method == PublishDiagnostics::METHOD =>
+                {
+                    let params: PublishDiagnosticsParams =
+                        serde_json::from_value(notification.params).unwrap();
+                    if let Some(diagnostic) = params
+                        .diagnostics
+                        .into_iter()
+                        .find(|diagnostic| diagnostic.message.contains("`println`"))
+                    {
+                        break diagnostic;
+                    }
+                }
+                _ => {}
+            }
+        };
+
+        server
+            .request(Request {
+                id: 1.into(),
+                method: CodeActionRequest::METHOD.to_owned(),
+                params: serde_json::to_value(CodeActionParams {
+                    text_document: TextDocumentIdentifier::new(uri.clone()),
+                    range: diagnostic.range,
+                    context: CodeActionContext {
+                        diagnostics: vec![diagnostic.clone()],
+                        only: None,
+                        trigger_kind: None,
+                    },
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .unwrap(),
+            })
+            .unwrap();
+
+        let Message::Response(response) = recv(&client) else {
+            panic!("expected a code action response")
+        };
+        let actions: CodeActionResponse =
+            serde_json::from_value(response.response_result.unwrap()).unwrap();
+        std::fs::remove_dir_all(&root).unwrap();
+
+        assert!(
+            actions.iter().any(|action| matches!(action,
+                CodeActionOrCommand::CodeAction(action)
+                    if action.title == "Import `println` from `std.io`")),
+            "actions: {actions:?}"
+        );
     }
 }

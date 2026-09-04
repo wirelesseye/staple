@@ -222,6 +222,20 @@ pub fn keywords() -> Vec<CompletionItem> {
 }
 
 impl CompletionIndex {
+    /// Distinct dotted module paths that publicly export `name`, for building an
+    /// "import this item" quick fix. Ordered, deduplicated.
+    pub fn modules_exporting(&self, name: &str) -> Vec<String> {
+        let mut modules = self
+            .external
+            .iter()
+            .filter(|symbol| symbol.label == name)
+            .map(|symbol| symbol.module_path.clone())
+            .collect::<Vec<_>>();
+        modules.sort();
+        modules.dedup();
+        modules
+    }
+
     pub fn items(&self, offset: usize) -> Vec<CompletionItem> {
         let Some(module) = self
             .modules
@@ -1079,13 +1093,11 @@ fn collect_external_symbols(typed: &TypedModule) -> Vec<ExternalSymbol> {
     let current_package = program.package_of(entry);
     let current_path = canonical(&program.module(entry).path);
 
-    // Names already reachable in the edited module (locals, prelude, existing
-    // imports) — never offer these as cross-module suggestions.
-    let visible = resolved
-        .visible_definitions(entry)
-        .map(|definitions| definitions.keys().cloned().collect::<HashSet<_>>())
-        .unwrap_or_default();
-
+    // The scan is deliberately unfiltered by what is currently in scope:
+    // `CompletionIndex::items` drops candidates already reachable, while the
+    // "import this item" quick fix needs an entry precisely for a name that
+    // just went out of scope (its `use` was removed), which the last
+    // successful index would otherwise no longer mention.
     let mut symbols = Vec::new();
     let mut seen_files = HashSet::new();
     let mut budget = MAX_EXTERNAL_FILES;
@@ -1144,7 +1156,6 @@ fn collect_external_symbols(typed: &TypedModule) -> Vec<ExternalSymbol> {
             let mut scan = ExternalScan {
                 module_path: &module_path,
                 same_package: current_package == Some(target_package),
-                visible: &visible,
                 symbols: &mut symbols,
             };
             for item in &parsed.items {
@@ -1207,7 +1218,6 @@ fn dotted_module_path(
 struct ExternalScan<'a> {
     module_path: &'a str,
     same_package: bool,
-    visible: &'a HashSet<String>,
     symbols: &'a mut Vec<ExternalSymbol>,
 }
 
@@ -1304,7 +1314,7 @@ impl ExternalScan<'_> {
             Visibility::Package => self.same_package,
             Visibility::Private => false,
         };
-        if !importable || self.visible.contains(name) {
+        if !importable {
             return;
         }
         self.symbols.push(ExternalSymbol {
