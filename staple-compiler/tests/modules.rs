@@ -280,6 +280,37 @@ fn reexports_public_items_through_selected_renamed_glob_and_chained_uses() {
 }
 
 #[test]
+fn selected_imports_bind_and_reexport_each_alias() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "library.sta",
+        concat!(
+            "pub type alias Number = I32\n",
+            "pub def add_two: Number -> Number = value => value + 2\n",
+            "pub let answer: Number = 42\n",
+        ),
+    );
+    fixture.write(
+        "facade.sta",
+        "pub use library.(add_two as bump, Number as Int)\n",
+    );
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use library.(add_two as bump, Number as Int, answer as forty_two)\n",
+            "use facade.(bump as bump_again)\n",
+            "let a: Int = bump 3\n",
+            "let b: Int = bump_again forty_two\n",
+            "let c: Int = a + b\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("selected imports should bind and re-export each alias");
+}
+
+#[test]
 fn inline_submodules_import_ancestors_and_reexport_public_items() {
     let fixture = Fixture::new();
     fixture.write(

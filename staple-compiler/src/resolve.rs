@@ -974,8 +974,8 @@ fn reexport_declaration(
         }
         UseKind::Namespace => false,
         UseKind::Glob => extend_interface(exported, imported),
-        UseKind::Selected(names) => names.iter().fold(false, |changed, name| {
-            export_interface_item(exported, imported, name, name) | changed
+        UseKind::Selected(names) => names.iter().fold(false, |changed, import| {
+            export_interface_item(exported, imported, &import.name, import.alias()) | changed
         }),
         UseKind::Renamed { item, alias } => export_interface_item(exported, imported, item, alias),
     }
@@ -2268,18 +2268,19 @@ impl NameResolver {
                             .extend(interface.namespaces.clone());
                     }
                     UseKind::Selected(names) => {
-                        for name in names {
-                            if let Some(symbol) = interface.values.get(&name) {
+                        for import in names {
+                            let alias = import.alias().to_owned();
+                            if let Some(symbol) = interface.values.get(&import.name) {
                                 self.definition_context_values[module.id.0]
-                                    .insert(name.clone(), *symbol);
+                                    .insert(alias.clone(), *symbol);
                             }
-                            if let Some(ty) = interface.types.get(&name) {
+                            if let Some(ty) = interface.types.get(&import.name) {
                                 self.definition_context_types[module.id.0]
-                                    .insert(name.clone(), *ty);
+                                    .insert(alias.clone(), *ty);
                             }
-                            if let Some(namespace) = interface.namespaces.get(&name) {
+                            if let Some(namespace) = interface.namespaces.get(&import.name) {
                                 self.definition_context_namespaces[module.id.0]
-                                    .insert(name.clone(), *namespace);
+                                    .insert(alias, *namespace);
                             }
                         }
                     }
@@ -2549,27 +2550,33 @@ impl NameResolver {
                 }
             }
             UseKind::Selected(names) => {
-                for name in names {
-                    self.record_import_definitions(declaration.syntax.id, &name, &name, &interface);
+                for import in names {
+                    let alias = import.alias().to_owned();
+                    self.record_import_definitions(
+                        declaration.syntax.id,
+                        &import.name,
+                        &alias,
+                        &interface,
+                    );
                     self.install_selected(
                         &interface,
-                        &name,
-                        &name,
+                        &import.name,
+                        &alias,
                         declaration.syntax.span.clone(),
                     );
                     if let Some(namespace) = self
                         .additional_imported_namespaces
                         .get(&declaration.syntax.id)
                         .copied()
-                        && interface.namespaces.get(&name) != Some(&namespace)
+                        && interface.namespaces.get(&import.name) != Some(&namespace)
                     {
                         self.insert_imported_namespace(
-                            name.clone(),
+                            alias.clone(),
                             namespace,
                             declaration.syntax.span.clone(),
                         );
                         self.import_definitions
-                            .entry((declaration.syntax.id, name))
+                            .entry((declaration.syntax.id, alias))
                             .or_default()
                             .push(DefinitionId::Module(namespace));
                     }

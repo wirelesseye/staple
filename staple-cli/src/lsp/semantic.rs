@@ -333,9 +333,15 @@ impl<'a> Classifier<'a> {
                         self.mark_last(&value.syntax, alias, kind, DECLARATION, 1);
                     }
                     UseKind::Selected(names) => {
-                        for name in names {
-                            let kind = self.import_kind(value, name, resolved);
-                            self.mark_last(&value.syntax, name, kind, 0, 1);
+                        for import in names {
+                            let kind = self.import_kind(value, &import.name, resolved);
+                            match &import.alias {
+                                Some(alias) => {
+                                    self.mark_first(&value.syntax, &import.name, kind, 0, 1);
+                                    self.mark_last(&value.syntax, alias, kind, DECLARATION, 1);
+                                }
+                                None => self.mark_last(&value.syntax, &import.name, kind, 0, 1),
+                            }
                         }
                     }
                     _ => {}
@@ -516,9 +522,15 @@ impl<'a> Classifier<'a> {
                         self.mark_last(&value.syntax, alias, kind, DECLARATION, 1);
                     }
                     UseKind::Selected(names) => {
-                        for name in names {
-                            let kind = self.import_kind(value, name, resolved);
-                            self.mark_last(&value.syntax, name, kind, 0, 1);
+                        for import in names {
+                            let kind = self.import_kind(value, &import.name, resolved);
+                            match &import.alias {
+                                Some(alias) => {
+                                    self.mark_first(&value.syntax, &import.name, kind, 0, 1);
+                                    self.mark_last(&value.syntax, alias, kind, DECLARATION, 1);
+                                }
+                                None => self.mark_last(&value.syntax, &import.name, kind, 0, 1),
+                            }
                         }
                     }
                     _ => {}

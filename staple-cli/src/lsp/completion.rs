@@ -1346,7 +1346,7 @@ pub fn resolve_import_edits(text: &str, module_path: &str, item: &str) -> Option
                 if declaration.path.join(".") != module_path {
                     continue;
                 }
-                if names.iter().any(|name| name == item) {
+                if names.iter().any(|import| import.name == item) {
                     return Some(Vec::new());
                 }
                 let close = span.start + declaration_text.rfind(')')?;

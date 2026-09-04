@@ -587,8 +587,14 @@ impl Collector<'_> {
         self.inline_use_path_segments(declaration, &resolved_kind);
         match &resolved_kind {
             UseKind::Selected(names) => {
-                for name in names {
-                    self.imported_name(declaration, &name, &name, false);
+                for import in names {
+                    match &import.alias {
+                        Some(alias) => {
+                            self.imported_name(declaration, &import.name, &import.name, false);
+                            self.imported_name(declaration, alias, &import.name, true);
+                        }
+                        None => self.imported_name(declaration, &import.name, &import.name, false),
+                    }
                 }
             }
             UseKind::Renamed { item, alias } => {

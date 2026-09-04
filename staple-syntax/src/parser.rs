@@ -3596,8 +3596,14 @@ impl Grammar {
         self.parse_value_name("expected binding name")
     }
 
-    fn parse_import_name(&mut self) -> Result<String, ParseError> {
-        self.parse_value_name("expected imported item name")
+    fn parse_import_name(&mut self) -> Result<SelectedImport, ParseError> {
+        let name = self.parse_value_name("expected imported item name")?;
+        let alias = if self.eat(TokenKind::As) {
+            Some(self.parse_value_name("expected import alias after `as`")?)
+        } else {
+            None
+        };
+        Ok(SelectedImport { name, alias })
     }
 
     /// Returns the next non-trivia token kind without consuming it.

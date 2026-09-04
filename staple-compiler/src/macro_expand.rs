@@ -8,8 +8,9 @@ use std::{
 use crate::{ModuleId, Program, ResolvedMacro};
 use staple_syntax::{
     Accessor, BinaryOperator, Binding, BindingKind, BlockExpression, Diagnostic, Expression, Item,
-    LogicalOperator, MacroDeclaration, ModifierArgument, ModifierInvocation, Pattern, Span, Syntax,
-    SyntaxId, Type, UseDeclaration, UseKind, Visibility, VisibilityKind, VisibilitySyntax,
+    LogicalOperator, MacroDeclaration, ModifierArgument, ModifierInvocation, Pattern, SelectedImport,
+    Span, Syntax, SyntaxId, Type, UseDeclaration, UseKind, Visibility, VisibilityKind,
+    VisibilitySyntax,
 };
 
 const MAX_EXPANSION_DEPTH: usize = 128;
@@ -975,13 +976,13 @@ fn provisional_use_kind(program: &Program, declaration: &UseDeclaration) -> UseK
     if candidates.namespace.is_some() {
         UseKind::Namespace
     } else if candidates.item_module.is_some() {
-        UseKind::Selected(vec![
+        UseKind::Selected(vec![SelectedImport::new(
             declaration
                 .path
                 .last()
                 .expect("dotted import has a final component")
                 .clone(),
-        ])
+        )])
     } else {
         UseKind::Dotted
     }
@@ -1208,7 +1209,7 @@ impl MacroExpander {
                             .collect(),
                         UseKind::Selected(names) => names
                             .iter()
-                            .map(|name| (name.clone(), name.clone()))
+                            .map(|import| (import.name.clone(), import.alias().to_owned()))
                             .collect(),
                         UseKind::Renamed { item, alias } => {
                             vec![(item.clone(), alias.clone())]
@@ -1318,7 +1319,7 @@ impl MacroExpander {
                             .collect(),
                         UseKind::Selected(names) => names
                             .iter()
-                            .map(|name| (name.clone(), name.clone()))
+                            .map(|import| (import.name.clone(), import.alias().to_owned()))
                             .collect(),
                         UseKind::Renamed { item, alias } => vec![(item.clone(), alias.clone())],
                     };
@@ -1529,12 +1530,12 @@ impl MacroExpander {
                         }
                     }
                     UseKind::Selected(names) => {
-                        for name in names {
+                        for import in names {
                             Self::install_selected(
                                 &mut scopes[source_module.id.0],
                                 imported,
-                                &name,
-                                &name,
+                                &import.name,
+                                import.alias(),
                                 macros,
                                 helpers,
                                 namespaces,
@@ -3041,8 +3042,8 @@ impl MacroExpander {
                 }
             }
             UseKind::Selected(names) => {
-                for name in names {
-                    install(&name, &name, scope);
+                for import in names {
+                    install(&import.name, import.alias(), scope);
                 }
             }
             UseKind::Renamed { item, alias } => install(&item, &alias, scope),

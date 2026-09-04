@@ -677,15 +677,16 @@ Public items can instead be imported directly:
 
 ```staple
 use path.to.another_module.*
-use path.to.another_module.(func, MyType)
+use path.to.another_module.(func as my_func, MyType)
 use path.to.another_module.func
 use path.to.another_module.func as my_func
 ```
 
 The wildcard form imports every public named item. The parenthesized form
-imports only the listed items. The `as` form imports one item under a different
-local name. Imports are hoisted and apply throughout their module. Prefixing an
-item import with `pub` re-exports it from the importing module:
+imports only the listed items; any entry may carry an `as` clause to bind it
+under a different local name. The trailing `as` form imports one item under a
+different local name. Imports are hoisted and apply throughout their module.
+Prefixing an item import with `pub` re-exports it from the importing module:
 
 ```staple
 pub use path.to.another_module.(func, MyType)

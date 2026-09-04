@@ -4,8 +4,8 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use staple_syntax::{
-    BlockExpression, Expression, Item, Module, SourceLocation, Span, Submodule, Syntax, SyntaxId,
-    TokenKind, UseDeclaration, UseKind, Visibility, parse_with_syntax_ids,
+    BlockExpression, Expression, Item, Module, SelectedImport, SourceLocation, Span, Submodule,
+    Syntax, SyntaxId, TokenKind, UseDeclaration, UseKind, Visibility, parse_with_syntax_ids,
 };
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -640,8 +640,10 @@ impl Program {
                         .insert(declaration.syntax.id, item_module);
                     self.additional_imported_namespaces
                         .insert(declaration.syntax.id, namespace);
-                    self.resolved_use_kinds
-                        .insert(declaration.syntax.id, UseKind::Selected(vec![item.clone()]));
+                    self.resolved_use_kinds.insert(
+                        declaration.syntax.id,
+                        UseKind::Selected(vec![SelectedImport::new(item.clone())]),
+                    );
                 }
                 (Some(namespace), _, false, _) => {
                     self.imported_modules
@@ -652,8 +654,10 @@ impl Program {
                 (None, Some(item_module), _, _) => {
                     self.imported_modules
                         .insert(declaration.syntax.id, item_module);
-                    self.resolved_use_kinds
-                        .insert(declaration.syntax.id, UseKind::Selected(vec![item.clone()]));
+                    self.resolved_use_kinds.insert(
+                        declaration.syntax.id,
+                        UseKind::Selected(vec![SelectedImport::new(item.clone())]),
+                    );
                 }
                 (Some(namespace), None, _, _) => {
                     self.imported_modules

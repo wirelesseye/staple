@@ -663,6 +663,7 @@ fn parses_use_declarations_and_public_items_losslessly() {
         "use path.to.another_module\n",
         "use path.to.another_module.*\n",
         "use path.to.another_module.(func, MyType)\n",
+        "use path.to.another_module.(func as my_func, Foo as Bar)\n",
         "use path.to.another_module.func\n",
         "use path.to.another_module.func as my_func\n",
         "pub use path.to.another_module.PublicType\n",
@@ -677,21 +678,24 @@ fn parses_use_declarations_and_public_items_losslessly() {
     );
     assert!(matches!(root.items[1], Item::UseDeclaration(ref use_) if use_.kind == UseKind::Glob));
     assert!(
-        matches!(root.items[2], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Selected(names) if names == &["func", "MyType"]))
+        matches!(root.items[2], Item::UseDeclaration(ref use_) if selected_entries(&use_.kind) == vec![("func", None), ("MyType", None)])
     );
     assert!(
-        matches!(root.items[3], Item::UseDeclaration(ref use_) if use_.kind == UseKind::Dotted)
+        matches!(root.items[3], Item::UseDeclaration(ref use_) if selected_entries(&use_.kind) == vec![("func", Some("my_func")), ("Foo", Some("Bar"))])
     );
     assert!(
-        matches!(root.items[4], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Renamed { item, alias } if item == "func" && alias == "my_func"))
+        matches!(root.items[4], Item::UseDeclaration(ref use_) if use_.kind == UseKind::Dotted)
     );
     assert!(
-        matches!(root.items[5], Item::UseDeclaration(ref use_) if use_.visibility == Visibility::Public)
+        matches!(root.items[5], Item::UseDeclaration(ref use_) if matches!(&use_.kind, UseKind::Renamed { item, alias } if item == "func" && alias == "my_func"))
     );
     assert!(
-        matches!(root.items[6], Item::TypeDeclaration(ref declaration) if declaration.visibility == Visibility::Public)
+        matches!(root.items[6], Item::UseDeclaration(ref use_) if use_.visibility == Visibility::Public)
     );
-    let Item::TypeDeclaration(declaration) = &root.items[6] else {
+    assert!(
+        matches!(root.items[7], Item::TypeDeclaration(ref declaration) if declaration.visibility == Visibility::Public)
+    );
+    let Item::TypeDeclaration(declaration) = &root.items[7] else {
         panic!("expected type declaration")
     };
     assert!(
@@ -700,11 +704,22 @@ fn parses_use_declarations_and_public_items_losslessly() {
             .text()
             .ends_with("pub type alias PublicType = I32")
     );
-    let Item::Binding(binding) = unmodified_item(&root.items[7]) else {
+    let Item::Binding(binding) = unmodified_item(&root.items[8]) else {
         panic!("expected binding")
     };
     assert_eq!(binding.visibility, Visibility::Public);
     assert!(binding.syntax.text().ends_with("pub def public_value = 1"));
+}
+
+/// Flattens a `UseKind::Selected` into `(name, alias)` pairs for assertions.
+fn selected_entries(kind: &UseKind) -> Vec<(&str, Option<&str>)> {
+    match kind {
+        UseKind::Selected(names) => names
+            .iter()
+            .map(|import| (import.name.as_str(), import.alias.as_deref()))
+            .collect(),
+        other => panic!("expected a selected import, got {other:?}"),
+    }
 }
 
 #[test]
@@ -864,7 +879,7 @@ fn parses_block_scoped_use_declarations_losslessly() {
     assert!(matches!(
         &block.items[2],
         Item::UseDeclaration(use_)
-            if matches!(&use_.kind, UseKind::Selected(names) if names == &["func", "MyType"])
+            if selected_entries(&use_.kind) == vec![("func", None), ("MyType", None)]
     ));
     assert!(matches!(
         &block.items[3],

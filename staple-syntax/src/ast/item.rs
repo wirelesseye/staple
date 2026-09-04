@@ -182,11 +182,35 @@ pub enum UseKind {
     Dotted,
     Namespace,
     Glob,
-    Selected(Vec<String>),
+    Selected(Vec<SelectedImport>),
     Renamed {
         item: String,
         alias: String,
     },
+}
+
+/// A single entry in a selected import list (`use a.b.(item, other as alias)`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedImport {
+    /// The item's name as exported by the imported module.
+    pub name: String,
+    /// The name it is bound to locally, when that differs from `name`.
+    pub alias: Option<String>,
+}
+
+impl SelectedImport {
+    /// Creates an entry that keeps the imported item's own name.
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            alias: None,
+        }
+    }
+
+    /// The name the item is bound to in the importing module.
+    pub fn alias(&self) -> &str {
+        self.alias.as_deref().unwrap_or(&self.name)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

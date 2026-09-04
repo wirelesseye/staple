@@ -589,12 +589,18 @@ impl Collector<'_> {
         }
         match &resolved_kind {
             UseKind::Selected(names) => {
-                for name in names {
-                    let definitions = self
-                        .resolved
-                        .import_definitions(self.resolved_id(value.syntax.id), name)
-                        .to_vec();
-                    self.add(&value.syntax, name, &definitions, true);
+                for import in names {
+                    let occurrences: &[(&str, bool)] = match &import.alias {
+                        Some(alias) => &[(import.name.as_str(), false), (alias.as_str(), true)],
+                        None => &[(import.name.as_str(), true)],
+                    };
+                    for &(name, is_binding) in occurrences {
+                        let definitions = self
+                            .resolved
+                            .import_definitions(self.resolved_id(value.syntax.id), name)
+                            .to_vec();
+                        self.add(&value.syntax, name, &definitions, is_binding);
+                    }
                 }
             }
             UseKind::Renamed { item, alias } => {
