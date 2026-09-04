@@ -14,8 +14,8 @@ pub enum Outcome {
     Completed(Option<String>),
     /// A child process (the user's program) ran; propagate its status.
     Executed(ExitStatus),
-    /// `staple fmt --check` found the input was not formatted.
-    FormatMismatch(String),
+    /// `staple fmt --check` found one or more inputs were not formatted.
+    FormatMismatch(Vec<String>),
 }
 
 fn main() -> ExitCode {
@@ -64,8 +64,10 @@ fn finish(result: Result<Outcome, String>) -> ExitCode {
         }
         Ok(Outcome::Completed(None)) => ExitCode::SUCCESS,
         Ok(Outcome::Executed(status)) => compile::exit_code(status),
-        Ok(Outcome::FormatMismatch(input)) => {
-            eprintln!("staple: `{input}` is not formatted");
+        Ok(Outcome::FormatMismatch(inputs)) => {
+            for input in &inputs {
+                eprintln!("staple: `{input}` is not formatted");
+            }
             ExitCode::FAILURE
         }
         Err(message) => {
@@ -127,7 +129,7 @@ fn usage() -> String {
         "  run [file]     build and run the current package, or a single source file\n",
         "  expand <file>  print a source file after macro expansion\n",
         "  compile <file> emit LLVM IR, an object file, or an executable\n",
-        "  fmt [file|-]   format a source file in place (or standard input)\n",
+        "  fmt [file|-]   format the current package, a source file, or standard input\n",
         "  lsp            run the language server on stdin/stdout\n",
         "\n",
         "run `staple <command> --help` for command options",

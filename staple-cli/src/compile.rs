@@ -471,9 +471,9 @@ fn format_input(options: &Options) -> Result<Outcome, String> {
         return if formatted == source {
             Ok(Outcome::Completed(None))
         } else {
-            Ok(Outcome::FormatMismatch(
+            Ok(Outcome::FormatMismatch(vec![
                 options.input.to_string_lossy().into_owned(),
-            ))
+            ]))
         };
     }
     if options.input == "-" {
@@ -485,7 +485,7 @@ fn format_input(options: &Options) -> Result<Outcome, String> {
     Ok(Outcome::Completed(None))
 }
 
-fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
+pub(crate) fn atomic_write(path: &Path, contents: &[u8]) -> Result<(), String> {
     let metadata = std::fs::metadata(path)
         .map_err(|error| format!("could not inspect `{}`: {error}", path.display()))?;
     let parent = path.parent().unwrap_or_else(|| Path::new("."));
@@ -695,7 +695,7 @@ pub(crate) fn usage() -> String {
         "       staple check [options] <input.sta>\n",
         "       staple run [options] <input.sta> [-- <arguments>...]\n",
         "       staple expand [options] <input.sta>\n",
-        "       staple fmt [--check] <input.sta|->\n",
+        "       staple fmt [--check] [--manifest-path <path>] [input.sta|-]\n",
         "\n",
         "options:\n",
         "  -h, --help                print this help\n",
@@ -781,17 +781,19 @@ fn expand_usage() -> String {
     .to_owned()
 }
 
-fn fmt_usage() -> String {
+pub(crate) fn fmt_usage() -> String {
     concat!(
-        "usage: staple fmt [--check] <input.sta|->\n",
+        "usage: staple fmt [--check] [--manifest-path <path>] [input.sta|-]\n",
         "\n",
-        "Formats one Staple source file without expanding or resolving macros.\n",
-        "A file is rewritten atomically; `-` reads standard input and writes\n",
-        "the formatted source to standard output.\n",
+        "With no input, formats every `.sta` file in the current package.\n",
+        "Given a file, formats just that file; given `-`, reads standard input\n",
+        "and writes the formatted source to standard output. Macros are neither\n",
+        "expanded nor resolved. Files are rewritten atomically.\n",
         "\n",
         "options:\n",
-        "  -h, --help  print this help\n",
-        "  --check     fail without writing when the input is not formatted",
+        "  -h, --help              print this help\n",
+        "  --check                 fail without writing when an input is not formatted\n",
+        "  --manifest-path <path>  format the package described by a specific staple.kdl",
     )
     .to_owned()
 }

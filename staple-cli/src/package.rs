@@ -370,7 +370,10 @@ fn write_project_file(path: &Path, contents: &str) -> Result<(), String> {
         .map_err(|error| format!("could not write `{}`: {error}", path.display()))
 }
 
-fn discover_manifest(explicit: Option<&Path>, current: &Path) -> Result<PathBuf, String> {
+pub(crate) fn discover_manifest(
+    explicit: Option<&Path>,
+    current: &Path,
+) -> Result<PathBuf, String> {
     if let Some(path) = explicit {
         let path = if path.is_absolute() {
             path.to_owned()
