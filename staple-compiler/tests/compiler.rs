@@ -7544,6 +7544,32 @@ fn derives_debug_for_bodyless_singleton_types() {
 }
 
 #[test]
+fn quoted_type_declarations_from_one_template_get_distinct_identity() {
+    // `typegroup` generates every variant `type` from a single `parse_quote`
+    // template; applying `@derive_debug` to more than one variant used to emit
+    // two `impl Debug` whose targets shared the template identifier node, which
+    // the resolver collapsed into one and rejected as a duplicate.
+    let module = type_check(concat!(
+        "use std.fmt.*\n",
+        "typegroup Switch {\n",
+        "    @derive_debug\n",
+        "    Enabled,\n",
+        "    @derive_debug\n",
+        "    Disabled,\n",
+        "}\n",
+        "use Switch.*\n",
+        "let enabled_debug: String = Formatter.debug Enabled\n",
+        "let disabled_debug: String = Formatter.debug Disabled\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("distinct per-variant Debug implementations should generate LLVM");
+    assert!(llvm.contains("c\"Enabled\\00\""));
+    assert!(llvm.contains("c\"Disabled\\00\""));
+}
+
+#[test]
 fn exposes_type_declarations_as_structured_items() {
     let module = type_check(concat!(
         "macro @inspect_item: Item -> Item = item => match item {\n",

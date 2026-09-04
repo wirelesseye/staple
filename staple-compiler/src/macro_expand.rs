@@ -9709,6 +9709,12 @@ fn freshen_block_item(expander: &mut MacroExpander, item: &mut Item, module: Mod
         }
         Item::TypeDeclaration(declaration) => {
             expander.freshen_syntax(&mut declaration.syntax, module, mark);
+            // `name_syntax` is a sibling node, not reachable from `syntax`, so it
+            // needs freshening in its own right. Without this, every expansion of
+            // a `quote`d `type $name` template reuses the template identifier
+            // node's id, and anything keyed on it (trait-impl argument
+            // resolution, hover, goto-definition) conflates the declarations.
+            expander.freshen_syntax(&mut declaration.name_syntax, module, mark);
             for parameter in &mut declaration.type_parameters {
                 freshen_type_parameter(expander, parameter, module, mark);
             }
@@ -9860,6 +9866,12 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
         }
         Item::TypeDeclaration(declaration) => {
             expander.freshen_syntax(&mut declaration.syntax, module, mark);
+            // `name_syntax` is a sibling node, not reachable from `syntax`, so it
+            // needs freshening in its own right. Without this, every expansion of
+            // a `quote`d `type $name` template reuses the template identifier
+            // node's id, and anything keyed on it (trait-impl argument
+            // resolution, hover, goto-definition) conflates the declarations.
+            expander.freshen_syntax(&mut declaration.name_syntax, module, mark);
             for parameter in &mut declaration.type_parameters {
                 freshen_type_parameter(expander, parameter, module, mark);
             }
