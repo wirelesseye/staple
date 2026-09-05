@@ -524,6 +524,36 @@ fn append_syntax_tokens(output: &mut Vec<staple_syntax::SyntaxToken>, syntax: &S
     }
 }
 
+/// Resolves a byte offset into `source` to a 1-based line and column, matching
+/// the parser's own line/column convention (`\n`, `\r`, and `\r\n` each end a
+/// line; the column counts characters, not bytes).
+fn source_location_at(source: &str, offset: usize) -> staple_syntax::SourceLocation {
+    let offset = offset.min(source.len());
+    let bytes = source.as_bytes();
+    let mut line = 1usize;
+    let mut line_start = 0usize;
+    let mut cursor = 0usize;
+    while cursor < offset {
+        match bytes[cursor] {
+            b'\r' if bytes.get(cursor + 1) == Some(&b'\n') => {
+                cursor += 2;
+                line += 1;
+                line_start = cursor;
+            }
+            b'\r' | b'\n' => {
+                cursor += 1;
+                line += 1;
+                line_start = cursor;
+            }
+            _ => cursor += 1,
+        }
+    }
+    staple_syntax::SourceLocation {
+        line,
+        column: source[line_start..offset].chars().count() + 1,
+    }
+}
+
 pub(crate) struct MacroAnalysis {
     pub definitions: HashMap<SyntaxId, ResolvedMacro>,
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
@@ -6448,11 +6478,36 @@ impl MacroExpander {
         environment: &Environment,
     ) -> Option<Syntax> {
         let input = contents.tokens();
+        // The lossless token stream backing `contents` reconstructs the whole
+        // source file `contents` was parsed from, so a token's `span.start` is a
+        // real byte offset into it. Keep it to give the quotation-template tokens
+        // an `origin` pointing back at the macro definition, the same way spliced
+        // tokens already carry the caller's `origin`.
+        let file_source: String = contents
+            .token_stream()
+            .iter()
+            .map(|token| token.text.as_str())
+            .collect();
+        let template_origin = |token: &staple_syntax::SyntaxToken| match &contents.span {
+            Span::User { source, .. } if !token.kind.is_trivia() => Some(Span::User {
+                source: source.clone(),
+                range: token.span.clone(),
+                location: Some(source_location_at(&file_source, token.span.start)),
+            }),
+            _ => None,
+        };
+        let push_template = |output: &mut Vec<staple_syntax::SyntaxToken>, index: usize| {
+            let mut token = input[index].clone();
+            if token.origin.is_none() {
+                token.origin = template_origin(&token);
+            }
+            output.push(token);
+        };
         let mut output = Vec::new();
         let mut cursor = 0;
         while cursor < input.len() {
             if input[cursor].kind != staple_syntax::TokenKind::Dollar {
-                output.push(input[cursor].clone());
+                push_template(&mut output, cursor);
                 cursor += 1;
                 continue;
             }
@@ -6461,7 +6516,7 @@ impl MacroExpander {
                 name_at += 1;
             }
             if name_at == input.len() || input[name_at].kind != staple_syntax::TokenKind::Identifier {
-                output.push(input[cursor].clone());
+                push_template(&mut output, cursor);
                 cursor += 1;
                 continue;
             }

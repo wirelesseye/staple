@@ -3837,13 +3837,20 @@ impl Grammar {
                     .map(|origin| (token.text.clone(), origin.clone()))
             })
             .collect();
+        // Tokens produced by macro expansion carry an `origin` that points back
+        // into real user source. When present, anchor the node there rather than
+        // at an offset into the synthetic token stream a fragment parse runs
+        // over — otherwise diagnostics report a line/column inside an internal
+        // reconstruction. Ordinary parses never set `origin`, so this is a no-op
+        // for them.
+        let span = span_from_token_origins(tokens).unwrap_or_else(|| Span::User {
+            source: self.source_name.clone(),
+            range: span_start..span_end,
+            location: Some(self.location(diagnostic_start)),
+        });
         Syntax {
             id,
-            span: Span::User {
-                source: self.source_name.clone(),
-                range: span_start..span_end,
-                location: Some(self.location(diagnostic_start)),
-            },
+            span,
             tokens: Arc::clone(&self.tokens),
             token_range: start..self.position,
             definition_module: None,
@@ -3930,6 +3937,22 @@ fn contains_move_type_element(ty: &Type) -> bool {
         Type::Repeated(repeated) => contains_move_type_element(&repeated.element),
         _ => false,
     }
+}
+
+/// Derives a node span from the provenance of its tokens when they were
+/// produced by macro expansion. Returns the `origin` of the first non-trivia
+/// token that carries one, so the node is anchored at a real source position
+/// instead of an offset into a synthetic reconstruction. Ordinary parse tokens
+/// never carry an `origin`, so this returns `None` and the caller falls back to
+/// the token-stream span.
+fn span_from_token_origins(tokens: &[SyntaxToken]) -> Option<Span> {
+    tokens
+        .iter()
+        .filter(|token| !token.kind.is_trivia())
+        .find_map(|token| match &token.origin {
+            Some(origin @ Span::User { .. }) => Some(origin.clone()),
+            _ => None,
+        })
 }
 
 fn line_starts(source: &str) -> Vec<usize> {

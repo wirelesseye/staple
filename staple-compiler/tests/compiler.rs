@@ -4132,6 +4132,46 @@ fn expands_user_defined_macros_hygienically() {
 }
 
 #[test]
+fn diagnostics_in_macro_generated_syntax_point_at_the_macro_definition() {
+    // The `quote` body is reconstructed into a fresh token stream and re-parsed
+    // when the macro expands. A diagnostic raised against that generated syntax
+    // must still report a real position in the macro definition, not a
+    // line/column inside the internal reconstruction.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "macro pick = condition: Expr * body: Expr =>\n", // line 1
+            "    quote {\n",                                  // line 2
+            "        match $condition {\n",                   // line 3
+            "            True => $body,\n",                   // line 4
+            "        }\n",                                    // line 5
+            "    }\n",                                        // line 6
+            "let flag: Bool = True\n",                        // line 7
+            "pick flag (0)\n",                                // line 8
+        )))
+        .expect_err_diagnostics("a macro expanding to a non-exhaustive match should fail");
+
+    let non_exhaustive = diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.message.contains("non-exhaustive match"))
+        .unwrap_or_else(|| {
+            panic!(
+                "expected a non-exhaustive match diagnostic, got: {:?}",
+                diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+            )
+        });
+
+    let rendered = non_exhaustive.to_string();
+    assert!(
+        rendered.ends_with("at line 3, column 9"),
+        "diagnostic should point at the `match` keyword in the macro body, got: {rendered}"
+    );
+    assert!(
+        rendered.contains("<stdin>.sta"),
+        "diagnostic should reference the real source file, got: {rendered}"
+    );
+}
+
+#[test]
 fn inspects_identifier_and_call_syntax() {
     let module = type_check(concat!(
         "macro call_argument = value: CallExpr => match value {\n",
