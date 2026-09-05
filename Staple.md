@@ -1391,6 +1391,10 @@ visible.
 type from the body unless a surrounding function type or a `satisfies`
 expression constrains it.
 
+A function whose result type is `Never` has no normal-return path. Calling it
+makes the following path unreachable, just like evaluating any other
+expression of type `Never`.
+
 A binding pattern normally has a name and a type:
 
 ```staple
@@ -2229,6 +2233,7 @@ def string_identity: <T where T <: String> T -> T = x => x
 subtyping relation instead:
 
 - `T <: T` (reflexivity);
+- `Never <: T` for every value type `T`;
 - every string literal type is a subtype of `String`, and a literal type whose
   values are a subset of another literal type's values is a subtype of it;
 - every non-negative integer literal type is a subtype of `USize` and
@@ -2442,7 +2447,8 @@ An expected type is applied to every arm. Without one, equal arm types remain
 that type; differing represented nominal results are joined into an sum by
 the same rules used for inferred function results. Arms which return from the
 enclosing function do not contribute to the match value type. If every arm
-returns, the match itself does not continue.
+returns or otherwise has type `Never`, the match has type `Never` and does not
+continue normally.
 
 The standard prelude supplies two conditional forms, both implemented as macros.
 
@@ -2505,9 +2511,12 @@ def answer = () => loop {
 
 `break value` exits the nearest enclosing loop and supplies its result. `break`
 without a value supplies `()`; a newline, semicolon, or closing brace terminates
-the unit form. All reachable breaks must produce compatible values, using the
-same result-joining rules as functions and match expressions. A loop with no
-reachable break diverges and may be used wherever an expected type is available.
+the unit form. The type of a loop is the join of the values supplied by all
+reachable breaks targeting that loop, using the same result-joining rules as
+functions and match expressions. Breaks targeting nested loops do not
+contribute. A break whose value has type `Never` is itself unreachable and also
+does not contribute. A loop with no reachable break has type `Never` and does
+not continue normally.
 
 `break` and `continue` cannot cross a function boundary, and labeled loops are
 not supported. Values owned by an iteration are dropped before a break,
@@ -2609,6 +2618,7 @@ ISize
 USize
 F32
 F64
+Never
 Bool
 String
 Ref T
@@ -2621,12 +2631,19 @@ Ordering
 Option T
 ```
 
-The numeric types, `Bool`, `String`, arithmetic and ordering traits, `ToString`, and their functions
-from `std.core` are imported implicitly into every source module. These are
+The numeric types, `Never`, `Bool`, `String`, arithmetic and ordering traits,
+`ToString`, and their functions from `std.core` are imported implicitly into
+every source module. These are
 ordinary type names rather than keywords, so a local declaration or explicit
 import can shadow a prelude name. Integer literals use an expected integer type
 when one is available and otherwise default to `I32`. Mixed-type arithmetic is
 not implicit.
+
+`Never` is the uninhabited bottom type. No expression can normally produce a
+`Never` value, and `Never` is a subtype of every value type, so a divergent
+expression can appear wherever another value type is expected. Joining
+`Never` with another type yields the other type; a join containing only
+`Never` remains `Never`.
 
 `ToString` has the member `to_string: T -> String` and is implemented for all
 integer and floating-point types, `Bool`, and `String`. Integers use decimal
@@ -3163,6 +3180,8 @@ type.
 
 Sums are unordered, flattened, and duplicate-free. Consequently `A | B` and
 `B | A` are the same type, nested sums are flattened, and `A | A` is `A`.
+Because `Never` has no values, it is removed when normalizing a sum with another
+alternative, so `Never | A` is `A`.
 Variant identity is the complete type, so different applications of one
 constructor, such as `Ok I32 | Ok String`, are distinct alternatives. A nominal
 pattern must select exactly one alternative; use a typed binding to disambiguate

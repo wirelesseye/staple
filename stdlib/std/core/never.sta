@@ -1,0 +1,3 @@
+pub mod
+
+pub type Never = opaque

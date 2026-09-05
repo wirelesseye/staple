@@ -2681,6 +2681,23 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.release_moved_ownership(environment, expression.syntax().id)?;
             return Ok(value);
         }
+        let diverges = self
+            .typed_module
+            .coercion_for(expression.syntax().id)
+            .is_some_and(|coercion| coercion.source == CheckedType::Never)
+            || self
+                .concrete_expression_type(expression)
+                .is_some_and(|value_type| value_type == CheckedType::Never);
+        if diverges {
+            self.builder
+                .build_unreachable()
+                .map_err(|error| {
+                    Diagnostic::new(expression.syntax().span.clone(), error.to_string())
+                })?;
+            environment.did_return = true;
+            self.release_moved_ownership(environment, expression.syntax().id)?;
+            return Ok(value);
+        }
         let value = if let Some(coercion) = self
             .typed_module
             .coercion_for(expression.syntax().id)
@@ -9222,6 +9239,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Span::Compiler,
                 "cannot generate code for an erroneous type",
             )),
+            CheckedType::Never => Ok(self.context.struct_type(&[], false).into()),
             CheckedType::NumberLiteral(_) => {
                 Ok(self.compile_integer_type(IntegerType::USize).into())
             }

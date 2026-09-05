@@ -70,6 +70,7 @@ pub struct ResolvedTraitImplementation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BuiltinType {
+    Never,
     Integer(IntegerType),
     Float(FloatType),
     String,
@@ -1413,6 +1414,7 @@ impl NameResolver {
         let Some(core) = program.standard_library_core() else {
             return;
         };
+        self.register_builtin_type(core, "std.core", "Never", BuiltinType::Never);
         for integer in IntegerType::ALL {
             self.register_builtin_type(
                 core,

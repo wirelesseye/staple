@@ -165,6 +165,7 @@ struct CheckedTraitImplementation {
 pub enum CheckedType {
     Inferred,
     Error,
+    Never,
     I32,
     I8,
     I16,
@@ -687,7 +688,8 @@ impl CheckedType {
                     && function.result.is_fully_known()
             }
             Self::Distinct { representation, .. } => representation.is_fully_known(),
-            Self::I32
+            Self::Never
+            | Self::I32
             | Self::I8
             | Self::I16
             | Self::I64
@@ -725,7 +727,8 @@ impl CheckedType {
             Self::Sum(sum) => sum.alternatives.iter().all(CheckedType::is_sized),
             Self::Distinct { representation, .. } => representation.is_sized(),
             // These values all have a statically known handle or scalar representation.
-            Self::Ref(_)
+            Self::Never
+            | Self::Ref(_)
             | Self::Slice(_)
             | Self::Buffer(_)
             | Self::CPointer { .. }
@@ -757,6 +760,7 @@ impl fmt::Display for CheckedType {
         match self {
             Self::Inferred => formatter.write_str("_"),
             Self::Error => formatter.write_str("<error>"),
+            Self::Never => formatter.write_str("Never"),
             Self::I32 => formatter.write_str("I32"),
             Self::I8 => formatter.write_str("I8"),
             Self::I16 => formatter.write_str("I16"),
@@ -3548,7 +3552,7 @@ impl TypeChecker {
             .filter(|value_type| *value_type != CheckedType::Error)
             .collect::<Vec<_>>();
         if values.is_empty() {
-            return CheckedType::empty_product();
+            return CheckedType::Never;
         }
         if values.iter().all(|value_type| value_type == &values[0]) {
             return values.remove(0);
@@ -8387,7 +8391,7 @@ impl TypeChecker {
         }
 
         let result = if every_arm_returns {
-            CheckedType::empty_product()
+            CheckedType::Never
         } else if let Some(expected) = expected {
             expected.clone()
         } else {
@@ -8426,10 +8430,10 @@ impl TypeChecker {
         self.check_expression(module, &Expression::Block(loop_.body.clone()));
         let context = self.loop_contexts.pop().expect("loop check context");
 
-        let result = if let Some(expected) = expected {
+        let result = if context.breaks.is_empty() {
+            CheckedType::Never
+        } else if let Some(expected) = expected {
             expected.clone()
-        } else if context.breaks.is_empty() {
-            CheckedType::empty_product()
         } else {
             self.join_return_contributions(&context.breaks, loop_.syntax.span.clone())
         };
@@ -9108,6 +9112,7 @@ impl TypeChecker {
         natural_type: CheckedType,
         expected: Option<&CheckedType>,
     ) -> CheckedType {
+        let diverges = natural_type == CheckedType::Never;
         let value_type = match expected {
             _ if self.did_return => natural_type,
             Some(CheckedType::Product(product)) if product.variadic => natural_type,
@@ -9121,6 +9126,9 @@ impl TypeChecker {
         };
         self.expression_types
             .insert(expression.syntax().id, value_type.clone());
+        if diverges || value_type == CheckedType::Never {
+            self.did_return = true;
+        }
         value_type
     }
 
@@ -9626,6 +9634,9 @@ impl TypeChecker {
         }
         if sub == sup {
             return true;
+        }
+        if *sub == CheckedType::Never {
+            return !matches!(sup, CheckedType::TypeConstructor { .. });
         }
         if let (CheckedType::Parameter { id: a, .. }, CheckedType::Parameter { id: b, .. }) =
             (sub, sup)
@@ -10333,6 +10344,10 @@ impl TypeChecker {
         } else if !literals.is_empty() {
             flattened.push(CheckedType::StringLiteralSet(literals));
         }
+        let contains_never = flattened.contains(&CheckedType::Never);
+        if flattened.len() > 1 {
+            flattened.retain(|alternative| *alternative != CheckedType::Never);
+        }
         flattened.sort_by_key(checked_type_sort_key);
         flattened.dedup();
         for alternative in &flattened {
@@ -10345,6 +10360,7 @@ impl TypeChecker {
             }
         }
         match flattened.len() {
+            0 if contains_never => CheckedType::Never,
             0 => CheckedType::Error,
             1 => flattened.pop().expect("one alternative"),
             _ => CheckedType::Sum(CheckedSumType {
@@ -10896,6 +10912,7 @@ impl TypeChecker {
         if let Some(builtin) = module.builtin_type(id) {
             return match builtin {
                 BuiltinType::Integer(integer) => CheckedType::integer(integer),
+                BuiltinType::Never => CheckedType::Never,
                 BuiltinType::Float(float) => CheckedType::float(float),
                 BuiltinType::String => CheckedType::String,
                 BuiltinType::Ref => CheckedType::TypeConstructor {
@@ -11073,6 +11090,7 @@ fn replace_product_default_policy(merged: CheckedType, expected: &CheckedType) -
 fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType> {
     match (actual, expected) {
         (CheckedType::Error, _) | (_, CheckedType::Error) => Some(CheckedType::Error),
+        (CheckedType::Never, expected) => Some(expected),
         (CheckedType::Inferred, value_type) | (value_type, CheckedType::Inferred) => {
             Some(value_type)
         }
@@ -11612,9 +11630,14 @@ fn normalize_substituted_sum(alternatives: Vec<CheckedType>) -> CheckedType {
     } else if !literals.is_empty() {
         flattened.push(CheckedType::StringLiteralSet(literals));
     }
+    let contains_never = flattened.contains(&CheckedType::Never);
+    if flattened.len() > 1 {
+        flattened.retain(|alternative| *alternative != CheckedType::Never);
+    }
     flattened.sort_by_key(checked_type_sort_key);
     flattened.dedup();
     match flattened.len() {
+        0 if contains_never => CheckedType::Never,
         0 => CheckedType::Error,
         1 => flattened.pop().expect("one alternative"),
         _ => CheckedType::Sum(CheckedSumType {
@@ -13752,7 +13775,8 @@ fn is_copy_type(
     }
     match value_type {
         CheckedType::Inferred | CheckedType::Error => true,
-        CheckedType::I32
+        CheckedType::Never
+        | CheckedType::I32
         | CheckedType::I8
         | CheckedType::I16
         | CheckedType::I64

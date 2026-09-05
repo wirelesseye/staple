@@ -364,7 +364,7 @@ impl<'a> OwnershipChecker<'a> {
                                 );
                             }
                         }
-                        return true;
+                        return self.expression_continues(expression);
                     }
                 }
                 self.check_expression(&value.callee, false);
@@ -382,7 +382,7 @@ impl<'a> OwnershipChecker<'a> {
                         });
                         self.check_call_argument(&value.argument, residual);
                     }
-                    return true;
+                    return self.expression_continues(expression);
                 }
                 let scoped_c_string = self
                     .module
@@ -415,7 +415,7 @@ impl<'a> OwnershipChecker<'a> {
                         });
                     self.check_call_argument(&value.argument, callee_function_type);
                 }
-                true
+                self.expression_continues(expression)
             }
             Expression::Access(value) => {
                 if let Some(symbol) = self.module.symbol_for(value.syntax.id) {
@@ -476,6 +476,17 @@ impl<'a> OwnershipChecker<'a> {
             | Expression::Float(_) => true,
             Expression::Binary(_) => unreachable!("binary expression reached ownership checking"),
         }
+    }
+
+    fn expression_continues(&self, expression: &Expression) -> bool {
+        !self
+            .module
+            .coercion_for(expression.syntax().id)
+            .is_some_and(|coercion| coercion.source == crate::CheckedType::Never)
+            && !self
+                .module
+                .type_of_expression(expression.syntax().id)
+                .is_some_and(|value_type| *value_type == crate::CheckedType::Never)
     }
 
     /// Checks a call's argument against the callee's per-position parameter

@@ -9368,6 +9368,51 @@ fn accepts_divergent_loops_in_typed_contexts() {
 }
 
 #[test]
+fn supports_never_as_the_bottom_type_and_tracks_divergence() {
+    let module = type_check(concat!(
+        "def forever: () -> Never = () => loop { continue }\n",
+        "def inferred = () => loop { continue }\n",
+        "def coerced: () -> I32 = () => forever ()\n",
+        "def caller = () => { forever (); 42 }\n",
+        "def normalized: () -> (Never | I32) = () => 8\n",
+        "def joined: Bool -> I32 = condition => loop {\n",
+        "  match condition {\n",
+        "    True() => { break forever () },\n",
+        "    False() => { break 7 },\n",
+        "  }\n",
+        "}\n",
+    ));
+
+    for (name, expected) in [
+        ("forever", CheckedType::Never),
+        ("inferred", CheckedType::Never),
+        ("coerced", CheckedType::I32),
+        ("caller", CheckedType::Never),
+        ("normalized", CheckedType::I32),
+        ("joined", CheckedType::I32),
+    ] {
+        let function = module
+            .functions()
+            .iter()
+            .find(|function| function.name == name)
+            .expect("Never test function should resolve");
+        assert_eq!(
+            *module
+                .type_of_function(function.id)
+                .expect("Never test function should be typed")
+                .result,
+            expected,
+        );
+    }
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("Never functions and calls should generate valid LLVM");
+    assert!(llvm.contains("unreachable"));
+}
+
+#[test]
 fn checks_reachability_correctly_after_a_top_level_loop_with_break() {
     // A top-level `loop { ...; break }` (here via the `for` macro's
     // expansion) must not poison reachability for the rest of the module:
