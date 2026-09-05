@@ -52,6 +52,7 @@ def typegroup_items:
             let item: Item = typegroup_apply_modifiers (modifiers, base)
             Sequence (first: item, rest: typegroup_items (visibility, rest))
         },
+        _ => panic "typegroup entry is unsupported",
     },
 }
 
@@ -79,6 +80,7 @@ def typegroup_generic_items:
                 let item: Item = typegroup_apply_modifiers (modifiers, base)
                 Sequence (first: item, rest: tail)
             },
+            _ => panic "generic typegroup entry is unsupported",
         }
     },
 }
@@ -104,6 +106,7 @@ def typegroup_sum:
             }
         },
     },
+    _ => panic "empty typegroup is unsupported",
 }
 
 def typegroup_parameter_syntax: Sequence Type -> Syntax = parameters => match parameters {
@@ -142,6 +145,7 @@ def typegroup_generic_sum_syntax:
             }
         },
     },
+    _ => panic "empty generic typegroup is unsupported",
 }
 
 /// Declares a sum-type alias and companion variants from a compact definition.

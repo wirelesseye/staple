@@ -115,6 +115,44 @@ pub(crate) enum MetaType {
     Delimited(DelimiterKind, DelimitedMetaContents),
 }
 
+/// The statically-known portion of a value evaluated while expanding macros.
+///
+/// Macro expansion precedes ordinary name resolution and type checking, so
+/// compile-time programs need a small type domain of their own. `Named` is
+/// deliberately retained for ordinary pure values (for example `Bool`), while
+/// syntax categories use `Meta` so their structural constructors remain
+/// available to match coverage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CompileType {
+    Error,
+    Unknown,
+    Never,
+    String,
+    Integer,
+    Float,
+    Bool,
+    Named(String),
+    Meta(MetaType),
+    Product(Vec<CompileType>),
+    Function(Box<CompileType>, Box<CompileType>),
+}
+
+#[derive(Clone)]
+struct CompileBinding {
+    ty: CompileType,
+    mutable: bool,
+}
+
+type CompileEnvironment = HashMap<String, CompileBinding>;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CompileCoveragePattern {
+    Any,
+    Constructor(String, Vec<CompileCoveragePattern>),
+    Literal(String),
+    Invalid,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum DelimiterKind {
     Parenthesized,
@@ -139,6 +177,7 @@ impl MetaType {
             Self::Expr
                 | Self::Ident(_)
                 | Self::CallExpr
+                | Self::StringExpr
                 | Self::UnstructuredExpr
                 | Self::Delimited(DelimiterKind::Parenthesized | DelimiterKind::Braced, _)
         )
@@ -813,6 +852,7 @@ pub(crate) fn expand_program(
 ) -> Result<(Program, MacroAnalysis), Vec<Diagnostic>> {
     let mut expander = MacroExpander::new(&program);
     expander.validate_definitions();
+    expander.validate_compile_time_code();
     for module in program.modules() {
         for item in &module.syntax.items {
             if let Item::Binding(binding) = item
@@ -981,6 +1021,8 @@ struct MacroExpander {
     /// nearest enclosing macro-invocation call site so it doesn't also
     /// append a redundant "while expanding macro" trailer.
     suppress_expansion_trailer: bool,
+    checked_compile_helpers: HashSet<SyntaxId>,
+    checking_compile_helpers: HashSet<SyntaxId>,
 }
 
 fn provisional_use_kind(program: &Program, declaration: &UseDeclaration) -> UseKind {
@@ -1645,6 +1687,8 @@ impl MacroExpander {
                 .unwrap_or_default(),
             standard_library_process,
             suppress_expansion_trailer: false,
+            checked_compile_helpers: HashSet::new(),
+            checking_compile_helpers: HashSet::new(),
             invocation_spans: Vec::new(),
         }
     }
@@ -1704,6 +1748,652 @@ impl MacroExpander {
                 .namespaces
                 .entry(local.to_owned())
                 .or_insert_with(|| *target);
+        }
+    }
+
+    /// Statically validates code which can run in the macro interpreter.
+    /// This deliberately runs before the first expansion: otherwise an
+    /// unused bad definition would remain silent and a used one would fail
+    /// only on the path exercised by that invocation.
+    fn validate_compile_time_code(&mut self) {
+        let definitions = self.definitions.values().cloned().collect::<Vec<_>>();
+        for definition in definitions {
+            let MacroKind::User(body) = &definition.kind else {
+                continue;
+            };
+            if definition.declaration.value.is_none() {
+                continue;
+            }
+            let mut expected = CompileType::Meta(definition.result.clone());
+            for parameter in definition.parameters.iter().rev() {
+                expected = CompileType::Function(
+                    Box::new(CompileType::Meta(parameter.clone())),
+                    Box::new(expected),
+                );
+            }
+            let mut environment = CompileEnvironment::new();
+            self.check_compile_expression(
+                definition.key.module,
+                body,
+                &mut environment,
+                Some(&expected),
+            );
+        }
+
+        let helpers = self
+            .scopes
+            .iter()
+            .flat_map(|scope| scope.helpers.values())
+            .filter(|helper| binding_is_compile_time_helper(&helper.binding))
+            .cloned()
+            .collect::<Vec<_>>();
+        for helper in helpers {
+            self.check_compile_helper(&helper);
+        }
+    }
+
+    fn check_compile_helper(&mut self, helper: &HelperDefinition) {
+        let syntax = helper.binding.syntax.id;
+        if self.checked_compile_helpers.contains(&syntax)
+            || !self.checking_compile_helpers.insert(syntax)
+            || (Some(helper.module) == self.standard_library_process
+                && helper.binding.name == "panic")
+        {
+            return;
+        }
+        if let Some(value) = &helper.binding.value {
+            let expected = helper
+                .binding
+                .annotation
+                .as_ref()
+                .map(compile_type)
+                .unwrap_or(CompileType::Unknown);
+            self.check_compile_expression(
+                helper.module,
+                value,
+                &mut CompileEnvironment::new(),
+                (expected != CompileType::Unknown).then_some(&expected),
+            );
+        }
+        self.checking_compile_helpers.remove(&syntax);
+        self.checked_compile_helpers.insert(syntax);
+    }
+
+    fn check_compile_expression(
+        &mut self,
+        module: ModuleId,
+        expression: &Expression,
+        environment: &mut CompileEnvironment,
+        expected: Option<&CompileType>,
+    ) -> CompileType {
+        let actual = match expression {
+            Expression::Function(function) => {
+                let (parameter, result) = match expected {
+                    Some(CompileType::Function(parameter, result)) => {
+                        (parameter.as_ref().clone(), Some(result.as_ref()))
+                    }
+                    _ => (
+                        compile_pattern_annotation(&function.pattern)
+                            .unwrap_or(CompileType::Unknown),
+                        None,
+                    ),
+                };
+                let mut nested = environment.clone();
+                self.bind_compile_pattern(module, &function.pattern, &parameter, &mut nested);
+                let body = self.check_compile_expression(
+                    module,
+                    &function.body,
+                    &mut nested,
+                    result,
+                );
+                CompileType::Function(Box::new(parameter), Box::new(body))
+            }
+            Expression::Satisfies(value) => {
+                let annotation = compile_type(&value.ty);
+                self.check_compile_expression(
+                    module,
+                    &value.value,
+                    environment,
+                    Some(&annotation),
+                )
+            }
+            Expression::Match(value) => {
+                let subject = self.check_compile_expression(
+                    module,
+                    &value.subject,
+                    environment,
+                    None,
+                );
+                let mut previous_patterns = Vec::new();
+                let mut result = CompileType::Never;
+                for arm in &value.arms {
+                    if !compile_pattern_is_useful(&previous_patterns, &arm.pattern) {
+                        self.diagnostics.push(Diagnostic::new(
+                            arm.pattern.syntax().span.clone(),
+                            "unreachable match arm",
+                        ));
+                    }
+                    previous_patterns.push(&arm.pattern);
+                    let mut nested = environment.clone();
+                    self.bind_compile_pattern(module, &arm.pattern, &subject, &mut nested);
+                    let arm_type = self.check_compile_expression(
+                        module,
+                        &arm.body,
+                        &mut nested,
+                        expected,
+                    );
+                    result = join_compile_types(result, arm_type);
+                }
+                if !compile_patterns_are_exhaustive(&subject, &previous_patterns) {
+                    self.diagnostics.push(Diagnostic::new(
+                        value.syntax.span.clone(),
+                        "non-exhaustive match",
+                    ));
+                }
+                result
+            }
+            Expression::Block(block) => {
+                let mut nested = environment.clone();
+                let mut result = CompileType::Product(Vec::new());
+                let last = block.items.len().saturating_sub(1);
+                for (index, item) in block.items.iter().enumerate() {
+                    result = self.check_compile_item(
+                        module,
+                        item,
+                        &mut nested,
+                        (index == last).then_some(expected).flatten(),
+                    );
+                }
+                result
+            }
+            Expression::Product(product) => CompileType::Product(
+                product
+                    .elements
+                    .iter()
+                    .map(|element| {
+                        self.check_compile_expression(module, &element.value, environment, None)
+                    })
+                    .collect(),
+            ),
+            Expression::RepeatedProduct(value) => {
+                let element = self.check_compile_expression(module, &value.value, environment, None);
+                let count = self.check_compile_expression(module, &value.count, environment, None);
+                self.require_compile_type(
+                    &count,
+                    &CompileType::Integer,
+                    value.count.syntax().span.clone(),
+                );
+                CompileType::Product(vec![element])
+            }
+            Expression::Call(_) => self.check_compile_call(module, expression, environment),
+            Expression::Access(access) => {
+                if let Some(helper) = self.qualified_compile_helper(module, access) {
+                    self.check_compile_helper(&helper);
+                    helper_compile_type(&helper.binding)
+                } else {
+                    let value = self.check_compile_expression(module, &access.value, environment, None);
+                    compile_field_type(&value, &access.accessor).unwrap_or_else(|| {
+                        let message = if value == CompileType::Meta(MetaType::CallExpr) {
+                            format!("call syntax has no field `{}`", accessor_name(&access.accessor))
+                        } else {
+                            format!("compile-time value has no field `{}`", accessor_name(&access.accessor))
+                        };
+                        self.diagnostics.push(Diagnostic::new(
+                            access.syntax.span.clone(),
+                            message,
+                        ));
+                        CompileType::Error
+                    })
+                }
+            }
+            Expression::Index(index) => {
+                let value = self.check_compile_expression(module, &index.value, environment, None);
+                let position = self.check_compile_expression(module, &index.index, environment, None);
+                self.require_compile_type(
+                    &position,
+                    &CompileType::Integer,
+                    index.index.syntax().span.clone(),
+                );
+                match value {
+                    CompileType::Product(elements) => elements
+                        .into_iter()
+                        .reduce(join_compile_types)
+                        .unwrap_or(CompileType::Unknown),
+                    CompileType::Error => CompileType::Error,
+                    _ => {
+                        self.diagnostics.push(Diagnostic::new(
+                            index.value.syntax().span.clone(),
+                            "compile-time indexing requires a product",
+                        ));
+                        CompileType::Error
+                    }
+                }
+            }
+            Expression::Binary(binary) => {
+                let left = self.check_compile_expression(module, &binary.left, environment, None);
+                let right = self.check_compile_expression(module, &binary.right, environment, None);
+                match binary.operator {
+                    BinaryOperator::Equal
+                    | BinaryOperator::NotEqual
+                    | BinaryOperator::Less
+                    | BinaryOperator::LessEqual
+                    | BinaryOperator::Greater
+                    | BinaryOperator::GreaterEqual => {
+                        self.require_compile_type(&right, &left, binary.right.syntax().span.clone());
+                        CompileType::Bool
+                    }
+                    BinaryOperator::Add
+                    | BinaryOperator::Subtract
+                    | BinaryOperator::Multiply
+                    | BinaryOperator::Divide => {
+                        self.require_compile_type(&right, &left, binary.right.syntax().span.clone());
+                        left
+                    }
+                    BinaryOperator::And | BinaryOperator::Or => {
+                        self.require_compile_type(&left, &CompileType::Bool, binary.left.syntax().span.clone());
+                        self.require_compile_type(&right, &CompileType::Bool, binary.right.syntax().span.clone());
+                        CompileType::Bool
+                    }
+                    BinaryOperator::Range | BinaryOperator::RangeInclusive => CompileType::Unknown,
+                }
+            }
+            Expression::Logical(logical) => {
+                let left = self.check_compile_expression(module, &logical.left, environment, Some(&CompileType::Bool));
+                let right = self.check_compile_expression(module, &logical.right, environment, Some(&CompileType::Bool));
+                self.require_compile_type(&left, &CompileType::Bool, logical.left.syntax().span.clone());
+                self.require_compile_type(&right, &CompileType::Bool, logical.right.syntax().span.clone());
+                CompileType::Bool
+            }
+            Expression::Quote(quote) => {
+                self.check_quote_splices(module, quote, environment);
+                match quote.kind {
+                    staple_syntax::QuoteKind::Quote => CompileType::Meta(MetaType::Syntax),
+                    staple_syntax::QuoteKind::ParseQuote => match expected {
+                        Some(CompileType::Meta(meta)) if !quote_result_type(meta) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                quote.syntax.span.clone(),
+                                format!(
+                                    "{} is not a supported `parse_quote` context",
+                                    format_meta_type(meta)
+                                ),
+                            ));
+                            CompileType::Error
+                        }
+                        Some(ty @ CompileType::Meta(_)) => ty.clone(),
+                        _ => inferred_compile_quote_type(quote),
+                    },
+                }
+            }
+            Expression::Name(name) => self.compile_name_type(module, name, environment),
+            Expression::String(_) => CompileType::String,
+            Expression::Integer(_) => CompileType::Integer,
+            Expression::Float(_) => CompileType::Float,
+            Expression::VisibilityArgument(_) => CompileType::Meta(MetaType::Visibility),
+            Expression::Splice(splice) => {
+                self.diagnostics.push(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    "splices are only allowed inside `quote`",
+                ));
+                CompileType::Error
+            }
+            Expression::SyntaxArgument(argument) => {
+                self.diagnostics.push(Diagnostic::new(
+                    argument.syntax.span.clone(),
+                    "grouped type or pattern syntax may only be passed to a matching macro parameter",
+                ));
+                CompileType::Error
+            }
+            Expression::StringTemplate(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "string templates are not available during compile-time macro evaluation",
+                ));
+                CompileType::Error
+            }
+            Expression::Resource(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "resources are not available during compile-time macro evaluation",
+                ));
+                CompileType::Error
+            }
+            Expression::With(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "resources are not available during compile-time macro evaluation",
+                ));
+                CompileType::Error
+            }
+            Expression::Loop(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "loops are not supported during compile-time evaluation",
+                ));
+                CompileType::Error
+            }
+            Expression::CString(_) => CompileType::Named("CString".to_owned()),
+        };
+        if let Some(expected) = expected
+            && !matches!(expression, Expression::Quote(quote) if quote.kind == staple_syntax::QuoteKind::Quote)
+        {
+            self.require_compile_type(&actual, expected, expression.syntax().span.clone());
+        }
+        actual
+    }
+
+    fn check_compile_item(
+        &mut self,
+        module: ModuleId,
+        item: &Item,
+        environment: &mut CompileEnvironment,
+        expected: Option<&CompileType>,
+    ) -> CompileType {
+        match item {
+            Item::Binding(binding) => {
+                let annotation = binding.annotation.as_ref().map(compile_type);
+                let ty = binding.value.as_ref().map_or(CompileType::Error, |value| {
+                    self.check_compile_expression(module, value, environment, annotation.as_ref())
+                });
+                environment.insert(
+                    binding.name.clone(),
+                    CompileBinding {
+                        ty: annotation.unwrap_or(ty),
+                        mutable: binding.mutable,
+                    },
+                );
+                CompileType::Product(Vec::new())
+            }
+            Item::PatternBinding(binding) => {
+                let ty = self.check_compile_expression(module, &binding.value, environment, None);
+                self.bind_compile_pattern(module, &binding.pattern, &ty, environment);
+                CompileType::Product(Vec::new())
+            }
+            Item::Assignment(assignment) => {
+                let target = self.check_compile_expression(module, &assignment.target, environment, None);
+                self.check_compile_expression(module, &assignment.value, environment, Some(&target));
+                if let Expression::Name(name) = &assignment.target
+                    && environment.get(&name.name).is_some_and(|binding| !binding.mutable)
+                {
+                    self.diagnostics.push(Diagnostic::new(
+                        assignment.target.syntax().span.clone(),
+                        format!("cannot assign to immutable compile-time binding `{}`", name.name),
+                    ));
+                }
+                CompileType::Product(Vec::new())
+            }
+            Item::Expression(value) => {
+                self.check_compile_expression(module, value, environment, expected)
+            }
+            Item::Return(value) => {
+                self.check_compile_expression(module, &value.value, environment, expected)
+            }
+            Item::Break(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "`break` is not supported during compile-time evaluation",
+                ));
+                CompileType::Error
+            }
+            Item::Continue(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "`continue` is not supported during compile-time evaluation",
+                ));
+                CompileType::Error
+            }
+            other => {
+                self.diagnostics.push(Diagnostic::new(
+                    other.syntax().span.clone(),
+                    "this item is not supported during compile-time evaluation",
+                ));
+                CompileType::Error
+            }
+        }
+    }
+
+    fn check_compile_call(
+        &mut self,
+        module: ModuleId,
+        expression: &Expression,
+        environment: &mut CompileEnvironment,
+    ) -> CompileType {
+        let (head, arguments) = flatten_call(expression);
+        if let Some(keys) = self.resolve_macro(module, head) {
+            let matching = keys
+                .iter()
+                .filter_map(|key| self.definitions.get(key))
+                .find(|definition| {
+                    arguments.len() >= definition.arity
+                        && definition
+                            .parameters
+                            .iter()
+                            .zip(arguments.iter())
+                            .all(|(expected, argument)| meta_type_matches(expected, argument))
+                })
+                .cloned();
+            if let Some(definition) = matching {
+                return CompileType::Meta(definition.result);
+            }
+            self.diagnostics.push(Diagnostic::new(
+                expression.syntax().span.clone(),
+                "no macro overload matches these compile-time arguments",
+            ));
+            return CompileType::Error;
+        }
+
+        if let Expression::Name(name) = head
+            && name.name.chars().next().is_some_and(char::is_uppercase)
+        {
+            let argument = arguments
+                .first()
+                .map(|argument| self.check_compile_expression(module, argument, environment, None))
+                .unwrap_or_else(|| CompileType::Product(Vec::new()));
+            return compile_constructor_type(&name.name, argument);
+        }
+
+        let mut callee = self.check_compile_expression(module, head, environment, None);
+        for argument in arguments {
+            let CompileType::Function(parameter, result) = callee else {
+                if callee != CompileType::Error && callee != CompileType::Unknown {
+                    self.diagnostics.push(Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        "cannot call this compile-time value",
+                    ));
+                }
+                return CompileType::Error;
+            };
+            self.check_compile_expression(module, argument, environment, Some(&parameter));
+            callee = *result;
+        }
+        callee
+    }
+
+    fn compile_name_type(
+        &mut self,
+        module: ModuleId,
+        name: &staple_syntax::NameExpression,
+        environment: &CompileEnvironment,
+    ) -> CompileType {
+        if let Some(binding) = environment.get(&name.name) {
+            return binding.ty.clone();
+        }
+        let mut cursor = name
+            .syntax
+            .definition_module()
+            .map(ModuleId)
+            .unwrap_or(module);
+        loop {
+            if let Some(helper) = self.scopes[cursor.0].helpers.get(&name.name).cloned() {
+                self.check_compile_helper(&helper);
+                return helper_compile_type(&helper.binding);
+            }
+            if !self.companion_modules[cursor.0] {
+                break;
+            }
+            let Some(parent) = self.parent_modules[cursor.0] else {
+                break;
+            };
+            cursor = parent;
+        }
+        if let Some(ty) = compile_builtin_name_type(&name.name) {
+            return ty;
+        }
+        self.diagnostics.push(Diagnostic::new(
+            name.syntax.span.clone(),
+            format!("compile-time name `{}` is not available", name.name),
+        ));
+        CompileType::Error
+    }
+
+    fn qualified_compile_helper(
+        &self,
+        module: ModuleId,
+        access: &staple_syntax::AccessExpression,
+    ) -> Option<HelperDefinition> {
+        let (namespace, item, definition_module) = qualified_macro_access_path(access)?;
+        let context = definition_module.map(ModuleId).unwrap_or(module);
+        let target = self.scopes[context.0].namespaces.get(&namespace)?;
+        self.scopes[target.0].helpers.get(&item).cloned()
+    }
+
+    fn bind_compile_pattern(
+        &mut self,
+        module: ModuleId,
+        pattern: &Pattern,
+        ty: &CompileType,
+        environment: &mut CompileEnvironment,
+    ) {
+        match pattern {
+            Pattern::At(at) => {
+                environment.insert(
+                    at.binding.name.clone(),
+                    CompileBinding { ty: ty.clone(), mutable: at.binding.mutable },
+                );
+                self.bind_compile_pattern(module, &at.pattern, ty, environment);
+            }
+            Pattern::Binding(binding)
+                if !binding.name.chars().next().is_some_and(char::is_uppercase) =>
+            {
+                let bound = if matches!(binding.ty, Type::Inferred(_)) {
+                    ty.clone()
+                } else {
+                    compile_type(&binding.ty)
+                };
+                self.require_compile_type(&bound, ty, binding.syntax.span.clone());
+                environment.insert(
+                    binding.name.clone(),
+                    CompileBinding { ty: bound, mutable: binding.mutable },
+                );
+            }
+            Pattern::Product(product) => {
+                let fields = compile_product_fields(ty, product.elements.len());
+                for (index, element) in product.elements.iter().enumerate() {
+                    self.bind_compile_pattern(
+                        module,
+                        element,
+                        fields.get(index).unwrap_or(&CompileType::Unknown),
+                        environment,
+                    );
+                }
+            }
+            Pattern::Nominal(nominal) => {
+                let representation = compile_constructor_representation(ty, &nominal.name)
+                    .unwrap_or(CompileType::Unknown);
+                self.bind_compile_pattern(module, &nominal.argument, &representation, environment);
+            }
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) | Pattern::Binding(_) => {}
+        }
+    }
+
+    fn check_quote_splices(
+        &mut self,
+        module: ModuleId,
+        quote: &staple_syntax::QuoteExpression,
+        environment: &CompileEnvironment,
+    ) {
+        match &quote.template {
+            staple_syntax::QuoteTemplate::Expression(value) => {
+                self.check_quoted_expression(module, value, environment)
+            }
+            staple_syntax::QuoteTemplate::Item(item) => {
+                self.check_quoted_item(module, item, environment)
+            }
+            staple_syntax::QuoteTemplate::Items(items) => {
+                for item in items {
+                    self.check_quoted_item(module, item, environment);
+                }
+            }
+            staple_syntax::QuoteTemplate::Raw => {
+                for token in quote.contents.tokens().windows(2) {
+                    if token[0].kind == staple_syntax::TokenKind::Dollar
+                        && token[1].kind == staple_syntax::TokenKind::Identifier
+                        && !environment.contains_key(&token[1].text)
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            quote.syntax.span.clone(),
+                            format!("unknown splice `${}`", token[1].text),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_quoted_expression(
+        &mut self,
+        module: ModuleId,
+        expression: &Expression,
+        environment: &CompileEnvironment,
+    ) {
+        match expression {
+            Expression::Splice(splice) => {
+                if !environment.contains_key(&splice.name) {
+                    self.diagnostics.push(Diagnostic::new(
+                        splice.syntax.span.clone(),
+                        format!("unknown splice `${}`", splice.name),
+                    ));
+                }
+            }
+            Expression::Function(value) => self.check_quoted_expression(module, &value.body, environment),
+            Expression::Satisfies(value) => self.check_quoted_expression(module, &value.value, environment),
+            Expression::Match(value) => {
+                self.check_quoted_expression(module, &value.subject, environment);
+                for arm in &value.arms { self.check_quoted_expression(module, &arm.body, environment); }
+            }
+            Expression::Block(value) | Expression::Loop(staple_syntax::LoopExpression { body: value, .. }) => {
+                for item in &value.items { self.check_quoted_item(module, item, environment); }
+            }
+            Expression::Product(value) => for element in &value.elements { self.check_quoted_expression(module, &element.value, environment); },
+            Expression::RepeatedProduct(value) => { self.check_quoted_expression(module, &value.value, environment); self.check_quoted_expression(module, &value.count, environment); }
+            Expression::Call(value) => { self.check_quoted_expression(module, &value.callee, environment); self.check_quoted_expression(module, &value.argument, environment); }
+            Expression::Access(value) => self.check_quoted_expression(module, &value.value, environment),
+            Expression::Index(value) => { self.check_quoted_expression(module, &value.value, environment); self.check_quoted_expression(module, &value.index, environment); }
+            Expression::Binary(value) => { self.check_quoted_expression(module, &value.left, environment); self.check_quoted_expression(module, &value.right, environment); }
+            Expression::Logical(value) => { self.check_quoted_expression(module, &value.left, environment); self.check_quoted_expression(module, &value.right, environment); }
+            Expression::Quote(value) => self.check_quote_splices(module, value, environment),
+            Expression::With(value) => { self.check_quoted_expression(module, &value.value, environment); for item in &value.body.items { self.check_quoted_item(module, item, environment); } }
+            _ => {}
+        }
+    }
+
+    fn check_quoted_item(&mut self, module: ModuleId, item: &Item, environment: &CompileEnvironment) {
+        match item {
+            Item::Binding(value) => if let Some(value) = &value.value { self.check_quoted_expression(module, value, environment); },
+            Item::PatternBinding(value) => self.check_quoted_expression(module, &value.value, environment),
+            Item::Assignment(value) => { self.check_quoted_expression(module, &value.target, environment); self.check_quoted_expression(module, &value.value, environment); }
+            Item::Return(value) => self.check_quoted_expression(module, &value.value, environment),
+            Item::Break(value) => if let Some(value) = &value.value { self.check_quoted_expression(module, value, environment); },
+            Item::Expression(value) => self.check_quoted_expression(module, value, environment),
+            _ => {}
+        }
+    }
+
+    fn require_compile_type(&mut self, actual: &CompileType, expected: &CompileType, span: Span) {
+        if !compile_types_compatible(actual, expected) {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("expected `{}`, found `{}`", format_compile_type(expected), format_compile_type(actual)),
+            ));
         }
     }
 
@@ -7408,6 +8098,770 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
             format!("{name} {contents}")
         }
     }
+}
+
+fn compile_type(ty: &Type) -> CompileType {
+    if let Some(meta) = meta_type(ty) {
+        return CompileType::Meta(meta);
+    }
+    match ty {
+        Type::Named(named) => match named.name.as_str() {
+            "Never" => CompileType::Never,
+            "String" => CompileType::String,
+            "Integer" | "I8" | "I16" | "I32" | "I64" | "ISize" | "U8" | "U16"
+            | "U32" | "U64" | "USize" => CompileType::Integer,
+            "Float" | "F32" | "F64" => CompileType::Float,
+            "Bool" => CompileType::Bool,
+            name => CompileType::Named(name.to_owned()),
+        },
+        Type::NumberLiteral(_) => CompileType::Integer,
+        Type::StringLiteral(_) => CompileType::String,
+        Type::Inferred(_) | Type::Splice(_) => CompileType::Unknown,
+        Type::Product(product) => CompileType::Product(
+            product.elements.iter().map(|element| compile_type(&element.ty)).collect(),
+        ),
+        Type::Function(function) => CompileType::Function(
+            Box::new(compile_type(&function.parameter)),
+            Box::new(compile_type(&function.result)),
+        ),
+        Type::Sum(_) | Type::Application(_) | Type::Repeated(_) => {
+            CompileType::Named(ty.to_string())
+        }
+    }
+}
+
+fn compile_pattern_annotation(pattern: &Pattern) -> Option<CompileType> {
+    match pattern {
+        Pattern::Binding(binding) if !matches!(binding.ty, Type::Inferred(_)) => {
+            Some(compile_type(&binding.ty))
+        }
+        Pattern::Wildcard(wildcard) if !matches!(wildcard.ty, Type::Inferred(_)) => {
+            Some(compile_type(&wildcard.ty))
+        }
+        Pattern::At(at) if !matches!(at.binding.ty, Type::Inferred(_)) => {
+            Some(compile_type(&at.binding.ty))
+        }
+        Pattern::At(at) => compile_pattern_annotation(&at.pattern),
+        Pattern::Product(product) => Some(CompileType::Product(
+            product
+                .elements
+                .iter()
+                .map(|element| compile_pattern_annotation(element).unwrap_or(CompileType::Unknown))
+                .collect(),
+        )),
+        _ => None,
+    }
+}
+
+fn helper_compile_type(binding: &Binding) -> CompileType {
+    binding
+        .annotation
+        .as_ref()
+        .map(compile_type)
+        .or_else(|| binding.value.as_ref().and_then(infer_compile_function_type))
+        .unwrap_or(CompileType::Unknown)
+}
+
+fn infer_compile_function_type(expression: &Expression) -> Option<CompileType> {
+    let Expression::Function(function) = expression else {
+        return None;
+    };
+    let parameter = compile_pattern_annotation(&function.pattern).unwrap_or(CompileType::Unknown);
+    let result = infer_compile_function_type(&function.body).unwrap_or(CompileType::Unknown);
+    Some(CompileType::Function(Box::new(parameter), Box::new(result)))
+}
+
+fn compile_builtin_name_type(name: &str) -> Option<CompileType> {
+    Some(match name {
+        "Private" | "Package" | "Public" | "PublicReprPackage" | "PublicRepr" => {
+            CompileType::Meta(MetaType::Visibility)
+        }
+        "Comma" => CompileType::Meta(MetaType::Comma),
+        "Equals" => CompileType::Meta(MetaType::Equals),
+        "FatArrow" => CompileType::Meta(MetaType::FatArrow),
+        "True" | "False" => CompileType::Bool,
+        "None" => CompileType::Named("None".to_owned()),
+        name if name.chars().next().is_some_and(char::is_uppercase) => {
+            CompileType::Named(name.to_owned())
+        }
+        _ => return None,
+    })
+}
+
+fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
+    match name {
+        "Ident" => CompileType::Meta(MetaType::Ident(None)),
+        "CallExpr" => CompileType::Meta(MetaType::CallExpr),
+        "StringExpr" => CompileType::Meta(MetaType::StringExpr),
+        "BindingPattern" => CompileType::Meta(MetaType::BindingPattern),
+        "NominalPattern" => CompileType::Meta(MetaType::NominalPattern),
+        "ModifiedItem" => CompileType::Meta(MetaType::ModifiedItem),
+        "TypeDeclarationItem" => CompileType::Meta(MetaType::TypeDeclarationItem),
+        "UnstructuredItem" => CompileType::Meta(MetaType::UnstructuredItem),
+        "Parenthesized" => CompileType::Meta(MetaType::Delimited(
+            DelimiterKind::Parenthesized,
+            compile_delimited_contents(&argument),
+        )),
+        "Bracketed" => CompileType::Meta(MetaType::Delimited(
+            DelimiterKind::Bracketed,
+            compile_delimited_contents(&argument),
+        )),
+        "Braced" => CompileType::Meta(MetaType::Delimited(
+            DelimiterKind::Braced,
+            compile_delimited_contents(&argument),
+        )),
+        "Sequence" => match argument {
+            CompileType::Product(elements) if elements.is_empty() => {
+                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::SyntaxNode)))
+            }
+            CompileType::Product(mut elements) if !elements.is_empty() => {
+                let element = elements.remove(0);
+                let meta = compile_type_as_meta(&element).unwrap_or(MetaType::SyntaxNode);
+                CompileType::Meta(MetaType::Sequence(Box::new(meta)))
+            }
+            _ => CompileType::Meta(MetaType::Sequence(Box::new(MetaType::SyntaxNode))),
+        },
+        "Some" | "None" => CompileType::Named("Optional".to_owned()),
+        "True" | "False" => CompileType::Bool,
+        _ => CompileType::Named(name.to_owned()),
+    }
+}
+
+fn compile_delimited_contents(argument: &CompileType) -> DelimitedMetaContents {
+    match argument {
+        CompileType::Product(elements) => DelimitedMetaContents::Fixed(
+            elements
+                .iter()
+                .map(|element| compile_type_as_meta(element).unwrap_or(MetaType::SyntaxNode))
+                .collect(),
+        ),
+        _ => DelimitedMetaContents::Fixed(vec![
+            compile_type_as_meta(argument).unwrap_or(MetaType::SyntaxNode),
+        ]),
+    }
+}
+
+fn compile_type_as_meta(ty: &CompileType) -> Option<MetaType> {
+    match ty {
+        CompileType::Meta(meta) => Some(meta.clone()),
+        CompileType::Product(elements) => elements
+            .iter()
+            .map(compile_type_as_meta)
+            .collect::<Option<Vec<_>>>()
+            .map(MetaType::Product),
+        _ => None,
+    }
+}
+
+fn inferred_compile_quote_type(quote: &staple_syntax::QuoteExpression) -> CompileType {
+    CompileType::Meta(match &quote.template {
+        staple_syntax::QuoteTemplate::Expression(_) => MetaType::Expr,
+        staple_syntax::QuoteTemplate::Item(_) => MetaType::Item,
+        staple_syntax::QuoteTemplate::Items(_) => MetaType::Sequence(Box::new(MetaType::Item)),
+        staple_syntax::QuoteTemplate::Raw => MetaType::Syntax,
+    })
+}
+
+fn compile_types_compatible(actual: &CompileType, expected: &CompileType) -> bool {
+    if matches!(actual, CompileType::Error | CompileType::Unknown | CompileType::Never)
+        || matches!(expected, CompileType::Error | CompileType::Unknown)
+        || compile_type_contains_unknown(actual)
+        || compile_type_contains_unknown(expected)
+    {
+        return true;
+    }
+    if format_compile_type(actual) == format_compile_type(expected) {
+        return true;
+    }
+    match (actual, expected) {
+        (CompileType::Meta(actual), CompileType::Meta(expected)) => {
+            actual == expected
+                || matches!((actual, expected), (MetaType::Sequence(actual), MetaType::Sequence(expected))
+                    if **actual == MetaType::SyntaxNode || **expected == MetaType::SyntaxNode || actual == expected)
+                || *expected == MetaType::SyntaxNode
+                || (*expected == MetaType::Expr && actual.is_expression())
+                || (*expected == MetaType::Item
+                    && matches!(actual, MetaType::ModifiedItem | MetaType::TypeDeclarationItem | MetaType::UnstructuredItem))
+                || (*expected == MetaType::Pattern
+                    && matches!(actual, MetaType::BindingPattern | MetaType::NominalPattern))
+        }
+        (CompileType::Product(actual), CompileType::Product(expected)) => {
+            actual.len() == expected.len()
+                && actual.iter().zip(expected).all(|(a, e)| compile_types_compatible(a, e))
+        }
+        (CompileType::Function(ap, ar), CompileType::Function(ep, er)) => {
+            compile_types_compatible(ap, ep) && compile_types_compatible(ar, er)
+        }
+        (CompileType::Named(actual), CompileType::Named(expected)) => actual == expected,
+        _ => actual == expected,
+    }
+}
+
+fn compile_type_contains_unknown(ty: &CompileType) -> bool {
+    match ty {
+        CompileType::Unknown => true,
+        CompileType::Product(elements) => elements.iter().any(compile_type_contains_unknown),
+        CompileType::Function(parameter, result) => {
+            compile_type_contains_unknown(parameter) || compile_type_contains_unknown(result)
+        }
+        _ => false,
+    }
+}
+
+fn join_compile_types(left: CompileType, right: CompileType) -> CompileType {
+    if left == CompileType::Never { return right; }
+    if right == CompileType::Never { return left; }
+    if left == CompileType::Error || right == CompileType::Error { return CompileType::Error; }
+    if compile_types_compatible(&left, &right) { left } else { CompileType::Unknown }
+}
+
+fn format_compile_type(ty: &CompileType) -> String {
+    match ty {
+        CompileType::Error => "<error>".to_owned(),
+        CompileType::Unknown => "_".to_owned(),
+        CompileType::Never => "Never".to_owned(),
+        CompileType::String => "String".to_owned(),
+        CompileType::Integer => "Integer".to_owned(),
+        CompileType::Float => "Float".to_owned(),
+        CompileType::Bool => "Bool".to_owned(),
+        CompileType::Named(name) => name.clone(),
+        CompileType::Meta(meta) => format_meta_type(meta),
+        CompileType::Product(elements) => format!("({})", elements.iter().map(format_compile_type).collect::<Vec<_>>().join(", ")),
+        CompileType::Function(parameter, result) => format!("{} -> {}", format_compile_type(parameter), format_compile_type(result)),
+    }
+}
+
+fn accessor_name(accessor: &Accessor) -> String {
+    match accessor {
+        Accessor::Name(name) | Accessor::Index(name) | Accessor::Method(name) => name.clone(),
+        Accessor::Representation => "representation".to_owned(),
+    }
+}
+
+fn compile_field_type(ty: &CompileType, accessor: &Accessor) -> Option<CompileType> {
+    let Accessor::Name(name) = accessor else { return None; };
+    match (ty, name.as_str()) {
+        (CompileType::Meta(MetaType::CallExpr), "callee" | "argument") => Some(CompileType::Meta(MetaType::Expr)),
+        (CompileType::Meta(MetaType::MacroCallMetadata), "modifiers") => Some(CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Modifier)))),
+        (CompileType::Meta(MetaType::MacroCallMetadata), "visibility") => Some(CompileType::Meta(MetaType::Visibility)),
+        _ => None,
+    }
+}
+
+fn compile_product_fields(ty: &CompileType, length: usize) -> Vec<CompileType> {
+    match ty {
+        CompileType::Product(elements) => elements.clone(),
+        CompileType::Meta(MetaType::Product(elements)) => {
+            elements.iter().cloned().map(CompileType::Meta).collect()
+        }
+        CompileType::Meta(MetaType::MacroCallMetadata) if length == 2 => vec![
+            CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Modifier))),
+            CompileType::Meta(MetaType::Visibility),
+        ],
+        CompileType::Meta(MetaType::Sequence(element)) if length == 2 => vec![
+            CompileType::Meta(element.as_ref().clone()),
+            CompileType::Meta(MetaType::Sequence(element.clone())),
+        ],
+        _ => vec![CompileType::Unknown; length],
+    }
+}
+
+fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<CompileType> {
+    match (ty, name) {
+        (CompileType::Meta(MetaType::Optional(element)), "Some") => {
+            Some(CompileType::Meta(element.as_ref().clone()))
+        }
+        (CompileType::Meta(MetaType::Optional(_)), "None") => {
+            Some(CompileType::Product(Vec::new()))
+        }
+        (CompileType::Meta(MetaType::Sequence(element)), "Sequence") => Some(CompileType::Product(vec![
+            CompileType::Meta(element.as_ref().clone()),
+            CompileType::Meta(MetaType::Sequence(element.clone())),
+        ])),
+        (CompileType::Meta(MetaType::ModifiedItem), "ModifiedItem")
+        | (CompileType::Meta(MetaType::Item), "ModifiedItem") => Some(CompileType::Product(vec![
+            CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Modifier))),
+            CompileType::Meta(MetaType::Item),
+        ])),
+        (CompileType::Meta(MetaType::TypeDeclarationItem), "TypeDeclarationItem")
+        | (CompileType::Meta(MetaType::Item), "TypeDeclarationItem") => Some(CompileType::Product(vec![
+            CompileType::Named("TypeDeclarationKind".to_owned()),
+        ])),
+        (CompileType::Meta(MetaType::Ident(_)), "Ident") => Some(CompileType::String),
+        (CompileType::Meta(MetaType::CallExpr), "CallExpr") => Some(CompileType::Product(vec![CompileType::Meta(MetaType::Expr), CompileType::Meta(MetaType::Expr)])),
+        _ => None,
+    }
+}
+
+fn compile_coverage_pattern(pattern: &Pattern, ty: &CompileType) -> CompileCoveragePattern {
+    if let Pattern::Product(product) = pattern
+        && product.elements.len() == 1
+        && compile_product_fields(ty, 2).len() != 1
+    {
+        return compile_coverage_pattern(&product.elements[0], ty);
+    }
+    match pattern {
+        Pattern::At(at) => compile_coverage_pattern(&at.pattern, ty),
+        Pattern::Wildcard(_) => CompileCoveragePattern::Any,
+        Pattern::Binding(binding)
+            if !binding.name.chars().next().is_some_and(char::is_uppercase) =>
+        {
+            CompileCoveragePattern::Any
+        }
+        Pattern::Binding(binding) => {
+            CompileCoveragePattern::Constructor(binding.name.clone(), Vec::new())
+        }
+        Pattern::StringLiteral(pattern) => CompileCoveragePattern::Literal(
+            staple_syntax::string_literal::decode(&pattern.literal)
+                .unwrap_or_else(|_| pattern.literal.clone()),
+        ),
+        Pattern::Product(product) => CompileCoveragePattern::Constructor(
+            "$product".to_owned(),
+            product
+                .elements
+                .iter()
+                .zip(compile_product_fields(ty, product.elements.len()))
+                .map(|(pattern, ty)| compile_coverage_pattern(pattern, &ty))
+                .collect(),
+        ),
+        Pattern::Nominal(nominal) if nominal.name == "Sequence" => {
+            compile_sequence_coverage_pattern(&nominal.argument, ty)
+        }
+        Pattern::Nominal(nominal) => {
+            let representation = compile_constructor_representation(ty, &nominal.name)
+                .unwrap_or(CompileType::Unknown);
+            let argument = compile_coverage_pattern(&nominal.argument, &representation);
+            let arguments = match argument {
+                CompileCoveragePattern::Constructor(name, arguments) if name == "$product" => arguments,
+                other => vec![other],
+            };
+            CompileCoveragePattern::Constructor(nominal.name.clone(), arguments)
+        }
+        Pattern::Splice(_) => CompileCoveragePattern::Invalid,
+    }
+}
+
+fn compile_pattern_is_catch_all(pattern: &Pattern) -> bool {
+    match pattern {
+        Pattern::Wildcard(_) => true,
+        Pattern::At(at) => compile_pattern_is_catch_all(&at.pattern),
+        Pattern::Binding(binding) => {
+            !binding.name.chars().next().is_some_and(char::is_uppercase)
+                && matches!(binding.ty, Type::Inferred(_))
+        }
+        _ => false,
+    }
+}
+
+fn compile_pattern_is_useful(previous: &[&Pattern], candidate: &Pattern) -> bool {
+    if previous.iter().any(|pattern| compile_pattern_is_catch_all(pattern)) {
+        return false;
+    }
+    !previous
+        .iter()
+        .any(|pattern| pattern.syntax().text() == candidate.syntax().text())
+}
+
+fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> bool {
+    if patterns.iter().any(|pattern| compile_pattern_covers_type(pattern, ty)) {
+        return true;
+    }
+    match ty {
+        CompileType::Bool => ["True", "False"]
+            .iter()
+            .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Product(_) | CompileType::Meta(MetaType::Product(_)) => {
+            compile_pattern_matrix_is_exhaustive(ty, patterns)
+        }
+        CompileType::Meta(MetaType::Sequence(_)) => {
+            let empty = patterns.iter().any(|pattern| sequence_pattern_kind(pattern) == Some(false));
+            let all_non_empty = patterns.iter().any(|pattern| sequence_pattern_kind(pattern) == Some(true));
+            (empty && all_non_empty) || patterns.len() >= 2
+        }
+        CompileType::Meta(MetaType::Optional(_)) => {
+            ["None", "Some"].iter().all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name)))
+        }
+        CompileType::Named(name) if name == "Optional" => {
+            ["None", "Some"].iter().all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name)))
+        }
+        CompileType::Meta(MetaType::Visibility) => ["Private", "Package", "Public", "PublicReprPackage", "PublicRepr"]
+            .iter()
+            .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Named(name) if name == "TypeDeclarationKind" => ["AliasDeclaration", "DistinctDeclaration", "SingletonDeclaration", "OpaqueDeclaration"]
+            .iter()
+            .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Meta(MetaType::Item) => ["ModifiedItem", "TypeDeclarationItem", "UnstructuredItem"]
+            .iter()
+            .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Meta(MetaType::Expr) => ["Ident", "CallExpr", "StringExpr", "UnstructuredExpr"]
+            .iter()
+            .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Meta(MetaType::Pattern) => ["BindingPattern", "NominalPattern", "UnstructuredPattern"]
+            .iter()
+            .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
+        CompileType::Meta(MetaType::Delimited(kind, contents)) => {
+            let expected = match kind {
+                DelimiterKind::Parenthesized => "Parenthesized",
+                DelimiterKind::Bracketed => "Bracketed",
+                DelimiterKind::Braced => "Braced",
+            };
+            patterns.iter().any(|pattern| {
+                let Pattern::Nominal(nominal) = strip_at_pattern(pattern) else { return false; };
+                let _ = contents;
+                nominal.name == expected
+            })
+        }
+        CompileType::Meta(MetaType::CallExpr) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("CallExpr")),
+        CompileType::Meta(MetaType::Ident(None)) => patterns.iter().any(|pattern| {
+            let Pattern::Nominal(nominal) = strip_at_pattern(pattern) else { return false; };
+            nominal.name == "Ident" && compile_pattern_is_catch_all(&nominal.argument)
+        }),
+        CompileType::Meta(MetaType::Ident(Some(spelling))) => patterns.iter().any(|pattern| {
+            let Pattern::Nominal(nominal) = strip_at_pattern(pattern) else { return false; };
+            nominal.name == "Ident" && matches!(nominal.argument.as_ref(), Pattern::StringLiteral(value) if staple_syntax::string_literal::decode(&value.literal).is_ok_and(|value| &value == spelling))
+        }),
+        CompileType::Meta(MetaType::ModifiedItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("ModifiedItem")),
+        CompileType::Meta(MetaType::TypeDeclarationItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("TypeDeclarationItem")),
+        CompileType::Meta(MetaType::UnstructuredItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("UnstructuredItem")),
+        CompileType::Meta(MetaType::Comma) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("Comma")),
+        CompileType::Meta(MetaType::Equals) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("Equals")),
+        CompileType::Meta(MetaType::FatArrow) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("FatArrow")),
+        CompileType::Meta(MetaType::MacroCallMetadata) => patterns.iter().any(|pattern| matches!(strip_at_pattern(pattern), Pattern::Product(_))),
+        _ => false,
+    }
+}
+
+fn compile_pattern_matrix_is_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> bool {
+    let matrix = patterns
+        .iter()
+        .map(|pattern| vec![compile_coverage_pattern(pattern, ty)])
+        .collect::<Vec<_>>();
+    !compile_coverage_is_useful(
+        std::slice::from_ref(ty),
+        &matrix,
+        &[CompileCoveragePattern::Any],
+    )
+}
+
+fn compile_pattern_covers_type(pattern: &Pattern, ty: &CompileType) -> bool {
+    match strip_at_pattern(pattern) {
+        Pattern::Wildcard(wildcard) => {
+            matches!(wildcard.ty, Type::Inferred(_))
+                || compile_types_compatible(&compile_type(&wildcard.ty), ty)
+        }
+        Pattern::Binding(binding)
+            if !binding.name.chars().next().is_some_and(char::is_uppercase) =>
+        {
+            matches!(binding.ty, Type::Inferred(_))
+                || compile_types_compatible(&compile_type(&binding.ty), ty)
+        }
+        Pattern::Product(product) => {
+            let fields = compile_product_fields(ty, product.elements.len());
+            fields.len() == product.elements.len()
+                && product.elements.iter().zip(fields).all(|(pattern, ty)| {
+                    compile_pattern_covers_type(pattern, &ty)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn strip_at_pattern(mut pattern: &Pattern) -> &Pattern {
+    while let Pattern::At(at) = pattern { pattern = &at.pattern; }
+    pattern
+}
+
+fn strip_grouped_pattern(mut pattern: &Pattern) -> &Pattern {
+    loop {
+        pattern = strip_at_pattern(pattern);
+        match pattern {
+            Pattern::Product(product) if product.elements.len() == 1 => {
+                pattern = &product.elements[0];
+            }
+            _ => return pattern,
+        }
+    }
+}
+
+fn compile_pattern_constructor_name(pattern: &Pattern) -> Option<&str> {
+    match strip_at_pattern(pattern) {
+        Pattern::Binding(binding) if binding.name.chars().next().is_some_and(char::is_uppercase) => Some(&binding.name),
+        Pattern::Nominal(nominal) => Some(&nominal.name),
+        _ => None,
+    }
+}
+
+/// `Some(true)` means a head/tail pattern covering every non-empty sequence;
+/// `Some(false)` means the empty constructor.
+fn sequence_pattern_kind(pattern: &Pattern) -> Option<bool> {
+    let text = pattern.syntax().text();
+    if text.trim_start().starts_with("Sequence") {
+        if text.contains("first:") && text.contains("rest:") {
+            return Some(true);
+        }
+        if text.split_whitespace().collect::<String>().starts_with("Sequence()") {
+            return Some(false);
+        }
+    }
+    let Pattern::Nominal(nominal) = strip_at_pattern(pattern) else { return None; };
+    if nominal.name != "Sequence" { return None; }
+    let Pattern::Product(product) = strip_grouped_pattern(&nominal.argument) else { return None; };
+    if product.elements.is_empty() { return Some(false); }
+    if product.elements.len() == 2 {
+        return Some(true);
+    }
+    None
+}
+
+fn compile_sequence_coverage_pattern(
+    pattern: &Pattern,
+    ty: &CompileType,
+) -> CompileCoveragePattern {
+    let CompileType::Meta(MetaType::Sequence(element)) = ty else {
+        return CompileCoveragePattern::Invalid;
+    };
+    let Pattern::Product(product) = pattern else {
+        return CompileCoveragePattern::Invalid;
+    };
+    if product.elements.is_empty() {
+        return CompileCoveragePattern::Constructor("Sequence.Empty".to_owned(), Vec::new());
+    }
+    if product.elements.len() == 2
+        && matches!(&product.elements[0], Pattern::Binding(binding) if binding.name == "first")
+        && matches!(&product.elements[1], Pattern::Binding(binding) if binding.name == "rest")
+    {
+        return CompileCoveragePattern::Constructor(
+            "Sequence.Cons".to_owned(),
+            vec![
+                compile_coverage_pattern(&product.elements[0], &CompileType::Meta(element.as_ref().clone())),
+                compile_coverage_pattern(&product.elements[1], ty),
+            ],
+        );
+    }
+    let mut tail = CompileCoveragePattern::Constructor("Sequence.Empty".to_owned(), Vec::new());
+    for element_pattern in product.elements.iter().rev() {
+        tail = CompileCoveragePattern::Constructor(
+            "Sequence.Cons".to_owned(),
+            vec![
+                compile_coverage_pattern(element_pattern, &CompileType::Meta(element.as_ref().clone())),
+                tail,
+            ],
+        );
+    }
+    tail
+}
+
+fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<CompileType>)>> {
+    Some(match ty {
+        CompileType::Bool => vec![
+            ("True".to_owned(), Vec::new()),
+            ("False".to_owned(), Vec::new()),
+        ],
+        CompileType::Product(elements) => vec![("$product".to_owned(), elements.clone())],
+        CompileType::Meta(MetaType::Product(elements)) => vec![(
+            "$product".to_owned(),
+            elements.iter().cloned().map(CompileType::Meta).collect(),
+        )],
+        CompileType::Named(name) if name == "TypeDeclarationKind" => vec![
+            ("AliasDeclaration".to_owned(), Vec::new()),
+            ("DistinctDeclaration".to_owned(), Vec::new()),
+            ("SingletonDeclaration".to_owned(), Vec::new()),
+            ("OpaqueDeclaration".to_owned(), Vec::new()),
+        ],
+        CompileType::Meta(MetaType::Sequence(element)) => vec![
+            ("Sequence.Empty".to_owned(), Vec::new()),
+            (
+                "Sequence.Cons".to_owned(),
+                vec![
+                    CompileType::Meta(element.as_ref().clone()),
+                    CompileType::Meta(MetaType::Sequence(element.clone())),
+                ],
+            ),
+        ],
+        CompileType::Meta(MetaType::Optional(element)) => vec![
+            ("None".to_owned(), Vec::new()),
+            ("Some".to_owned(), vec![CompileType::Meta(element.as_ref().clone())]),
+        ],
+        CompileType::Meta(MetaType::Visibility) => vec![
+            ("Private".to_owned(), Vec::new()),
+            ("Package".to_owned(), Vec::new()),
+            ("Public".to_owned(), Vec::new()),
+            ("PublicReprPackage".to_owned(), Vec::new()),
+            ("PublicRepr".to_owned(), Vec::new()),
+        ],
+        CompileType::Meta(MetaType::Item) => vec![
+            (
+                "ModifiedItem".to_owned(),
+                vec![
+                    CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Modifier))),
+                    CompileType::Meta(MetaType::Item),
+                ],
+            ),
+            (
+                "TypeDeclarationItem".to_owned(),
+                vec![
+                    CompileType::Named("TypeDeclarationKind".to_owned()),
+                    CompileType::Meta(MetaType::Ident(None)),
+                    CompileType::String,
+                    CompileType::Meta(MetaType::Type),
+                    CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
+                    CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
+                ],
+            ),
+            ("UnstructuredItem".to_owned(), Vec::new()),
+        ],
+        CompileType::Meta(MetaType::ModifiedItem) => vec![(
+            "ModifiedItem".to_owned(),
+            vec![
+                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Modifier))),
+                CompileType::Meta(MetaType::Item),
+            ],
+        )],
+        CompileType::Meta(MetaType::TypeDeclarationItem) => vec![(
+            "TypeDeclarationItem".to_owned(),
+            vec![
+                CompileType::Named("TypeDeclarationKind".to_owned()),
+                CompileType::Meta(MetaType::Ident(None)),
+                CompileType::String,
+                CompileType::Meta(MetaType::Type),
+                CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Ident(None)))),
+                CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
+            ],
+        )],
+        CompileType::Meta(MetaType::UnstructuredItem) => vec![("UnstructuredItem".to_owned(), Vec::new())],
+        CompileType::Meta(MetaType::Ident(_)) => vec![("Ident".to_owned(), vec![CompileType::String])],
+        CompileType::Meta(MetaType::CallExpr) => vec![("CallExpr".to_owned(), vec![CompileType::Meta(MetaType::Expr), CompileType::Meta(MetaType::Expr)])],
+        CompileType::Meta(MetaType::Expr) => vec![
+            ("Ident".to_owned(), vec![CompileType::String]),
+            ("CallExpr".to_owned(), vec![CompileType::Meta(MetaType::Expr), CompileType::Meta(MetaType::Expr)]),
+            ("StringExpr".to_owned(), vec![CompileType::String]),
+            ("UnstructuredExpr".to_owned(), Vec::new()),
+        ],
+        CompileType::Meta(MetaType::Pattern) => vec![
+            ("BindingPattern".to_owned(), vec![CompileType::Meta(MetaType::Ident(None))]),
+            ("NominalPattern".to_owned(), vec![CompileType::Meta(MetaType::Ident(None)), CompileType::Meta(MetaType::Pattern)]),
+            ("UnstructuredPattern".to_owned(), Vec::new()),
+        ],
+        CompileType::Meta(MetaType::Delimited(kind, contents)) => {
+            let name = match kind {
+                DelimiterKind::Parenthesized => "Parenthesized",
+                DelimiterKind::Bracketed => "Bracketed",
+                DelimiterKind::Braced => "Braced",
+            };
+            let contents = match contents {
+                DelimitedMetaContents::Fixed(elements) => CompileType::Product(elements.iter().cloned().map(CompileType::Meta).collect()),
+                DelimitedMetaContents::Sequence(element) => CompileType::Meta(MetaType::Sequence(element.clone())),
+                DelimitedMetaContents::Separated { element, separator } => CompileType::Product(vec![
+                    CompileType::Meta(separator.as_ref().clone()),
+                    CompileType::Meta(MetaType::Sequence(element.clone())),
+                    CompileType::Bool,
+                ]),
+            };
+            vec![(name.to_owned(), match contents { CompileType::Product(elements) => elements, other => vec![other] })]
+        }
+        CompileType::Meta(MetaType::MacroCallMetadata) => vec![("$product".to_owned(), vec![
+            CompileType::Meta(MetaType::Sequence(Box::new(MetaType::Modifier))),
+            CompileType::Meta(MetaType::Visibility),
+        ])],
+        CompileType::Meta(MetaType::Comma) => vec![("Comma".to_owned(), Vec::new())],
+        CompileType::Meta(MetaType::Equals) => vec![("Equals".to_owned(), Vec::new())],
+        CompileType::Meta(MetaType::FatArrow) => vec![("FatArrow".to_owned(), Vec::new())],
+        _ => return None,
+    })
+}
+
+fn compile_coverage_is_useful(
+    types: &[CompileType],
+    matrix: &[Vec<CompileCoveragePattern>],
+    candidate: &[CompileCoveragePattern],
+) -> bool {
+    compile_coverage_is_useful_with_fuel(types, matrix, candidate, 256)
+}
+
+fn compile_coverage_is_useful_with_fuel(
+    types: &[CompileType],
+    matrix: &[Vec<CompileCoveragePattern>],
+    candidate: &[CompileCoveragePattern],
+    fuel: usize,
+) -> bool {
+    if fuel == 0 {
+        // Recursive syntax types can describe an unbounded constructor
+        // space. Conservatively retain the candidate rather than overflowing
+        // while proving usefulness.
+        return true;
+    }
+    if matrix.is_empty() {
+        return true;
+    }
+    if types.is_empty() {
+        return !matrix.iter().any(Vec::is_empty);
+    }
+    let first = &candidate[0];
+    if let Some(constructors) = compile_type_constructors(&types[0]) {
+        let selected = match first {
+            CompileCoveragePattern::Any => constructors,
+            CompileCoveragePattern::Constructor(name, _) => constructors
+                .into_iter()
+                .filter(|(constructor, _)| constructor == name)
+                .collect(),
+            CompileCoveragePattern::Literal(_) | CompileCoveragePattern::Invalid => return false,
+        };
+        return selected.into_iter().any(|(name, arguments)| {
+            let specialized_matrix = matrix
+                .iter()
+                .filter_map(|row| specialize_compile_coverage_row(row, &name, arguments.len()))
+                .collect::<Vec<_>>();
+            let Some(specialized_candidate) =
+                specialize_compile_coverage_row(candidate, &name, arguments.len())
+            else {
+                return false;
+            };
+            let mut specialized_types = arguments;
+            specialized_types.extend_from_slice(&types[1..]);
+            compile_coverage_is_useful_with_fuel(
+                &specialized_types,
+                &specialized_matrix,
+                &specialized_candidate,
+                fuel - 1,
+            )
+        });
+    }
+
+    match first {
+        CompileCoveragePattern::Literal(literal) => {
+            let specialized_matrix = matrix
+                .iter()
+                .filter(|row| matches!(&row[0], CompileCoveragePattern::Any) || matches!(&row[0], CompileCoveragePattern::Literal(value) if value == literal))
+                .map(|row| row[1..].to_vec())
+                .collect::<Vec<_>>();
+            compile_coverage_is_useful_with_fuel(&types[1..], &specialized_matrix, &candidate[1..], fuel - 1)
+        }
+        CompileCoveragePattern::Any => {
+            let specialized_matrix = matrix
+                .iter()
+                .filter(|row| matches!(row[0], CompileCoveragePattern::Any))
+                .map(|row| row[1..].to_vec())
+                .collect::<Vec<_>>();
+            compile_coverage_is_useful_with_fuel(&types[1..], &specialized_matrix, &candidate[1..], fuel - 1)
+        }
+        _ => false,
+    }
+}
+
+fn specialize_compile_coverage_row(
+    row: &[CompileCoveragePattern],
+    constructor: &str,
+    arity: usize,
+) -> Option<Vec<CompileCoveragePattern>> {
+    let mut result = match &row[0] {
+        CompileCoveragePattern::Any => vec![CompileCoveragePattern::Any; arity],
+        CompileCoveragePattern::Constructor(name, arguments) if name == constructor => {
+            if arguments.len() == arity { arguments.clone() } else { return None; }
+        }
+        _ => return None,
+    };
+    result.extend_from_slice(&row[1..]);
+    Some(result)
 }
 
 /// Reads a macro annotation's parameter list and result. Multiple

@@ -16,6 +16,7 @@ clauses => match clauses {
     ) => match first {
         (condition: Ident "else", _, fallback) => match rest {
             Sequence () => fallback,
+            _ => panic "when clauses after else are unsupported",
         },
         (condition, _, branch) => {
             let otherwise = when_clauses rest
@@ -68,14 +69,19 @@ def if_branches: (Expr, Expr, Sequence Expr) -> Expr = (condition, consequent, r
                                     let elif_consequent = first
                                     if_branches (elif_condition, elif_consequent, rest)
                                 },
+                                _ => panic "if without an else-if body is unsupported",
                             }
                         },
+                        _ => panic "if without an else-if condition is unsupported",
                     },
                     otherwise_branch => match rest {
                         Sequence () => otherwise_branch,
+                        _ => panic "if tokens after else are unsupported",
                     },
                 },
+                _ => panic "if without a branch after else is unsupported",
             },
+            _ => panic "if trailing syntax without else is unsupported",
         },
     }
     parse_quote {

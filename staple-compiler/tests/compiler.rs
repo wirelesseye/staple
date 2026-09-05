@@ -4675,6 +4675,7 @@ fn modified_item_can_be_destructured_and_reconstructed_losslessly() {
         "use std.syntax.(ModifiedItem, parse_quote, Item)\n",
         "macro @outer: Item -> Item = item => match item {\n",
         "    ModifiedItem (modifiers, inner) => ModifiedItem (modifiers: modifiers, item: inner),\n",
+        "    _ => panic \"outer item is unsupported\",\n",
         "}\n",
         "macro @inner: Parenthesized (Expr) * Item -> Item = value * _ => parse_quote { let reconstructed: I32 = $value }\n",
         "@outer\n",
@@ -4975,6 +4976,7 @@ fn parse_quote_produces_visibility_result_type() {
         "    let repr: Visibility = parse_quote { pub(repr) }\n",
         "    match (none, package_vis, pub_, package_repr, repr) {\n",
         "        (Private, Package, Public, PublicReprPackage, PublicRepr) => parse_quote { 42 },\n",
+        "        _ => panic \"unexpected visibility values are unsupported\",\n",
         "    }\n",
         "}\n",
         "let result: I32 = visibility (0)\n",
@@ -4998,6 +5000,7 @@ fn parse_quote_produces_delimited_result_types() {
         "         Bracketed (Sequence (Ident \"one\", Ident \"two\")),\n",
         "         Braced (Separated (separator: Comma, elements: (Ident \"x\", _), trailing: True()))) =>\n",
         "            match nested { Parenthesized _ => parse_quote { 42 } },\n",
+        "        _ => panic \"unexpected delimited syntax is unsupported\",\n",
         "    }\n",
         "}\n",
         "let result: I32 = delimited (0)\n",
@@ -5148,7 +5151,7 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
     for (source, expected) in [
         (
             "typegroup Empty {}\n",
-            "compile-time match was not exhaustive",
+            "macro `typegroup` panicked: empty typegroup is unsupported",
         ),
         (
             "macro invalid: Optional Type -> Expr = value => parse_quote { 0 }\ninvalid I32\n",
@@ -6379,9 +6382,10 @@ fn requires_else_to_be_the_last_braced_when_clause() {
         .resolve_program(program)
         .expect_err_diagnostics("a non-final else clause should be rejected");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message == "compile-time match was not exhaustive" })
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "macro `when` panicked: when clauses after else are unsupported"
+        })
     );
 }
 
@@ -7644,7 +7648,9 @@ fn exposes_type_declarations_as_structured_items() {
     let module = type_check(concat!(
         "macro @inspect_item: Item -> Item = item => match item {\n",
         "  TypeDeclarationItem (DistinctDeclaration(), Ident name, spelling, declared_type, parameters, Some representation) => item,\n",
-        "  UnstructuredItem() => item,\n}\n",
+        "  UnstructuredItem() => item,\n",
+        "  _ => panic \"inspect_item item is unsupported\",\n",
+        "}\n",
         "@inspect_item\ntype Pair T = (T, T)\n",
         "@inspect_item\ndef answer = () => 42\n",
         "let pair = Pair (1, 2)\nlet result = answer ()\n",
@@ -9854,3 +9860,59 @@ fn rejects_a_blanket_bounded_impl_that_overlaps_an_earlier_concrete_one() {
     }));
 }
 
+#[test]
+fn statically_checks_unused_macro_bodies_and_compile_time_helpers() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for source in [
+        "macro unused: Expr -> Expr = _ => missing_name\n",
+        concat!(
+            "def unused_helper: Expr -> Expr = value => missing_name\n",
+            "macro unused: Expr -> Expr = value => unused_helper value\n",
+        ),
+        concat!(
+            "def reached_helper: I32 -> I32 = value => missing_name\n",
+            "macro unused: Expr -> Expr = _ => { reached_helper 1; parse_quote { 0 } }\n",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(&with_syntax_imports(source), root)
+            .expect("invalid compile-time source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err_diagnostics("unused compile-time declarations should be checked");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("missing_name")),
+            "{diagnostics:#?}",
+        );
+    }
+}
+
+#[test]
+fn statically_checks_macro_match_coverage_before_expansion() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            &with_syntax_imports(concat!(
+                "macro invalid: Item -> Item = item => match item {\n",
+                "  ModifiedItem _ => item,\n",
+                "}\n",
+                "macro invoked: Expr -> Expr = _ => panic \"must not expand\"\n",
+                "let result = invoked (0)\n",
+            )),
+            root,
+        )
+        .expect("invalid compile-time source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("definition checking should precede expansion");
+    assert!(diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("non-exhaustive match")));
+    assert!(!diagnostics
+        .iter()
+        .any(|diagnostic| diagnostic.message.contains("must not expand")));
+}

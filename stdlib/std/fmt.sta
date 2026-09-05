@@ -103,6 +103,7 @@ pub macro @derive_debug: Item -> Sequence Item = item => match item {
             rest: Sequence (),
         ),
     ),
+    _ => panic "derive_debug item is unsupported",
 }
 
 def grow_formatter: mut Formatter -> () = mut formatter => {
