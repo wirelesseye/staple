@@ -1,0 +1,31 @@
+pub mod
+
+use std.io.printf
+use std.cinterop.(c_string, CString)
+
+// Nested so the raw C `exit` symbol (extern bindings are always named
+// exactly after their C symbol) doesn't collide with the `exit` wrapper
+// below.
+mod raw {
+    pub(package) extern "c" {
+        exit: I32 -> ()
+    }
+}
+
+use raw.exit as terminate
+
+/// Terminates the current process with the given exit code.
+pub def exit: I32 -> Never = code => {
+    let _ = terminate code
+    loop { continue }
+}
+
+/// Terminates the program after printing `message`.
+///
+/// Signals that a computation unexpectedly failed — this is not for
+/// reporting invalid macro-user syntax, which will use a separate
+/// `compile_error` function.
+pub def panic: String -> Never = message => {
+    let _ = printf (c_string "panic: %s\n", CString.from_string message)
+    exit 1
+}

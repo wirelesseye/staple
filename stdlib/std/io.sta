@@ -5,7 +5,7 @@ use std.cinterop.*
 /// The capability required for standard output operations.
 pub type IO = opaque
 
-extern "c" {
+pub(package) extern "c" {
     printf: (CPointer CChar, ...) -> I32
 }
 

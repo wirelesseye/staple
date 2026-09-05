@@ -398,9 +398,25 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         ));
                     };
                     let llvm_type = self.compile_native_function_type(function_type)?;
-                    let function = self
-                        .llvm_module
-                        .add_function(&binding.name, llvm_type, None);
+                    // Two `extern "c"` blocks (in different modules, e.g. a
+                    // stdlib module and a user program) can legally declare
+                    // the same C symbol. `add_function` doesn't check for an
+                    // existing declaration by name, so declaring it again
+                    // unconditionally would make LLVM silently rename the
+                    // second one, detaching it from the real symbol.
+                    let function = match self.llvm_module.get_function(&binding.name) {
+                        Some(existing) if existing.get_type() == llvm_type => existing,
+                        Some(_) => {
+                            return Err(Diagnostic::new(
+                                binding.syntax.span.clone(),
+                                format!(
+                                    "extern `{}` was already declared with a different type",
+                                    binding.name
+                                ),
+                            ));
+                        }
+                        None => self.llvm_module.add_function(&binding.name, llvm_type, None),
+                    };
                     self.globals.insert(symbol, function.into());
                     self.external_symbols.insert(symbol);
 
@@ -1536,9 +1552,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             if entry_reactive_scope_pushed && !environment.did_return {
                 self.dispose_reactive_scopes(&environment, 0, Span::Compiler)?;
             }
-            self.builder
-                .build_return(None)
-                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+            if !environment.did_return {
+                self.builder
+                    .build_return(None)
+                    .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+            }
         }
         Ok(())
     }

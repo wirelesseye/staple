@@ -964,6 +964,23 @@ struct MacroExpander {
     module_packages: Vec<Option<staple_project::PackageId>>,
     active_features: staple_project::ActiveFeatures,
     declared_features: HashMap<staple_project::PackageId, HashSet<String>>,
+    /// The `std/process.sta` module, so a compile-time call to the real
+    /// `panic` (however it was imported/aliased) can be recognized by
+    /// identity and short-circuited into a diagnostic instead of being
+    /// interpreted like an ordinary function — its body calls extern `c`
+    /// functions that have no compile-time meaning.
+    standard_library_process: Option<ModuleId>,
+    /// Call-site spans of the macro/modifier invocations currently being
+    /// evaluated, innermost last. A diagnostic raised while interpreting a
+    /// macro's body (such as a compile-time `panic`) should point at where
+    /// the macro was *called*, not at the line inside its definition that
+    /// happened to trigger the error.
+    invocation_spans: Vec<Span>,
+    /// Set when a compile-time `panic` call has just produced a
+    /// diagnostic that already names the panicking macro; consumed by the
+    /// nearest enclosing macro-invocation call site so it doesn't also
+    /// append a redundant "while expanding macro" trailer.
+    suppress_expansion_trailer: bool,
 }
 
 fn provisional_use_kind(program: &Program, declaration: &UseDeclaration) -> UseKind {
@@ -996,6 +1013,11 @@ impl MacroExpander {
         let prelude = program.standard_library_prelude();
         let syntax = program.standard_library_syntax();
         let cinterop = program.standard_library_cinterop();
+        let standard_library_process = program
+            .modules()
+            .iter()
+            .find(|module| module.path.ends_with(std::path::Path::new("std/process.sta")))
+            .map(|module| module.id);
 
         for source_module in program.modules() {
             for item in &source_module.syntax.items {
@@ -1621,6 +1643,9 @@ impl MacroExpander {
                         .collect()
                 })
                 .unwrap_or_default(),
+            standard_library_process,
+            suppress_expansion_trailer: false,
+            invocation_spans: Vec::new(),
         }
     }
 
@@ -2097,10 +2122,14 @@ impl MacroExpander {
         let Some(result) = result else {
             self.expansion_stack.pop();
             if self.diagnostics.len() > diagnostic_start {
-                self.diagnostics.push(Diagnostic::new(
-                    invocation.syntax.span,
-                    format!("while expanding macro `{}`", key.name),
-                ));
+                if self.suppress_expansion_trailer {
+                    self.suppress_expansion_trailer = false;
+                } else {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span,
+                        format!("while expanding macro `{}`", key.name),
+                    ));
+                }
             }
             return None;
         };
@@ -2399,10 +2428,14 @@ impl MacroExpander {
         let Some(items) = result else {
             self.expansion_stack.pop();
             if self.diagnostics.len() > diagnostic_start {
-                self.diagnostics.push(Diagnostic::new(
-                    invocation.syntax.span.clone(),
-                    format!("while expanding modifier macro `@{}`", key.name),
-                ));
+                if self.suppress_expansion_trailer {
+                    self.suppress_expansion_trailer = false;
+                } else {
+                    self.diagnostics.push(Diagnostic::new(
+                        invocation.syntax.span.clone(),
+                        format!("while expanding modifier macro `@{}`", key.name),
+                    ));
+                }
             }
             return None;
         };
@@ -2595,6 +2628,20 @@ impl MacroExpander {
         item: Item,
         call_span: Span,
     ) -> Option<Vec<Item>> {
+        self.invocation_spans.push(call_span.clone());
+        let result = self.invoke_modifier_inner(module, definition, argument, item, call_span);
+        self.invocation_spans.pop();
+        result
+    }
+
+    fn invoke_modifier_inner(
+        &mut self,
+        module: ModuleId,
+        definition: &MacroDefinition,
+        argument: Option<SyntaxValue>,
+        item: Item,
+        call_span: Span,
+    ) -> Option<Vec<Item>> {
         let MacroKind::User(body) = &definition.kind else {
             unreachable!("compiler-provided macros cannot be modifiers")
         };
@@ -2728,10 +2775,14 @@ impl MacroExpander {
         let Some(result) = result else {
             self.expansion_stack.pop();
             if self.diagnostics.len() > diagnostic_start {
-                self.diagnostics.push(Diagnostic::new(
-                    expression.syntax().span.clone(),
-                    format!("while expanding macro `{}`", key.name),
-                ));
+                if self.suppress_expansion_trailer {
+                    self.suppress_expansion_trailer = false;
+                } else {
+                    self.diagnostics.push(Diagnostic::new(
+                        expression.syntax().span.clone(),
+                        format!("while expanding macro `{}`", key.name),
+                    ));
+                }
             }
             return true;
         };
@@ -3120,10 +3171,14 @@ impl MacroExpander {
             let Some(result) = expanded else {
                 self.expansion_stack.pop();
                 if self.diagnostics.len() > diagnostic_start {
-                    self.diagnostics.push(Diagnostic::new(
-                        expression.syntax().span.clone(),
-                        format!("while expanding macro `{}`", key.name),
-                    ));
+                    if self.suppress_expansion_trailer {
+                        self.suppress_expansion_trailer = false;
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            expression.syntax().span.clone(),
+                            format!("while expanding macro `{}`", key.name),
+                        ));
+                    }
                 }
                 return expression;
             };
@@ -3511,6 +3566,18 @@ impl MacroExpander {
     }
 
     fn invoke_macro(
+        &mut self,
+        definition: &MacroDefinition,
+        arguments: Vec<MacroArgument>,
+        call_span: Span,
+    ) -> Option<SyntaxValue> {
+        self.invocation_spans.push(call_span.clone());
+        let result = self.invoke_macro_inner(definition, arguments, call_span);
+        self.invocation_spans.pop();
+        result
+    }
+
+    fn invoke_macro_inner(
         &mut self,
         definition: &MacroDefinition,
         arguments: Vec<MacroArgument>,
@@ -5052,6 +5119,24 @@ impl MacroExpander {
                 result
             }
             Value::Helper(module, binding) => {
+                if Some(module) == self.standard_library_process && binding.name == "panic" {
+                    let message = match &argument {
+                        Value::String(message) => {
+                            staple_syntax::string_literal::decode(message)
+                                .unwrap_or_else(|_| message.clone())
+                        }
+                        _ => "compile-time panic".to_string(),
+                    };
+                    let description = match self.expansion_stack.last() {
+                        Some(key) => format!("macro `{}` panicked: {message}", key.name),
+                        None => format!("panicked at compile time: {message}"),
+                    };
+                    let report_span = self.invocation_spans.last().cloned().unwrap_or(span);
+                    self.diagnostics
+                        .push(Diagnostic::new(report_span, description));
+                    self.suppress_expansion_trailer = true;
+                    return None;
+                }
                 let value = binding.value?;
                 let previous_context = binding
                     .annotation

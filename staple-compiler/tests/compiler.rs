@@ -6901,6 +6901,53 @@ fn diagnoses_incomplete_and_non_syntax_macros() {
 }
 
 #[test]
+fn panic_called_during_macro_expansion_reports_a_clean_diagnostic() {
+    // `panic`'s real body calls extern `c` functions (`printf`, `exit`),
+    // which have no compile-time meaning; the macro interpreter used to
+    // try to evaluate that body anyway and fail deep inside it with a
+    // confusing `` compile-time name `printf` is not available `` error,
+    // plus a redundant `while expanding macro` trailer. `panic` is now
+    // recognized by identity and short-circuited into a single clean
+    // diagnostic before its body is ever interpreted.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let source = concat!(
+        "use std.process.panic\n",
+        "macro always_fail = e: Expr => panic \"internal error\"\n",
+        "always_fail 42\n",
+    );
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(source, root)
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("a compile-time panic should fail resolution");
+    assert_eq!(
+        diagnostics.len(),
+        1,
+        "expected exactly one diagnostic, got {diagnostics:?}",
+    );
+    assert_eq!(
+        diagnostics[0].message,
+        "macro `always_fail` panicked: internal error",
+    );
+    // The span's start includes the newline that ends the previous line
+    // (an existing quirk of how top-level statement spans are computed,
+    // unrelated to this fix); what matters here is that it lands on the
+    // `always_fail 42` call-site line rather than inside the macro's own
+    // `panic "internal error"` definition.
+    let call_site = source
+        .rfind("\nalways_fail 42")
+        .expect("call site should be present in the source");
+    assert_eq!(
+        diagnostics[0].span.to_range().start,
+        call_site,
+        "the diagnostic should point at the macro call site, not at `panic` inside \
+         the macro's own definition",
+    );
+}
+
+#[test]
 fn rejects_runtime_syntax_values() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
@@ -9413,6 +9460,90 @@ fn supports_never_as_the_bottom_type_and_tracks_divergence() {
 }
 
 #[test]
+fn panic_diverges_and_unifies_with_any_expected_type() {
+    let module = type_check(concat!(
+        "use std.process.panic\n",
+        "def choose: Bool -> I32 = cond => match cond {\n",
+        "  True() => 1,\n",
+        "  False() => panic \"unreachable\",\n",
+        "}\n",
+    ));
+    let function = module
+        .functions()
+        .iter()
+        .find(|function| function.name == "choose")
+        .expect("choose should resolve");
+    assert_eq!(
+        *module
+            .type_of_function(function.id)
+            .expect("choose should be typed")
+            .result,
+        CheckedType::I32,
+    );
+
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("panic call should generate valid LLVM");
+    assert!(llvm.contains("unreachable"));
+}
+
+#[test]
+fn a_diverging_top_level_statement_does_not_double_terminate_its_module_initializer() {
+    // A `Never`-typed expression already closes its basic block with
+    // `unreachable`; `compile_module_initializers` used to then
+    // unconditionally emit a trailing `ret void` in the same block
+    // regardless, producing an invalid module ("Terminator found in the
+    // middle of a basic block") whenever the *last* top-level statement of
+    // a module diverged.
+    let module = type_check(concat!(
+        "def forever: () -> Never = () => loop { continue }\n",
+        "forever ()\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a diverging top-level statement should compile to a valid module");
+    assert!(llvm.contains("unreachable"));
+}
+
+#[test]
+fn deduplicates_matching_extern_declarations_across_modules() {
+    // `std.process`'s `panic` is prelude-ambient and transitively declares
+    // the raw C `exit` symbol internally; a user program that also
+    // declares a matching `extern "c" { exit: ... }` must reuse that one
+    // declaration rather than have LLVM silently rename the second one
+    // (`@exit.1`), detaching it from the real libc symbol at link time.
+    let module = type_check(concat!("extern \"c\" { exit: I32 -> () }\n", "exit 5\n",));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a matching duplicate extern declaration should be deduplicated");
+    assert!(
+        !llvm.contains("@exit.1"),
+        "the second `exit` declaration should reuse the first, not rename itself:\n{llvm}",
+    );
+}
+
+#[test]
+fn rejects_conflicting_extern_declarations_of_the_same_symbol() {
+    let module = type_check(concat!(
+        "extern \"c\" { exit: I32 -> I32 }\n",
+        "let _ = exit 5\n",
+    ));
+    let context = Context::create();
+    let diagnostics = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect_err("a conflicting extern redeclaration of `exit` should be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("already declared with a different type")),
+        "{diagnostics:?}",
+    );
+}
+
+#[test]
 fn checks_reachability_correctly_after_a_top_level_loop_with_break() {
     // A top-level `loop { ...; break }` (here via the `for` macro's
     // expansion) must not poison reachability for the rest of the module:
@@ -9722,3 +9853,4 @@ fn rejects_a_blanket_bounded_impl_that_overlaps_an_earlier_concrete_one() {
             .contains("duplicate trait implementation")
     }));
 }
+

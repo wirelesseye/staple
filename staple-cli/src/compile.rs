@@ -1489,6 +1489,68 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn exit_terminates_the_process_with_the_given_code() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-process-exit-{nonce}.sta"));
+        std::fs::write(&source, "use std.process.exit\nexit 7\n")
+            .expect("temporary exit source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let outcome = run([
+            "run".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("exit source should run");
+        let _ = std::fs::remove_file(source);
+
+        let Outcome::Executed(status) = outcome else {
+            panic!("run mode should return a process status");
+        };
+        assert_eq!(status.code(), Some(7));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn panic_prints_its_message_and_terminates_the_process() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-panic-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-panic-{nonce}"));
+        std::fs::write(&source, "use std.process.panic\npanic \"boom\"\n")
+            .expect("temporary panic source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("panic executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("panic executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(!result.status.success(), "panic should exit unsuccessfully");
+        assert!(
+            String::from_utf8_lossy(&result.stdout).contains("boom"),
+            "expected panic message in stdout: {}",
+            String::from_utf8_lossy(&result.stdout),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_typed_resources_with_lexical_shadowing() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

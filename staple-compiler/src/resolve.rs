@@ -2950,7 +2950,7 @@ impl NameResolver {
                 definitions.push(definition);
             }
         };
-        for (name, symbol) in self.current_scope() {
+        for (name, symbol) in self.current_scope().iter().chain(self.prelude_values.iter()) {
             insert(name, DefinitionId::Symbol(*symbol));
         }
         for (name, id) in self.declared_types[module.0]

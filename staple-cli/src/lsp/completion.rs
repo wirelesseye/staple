@@ -949,13 +949,28 @@ impl Collector<'_> {
         let resolved = self.typed.resolved();
         let (namespace, kind, detail) = match definition {
             DefinitionId::Symbol(symbol) => {
-                let ty = self.typed.type_of_symbol(symbol)?;
+                // `symbol_types` only carries an entry once something in
+                // this compilation unit has actually looked the symbol up
+                // (e.g. a call site) — a prelude function nobody has
+                // referenced yet (such as `panic`, freshly re-exported from
+                // `std.process`) has no entry there even though it is
+                // genuinely in scope. Fall back to the function's declared
+                // type so it isn't dropped from the "already visible" set
+                // and wrongly offered again as an auto-import.
+                let ty = match self.typed.type_of_symbol(symbol) {
+                    Some(ty) => ty.clone(),
+                    None => {
+                        let syntax = resolved.declaration_syntax(definition)?;
+                        let function = self.typed.function_for(syntax)?;
+                        CheckedType::Function(self.typed.type_of_function(function)?.clone())
+                    }
+                };
                 let kind = if matches!(ty, CheckedType::Function(_)) {
                     CompletionItemKind::FUNCTION
                 } else {
                     CompletionItemKind::VARIABLE
                 };
-                (Namespace::Value, kind, Some(display_type(self.typed, ty)))
+                (Namespace::Value, kind, Some(display_type(self.typed, &ty)))
             }
             DefinitionId::Type(id) => {
                 let declaration = resolved.type_declarations().get(&id)?;
@@ -1970,5 +1985,41 @@ mod tests {
                 .iter()
                 .any(|item| item.label == "main" && item.data.is_some())
         );
+    }
+
+    #[test]
+    fn prelude_functions_are_not_reoffered_as_auto_imports_when_unreferenced() {
+        // `panic` is re-exported from the prelude, so it is in scope
+        // everywhere without a `use`. It is easy to get this wrong: nothing
+        // in this source ever calls `panic`, so `symbol_types` (populated
+        // only for symbols something actually looked up) has no entry for
+        // it, and a completion candidate built solely from that map would
+        // silently drop it from the "already visible" set — making it
+        // wrongly reappear as a `std.process` auto-import suggestion.
+        let source = "let x = 1\n";
+        let path = std::env::temp_dir().join("staple-completion-prelude-panic.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let items = index(&module, &typed).items(source.len());
+        let panics = items
+            .iter()
+            .filter(|item| item.label == "panic")
+            .collect::<Vec<_>>();
+        assert_eq!(
+            panics.len(),
+            1,
+            "expected exactly one `panic` candidate, got {panics:?}",
+        );
+        assert!(
+            panics[0].data.is_none(),
+            "an already in-scope prelude function must not carry auto-import data: {:?}",
+            panics[0],
+        );
+        assert_eq!(panics[0].kind, Some(CompletionItemKind::FUNCTION));
     }
 }
