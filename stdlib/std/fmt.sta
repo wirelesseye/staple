@@ -19,8 +19,15 @@ pub trait Debug T {
     fmt: (T, mut Formatter) -> ()
 }
 
-def derived_debug_implementation: Ident String -> String -> Type -> Sequence (Ident String) -> Type -> Item =
-name_syntax => name => target => parameters => representation => {
+def derived_debug_implementation:
+    (
+        Ident String,
+        String,
+        Type,
+        Sequence (Ident String),
+        Type,
+    ) -> Item =
+(name_syntax, name, target, parameters, representation) => {
     let name_expression: Expr = StringExpr name
     let inner_name: Ident String = Ident "inner"
     let inner_pattern: Pattern = BindingPattern inner_name
@@ -54,8 +61,7 @@ name_syntax => name => target => parameters => representation => {
 /// Derives `Debug` for a bodyless singleton type, formatting it as its name.
 /// Singleton types cannot carry compile-time parameters, so the implementation
 /// is always unparameterized.
-def derived_singleton_debug_implementation: String -> Type -> Item =
-name => target => {
+def derived_singleton_debug_implementation: (String, Type) -> Item = (name, target) => {
     let name_expression: Expr = StringExpr name
     parse_quote {
         impl Debug $target {
@@ -84,7 +90,7 @@ pub macro @derive_debug: Item -> Sequence Item = item => match item {
     ) => Sequence (
         first: item,
         rest: Sequence (
-            first: derived_debug_implementation name_syntax name target parameters representation,
+            first: derived_debug_implementation (name_syntax, name, target, parameters, representation),
             rest: Sequence (),
         ),
     ),
@@ -93,7 +99,7 @@ pub macro @derive_debug: Item -> Sequence Item = item => match item {
     ) => Sequence (
         first: item,
         rest: Sequence (
-            first: derived_singleton_debug_implementation name target,
+            first: derived_singleton_debug_implementation (name, target),
             rest: Sequence (),
         ),
     ),

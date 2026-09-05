@@ -26,17 +26,17 @@ def typegroup_visibility_syntax: Visibility -> Syntax = visibility => match visi
     PublicRepr => quote { pub(repr) },
 }
 
-def typegroup_apply_modifiers: Sequence Modifier -> Item -> Item =
-modifiers => item => match modifiers {
+def typegroup_apply_modifiers: (Sequence Modifier, Item) -> Item = (modifiers, item) => match modifiers {
     Sequence () => item,
     _ => ModifiedItem (modifiers: modifiers, item: item),
 }
 
 def typegroup_items:
-    Visibility ->
-    Sequence (Sequence Modifier, Ident String, Optional Type) ->
-    Sequence Item =
-visibility => entries => match entries {
+    (
+        Visibility,
+        Sequence (Sequence Modifier, Ident String, Optional Type),
+    ) -> Sequence Item =
+(visibility, entries) => match entries {
     Sequence () => Sequence (),
     Sequence (
         first: (Sequence Modifier, Ident String, Optional Type),
@@ -44,38 +44,39 @@ visibility => entries => match entries {
     ) => match first {
         (modifiers: Sequence Modifier, variant: Ident String, None) => {
             let base: Item = parse_quote { $visibility type $variant }
-            let item: Item = typegroup_apply_modifiers modifiers base
-            Sequence (first: item, rest: typegroup_items visibility rest)
+            let item: Item = typegroup_apply_modifiers (modifiers, base)
+            Sequence (first: item, rest: typegroup_items (visibility, rest))
         },
         (modifiers: Sequence Modifier, variant: Ident String, Some underlying) => {
             let base: Item = parse_quote { $visibility type $variant = $underlying }
-            let item: Item = typegroup_apply_modifiers modifiers base
-            Sequence (first: item, rest: typegroup_items visibility rest)
+            let item: Item = typegroup_apply_modifiers (modifiers, base)
+            Sequence (first: item, rest: typegroup_items (visibility, rest))
         },
     },
 }
 
 def typegroup_generic_items:
-    Syntax ->
-    Syntax ->
-    Sequence (Sequence Modifier, Ident String, Optional Type) ->
-    Sequence Item =
-visibility => parameters => entries => match entries {
+    (
+        Syntax,
+        Syntax,
+        Sequence (Sequence Modifier, Ident String, Optional Type),
+    ) -> Sequence Item =
+(visibility, parameters, entries) => match entries {
     Sequence () => Sequence (),
     Sequence (
         first: (Sequence Modifier, Ident String, Optional Type),
         rest: Sequence (Sequence Modifier, Ident String, Optional Type),
     ) => {
-        let tail = typegroup_generic_items visibility parameters rest
+        let tail = typegroup_generic_items (visibility, parameters, rest)
         match first {
             (modifiers: Sequence Modifier, variant: Ident String, None) => {
                 let base: Item = parse_quote { $visibility type $variant }
-                let item: Item = typegroup_apply_modifiers modifiers base
+                let item: Item = typegroup_apply_modifiers (modifiers, base)
                 Sequence (first: item, rest: tail)
             },
             (modifiers: Sequence Modifier, variant: Ident String, Some underlying) => {
                 let base: Item = parse_quote { $visibility type $variant $parameters = $underlying }
-                let item: Item = typegroup_apply_modifiers modifiers base
+                let item: Item = typegroup_apply_modifiers (modifiers, base)
                 Sequence (first: item, rest: tail)
             },
         }
@@ -83,10 +84,11 @@ visibility => parameters => entries => match entries {
 }
 
 def typegroup_sum:
-    Ident String ->
-    Sequence (Sequence Modifier, Ident String, Optional Type) ->
-    Type =
-group => entries => match entries {
+    (
+        Ident String,
+        Sequence (Sequence Modifier, Ident String, Optional Type),
+    ) -> Type =
+(group, entries) => match entries {
     Sequence (
         first: (Sequence Modifier, Ident String, Optional Type),
         rest: Sequence (Sequence Modifier, Ident String, Optional Type),
@@ -96,7 +98,7 @@ group => entries => match entries {
             match rest {
                 Sequence () => head,
                 _ => {
-                    let tail = typegroup_sum group rest
+                    let tail = typegroup_sum (group, rest)
                     parse_quote { $head | $tail } satisfies Type
                 },
             }
@@ -116,11 +118,12 @@ def typegroup_parameter_syntax: Sequence Type -> Syntax = parameters => match pa
 }
 
 def typegroup_generic_sum_syntax:
-    Ident String ->
-    Syntax ->
-    Sequence (Sequence Modifier, Ident String, Optional Type) ->
-    Syntax =
-group => parameters => entries => match entries {
+    (
+        Ident String,
+        Syntax,
+        Sequence (Sequence Modifier, Ident String, Optional Type),
+    ) -> Syntax =
+(group, parameters, entries) => match entries {
     Sequence (
         first: (Sequence Modifier, Ident String, Optional Type),
         rest: Sequence (Sequence Modifier, Ident String, Optional Type),
@@ -133,7 +136,7 @@ group => parameters => entries => match entries {
             match rest {
                 Sequence () => head,
                 _ => {
-                    let tail = typegroup_generic_sum_syntax group parameters rest
+                    let tail = typegroup_generic_sum_syntax (group, parameters, rest)
                     quote { $head | $tail }
                 },
             }
@@ -168,12 +171,12 @@ body => {
         let public_visibility = typegroup_public_visibility visibility
         match parameters {
             Sequence () => {
-                let items = typegroup_items item_visibility elements
-                let sum: Type = typegroup_sum group elements
+                let items = typegroup_items (item_visibility, elements)
+                let sum: Type = typegroup_sum (group, elements)
                 let base: Item = parse_quote {
                     $public_visibility type alias $group = $sum
                 }
-                let alias_item: Item = typegroup_apply_modifiers modifiers base
+                let alias_item: Item = typegroup_apply_modifiers (modifiers, base)
                 let companion_item: Item = parse_quote {
                     companion $group {
                         $items...
@@ -188,12 +191,12 @@ body => {
                 let parameter_syntax = typegroup_parameter_syntax parameters
                 let generic_item_visibility = typegroup_visibility_syntax item_visibility
                 let generic_public_visibility = typegroup_visibility_syntax public_visibility
-                let items = typegroup_generic_items generic_item_visibility parameter_syntax elements
-                let sum = typegroup_generic_sum_syntax group parameter_syntax elements
+                let items = typegroup_generic_items (generic_item_visibility, parameter_syntax, elements)
+                let sum = typegroup_generic_sum_syntax (group, parameter_syntax, elements)
                 let base: Item = parse_quote {
                     $generic_public_visibility type alias $group $parameter_syntax = $sum
                 }
-                let alias_item: Item = typegroup_apply_modifiers modifiers base
+                let alias_item: Item = typegroup_apply_modifiers (modifiers, base)
                 let companion_item: Item = parse_quote {
                     companion $group {
                         $items...

@@ -107,11 +107,11 @@ companion<T> List T {
 // left-to-right, so elements are pushed in the order they were written.
 // `accumulator` is a previously-built `Expr` value, spliced in — not a name
 // — so this never runs into the binder/use hygiene mismatch described above.
-def list_of_pushes: Expr -> Sequence Expr -> Expr = accumulator => elements => match elements {
+def list_of_pushes: (Expr, Sequence Expr) -> Expr = (accumulator, elements) => match elements {
     Sequence () => accumulator,
     Sequence (first: Expr, rest: Sequence Expr) => {
         let pushed: Expr = parse_quote { List.push_and_return $accumulator $first }
-        list_of_pushes pushed rest
+        list_of_pushes (pushed, rest)
     },
 }
 
@@ -135,7 +135,7 @@ def list_of_expression: Sequence Expr -> Expr = elements => match elements {
     Sequence () => parse_quote { List.new () },
     Sequence (first: Expr, rest: Sequence Expr) => {
         let base: Expr = parse_quote { List.singleton $first }
-        list_of_pushes base rest
+        list_of_pushes (base, rest)
     },
 }
 

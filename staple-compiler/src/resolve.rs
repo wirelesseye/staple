@@ -5222,12 +5222,7 @@ fn analyze_compile_helper_expression(
         (expression, annotation)
     {
         scope.frames.push(HashMap::new());
-        declare_compile_pattern(
-            &function.pattern,
-            scope,
-            CompileTimeBindingKind::HelperParameter,
-            Some(function_type.parameter.to_string()),
-        );
+        declare_compile_helper_parameter(&function.pattern, &function_type.parameter, scope);
         analyze_compile_helper_expression(&function.body, Some(&function_type.result), scope);
         scope.frames.pop();
     } else {
@@ -5238,6 +5233,38 @@ fn analyze_compile_helper_expression(
             false,
         );
     }
+}
+
+/// Declares a helper function's top-level parameter pattern against its
+/// declared type. A one-product-parameter helper (`(a, b) => ...` typed
+/// `(A, B) -> R`) destructures its parameter into a `Pattern::Product`, so
+/// this recurses element-by-element against the matching `Type::Product`
+/// element types — otherwise every destructured binding would fall through
+/// `declare_compile_pattern`'s generic `Pattern::Product` case (which has no
+/// per-element type to hand out) to the untyped-parameter default of
+/// `SyntaxNode`, hiding the declared type in hover.
+fn declare_compile_helper_parameter(
+    pattern: &Pattern,
+    parameter_type: &Type,
+    scope: &mut CompileTimeScope,
+) {
+    if let (Pattern::Product(pattern_product), Type::Product(type_product)) =
+        (pattern, parameter_type)
+        && pattern_product.elements.len() == type_product.elements.len()
+    {
+        for (element_pattern, element_type) in
+            pattern_product.elements.iter().zip(&type_product.elements)
+        {
+            declare_compile_helper_parameter(element_pattern, &element_type.ty, scope);
+        }
+        return;
+    }
+    declare_compile_pattern(
+        pattern,
+        scope,
+        CompileTimeBindingKind::HelperParameter,
+        Some(parameter_type.to_string()),
+    );
 }
 
 fn compile_time_builtin_signature(name: &str) -> Option<&str> {

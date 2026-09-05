@@ -51,12 +51,7 @@ pub macro when =
 // parenthesised, matching `while` and `for`. The trailing arms arrive as a flat
 // `Sequence Expr` of `else` / `if` / condition / branch atoms, which this helper
 // walks recursively.
-def if_branches:
-    Expr ->
-    Expr ->
-    Sequence Expr ->
-    Expr =
-condition => consequent => rest => {
+def if_branches: (Expr, Expr, Sequence Expr) -> Expr = (condition, consequent, rest) => {
     // `first` and `rest` are the required binding names for a `Sequence`
     // head/tail destructure, so each level rebinds `first` to a descriptive
     // local before recursing.
@@ -71,7 +66,7 @@ condition => consequent => rest => {
                             match rest {
                                 Sequence (first: Expr, rest: Sequence Expr) => {
                                     let elif_consequent = first
-                                    if_branches elif_condition elif_consequent rest
+                                    if_branches (elif_condition, elif_consequent, rest)
                                 },
                             }
                         },
@@ -102,7 +97,7 @@ pub macro if =
     condition: Expr *
     consequent: Expr *
     rest: Sequence Expr =>
-    if_branches condition consequent rest
+    if_branches (condition, consequent, rest)
 
 /// Repeats a body while its condition evaluates to `True`.
 ///
