@@ -28,10 +28,10 @@ def derived_debug_implementation:
         Type,
     ) -> Item =
 (name_syntax, name, target, parameters, representation) => {
-    let name_expression: Expr = StringExpr name
-    let inner_name: Ident String = Ident "inner"
-    let inner_pattern: Pattern = BindingPattern inner_name
-    let value_pattern: Pattern = NominalPattern (name: name_syntax, argument: inner_pattern)
+    let name_expression = StringExpr name
+    let inner_name = Ident "inner"
+    let inner_pattern = BindingPattern inner_name
+    let value_pattern = NominalPattern (name: name_syntax, argument: inner_pattern)
     match parameters {
         Sequence () => {
             parse_quote {
@@ -62,7 +62,7 @@ def derived_debug_implementation:
 /// Singleton types cannot carry compile-time parameters, so the implementation
 /// is always unparameterized.
 def derived_singleton_debug_implementation: (String, Type) -> Item = (name, target) => {
-    let name_expression: Expr = StringExpr name
+    let name_expression = StringExpr name
     parse_quote {
         impl Debug $target {
             def fmt = (_, mut formatter) => Formatter.write (formatter, $name_expression)

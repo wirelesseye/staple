@@ -10030,3 +10030,72 @@ fn statically_checks_macro_match_coverage_before_expansion() {
         .iter()
         .any(|diagnostic| diagnostic.message.contains("must not expand")));
 }
+
+#[test]
+fn infers_nested_compile_time_match_bindings() {
+    type_check(concat!(
+        "use std.syntax.(Sequence, Modifier, Ident, Optional, Type, Item)\n",
+        "def accept_modifiers: Sequence Modifier -> () = _ => ()\n",
+        "def accept_ident: Ident String -> () = _ => ()\n",
+        "def accept_type: Type -> () = _ => ()\n",
+        "def infer: Sequence (Sequence Modifier, Ident String, Optional Type) -> Sequence Item = entries => match entries {\n",
+        "  Sequence () => Sequence (),\n",
+        "  Sequence (first, rest) => match first {\n",
+        "    (modifiers, variant, None) => {\n",
+        "      accept_modifiers modifiers; accept_ident variant; infer rest; Sequence ()\n",
+        "    },\n",
+        "    (modifiers, variant, Some underlying) => {\n",
+        "      accept_modifiers modifiers; accept_ident variant; accept_type underlying; infer rest; Sequence ()\n",
+        "    },\n",
+        "  },\n",
+        "}\n",
+    ));
+}
+
+#[test]
+fn checks_inferred_and_explicit_compile_time_match_binding_types() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for (source, expected) in [
+        (
+            concat!(
+                "use std.syntax.(Sequence, Modifier, Ident, Optional, Type, Item)\n",
+                "def accept_ident: Ident String -> () = _ => ()\n",
+                "def invalid: Sequence (Sequence Modifier, Ident String, Optional Type) -> Sequence Item = entries => match entries {\n",
+                "  Sequence () => Sequence (),\n",
+                "  Sequence (first, _) => match first {\n",
+                "    (modifiers, _, None) => { accept_ident modifiers; Sequence () },\n",
+                "    (_, _, Some _) => Sequence (),\n",
+                "  },\n",
+                "}\n",
+            ),
+            "expected `Ident String`, found `Sequence Modifier`",
+        ),
+        (
+            concat!(
+                "use std.syntax.(Sequence, Modifier, Ident, Optional, Type, Item)\n",
+                "def invalid: Sequence (Sequence Modifier, Ident String, Optional Type) -> Sequence Item = entries => match entries {\n",
+                "  Sequence () => Sequence (),\n",
+                "  Sequence (first, _) => match first {\n",
+                "    (modifiers: Ident String, _, None) => Sequence (),\n",
+                "    (_, _, Some _) => Sequence (),\n",
+                "  },\n",
+                "}\n",
+            ),
+            "expected `Sequence Modifier`, found `Ident String`",
+        ),
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("invalid compile-time binding source should parse");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err_diagnostics("invalid inferred binding use should fail");
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "expected `{expected}`, found {diagnostics:#?}",
+        );
+    }
+}

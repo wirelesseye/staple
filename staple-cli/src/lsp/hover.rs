@@ -2533,6 +2533,17 @@ mod tests {
                 "entries",
                 "entries: Sequence (Sequence Modifier, Ident String, Optional Type)",
             ),
+            (
+                "first",
+                "first: (Sequence Modifier, Ident String, Optional Type)",
+            ),
+            (
+                "rest",
+                "rest: Sequence (Sequence Modifier, Ident String, Optional Type)",
+            ),
+            ("modifiers", "modifiers: Sequence Modifier"),
+            ("variant", "variant: Ident String"),
+            ("underlying", "underlying: Type"),
         ] {
             assert!(
                 entries.iter().any(|entry| {
@@ -2542,6 +2553,12 @@ mod tests {
                 expected
             );
         }
+        assert!(!entries.iter().any(|entry| {
+            matches!(
+                &source[entry.range.clone()],
+                "first" | "rest" | "modifiers" | "variant" | "underlying"
+            ) && entry.signature.ends_with(": SyntaxNode")
+        }));
     }
 
     #[test]

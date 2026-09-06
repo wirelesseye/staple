@@ -558,6 +558,7 @@ pub(crate) struct MacroAnalysis {
     pub definitions: HashMap<SyntaxId, ResolvedMacro>,
     pub invocations: HashMap<SyntaxId, ResolvedMacro>,
     pub helpers: Vec<(ModuleId, Binding)>,
+    pub binding_types: HashMap<SyntaxId, String>,
     pub next_syntax_id: usize,
 }
 
@@ -1053,6 +1054,7 @@ struct MacroExpander {
     suppress_expansion_trailer: bool,
     checked_compile_helpers: HashSet<SyntaxId>,
     checking_compile_helpers: HashSet<SyntaxId>,
+    compile_binding_types: HashMap<SyntaxId, String>,
 }
 
 fn provisional_use_kind(program: &Program, declaration: &UseDeclaration) -> UseKind {
@@ -1719,6 +1721,7 @@ impl MacroExpander {
             suppress_expansion_trailer: false,
             checked_compile_helpers: HashSet::new(),
             checking_compile_helpers: HashSet::new(),
+            compile_binding_types: HashMap::new(),
             invocation_spans: Vec::new(),
         }
     }
@@ -1738,6 +1741,7 @@ impl MacroExpander {
                 .filter(|helper| binding_is_compile_time_helper(&helper.binding))
                 .map(|helper| (helper.module, helper.binding.clone()))
                 .collect(),
+            binding_types: self.compile_binding_types.clone(),
             next_syntax_id: self.next_syntax_id,
         }
     }
@@ -2295,6 +2299,7 @@ impl MacroExpander {
     ) {
         match pattern {
             Pattern::At(at) => {
+                self.record_compile_binding_type(at.binding.syntax.id, ty);
                 environment.insert(
                     at.binding.name.clone(),
                     CompileBinding { ty: ty.clone(), mutable: at.binding.mutable },
@@ -2307,9 +2312,12 @@ impl MacroExpander {
                 let bound = if matches!(binding.ty, Type::Inferred(_)) {
                     ty.clone()
                 } else {
-                    compile_type(&binding.ty)
+                    let annotation = compile_type(&binding.ty);
+                    let compatible = compile_types_compatible(&annotation, ty);
+                    self.require_compile_type(&annotation, ty, binding.syntax.span.clone());
+                    if compatible { annotation } else { CompileType::Error }
                 };
-                self.require_compile_type(&bound, ty, binding.syntax.span.clone());
+                self.record_compile_binding_type(binding.syntax.id, &bound);
                 environment.insert(
                     binding.name.clone(),
                     CompileBinding { ty: bound, mutable: binding.mutable },
@@ -2332,6 +2340,13 @@ impl MacroExpander {
                 self.bind_compile_pattern(module, &nominal.argument, &representation, environment);
             }
             Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) | Pattern::Binding(_) => {}
+        }
+    }
+
+    fn record_compile_binding_type(&mut self, syntax: SyntaxId, ty: &CompileType) {
+        if !matches!(ty, CompileType::Error | CompileType::Unknown) {
+            self.compile_binding_types
+                .insert(syntax, format_compile_type(ty));
         }
     }
 
@@ -8848,10 +8863,34 @@ fn compile_coverage_is_useful_with_fuel(
     if matrix.is_empty() {
         return true;
     }
+    if matrix.iter().any(|row| {
+        row.len() == candidate.len()
+            && row
+                .iter()
+                .all(|pattern| matches!(pattern, CompileCoveragePattern::Any))
+    }) {
+        return false;
+    }
     if types.is_empty() {
         return !matrix.iter().any(Vec::is_empty);
     }
     let first = &candidate[0];
+    if matches!(first, CompileCoveragePattern::Any)
+        && matrix
+            .iter()
+            .all(|row| matches!(row.first(), Some(CompileCoveragePattern::Any)))
+    {
+        let reduced_matrix = matrix
+            .iter()
+            .map(|row| row[1..].to_vec())
+            .collect::<Vec<_>>();
+        return compile_coverage_is_useful_with_fuel(
+            &types[1..],
+            &reduced_matrix,
+            &candidate[1..],
+            fuel - 1,
+        );
+    }
     if let Some(constructors) = compile_type_constructors(&types[0]) {
         let selected = match first {
             CompileCoveragePattern::Any => constructors,

@@ -10,10 +10,7 @@ def when_clauses:
     Expr =
 clauses => match clauses {
     Sequence () => parse_quote { () },
-    Sequence (
-        first: (Expr, FatArrow, Expr),
-        rest: Sequence (Expr, FatArrow, Expr),
-    ) => match first {
+    Sequence (first, rest) => match first {
         (condition: Ident "else", _, fallback) => match rest {
             Sequence () => fallback,
             _ => panic "when clauses after else are unsupported",
@@ -58,14 +55,14 @@ def if_branches: (Expr, Expr, Sequence Expr) -> Expr = (condition, consequent, r
     // local before recursing.
     let otherwise = match rest {
         Sequence () => parse_quote { () },
-        Sequence (first: Expr, rest: Sequence Expr) => match first {
+        Sequence (first, rest) => match first {
             else_keyword: Ident "else" => match rest {
-                Sequence (first: Expr, rest: Sequence Expr) => match first {
+                Sequence (first, rest) => match first {
                     if_keyword: Ident "if" => match rest {
-                        Sequence (first: Expr, rest: Sequence Expr) => {
+                        Sequence (first, rest) => {
                             let elif_condition = first
                             match rest {
-                                Sequence (first: Expr, rest: Sequence Expr) => {
+                                Sequence (first, rest) => {
                                     let elif_consequent = first
                                     if_branches (elif_condition, elif_consequent, rest)
                                 },

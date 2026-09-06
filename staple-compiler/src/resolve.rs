@@ -1311,6 +1311,9 @@ impl NameResolver {
         let mut compile_time_bindings =
             analyze_compile_time_bindings(&program, &macro_analysis.helpers);
         for info in compile_time_bindings.values_mut() {
+            if let Some(inferred) = macro_analysis.binding_types.get(&info.declaration) {
+                info.type_display = Some(inferred.clone());
+            }
             if info.kind == CompileTimeBindingKind::Builtin {
                 info.definition = self
                     .definition_context_types
