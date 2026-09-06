@@ -949,22 +949,12 @@ impl Collector<'_> {
         let resolved = self.typed.resolved();
         let (namespace, kind, detail) = match definition {
             DefinitionId::Symbol(symbol) => {
-                // `symbol_types` only carries an entry once something in
-                // this compilation unit has actually looked the symbol up
-                // (e.g. a call site) — a prelude function nobody has
-                // referenced yet (such as `panic`, freshly re-exported from
-                // `std.process`) has no entry there even though it is
-                // genuinely in scope. Fall back to the function's declared
-                // type so it isn't dropped from the "already visible" set
-                // and wrongly offered again as an auto-import.
-                let ty = match self.typed.type_of_symbol(symbol) {
-                    Some(ty) => ty.clone(),
-                    None => {
-                        let syntax = resolved.declaration_syntax(definition)?;
-                        let function = self.typed.function_for(syntax)?;
-                        CheckedType::Function(self.typed.type_of_function(function)?.clone())
-                    }
-                };
+                // A symbol nothing in this file has referenced yet (e.g. an
+                // unused prelude function) has no entry in `type_of_symbol`.
+                // Fall back to its declared type so it isn't dropped from
+                // the "already visible" set and wrongly offered again as an
+                // auto-import.
+                let ty = self.typed.declared_type_of_symbol(symbol)?;
                 let kind = if matches!(ty, CheckedType::Function(_)) {
                     CompletionItemKind::FUNCTION
                 } else {

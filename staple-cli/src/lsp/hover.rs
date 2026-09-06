@@ -1320,7 +1320,21 @@ impl Collector<'_> {
                 _ => {}
             }
         }
-        if let Some(value_type) = self.typed.type_of_expression(expression.syntax().id) {
+        // A macro's own body is never type-checked as ordinary code, so an
+        // occurrence there (e.g. a reference to an outer helper function)
+        // never gets a `type_of_expression` entry even though the name it
+        // refers to resolves fine. Fall back to the referenced symbol's own
+        // declared type so hover still has something to show.
+        let expression_type = self
+            .typed
+            .type_of_expression(expression.syntax().id)
+            .cloned()
+            .or_else(|| {
+                self.typed
+                    .symbol_for(expression.syntax().id)
+                    .and_then(|symbol| self.typed.declared_type_of_symbol(symbol))
+            });
+        if let Some(value_type) = expression_type.as_ref() {
             let value_type = self.display_type(value_type);
             let symbol = self.typed.symbol_for(expression.syntax().id);
             // A real `let`/`def` declaration, or — for a type constructor used
@@ -2074,6 +2088,34 @@ mod tests {
                     && entry.module.as_deref() == Some("std.io")
             }),
             "no `println` hover names `std.io`: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn hovers_over_outer_references_inside_a_macros_own_body() {
+        // A macro's body is never resolved as ordinary code (it is only
+        // interpreted by the macro expander), so a reference to an outer
+        // definition made directly from within it (not inside a
+        // `quote`/`parse_quote` template) used to have no symbol recorded
+        // at all, leaving hover with nothing to show.
+        let source = "macro always_fail = e: Expr => panic \"internal error\"\n";
+        let path = std::env::temp_dir().join("staple-hover-macro-body-outer-ref.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "panic"
+                    && entry.module.as_deref() == Some("std.process")
+                    && entry.signature.contains("Never")
+            }),
+            "no `panic` hover inside the macro body: {entries:?}"
         );
     }
 

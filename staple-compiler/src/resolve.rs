@@ -3588,6 +3588,17 @@ impl NameResolver {
         }
         if let Some(value) = &declaration.value {
             self.resolve_compile_time_expression_annotations(value);
+            // The macro's body is never resolved as ordinary code (it is
+            // only interpreted, on demand, by the macro expander), so
+            // without this its own parameters and any outer names it
+            // references (e.g. calling a helper function) would have no
+            // symbol recorded at all — leaving hover, go-to-definition, and
+            // semantic highlighting with nothing to show for them. This
+            // reuses the same scope-aware resolution already used for
+            // `quote`/`parse_quote` templates, since a macro's own
+            // compile-time body has the same shape: local pattern bindings
+            // plus references that fall back to the enclosing scope.
+            self.resolve_quoted_expression(value, &mut vec![HashMap::new()]);
         }
         self.pop_type_parameter_scope();
     }

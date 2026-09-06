@@ -1345,6 +1345,28 @@ impl TypedModule {
         self.symbol_types.get(&symbol)
     }
 
+    /// The declared type of `symbol`, falling back to its function's own
+    /// checked signature when `type_of_symbol` has no entry for it.
+    ///
+    /// `symbol_types` only gets an entry once something in this compilation
+    /// unit has actually looked the symbol up (e.g. a call site) — a
+    /// function nothing here calls yet (an unused prelude export, or one
+    /// referenced only from within a macro's own body, which is never
+    /// type-checked as ordinary code) has no entry there even though it is
+    /// genuinely declared and typed.
+    pub fn declared_type_of_symbol(&self, symbol: SymbolId) -> Option<CheckedType> {
+        if let Some(ty) = self.type_of_symbol(symbol) {
+            return Some(ty.clone());
+        }
+        let syntax = self
+            .resolved()
+            .declaration_syntax(DefinitionId::Symbol(symbol))?;
+        let function = self.function_for(syntax)?;
+        Some(CheckedType::Function(
+            self.type_of_function(function)?.clone(),
+        ))
+    }
+
     pub fn companion_type_of_symbol(&self, symbol: SymbolId) -> Option<TypeId> {
         self.symbol_companion_types
             .get(&symbol)

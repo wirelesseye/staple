@@ -1499,6 +1499,33 @@ mod tests {
     }
 
     #[test]
+    fn resolves_outer_references_inside_a_macros_own_body() {
+        // A macro's body is never resolved as ordinary code (it is only
+        // interpreted by the macro expander), so a reference to an outer
+        // definition made directly from within it (not inside a
+        // `quote`/`parse_quote` template) used to have no symbol recorded
+        // at all, leaving go-to-definition with nothing to jump to.
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let source = "macro always_fail = e: Expr => panic \"internal error\"\n";
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, &root)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &resolved, None);
+        let process = std::fs::canonicalize(root.join("stdlib/std/process.sta")).unwrap();
+
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "panic"
+                    && entry.targets.iter().any(|target| target.path == process)
+            }),
+            "missing go-to-definition for `panic` referenced inside a macro body: {entries:?}",
+        );
+    }
+
+    #[test]
     fn indexes_file_module_segments_in_dotted_item_imports() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
         let source = "use std.io.println\n";

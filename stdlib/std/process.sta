@@ -21,10 +21,6 @@ pub def exit: I32 -> Never = code => {
 }
 
 /// Terminates the program after printing `message`.
-///
-/// Signals that a computation unexpectedly failed — this is not for
-/// reporting invalid macro-user syntax, which will use a separate
-/// `compile_error` function.
 pub def panic: String -> Never = message => {
     let _ = printf (c_string "panic: %s\n", CString.from_string message)
     exit 1

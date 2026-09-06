@@ -235,7 +235,7 @@ impl<'a> Classifier<'a> {
     fn value_symbol_kind(&self, symbol: SymbolId) -> u32 {
         if self
             .typed
-            .and_then(|typed| typed.type_of_symbol(symbol))
+            .and_then(|typed| typed.declared_type_of_symbol(symbol))
             .is_some_and(|ty| matches!(ty, CheckedType::Function(_)))
         {
             FUNCTION
@@ -1730,6 +1730,34 @@ mod tests {
         assert!(labels.contains(&("imported_value", VARIABLE)));
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn classifies_outer_references_inside_a_macros_own_body() {
+        // A macro's body is never resolved or type-checked as ordinary code
+        // (it is only interpreted by the macro expander), so a reference to
+        // an outer function made directly from within it (not inside a
+        // `quote`/`parse_quote` template) used to have no symbol and no
+        // checked type at all, leaving it classified as a plain unresolved
+        // variable instead of the function it actually is.
+        let source = "macro always_fail = e: Expr => panic \"internal error\"\n";
+        let path = std::env::temp_dir().join("staple-semantic-macro-body-outer-ref.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let labels = labels(
+            source,
+            &tokens(source, Some(&module), Some(typed.resolved()), Some(&typed)),
+        );
+
+        assert!(
+            labels.contains(&("panic", FUNCTION)),
+            "expected `panic` to be classified as a function: {labels:?}"
+        );
     }
 
     #[test]
