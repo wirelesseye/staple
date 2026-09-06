@@ -34,6 +34,7 @@ pub fn entries_at_path(path: &Path, module: &Module, typed: &TypedModule) -> Vec
         entries: Vec::new(),
         declarations: HashMap::new(),
         path,
+        macro_result: None,
     };
     for source_module in typed.resolved().program().modules() {
         collector.collect_module_declarations(&source_module.syntax);
@@ -96,6 +97,11 @@ struct Collector<'a> {
     entries: Vec<HoverEntry>,
     declarations: HashMap<SymbolId, Declaration>,
     path: &'a Path,
+    /// While descending a macro body, the macro's declared result type
+    /// (`Sequence Item` for `@m: Item -> Sequence Item`). Lets a compile-time
+    /// syntax constructor used in that body (`Sequence (…)`) show what it was
+    /// instantiated to, since macro bodies carry no checked types.
+    macro_result: Option<Type>,
 }
 
 #[derive(Clone)]
@@ -494,7 +500,13 @@ impl Collector<'_> {
                     self.ty(annotation);
                 }
                 if let Some(value) = &declaration.value {
+                    let previous = self.macro_result.take();
+                    self.macro_result = match &declaration.annotation {
+                        Some(Type::Function(function)) => Some(function.result.as_ref().clone()),
+                        _ => None,
+                    };
                     self.expression(value);
+                    self.macro_result = previous;
                 }
             }
             Item::TraitImplementation(implementation) => {
@@ -1297,9 +1309,14 @@ impl Collector<'_> {
             .compile_time_binding_for(expression.syntax().id)
         {
             let signature = compile_time_signature(info);
+            let instantiation = self.syntax_constructor_instantiation(info);
             match expression {
-                Expression::Name(name) => self.named(&name.syntax, &name.name, signature),
-                Expression::Splice(splice) => self.named(&splice.syntax, &splice.name, signature),
+                Expression::Name(name) => {
+                    self.named_with_instantiation(&name.syntax, &name.name, signature, instantiation)
+                }
+                Expression::Splice(splice) => {
+                    self.named(&splice.syntax, &splice.name, signature)
+                }
                 _ => {}
             }
         }
@@ -1706,6 +1723,55 @@ impl Collector<'_> {
         self.named_with_docs(syntax, name, signature, Vec::new(), module);
     }
 
+    fn named_with_instantiation(
+        &mut self,
+        syntax: &Syntax,
+        name: &str,
+        signature: String,
+        instantiation: Option<String>,
+    ) {
+        let module = self.module_label(syntax.id);
+        if let Some(range) =
+            crate::lsp::source_projection::named_range(syntax, name, false, self.path)
+        {
+            self.entries.push(HoverEntry {
+                range,
+                signature,
+                documentation: Vec::new(),
+                module,
+                instantiation,
+            });
+        }
+    }
+
+    /// For a compile-time syntax constructor (`Sequence`, `Separated`, …) used
+    /// inside a macro body: the instantiated form of its declared signature,
+    /// obtained by substituting the constructor's type parameters with the
+    /// arguments of the enclosing macro's declared result type. `None` unless
+    /// that result type is an application of this same constructor.
+    fn syntax_constructor_instantiation(&self, info: &CompileTimeBindingInfo) -> Option<String> {
+        if info.kind != CompileTimeBindingKind::Builtin {
+            return None;
+        }
+        let display = info.type_display.as_deref()?;
+        // `<Element> repr -> Result` — split off the bracketed parameter list.
+        let rest = display.strip_prefix('<')?;
+        let (parameters, body) = rest.split_once("> ")?;
+        let parameters = parameters.split_whitespace().collect::<Vec<_>>();
+        if parameters.is_empty() {
+            return None;
+        }
+        let (head, arguments) = type_head_and_arguments(self.macro_result.as_ref()?);
+        if head != info.name || arguments.len() != parameters.len() {
+            return None;
+        }
+        let mut instantiated = body.to_owned();
+        for (parameter, argument) in parameters.iter().zip(&arguments) {
+            instantiated = replace_type_word(&instantiated, parameter, argument);
+        }
+        Some(format!("{}: {instantiated}", info.name))
+    }
+
     fn named_with_docs(
         &mut self,
         syntax: &Syntax,
@@ -1850,12 +1916,57 @@ impl Collector<'_> {
     }
 }
 
+/// The head name and textual arguments of a (possibly applied) source type:
+/// `Sequence Item` → `("Sequence", ["Item"])`, `Foo` → `("Foo", [])`.
+fn type_head_and_arguments(ty: &Type) -> (String, Vec<String>) {
+    match ty {
+        Type::Application(application) => {
+            let (head, mut arguments) = type_head_and_arguments(&application.callee);
+            arguments.push(application.argument.to_string());
+            (head, arguments)
+        }
+        other => (other.to_string(), Vec::new()),
+    }
+}
+
+/// Replaces whole-identifier occurrences of `word` in `text` with `replacement`,
+/// leaving `word` embedded in a longer identifier untouched.
+fn replace_type_word(text: &str, word: &str, replacement: &str) -> String {
+    let is_ident = |byte: u8| byte.is_ascii_alphanumeric() || byte == b'_';
+    let bytes = text.as_bytes();
+    let mut result = String::with_capacity(text.len());
+    let mut index = 0;
+    while index < text.len() {
+        if text[index..].starts_with(word)
+            && (index == 0 || !is_ident(bytes[index - 1]))
+            && text[index + word.len()..]
+                .bytes()
+                .next()
+                .is_none_or(|byte| !is_ident(byte))
+        {
+            result.push_str(replacement);
+            index += word.len();
+            continue;
+        }
+        let character = text[index..].chars().next().unwrap();
+        result.push(character);
+        index += character.len_utf8();
+    }
+    result
+}
+
 fn compile_time_signature(info: &CompileTimeBindingInfo) -> String {
     if info.kind == CompileTimeBindingKind::Builtin {
-        return info
-            .type_display
-            .clone()
-            .unwrap_or_else(|| info.name.clone());
+        return match &info.type_display {
+            // A compile-time constructor (`Sequence`, `Ident`, …): its
+            // `type_display` is a function signature, so lead with the name
+            // the way a `def`/constructor hover does.
+            Some(display) if display != &info.name => {
+                format!("{}: {display}", info.name)
+            }
+            Some(display) => display.clone(),
+            None => info.name.clone(),
+        };
     }
     let name = info.declaration_prefix.as_ref().map_or_else(
         || info.name.clone(),
@@ -2435,6 +2546,37 @@ mod tests {
                     && entry.instantiation.as_deref() == Some("Box: I32 -> Box I32")
             }),
             "constructor use-site hover missing: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn syntax_node_constructor_in_a_macro_leads_with_the_declared_type() {
+        let source = concat!(
+            "use std.syntax.Sequence\n",
+            "pub macro @wrap: Item -> Sequence Item = item => Sequence (first: item, rest: Sequence ())\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-sequence-constructor.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        // A `Sequence (…)` constructor call in the macro body hovers as the
+        // declared generic signature, with the macro's own result type
+        // (`Sequence Item`) substituted into the `instantiated to:` block.
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "Sequence"
+                    && entry.signature
+                        == "Sequence: <Element> () | (first: Element, rest: Sequence Element) -> Sequence Element"
+                    && entry.instantiation.as_deref()
+                        == Some("Sequence: () | (first: Item, rest: Sequence Item) -> Sequence Item")
+            }),
+            "sequence constructor hover missing: {entries:?}"
         );
     }
 
@@ -3337,7 +3479,10 @@ mod tests {
             "{signatures:?}"
         );
         assert!(
-            signatures.contains(&("CallExpr", "(callee: Expr, argument: Expr) -> CallExpr")),
+            signatures.contains(&(
+                "CallExpr",
+                "CallExpr: (callee: Expr, argument: Expr) -> CallExpr"
+            )),
             "{signatures:?}"
         );
         assert!(

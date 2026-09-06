@@ -5435,13 +5435,15 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         "StringExpr" => Some("String -> StringExpr"),
         "BindingPattern" => Some("Ident String -> BindingPattern"),
         "NominalPattern" => Some("(name: Ident String, argument: Pattern) -> NominalPattern"),
-        "Sequence" => Some("Element => Element -> Sequence Element"),
-        "Separated" => Some(
-            "Element => Separator => (separator: Separator, elements: Sequence Element, trailing: Bool) -> Separated Element Separator",
+        "Sequence" => Some(
+            "<Element> () | (first: Element, rest: Sequence Element) -> Sequence Element",
         ),
-        "Parenthesized" => Some("Contents => Contents -> Parenthesized Contents"),
-        "Bracketed" => Some("Contents => Contents -> Bracketed Contents"),
-        "Braced" => Some("Contents => Contents -> Braced Contents"),
+        "Separated" => Some(
+            "<Element Separator> (separator: Separator, elements: Sequence Element, trailing: Bool) -> Separated Element Separator",
+        ),
+        "Parenthesized" => Some("<Contents> Contents -> Parenthesized Contents"),
+        "Bracketed" => Some("<Contents> Contents -> Bracketed Contents"),
+        "Braced" => Some("<Contents> Contents -> Braced Contents"),
         "TypeDeclarationItem" => Some(
             "(kind: TypeDeclarationKind, name: Ident String, name_spelling: String, declared_type: Type, type_parameters: Sequence (Ident String), underlying: Optional Type) -> TypeDeclarationItem",
         ),
