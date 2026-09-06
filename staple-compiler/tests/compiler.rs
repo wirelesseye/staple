@@ -896,6 +896,20 @@ fn allows_a_recursive_type_guarded_by_a_recursive_constructor() {
 }
 
 #[test]
+fn constructs_a_recursive_value_through_its_own_indirection_arm() {
+    // The recursive self-reference stand-in carries an `Opaque` placeholder
+    // representation; passing `Ref node` back into the type's own constructor
+    // makes generic inference for `Ref` reconcile that placeholder against the
+    // fully-resolved `Node`, which must not be reported as a conflict.
+    type_check(concat!(
+        "type Node = () | (Ref Node)\n",
+        "let node1 = Node ()\n",
+        "let node2 = Node (Ref node1)\n",
+        "let node3 = Node (Ref node2)\n",
+    ));
+}
+
+#[test]
 fn still_rejects_a_recursive_type_with_no_indirection() {
     TypeChecker::new()
         .check(resolve("type Loop = (head: I32, tail: Loop)\n"))

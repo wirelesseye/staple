@@ -11566,7 +11566,8 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
                 id: actual_id,
                 name: actual_name,
                 arguments,
-                representation: Box::new(merge_types(
+                representation: Box::new(reconcile_distinct_representation(
+                    actual_id,
                     *actual_representation,
                     *expected_representation,
                 )?),
@@ -11574,6 +11575,32 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         }
         _ => None,
     }
+}
+
+/// Reconciles the `representation` of two `Distinct` types already known to
+/// share an `id` and argument arity. A `Distinct` is a nominal type — its
+/// `id` and `arguments` fully determine its representation — but a recursive
+/// self-reference stand-in carries an `Opaque { id }` placeholder in place of
+/// the real representation (see `recursive_self_reference`). That placeholder
+/// can surface nested inside an otherwise fully-resolved representation, and
+/// at a shallower depth than a separately-resolved copy of the same type, so
+/// a structural merge of the two would spuriously fail (`Opaque` vs `Sum`).
+/// Prefer whichever side is not the placeholder before merging structurally.
+fn reconcile_distinct_representation(
+    id: TypeId,
+    actual: CheckedType,
+    expected: CheckedType,
+) -> Option<CheckedType> {
+    let is_placeholder = |representation: &CheckedType| {
+        matches!(representation, CheckedType::Opaque { id: opaque_id, .. } if *opaque_id == id)
+    };
+    if is_placeholder(&expected) {
+        return Some(actual);
+    }
+    if is_placeholder(&actual) {
+        return Some(expected);
+    }
+    merge_types(actual, expected)
 }
 
 fn can_coerce_type(actual: &CheckedType, expected: &CheckedType) -> bool {
