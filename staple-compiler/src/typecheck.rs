@@ -5937,14 +5937,10 @@ impl TypeChecker {
                     ));
                     continue;
                 };
-                if initialized[destination] {
-                    has_error = true;
-                    self.diagnostics.push(Diagnostic::new(
-                        element.syntax.span.clone(),
-                        format!("product field `{name}` is initialized more than once"),
-                    ));
-                    continue;
-                }
+                // A later `.name:` designator overrides an earlier value for
+                // the same field, whether that value came from the positional
+                // prefix or an earlier designator. This mirrors the
+                // later-field-wins merge semantics of a `...=` named spread.
                 initialized[destination] = true;
                 if let Some(merged) = merge_types(
                     value_type.clone(),

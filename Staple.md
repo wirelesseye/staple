@@ -1163,11 +1163,13 @@ let value: (I32, I32, a: I32, b: I32) =
 The expected fixed product shape and its field names must already be known;
 the individual element types may still contain inference variables. Each
 `.name:` selects the uniquely named position in that expected product. A
-designator cannot name an unknown field, initialize a position already
-consumed by the positional prefix or another designator, or leave any expected
-position uninitialized. Positional elements and positional spreads cannot
-appear after the first designator. Initializer expressions are evaluated once
-in source order even though designated values are placed in product order.
+designator cannot name an unknown field or leave any expected position
+uninitialized. A designator may name a position already filled by the
+positional prefix or an earlier designator; the later value wins, matching the
+later-field-wins merge semantics of a `...=` named spread. Positional elements
+and positional spreads cannot appear after the first designator. Initializer
+expressions are all evaluated once in source order even though designated
+values are placed in product order.
 
 Ordinary `name: value` syntax never performs designated placement. Designated
 initializers also do not combine with a `...=` named spread. Named spreads keep

@@ -1503,10 +1503,6 @@ fn rejects_invalid_contextual_named_initializers_and_labels() {
             "unknown designated product field `missing`",
         ),
         (
-            "let value: (a: I32, b: I32) = (1, .a: 2, .b: 3)\n",
-            "initialized more than once",
-        ),
-        (
             "let value: (a: I32, b: I32) = (.a: 1)\n",
             "missing product field `b`",
         ),
@@ -1550,6 +1546,21 @@ fn rejects_invalid_contextual_named_initializers_and_labels() {
             "expected diagnostic containing `{expected}`, got {diagnostics:?}"
         );
     }
+}
+
+#[test]
+fn designated_initializers_override_earlier_values() {
+    // A `.name:` designator overrides the positional prefix and any earlier
+    // designator for the same field, matching `...=` merge semantics.
+    let source = concat!(
+        "let value: (a: I32, b: I32) = (1, 2, .a: 10, .a: 30)\n",
+        "let result: I32 = value.a + value.b\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("designated override should generate LLVM");
 }
 
 #[test]
