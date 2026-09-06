@@ -1306,11 +1306,17 @@ impl Collector<'_> {
         if let Some(value_type) = self.typed.type_of_expression(expression.syntax().id) {
             let value_type = self.display_type(value_type);
             let symbol = self.typed.symbol_for(expression.syntax().id);
-            let declaration = symbol.and_then(|symbol| self.declarations.get(&symbol));
+            // A real `let`/`def` declaration, or — for a type constructor used
+            // as a value (`Box 32`) — a synthetic one built from the type's
+            // own declaration so the hover reads `Box: <T> T -> Box T`.
+            let declaration = symbol
+                .and_then(|symbol| self.declarations.get(&symbol))
+                .cloned()
+                .or_else(|| symbol.and_then(|symbol| self.constructor_declaration(symbol)));
             // The declared (generic) type of the referenced binding, so a
-            // generic function hovers as its declared signature with the
-            // instantiation noted below it rather than only the instantiated
-            // type.
+            // generic function or constructor hovers as its declared
+            // signature with the instantiation noted below it rather than
+            // only the instantiated type.
             let declared_type = symbol
                 .and_then(|symbol| self.typed.type_of_symbol(symbol))
                 .map(|ty| self.display_type(ty));
@@ -1325,13 +1331,14 @@ impl Collector<'_> {
                         .trait_method(*method)
                         .map(|member| (*method, member))
                 });
-            let instantiation = declaration.and_then(|declaration| {
+            let instantiation = declaration.as_ref().and_then(|declaration| {
                 let declared = declared_type.as_deref()?;
                 declaration
                     .is_instantiation(declared, &value_type)
                     .then(|| declaration.instantiated_signature(&value_type))
             });
             let signature = declaration
+                .as_ref()
                 .map(|declaration| match &declared_type {
                     Some(declared) if declaration.is_instantiation(declared, &value_type) => {
                         declaration.declared_signature(declared)
@@ -1345,6 +1352,7 @@ impl Collector<'_> {
                 })
                 .unwrap_or(value_type);
             let docs = declaration
+                .as_ref()
                 .map(|declaration| declaration.docs.clone())
                 .or_else(|| trait_member.map(|(_, member)| member.docs.clone()))
                 .unwrap_or_default();
@@ -1743,6 +1751,26 @@ impl Collector<'_> {
                 instantiation: None,
             });
         }
+    }
+
+    /// A synthetic `Declaration` for a type constructor used as a value, so a
+    /// use of it (`Box 32`) hovers as `Box: <T> T -> Box T` with the
+    /// instantiation noted below, mirroring a generic `def`. The constructor
+    /// itself has no `let`/`def` keyword, hence no prefix.
+    fn constructor_declaration(&self, symbol: SymbolId) -> Option<Declaration> {
+        let id = self.typed.resolved().constructor_type(symbol)?;
+        let declaration = self.typed.resolved().type_declarations().get(&id)?;
+        let generics = self.bracketed_generic_prefix(
+            &declaration.type_parameters,
+            &declaration.trait_bounds,
+            &declaration.subtype_bounds,
+        );
+        Some(Declaration {
+            prefix: None,
+            name: declaration.name.clone(),
+            docs: declaration.docs.clone(),
+            generics,
+        })
     }
 
     /// The `use`-path-style name of the module that defines whatever the given
@@ -2379,6 +2407,34 @@ mod tests {
                     && entry.instantiation.as_deref() == Some("unbox: Box I32 -> I32")
             }),
             "use-site hover missing: {entries:?}"
+        );
+    }
+
+    #[test]
+    fn generic_type_constructor_use_site_leads_with_the_declared_type() {
+        let source = concat!(
+            "pub(repr) type Box T = T\n",
+            "let box = Box 32\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-generic-constructor-use-site.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        // `Box` applied as a constructor hovers as its declared generic
+        // signature, with the instantiation in its own block.
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "Box"
+                    && entry.signature == "Box: <T> T -> Box T"
+                    && entry.instantiation.as_deref() == Some("Box: I32 -> Box I32")
+            }),
+            "constructor use-site hover missing: {entries:?}"
         );
     }
 
