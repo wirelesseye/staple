@@ -1570,6 +1570,17 @@ pub struct TypeChecker {
     type_declarations: HashMap<TypeId, TypeDeclaration>,
     resolved_named_types: HashMap<TypeId, CheckedType>,
     resolving_named_types: HashSet<TypeId>,
+    /// Nesting depth of type-argument positions whose enclosing constructor is
+    /// a `@recursive_constructor` (`Ref`, `Slice`, `Syntax`). A self-reference
+    /// reached while this is non-zero passes through a construction that does
+    /// not need its argument's representation to be laid out, so it breaks an
+    /// otherwise-cyclic type definition instead of being rejected.
+    recursive_construction_depth: usize,
+    /// Set while resolving a type synthesized from a pattern (e.g. the bare
+    /// `Node` in the parameter pattern `Node value => ...`), where an
+    /// under-applied constructor is expected and its arguments are recovered
+    /// from context rather than written out.
+    permit_partial_type_constructor: bool,
     return_contexts: Vec<CheckedType>,
     return_contributions: Vec<Vec<ReturnContribution>>,
     pending_propagations: Vec<Vec<(SyntaxId, CheckedType, usize, Span)>>,
@@ -3257,7 +3268,9 @@ impl TypeChecker {
                 }
                 continue;
             }
+            self.permit_partial_type_constructor = true;
             let mut parameter = self.resolve_source_type(module, &function.pattern.ty());
+            self.permit_partial_type_constructor = false;
             if !parameter.is_fully_known()
                 && let Some(annotation) = &function.binding_annotation
                 && let CheckedType::Function(annotation) =
@@ -10262,7 +10275,8 @@ impl TypeChecker {
                     }
                 } else {
                     let resolved = self.resolve_named_type(module, named);
-                    self.finish_defaulted_type(module, resolved)
+                    let finished = self.finish_defaulted_type(module, resolved);
+                    self.require_applied_type_constructor(finished, named.syntax.span.clone())
                 }
             }
             Type::Product(product) => {
@@ -10361,8 +10375,21 @@ impl TypeChecker {
             }
             Type::Application(application) => {
                 let callee = self.resolve_type_application_callee(module, &application.callee);
+                let guarded = matches!(
+                    &callee,
+                    CheckedType::TypeConstructor { id, .. }
+                        if module.recursive_construction(*id).is_some()
+                );
+                if guarded {
+                    self.recursive_construction_depth += 1;
+                }
                 let argument = self.resolve_source_type_inner(module, &application.argument);
-                self.apply_type_argument(module, callee, argument, application.syntax.span.clone())
+                if guarded {
+                    self.recursive_construction_depth -= 1;
+                }
+                let applied =
+                    self.apply_type_argument(module, callee, argument, application.syntax.span.clone());
+                self.require_applied_type_constructor(applied, application.syntax.span.clone())
             }
             Type::Repeated(repeated) => {
                 let element = self.resolve_source_type_inner(module, &repeated.element);
@@ -10698,6 +10725,66 @@ impl TypeChecker {
         self.finish_defaulted_type(module, result)
     }
 
+    /// Rejects a type expression that resolves to an under-applied
+    /// `TypeConstructor`. Staple has no higher-kinded types, so a generic type
+    /// name must be given all of its arguments wherever a value type is
+    /// expected; a bare `Node` or a half-applied `Result I32` is an error
+    /// rather than a partially applied type.
+    fn require_applied_type_constructor(
+        &mut self,
+        value_type: CheckedType,
+        span: Span,
+    ) -> CheckedType {
+        let CheckedType::TypeConstructor { id, name, arguments } = &value_type else {
+            return value_type;
+        };
+        if self.permit_partial_type_constructor {
+            return value_type;
+        }
+        let expected = self.type_declarations[id].type_parameters.len();
+        self.diagnostics.push(Diagnostic::new(
+            span,
+            format!(
+                "type constructor `{name}` expects {expected} type argument{}, but {} {} supplied",
+                if expected == 1 { "" } else { "s" },
+                arguments.len(),
+                if arguments.len() == 1 { "was" } else { "were" },
+            ),
+        ));
+        CheckedType::Error
+    }
+
+    /// When a type declaration refers to itself while its own representation is
+    /// still being resolved, but the reference is reached through a
+    /// `@recursive_constructor` (`recursive_construction_depth > 0`), the
+    /// enclosing construction (`Ref`, `Slice`, `Syntax`) does not need the
+    /// referent's layout, so the definition is well-founded. Yields a nominal
+    /// stand-in whose representation is left opaque rather than expanded a
+    /// second time; `None` means this is a genuine cyclic definition.
+    fn recursive_self_reference(
+        &self,
+        declaration: &TypeDeclaration,
+        id: TypeId,
+        display_name: &str,
+        arguments: &[CheckedType],
+    ) -> Option<CheckedType> {
+        if self.recursive_construction_depth == 0
+            || declaration.kind != TypeDeclarationKind::Distinct
+        {
+            return None;
+        }
+        Some(CheckedType::Distinct {
+            id,
+            name: display_name.to_owned(),
+            arguments: arguments.to_vec(),
+            representation: Box::new(CheckedType::Opaque {
+                id,
+                name: display_name.to_owned(),
+                arguments: arguments.to_vec(),
+            }),
+        })
+    }
+
     /// Finishes a possibly-partial `TypeConstructor` by filling in defaults
     /// for any trailing parameters still missing, if every one of them has
     /// one. Leaves anything else (including a `TypeConstructor` that still
@@ -10816,6 +10903,11 @@ impl TypeChecker {
             };
         }
         if !self.resolving_named_types.insert(id) {
+            if let Some(reference) =
+                self.recursive_self_reference(&declaration, id, &display_name, &arguments)
+            {
+                return reference;
+            }
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 format!("cyclic type definition involving `{display_name}`"),
@@ -10843,10 +10935,15 @@ impl TypeChecker {
         }
         self.active_function_bounds.push(declaration_bounds);
         self.active_subtype_bounds.push(declaration_subtype_bounds);
+        // A recursive constructor open in the caller's context does not guard
+        // *this* type's own self-reference; only one entered while resolving
+        // this representation does.
+        let outer_recursive_depth = std::mem::take(&mut self.recursive_construction_depth);
         let template = self.resolve_source_type(
             module,
             declaration.underlying.as_ref().expect("represented type"),
         );
+        self.recursive_construction_depth = outer_recursive_depth;
         self.active_function_bounds.pop();
         self.active_subtype_bounds.pop();
         self.resolving_named_types.remove(&id);
@@ -11189,12 +11286,18 @@ impl TypeChecker {
             return value_type;
         }
         if !self.resolving_named_types.insert(id) {
+            if let Some(reference) =
+                self.recursive_self_reference(&declaration, id, &display_name, &[])
+            {
+                return reference;
+            }
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 format!("cyclic type definition involving `{display_name}`"),
             ));
             return CheckedType::Error;
         }
+        let outer_recursive_depth = std::mem::take(&mut self.recursive_construction_depth);
         let representation = self.resolve_source_type(
             module,
             declaration
@@ -11202,6 +11305,7 @@ impl TypeChecker {
                 .as_ref()
                 .expect("non-opaque type declaration has an underlying type"),
         );
+        self.recursive_construction_depth = outer_recursive_depth;
         self.resolving_named_types.remove(&id);
         if declaration.kind == TypeDeclarationKind::Distinct && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(

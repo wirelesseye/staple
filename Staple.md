@@ -3147,7 +3147,16 @@ A type annotation must apply every compile-time parameter, unless the omitted
 trailing parameters all have defaults (see [Default type
 parameters](#default-type-parameters)). Applying a non-parameterized type,
 supplying the wrong product shape, or leaving a type partially applied is an
-error.
+error. This applies to a self-reference too: a recursive `type Node T` must
+still write its own arguments, as `Node T` or `Node I32`, never a bare `Node`.
+
+A represented type may refer to itself, directly or mutually, only where the
+reference passes through a managed indirection — `Ref`, `Slice`, or a
+`Syntax` value — so that every instance has a finite layout. A representation
+that would contain itself by value (`type Loop = (head: I32, tail: Loop)`) is
+rejected as a cyclic definition; routing the back-edge through `Ref`
+(`type Loop = (head: I32, tail: Option (Ref Loop))`) is well-founded and
+accepted.
 
 Product types and values may have a trailing comma.
 

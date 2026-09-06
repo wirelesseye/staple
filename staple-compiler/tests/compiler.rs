@@ -860,6 +860,66 @@ fn marks_compiler_owned_recursive_constructors() {
     assert_eq!(construction_for("String"), None);
 }
 
+#[test]
+fn rejects_a_recursive_type_that_omits_the_self_reference_arguments() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("type Node T = (value: T, next: Option Node)\n"))
+        .expect_err_diagnostics("a bare generic self-reference is not a value type");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "type constructor `Node` expects 1 type argument, but 0 were supplied"
+        }),
+        "unexpected diagnostics: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn rejects_a_bare_generic_type_constructor_used_as_a_value_type() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let bad: Option = 1\n"))
+        .expect_err_diagnostics("a partially applied type constructor is not a value type");
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.message
+                == "type constructor `Option` expects 1 type argument, but 0 were supplied"
+        }),
+        "unexpected diagnostics: {diagnostics:#?}"
+    );
+}
+
+#[test]
+fn allows_a_recursive_type_guarded_by_a_recursive_constructor() {
+    type_check("type Node T = (value: T, next: Option (Ref (Node I32)))\n");
+    type_check("type List T = (head: T, tail: Option (Ref (List T)))\n");
+    type_check("type Chain = (head: I32, tail: Option (Ref Chain))\n");
+}
+
+#[test]
+fn still_rejects_a_recursive_type_with_no_indirection() {
+    TypeChecker::new()
+        .check(resolve("type Loop = (head: I32, tail: Loop)\n"))
+        .expect_err_diagnostics("a type that directly contains itself has no finite layout");
+}
+
+#[test]
+fn recursive_constructor_guard_does_not_leak_into_a_nested_type() {
+    // `Ref` is open while resolving `Outer`, but that must not license
+    // `Inner`'s own by-value self-reference.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Inner = (here: I32, again: Inner)\n",
+            "type Outer = (inner: Option (Ref Inner))\n",
+        )))
+        .expect_err_diagnostics("a nested by-value cycle is still rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message == "cyclic type definition involving `Inner`"),
+        "unexpected diagnostics: {diagnostics:#?}"
+    );
+}
+
 fn copy_directory(source: &Path, target: &Path) {
     std::fs::create_dir_all(target).expect("test standard library directory should be created");
     for entry in std::fs::read_dir(source).expect("standard library directory should be readable") {
@@ -6839,11 +6899,9 @@ fn default_type_bound_does_not_fire_when_a_later_parameter_lacks_one() {
             "`Weird`'s `B` parameter has no default, so the defaulted `A` ",
             "cannot fill in for a fully bare `Weird` either"
         ));
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message == "expected `Weird`, found `(I32, I32)`" })
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "type constructor `Weird` expects 2 type arguments, but 0 were supplied"
+    }));
 }
 
 #[test]
