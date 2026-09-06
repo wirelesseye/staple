@@ -1959,7 +1959,9 @@ impl MacroExpander {
                 );
                 CompileType::Product(vec![element])
             }
-            Expression::Call(_) => self.check_compile_call(module, expression, environment),
+            Expression::Call(_) => {
+                self.check_compile_call(module, expression, environment, expected)
+            }
             Expression::Access(access) => {
                 if let Some(helper) = self.qualified_compile_helper(module, access) {
                     self.check_compile_helper(&helper);
@@ -2190,29 +2192,43 @@ impl MacroExpander {
         module: ModuleId,
         expression: &Expression,
         environment: &mut CompileEnvironment,
+        expected: Option<&CompileType>,
     ) -> CompileType {
         let (head, arguments) = flatten_call(expression);
         if let Some(keys) = self.resolve_macro(module, head) {
-            let matching = keys
-                .iter()
-                .filter_map(|key| self.definitions.get(key))
-                .find(|definition| {
-                    arguments.len() >= definition.arity
-                        && definition
-                            .parameters
-                            .iter()
-                            .zip(arguments.iter())
-                            .all(|(expected, argument)| meta_type_matches(expected, argument))
-                })
-                .cloned();
-            if let Some(definition) = matching {
-                return CompileType::Meta(definition.result);
+            // Match overloads the same way real call sites and compile-time
+            // evaluation do, so function-style macros with greedy `Expr *`
+            // parameters and a trailing `Sequence Expr` (`if`, `while`, `for`,
+            // `when`) are usable inside compile-time helper and macro bodies.
+            // `select_macro` reports its own diagnostic when nothing matches.
+            let Some(selected) =
+                self.select_macro(&keys, &arguments, None, expression.syntax().span.clone())
+            else {
+                return CompileType::Error;
+            };
+            if selected.consumed < arguments.len() {
+                // Excess arguments would be applied to the expansion as calls;
+                // that is only meaningful for function-producing macros, which
+                // are not expressible as a compile-time meta type. Leave the
+                // result unconstrained rather than guessing.
+                for argument in &arguments[selected.consumed..] {
+                    self.check_compile_expression(module, argument, environment, None);
+                }
+                return CompileType::Unknown;
             }
-            self.diagnostics.push(Diagnostic::new(
-                expression.syntax().span.clone(),
-                "no macro overload matches these compile-time arguments",
-            ));
-            return CompileType::Error;
+            // A macro whose result is raw `Syntax`/`SyntaxNode` yields an
+            // expression value here, the same coercion `parse_quote` performs:
+            // adopt the expected quotable meta type when one is supplied.
+            let result = selected.definition.result.clone();
+            if matches!(result, MetaType::Syntax | MetaType::SyntaxNode) {
+                match expected {
+                    Some(CompileType::Meta(meta)) if quote_result_type(meta) => {
+                        return CompileType::Meta(meta.clone());
+                    }
+                    _ => return CompileType::Meta(MetaType::Expr),
+                }
+            }
+            return CompileType::Meta(result);
         }
 
         if let Expression::Name(name) = head
@@ -4856,7 +4872,14 @@ impl MacroExpander {
                         selected.arguments,
                         expression.syntax().span.clone(),
                     );
-                    if let Some(SyntaxValue::Raw(raw)) = result.take() {
+                    // Only a `Raw` fragment needs reparsing; a structured
+                    // `SyntaxValue` must be preserved as-is. Using `result.take()`
+                    // as the `if let` scrutinee would drop non-`Raw` values on a
+                    // failed match, so branch on the variant explicitly.
+                    if matches!(result, Some(SyntaxValue::Raw(_))) {
+                        let Some(SyntaxValue::Raw(raw)) = result.take() else {
+                            unreachable!("checked to be a raw fragment above")
+                        };
                         result = match staple_syntax::parse_expression_fragment(
                             &raw,
                             &mut self.next_syntax_id,
@@ -4912,6 +4935,30 @@ impl MacroExpander {
                             }
                             result = Some(SyntaxValue::from_expression(expanded));
                         };
+                    }
+                    // During compile-time evaluation, a control-flow macro such
+                    // as `if`/`when` expands to a `match … satisfies Bool { … }`
+                    // over compile-time-known operands. Evaluate that expansion
+                    // in place so the macro selects a branch inside compile-time
+                    // helper and macro bodies, instead of yielding the `match`
+                    // as an opaque syntax value the surrounding code cannot use.
+                    // Only bare control-flow shapes are evaluated; a macro that
+                    // builds an expression to emit (a constructor call, an
+                    // identifier, a literal) is still returned as syntax, as are
+                    // builtin producers (`c_string`) and excess-argument calls.
+                    if arguments[consumed_count..].is_empty()
+                        && matches!(definition.kind, MacroKind::User(_))
+                        && let Some(expanded) =
+                            result.as_ref().and_then(SyntaxValue::to_expression)
+                        && matches!(
+                            expanded,
+                            Expression::Match(_) | Expression::Satisfies(_)
+                        )
+                    {
+                        let expanded = expanded.clone();
+                        let evaluated = self.eval_expression(module, &expanded, environment);
+                        self.expansion_stack.pop();
+                        return evaluated;
                     }
                     let result = result.map(Value::Syntax);
                     self.expansion_stack.pop();
