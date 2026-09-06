@@ -783,6 +783,11 @@ fn render_hover_markdown(entries: &[&HoverEntry]) -> String {
             rendered.push_str("```staple\n");
             rendered.push_str(&entry.signature);
             rendered.push_str("\n```");
+            if let Some(instantiation) = &entry.instantiation {
+                rendered.push_str("\ninstantiated to:\n```staple\n");
+                rendered.push_str(instantiation);
+                rendered.push_str("\n```");
+            }
             if !entry.documentation.is_empty() {
                 rendered.push_str("\n\n");
                 rendered.push_str(&entry.documentation.join("\n"));
@@ -807,6 +812,7 @@ fn remap_hover_entries(source: &str, successful: &SuccessfulAnalysis) -> Vec<Hov
                     signature: entry.signature.clone(),
                     documentation: entry.documentation.clone(),
                     module: entry.module.clone(),
+                    instantiation: entry.instantiation.clone(),
                 }
             })
         })
@@ -1347,6 +1353,7 @@ mod tests {
                 signature: "def good: () -> I32".to_owned(),
                 documentation: Vec::new(),
                 module: None,
+                instantiation: None,
             }],
         };
 
@@ -1377,6 +1384,7 @@ mod tests {
             signature: "def println: String -> () / IO".to_owned(),
             documentation: vec!["Prints a line.".to_owned()],
             module: Some("std.io".to_owned()),
+            instantiation: None,
         };
         let rendered = render_hover_markdown(&[&with_module]);
         assert_eq!(
@@ -1390,10 +1398,24 @@ mod tests {
             signature: "let x: I32".to_owned(),
             documentation: Vec::new(),
             module: None,
+            instantiation: None,
         };
         assert_eq!(
             render_hover_markdown(&[&without_module]),
             "```staple\nlet x: I32\n```"
+        );
+
+        let instantiated = HoverEntry {
+            range: 0..1,
+            signature: "def identity: <T> move T -> T".to_owned(),
+            documentation: Vec::new(),
+            module: Some("example".to_owned()),
+            instantiation: Some("identity: move I32 -> I32".to_owned()),
+        };
+        assert_eq!(
+            render_hover_markdown(&[&instantiated]),
+            "```staple\nexample\n```\n\n```staple\ndef identity: <T> move T -> T\n```\n\
+             instantiated to:\n```staple\nidentity: move I32 -> I32\n```"
         );
     }
 

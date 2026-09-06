@@ -15,6 +15,10 @@ pub struct HoverEntry {
     /// rust-analyzer style. `None` for locals, parameters, type parameters, and
     /// anything whose defining module can't be named.
     pub module: Option<String>,
+    /// For a use of a generic binding: the type it was instantiated to here,
+    /// rendered as its own `instantiated to:` fenced block below `signature`
+    /// (which keeps the declared, generic form). `None` otherwise.
+    pub instantiation: Option<String>,
 }
 
 #[cfg(test)]
@@ -50,6 +54,7 @@ pub fn entries_at_path(path: &Path, module: &Module, typed: &TypedModule) -> Vec
             .then(left.signature.cmp(&right.signature))
             .then(left.documentation.cmp(&right.documentation))
             .then(left.module.cmp(&right.module))
+            .then(left.instantiation.cmp(&right.instantiation))
     });
     collector.entries.dedup();
     collector.entries
@@ -98,6 +103,11 @@ struct Declaration {
     prefix: Option<String>,
     name: String,
     docs: Vec<String>,
+    /// Bracketed generic-parameter prefix of the declaration, e.g. `<T> ` or
+    /// `<T where Debug T> `. Empty for non-generic declarations and for
+    /// bindings introduced by a pattern. Lets a use-site hover lead with the
+    /// declared (generic) signature before noting the instantiation.
+    generics: String,
 }
 
 impl Collector<'_> {
@@ -219,12 +229,18 @@ impl Collector<'_> {
             } else {
                 binding.docs.clone()
             };
+            let generics = self.bracketed_generic_prefix(
+                &binding.type_parameters,
+                &binding.trait_bounds,
+                &binding.subtype_bounds,
+            );
             self.declarations.insert(
                 symbol,
                 Declaration {
                     prefix: Some(binding.declaration_prefix()),
                     name: binding.name.clone(),
                     docs,
+                    generics,
                 },
             );
         }
@@ -350,6 +366,7 @@ impl Collector<'_> {
                             prefix,
                             name: binding.name.clone(),
                             docs: Vec::new(),
+                            generics: String::new(),
                         },
                     );
                 }
@@ -1288,10 +1305,15 @@ impl Collector<'_> {
         }
         if let Some(value_type) = self.typed.type_of_expression(expression.syntax().id) {
             let value_type = self.display_type(value_type);
-            let declaration = self
-                .typed
-                .symbol_for(expression.syntax().id)
-                .and_then(|symbol| self.declarations.get(&symbol));
+            let symbol = self.typed.symbol_for(expression.syntax().id);
+            let declaration = symbol.and_then(|symbol| self.declarations.get(&symbol));
+            // The declared (generic) type of the referenced binding, so a
+            // generic function hovers as its declared signature with the
+            // instantiation noted below it rather than only the instantiated
+            // type.
+            let declared_type = symbol
+                .and_then(|symbol| self.typed.type_of_symbol(symbol))
+                .map(|ty| self.display_type(ty));
             let trait_member = self
                 .typed
                 .resolved()
@@ -1303,8 +1325,19 @@ impl Collector<'_> {
                         .trait_method(*method)
                         .map(|member| (*method, member))
                 });
+            let instantiation = declaration.and_then(|declaration| {
+                let declared = declared_type.as_deref()?;
+                declaration
+                    .is_instantiation(declared, &value_type)
+                    .then(|| declaration.instantiated_signature(&value_type))
+            });
             let signature = declaration
-                .map(|declaration| declaration.signature(&value_type))
+                .map(|declaration| match &declared_type {
+                    Some(declared) if declaration.is_instantiation(declared, &value_type) => {
+                        declaration.declared_signature(declared)
+                    }
+                    _ => declaration.signature(&value_type),
+                })
                 .or_else(|| {
                     trait_member.map(|(method, member)| {
                         self.trait_member_signature(method, &member.name, &value_type)
@@ -1323,7 +1356,7 @@ impl Collector<'_> {
                     .and_then(|method| self.typed.resolved().trait_for_method(*method))
                     .and_then(|trait_id| self.definition_module_label(DefinitionId::Trait(trait_id)))
             });
-            self.syntax_with_docs(expression.syntax(), signature, docs, module);
+            self.syntax_with_docs(expression.syntax(), signature, docs, module, instantiation);
         }
         match expression {
             Expression::Function(function) => {
@@ -1638,7 +1671,7 @@ impl Collector<'_> {
 
     fn syntax(&mut self, syntax: &Syntax, signature: String) {
         let module = self.module_label(syntax.id);
-        self.syntax_with_docs(syntax, signature, Vec::new(), module);
+        self.syntax_with_docs(syntax, signature, Vec::new(), module, None);
     }
 
     fn syntax_with_docs(
@@ -1647,6 +1680,7 @@ impl Collector<'_> {
         signature: String,
         documentation: Vec<String>,
         module: Option<String>,
+        instantiation: Option<String>,
     ) {
         if let Some(range) = crate::lsp::source_projection::syntax_range(syntax, self.path) {
             self.entries.push(HoverEntry {
@@ -1654,6 +1688,7 @@ impl Collector<'_> {
                 signature,
                 documentation,
                 module,
+                instantiation,
             });
         }
     }
@@ -1679,6 +1714,7 @@ impl Collector<'_> {
                 signature,
                 documentation,
                 module,
+                instantiation: None,
             });
         }
     }
@@ -1704,6 +1740,7 @@ impl Collector<'_> {
                 signature,
                 documentation,
                 module,
+                instantiation: None,
             });
         }
     }
@@ -1817,6 +1854,29 @@ impl Declaration {
             Some(prefix) => format!("{prefix} {}: {value_type}", self.name),
             None => format!("{}: {value_type}", self.name),
         }
+    }
+
+    /// The declared, generic signature shown as the primary hover line:
+    /// keeps the `def`/`let` prefix and the `<T …>` generic prefix, e.g.
+    /// `def identity: <T> move T -> T`.
+    fn declared_signature(&self, declared: &str) -> String {
+        match &self.prefix {
+            Some(prefix) => format!("{prefix} {}: {}{declared}", self.name, self.generics),
+            None => format!("{}: {}{declared}", self.name, self.generics),
+        }
+    }
+
+    /// The `instantiated to:` line: just `name: type`, without the
+    /// declaration prefix or the generic prefix, e.g. `identity: move I32 -> I32`.
+    fn instantiated_signature(&self, instantiated: &str) -> String {
+        format!("{}: {instantiated}", self.name)
+    }
+
+    /// Whether a use of this declaration at `instantiated` should show a
+    /// distinct `instantiated to:` block — true only for a generic
+    /// declaration used at a type that differs from its declared one.
+    fn is_instantiation(&self, declared: &str, instantiated: &str) -> bool {
+        !self.generics.is_empty() && declared != instantiated
     }
 }
 
@@ -2284,6 +2344,45 @@ mod tests {
     }
 
     #[test]
+    fn generic_function_use_site_leads_with_the_declared_type() {
+        let source = concat!(
+            "pub(repr) type Box T = (value: T)\n",
+            "def unbox: <T> Box T -> T = Box value => value\n",
+            "unbox (Box (value: 1))\n",
+        );
+        let path = std::env::temp_dir().join("staple-hover-generic-use-site.sta");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .load_source_at(&path, source)
+            .unwrap();
+        let resolved = NameResolver::new().resolve_program(program).unwrap();
+        let typed = TypeChecker::new().check(resolved).unwrap();
+        let module = parse(source).unwrap();
+        let entries = entries(&module, &typed);
+
+        // The declaration still hovers as its declared (generic) signature,
+        // with no instantiation block.
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "unbox"
+                    && entry.signature == "def unbox: <T> Box T -> T"
+                    && entry.instantiation.is_none()
+            }),
+            "declaration hover missing: {entries:?}"
+        );
+        // The call site keeps the declared signature and carries the
+        // instantiated type in its own block.
+        assert!(
+            entries.iter().any(|entry| {
+                &source[entry.range.clone()] == "unbox"
+                    && entry.signature == "def unbox: <T> Box T -> T"
+                    && entry.instantiation.as_deref() == Some("unbox: Box I32 -> I32")
+            }),
+            "use-site hover missing: {entries:?}"
+        );
+    }
+
+    #[test]
     fn reaction_effects_propagate_through_a_wrapping_function() {
         let source = concat!(
             "use std.io.println\n",
@@ -2310,16 +2409,25 @@ mod tests {
         let module = parse(source).unwrap();
         let entries = entries(&module, &typed);
 
-        for (name, signature) in [
-            ("test", "def test: () ->{state.read, IO, Reactive} ()"),
+        for (name, signature, instantiation) in [
+            (
+                "test",
+                "def test: () ->{state.read, IO, Reactive} ()",
+                None,
+            ),
             (
                 "reaction",
-                "def reaction: (() ->{state.read, IO} ()) ->{state.read, IO, Reactive} ()",
+                "def reaction: <effect E> (() ->{E} ()) ->{E, Reactive} ()",
+                Some(
+                    "reaction: (() ->{state.read, IO} ()) ->{state.read, IO, Reactive} ()",
+                ),
             ),
         ] {
             assert!(
                 entries.iter().any(|entry| {
-                    &source[entry.range.clone()] == name && entry.signature == signature
+                    &source[entry.range.clone()] == name
+                        && entry.signature == signature
+                        && entry.instantiation.as_deref() == instantiation
                 }),
                 "missing {name}: {signature} in {entries:?}"
             );
