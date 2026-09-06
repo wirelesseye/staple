@@ -1469,6 +1469,18 @@ fn parses_juxtaposed_function_parameters_and_types() {
 }
 
 #[test]
+fn rejects_defaults_on_juxtaposed_parameter_slots() {
+    let error = parse(
+        "def render: (width: I32 = 800) * body: (() -> ()) -> () = width * body => ()\n",
+    )
+    .expect_err("juxtaposed slots must have exact arity");
+    assert!(error.message.contains("exact arity"), "{}", error.message);
+
+    parse("def render: ((width: I32 = 800)) * body: (() -> ()) -> () = width * body => ()\n")
+        .expect("a nested product parameter may retain its own field defaults");
+}
+
+#[test]
 fn parses_mixed_precedence_builtin_operator_expression() {
     let source = "1 + 2 * 3\n";
     let root = parse(source).expect("builtin operator expression should parse");

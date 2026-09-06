@@ -1158,14 +1158,17 @@ fn fills_anonymous_product_field_defaults_at_calls_and_construction() {
 }
 
 #[test]
-fn fills_defaulted_juxtaposed_parameters_at_calls_and_through_aliases() {
-    let declaration = type_check(
-        "def app: (props: I32 = 7) * children: (() -> I32) -> I32 = props * children => props + children ()\n",
-    );
+fn selects_function_overloads_by_juxtaposed_arity() {
+    let declaration = type_check(concat!(
+        "def app: I32 -> I32 = value => value + 1\n",
+        "def app: I32 * I32 -> I32 = left * right => left + right\n",
+    ));
     let app = declaration
         .functions()
         .iter()
-        .find(|function| function.name == "app")
+        .find(|function| {
+            function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed
+        })
         .expect("app declaration");
     assert_eq!(
         declaration
@@ -1175,18 +1178,18 @@ fn fills_defaulted_juxtaposed_parameters_at_calls_and_through_aliases() {
         staple_syntax::FunctionParameterStyle::Juxtaposed
     );
     let source = concat!(
-        "def app: (props: I32 = 7) * children: (() -> I32) -> I32 = props * children => props + children ()\n",
-        "let explicit: I32 = app 5 { 1 }\n",
-        "let omitted: I32 = app { 2 }\n",
-        "let component = app\n",
-        "let aliased: I32 = component { 3 }\n",
-        "let forced: I32 = app _ { 4 }\n",
+        "def app: I32 -> I32 = value => value + 1\n",
+        "def app: I32 * I32 -> I32 = left * right => left + right\n",
+        "let unary: I32 = app 5\n",
+        "let binary: I32 = app 5 7\n",
+        "let selected: I32 -> I32 = app\n",
+        "let contextual: I32 = selected 9\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("defaulted juxtaposed calls should generate LLVM");
+        .expect("arity-overloaded calls should generate LLVM");
 }
 
 #[test]
@@ -1204,58 +1207,102 @@ fn rejects_a_default_on_a_curried_parameter() {
 }
 
 #[test]
-fn supports_consecutive_defaulted_juxtaposed_parameters_and_direct_product_construction() {
+fn overloaded_functions_apply_extra_arguments_to_the_selected_result() {
     let source = concat!(
-        "def render: (options: (width: I32 = 10, height: I32 = 20) = ()) * (theme: String = \"light\") * children: (() -> I32) -> I32 = options * theme * children => options.width + children ()\n",
-        "let omitted: I32 = render { 1 }\n",
-        "let explicit: I32 = render (.width: 20) \"dark\" { 2 }\n",
-        "let forced: I32 = render _ \"dark\" { 3 }\n",
+        "def apply: I32 -> I32 -> I32 = first => second => first + second\n",
+        "def apply: I32 * I32 * I32 -> I32 = first * second * third => first + second + third\n",
+        "let through_unary: I32 = apply 1 2\n",
+        "def extend: I32 -> I32 = value => value + 1\n",
+        "def extend: I32 * I32 -> I32 -> I32 = first * second => third => first + second + third\n",
+        "let through_binary: I32 = extend 1 2 3\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("consecutive defaulted juxtaposed calls should generate LLVM");
+        .expect("arguments after the selected overload should apply to its result");
 }
 
 #[test]
-fn rejects_default_omission_placeholder_outside_a_defaulted_call() {
+fn rejects_an_inference_placeholder_as_a_value() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let invalid = _\n"))
         .expect_err_diagnostics("a standalone omission placeholder must fail");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("may only omit a defaulted juxtaposed parameter")
+            .contains("is not a value expression")
     }));
 }
 
 #[test]
-fn infers_generic_parameters_across_a_skipped_defaulted_juxtaposed_slot() {
+fn supports_same_scope_local_arity_overloads() {
     let source = concat!(
-        "def fallback: <T where Default T> (value: T = default ()) * children: (() -> T) -> T = value * children => children ()\n",
-        "let text: String = fallback { \"chosen\" }\n",
+        "def run = () => {\n",
+        "  def local: I32 -> I32 = value => value\n",
+        "  def local: I32 * I32 -> I32 = left * right => left + right\n",
+        "  local 1 + local 2 3\n",
+        "}\n",
+        "let value: I32 = run ()\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("generic defaulted juxtaposed calls should specialize");
+        .expect("same-scope local overloads should generate LLVM");
 }
 
 #[test]
-fn applies_defaulted_juxtaposed_parameters_on_trait_methods() {
+fn rejects_an_uncontextualized_bare_overload_set() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def choose: I32 -> I32 = value => value\n",
+            "def choose: I32 * I32 -> I32 = left * right => left\n",
+            "let ambiguous = choose\n",
+        )))
+        .expect_err_diagnostics("a bare overload set needs an expected function type");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("ambiguous overloaded function `choose`")));
+}
+
+#[test]
+fn applies_arity_overloads_on_trait_methods() {
     let source = concat!(
-        "trait Render T where Default T { render: (props: T = default ()) * children: (() -> T) -> T }\n",
-        "impl Render I32 { def render = props * children => props + children () }\n",
-        "let value: I32 = Render.render { 2 }\n",
-        "let another: I32 = Render.render { 3 }\n",
+        "trait Render T {\n",
+        "  render: T -> T\n",
+        "  render: T * T -> T\n",
+        "}\n",
+        "impl Render I32 {\n",
+        "  def render = value => value\n",
+        "  def render = left * right => left + right\n",
+        "}\n",
+        "let unary: I32 = Render.render 2\n",
+        "let binary: I32 = Render.render 2 3\n",
     );
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("trait juxtaposed defaults should generate LLVM");
+        .expect("trait arity overloads should generate LLVM");
+}
+
+#[test]
+fn applies_arity_overloads_on_companion_items() {
+    let source = concat!(
+        "type Box = I32\n",
+        "companion Box {\n",
+        "  pub def make: I32 -> Box = value => Box value\n",
+        "  pub def make: I32 * I32 -> Box = left * right => Box (left + right)\n",
+        "}\n",
+        "let unary: Box = Box.make 2\n",
+        "let binary: Box = Box.make 2 3\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("companion arity overloads should generate LLVM");
 }
 
 #[test]
@@ -7402,18 +7449,16 @@ fn lowers_mutation_markers_on_juxtaposed_parameter_slots() {
 }
 
 #[test]
-fn fills_and_skips_juxtaposed_parameter_defaults() {
-    let source = concat!(
-        "let render: (width: I32 = 10) * (label: String = \"default\") * body: (() -> I32) -> I32 = width * label * body => width + body ()\n",
-        "let omitted: I32 = render { 2 }\n",
-        "let explicit: I32 = render 20 \"chosen\" { 3 }\n",
-        "let forced: I32 = render _ _ { 4 }\n",
-    );
-    let module = type_check(source);
-    let context = Context::create();
-    CodeGenerator::new(&context)
-        .compile_module(&module)
-        .expect("juxtaposed defaults should generate LLVM");
+fn rejects_duplicate_function_overload_arities() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "def duplicate: I32 -> I32 = value => value\n",
+            "def duplicate: String -> String = value => value\n",
+        )))
+        .expect_err_diagnostics("parameter types do not distinguish overloads");
+    assert!(diagnostics.iter().any(|diagnostic| diagnostic
+        .message
+        .contains("duplicate function overload with arity 1")));
 }
 
 #[test]
@@ -9569,6 +9614,24 @@ fn deduplicates_matching_extern_declarations_across_modules() {
         !llvm.contains("@exit.1"),
         "the second `exit` declaration should reuse the first, not rename itself:\n{llvm}",
     );
+}
+
+#[test]
+fn supports_external_function_arity_overloads() {
+    let module = type_check(concat!(
+        "extern \"c\" {\n",
+        "  foreign: I32 -> I32\n",
+        "  foreign: I32 * I32 -> I32\n",
+        "}\n",
+        "let unary: I32 = foreign 1\n",
+        "let binary: I32 = foreign 1 2\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("external overloads should generate distinct declarations");
+    assert!(llvm.contains("@foreign.arity1"), "{llvm}");
+    assert!(llvm.contains("@foreign.arity2"), "{llvm}");
 }
 
 #[test]

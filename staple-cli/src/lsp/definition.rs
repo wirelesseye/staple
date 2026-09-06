@@ -1083,6 +1083,16 @@ impl Collector<'_> {
         let syntax = self.resolved_id(syntax);
         let mut definitions = self.resolved.definitions_for(syntax);
         if let Some(symbol) = self.typed.and_then(|typed| typed.symbol_for(syntax)) {
+            if definitions
+                .iter()
+                .filter(|definition| matches!(definition, DefinitionId::Symbol(_)))
+                .count()
+                > 1
+            {
+                definitions.retain(|definition| {
+                    !matches!(definition, DefinitionId::Symbol(candidate) if *candidate != symbol)
+                });
+            }
             definitions.push(DefinitionId::Symbol(symbol));
         }
         if let Some(dispatch) = self

@@ -152,9 +152,6 @@ fn format_juxtaposed_parameter(
                 text.push_str(": ");
             }
             text.push_str(&element.ty.to_string());
-            if element.default.is_some() {
-                text.push_str(" = …");
-            }
             text
         })
         .collect::<Vec<_>>()

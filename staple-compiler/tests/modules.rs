@@ -280,6 +280,50 @@ fn reexports_public_items_through_selected_renamed_glob_and_chained_uses() {
 }
 
 #[test]
+fn imports_and_reexports_preserve_a_same_module_arity_overload_set() {
+    let fixture = Fixture::new();
+    fixture.write(
+        "origin.sta",
+        concat!(
+            "pub def choose: I32 -> I32 = value => value\n",
+            "pub def choose: I32 * I32 -> I32 = left * right => left + right\n",
+        ),
+    );
+    fixture.write("facade.sta", "pub use origin.choose\n");
+    fixture.write(
+        "main.sta",
+        concat!(
+            "use facade.choose\n",
+            "let unary: I32 = choose 1\n",
+            "let binary: I32 = choose 1 2\n",
+        ),
+    );
+
+    fixture
+        .compile()
+        .expect("an imported overload set should retain all of its arities");
+}
+
+#[test]
+fn rejects_combining_same_named_functions_from_different_modules() {
+    let fixture = Fixture::new();
+    fixture.write("first.sta", "pub def choose: I32 -> I32 = value => value\n");
+    fixture.write(
+        "second.sta",
+        "pub def choose: I32 * I32 -> I32 = left * right => left + right\n",
+    );
+    fixture.write(
+        "main.sta",
+        "use first.choose\nuse second.choose\nchoose 1\n",
+    );
+
+    let error = fixture
+        .compile()
+        .expect_err("imports from different defining modules must not merge");
+    assert!(error.contains("duplicate import of `choose`"), "{error}");
+}
+
+#[test]
 fn selected_imports_bind_and_reexport_each_alias() {
     let fixture = Fixture::new();
     fixture.write(

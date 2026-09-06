@@ -2178,10 +2178,17 @@ impl Grammar {
         let start = self.position;
         let checkpoint = self.position;
         let syntax_checkpoint = self.next_syntax_id;
-        if self.juxtaposed_function_type_ahead()
-            && let Ok(first) = self.parse_juxtaposed_parameter_type_element()
-            && self.eat(TokenKind::Star)
-        {
+        if self.juxtaposed_function_type_ahead() {
+            let first = match self.parse_juxtaposed_parameter_type_element() {
+                Ok(first) => first,
+                Err(error) if error.message.contains("exact arity") => return Err(error),
+                Err(_) => {
+                    self.position = checkpoint;
+                    self.next_syntax_id = syntax_checkpoint;
+                    return self.parse_non_juxtaposed_function_type(start);
+                }
+            };
+            self.expect(TokenKind::Star, "expected `*` between juxtaposed parameters")?;
             let mut elements = vec![first];
             loop {
                 elements.push(self.parse_juxtaposed_parameter_type_element()?);
@@ -2221,6 +2228,10 @@ impl Grammar {
         }
         self.position = checkpoint;
         self.next_syntax_id = syntax_checkpoint;
+        self.parse_non_juxtaposed_function_type(start)
+    }
+
+    fn parse_non_juxtaposed_function_type(&mut self, start: usize) -> Result<Type, ParseError> {
         let whole_mutable = self.eat(TokenKind::Mut);
         let whole_moved = if whole_mutable {
             if self.eat(TokenKind::Move) {
@@ -2295,6 +2306,11 @@ impl Grammar {
             };
             if !product.variadic && product.elements.len() == 1 {
                 let mut element = product.elements.remove(0);
+                if element.default.is_some() {
+                    return Err(self.error(
+                        "juxtaposed parameters have exact arity and cannot declare defaults",
+                    ));
+                }
                 if mutable || moved {
                     if element.mutable || element.moved {
                         return Err(
@@ -2340,10 +2356,15 @@ impl Grammar {
     fn juxtaposed_function_type_ahead(&self) -> bool {
         let mut depth = 0usize;
         let mut saw_star = false;
+        let mut saw_token = false;
         for token in self.tokens.iter().skip(self.position) {
+            if token.kind == TokenKind::Newline && depth == 0 && saw_token && !saw_star {
+                return false;
+            }
             if token.kind.is_trivia() {
                 continue;
             }
+            saw_token = true;
             match token.kind {
                 TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
                 TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => {

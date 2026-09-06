@@ -1198,8 +1198,9 @@ default is not evaluated when an explicit initializer supplies that field.
 Defaults are contextual construction metadata, not part of structural type
 identity or runtime representation. They are preserved through transparent
 aliases, product type spreads, and function parameter types, but are erased
-from a constructed product value. Function-parameter defaults are inserted by
-the caller; the callee always receives the complete ordinary product.
+from a constructed product value. When a product parameter is constructed at a
+call site, its field defaults are inserted there; the callee always receives
+the complete ordinary product. They do not make function parameters optional.
 
 Defaults must be pure and portable: they may use literals, global names, and
 compile-time parameters, but may not capture local runtime values or refer to
@@ -2350,26 +2351,41 @@ Unlike `x => y => ...`, supplying the first argument never creates a partial
 closure. This form is also distinct from `(x, y) => ...`, which accepts one
 product value and is called as `add (1, 2)`. 
 
-Defaults may be declared on named slots in an explicit juxtaposed function
-type. Parentheses delimit a slot whose default expression could otherwise be
-confused with `*` multiplication:
+Juxtaposed functions may be overloaded by defining the same name at distinct
+outer arities in one module and lexical scope:
 
 ```staple
-def App:
-    (width: I32 = 800) * children: (() -> ()) -> ()
-= width * children => children ()
+def convert: I32 -> String = value => to_string value
+def convert: I32 * I32 -> String = value * radix => format_radix (value, radix)
 
-App 640 { () }
-App { () }       // width defaults to 800
-App _ { () }     // explicitly select width's default
+convert 10       // selects arity 1
+convert 10 16    // selects arity 2
 ```
 
-Arguments fill the earliest compatible slot. An incompatible argument may skip
-one or more defaulted slots, `_` explicitly fills the current slot from its
-default, and remaining trailing defaults are filled when the call completes.
-A braced expression prefers a reachable zero-argument callback slot. Defaults
-retain product-field defaults' purity, portability, generic-specialization, and
-call-site evaluation rules. Ordinary curried arrows cannot declare defaults.
+An ordinary function arrow has outer arity 1, even when its parameter is a
+product. A juxtaposed function's outer arity is its number of slots. Parameter
+and result types never distinguish overloads, so two definitions of the same
+name and arity are an error.
+
+For a contiguous application chain, the compiler selects the greatest declared
+arity no larger than the number of supplied arguments. The selected function
+consumes exactly that many arguments; any arguments left over are applied to
+its result. Thus, given overloads at arities 1 and 2, `f a c d` selects arity 2
+and then applies `d` to the result. Supplying fewer arguments than every
+available arity is an incomplete call and never creates a partial juxtaposed
+closure.
+
+An overload set is compile-time-only. A bare overloaded name requires an
+expected function type whose outer arity selects one member. Overloads may be
+declared at module level or by `def`s in the same local scope. Imports and
+re-exports preserve an overload set declared by one module, but same-named
+functions imported from different modules do not merge and remain a duplicate
+import error.
+
+Juxtaposed slots always have exact arity: they cannot declare defaults, be
+skipped by an incompatible argument, or use `_` as an omission placeholder.
+Defaults on fields of a product type nested inside a slot remain ordinary
+product-construction defaults.
 
 ## Block expressions
 

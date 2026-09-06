@@ -797,15 +797,16 @@ impl Collector<'_> {
         imported_name: &str,
         last: bool,
     ) {
-        let signature = self
+        let signatures = self
             .typed
             .resolved()
             .import_definitions(declaration.syntax.id, imported_name)
             .iter()
-            .find_map(|definition| {
+            .filter_map(|definition| {
                 self.definition_signature_and_docs(*definition, declaration.syntax.id)
-            });
-        if let Some((signature, docs)) = signature {
+            })
+            .collect::<Vec<_>>();
+        for (signature, docs) in signatures {
             let module = self.import_module_label(declaration.syntax.id, imported_name);
             if last {
                 self.named_last_with_docs(

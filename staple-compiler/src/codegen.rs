@@ -398,13 +398,32 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         ));
                     };
                     let llvm_type = self.compile_native_function_type(function_type)?;
+                    let external_name = if self
+                        .typed_module
+                        .resolved()
+                        .symbol_is_overloaded(symbol)
+                    {
+                        let arity = if function_type.parameter_style
+                            == staple_syntax::FunctionParameterStyle::Juxtaposed
+                        {
+                            match function_type.parameter.as_ref() {
+                                CheckedType::Product(product) => product.elements.len(),
+                                _ => 1,
+                            }
+                        } else {
+                            1
+                        };
+                        format!("{}.arity{arity}", binding.name)
+                    } else {
+                        binding.name.clone()
+                    };
                     // Two `extern "c"` blocks (in different modules, e.g. a
                     // stdlib module and a user program) can legally declare
                     // the same C symbol. `add_function` doesn't check for an
                     // existing declaration by name, so declaring it again
                     // unconditionally would make LLVM silently rename the
                     // second one, detaching it from the real symbol.
-                    let function = match self.llvm_module.get_function(&binding.name) {
+                    let function = match self.llvm_module.get_function(&external_name) {
                         Some(existing) if existing.get_type() == llvm_type => existing,
                         Some(_) => {
                             return Err(Diagnostic::new(
@@ -415,7 +434,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                                 ),
                             ));
                         }
-                        None => self.llvm_module.add_function(&binding.name, llvm_type, None),
+                        None => self.llvm_module.add_function(&external_name, llvm_type, None),
                     };
                     self.globals.insert(symbol, function.into());
                     self.external_symbols.insert(symbol);
@@ -426,7 +445,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     ) {
                         let adapter_type = self.compile_closure_function_type(function_type)?;
                         let adapter = self.llvm_module.add_function(
-                            &format!("__staple_extern_{}", binding.name),
+                            &format!("__staple_extern_{}", external_name),
                             adapter_type,
                             Some(inkwell::module::Linkage::Internal),
                         );
@@ -469,9 +488,18 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     continue;
                 };
+                let binding_name = if self
+                    .typed_module
+                    .resolved()
+                    .symbol_is_overloaded(symbol)
+                {
+                    format!("{}.overload.{}", binding.name, symbol.0)
+                } else {
+                    binding.name.clone()
+                };
                 self.declare_initialization_state(
                     symbol,
-                    &format!("__staple_m{}_{}_state", source_module.id.0, binding.name),
+                    &format!("__staple_m{}_{}_state", source_module.id.0, binding_name),
                 );
                 if !binding.type_parameters.is_empty() {
                     continue;
@@ -483,7 +511,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     continue;
                 };
                 let llvm_type = self.compile_type(value_type)?;
-                let name = format!("__staple_m{}_{}", source_module.id.0, binding.name);
+                let name = format!("__staple_m{}_{}", source_module.id.0, binding_name);
                 let global = self.llvm_module.add_global(llvm_type, None, &name);
                 let zero = llvm_type.const_zero();
                 global.set_initializer(&zero);

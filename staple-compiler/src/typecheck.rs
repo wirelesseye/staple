@@ -224,6 +224,39 @@ fn expected_string_representation() -> CheckedType {
     CheckedType::Slice(Box::new(CheckedType::U8))
 }
 
+fn function_outer_arity(value_type: &CheckedType) -> Option<usize> {
+    let CheckedType::Function(function) = value_type else {
+        return None;
+    };
+    if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed {
+        let CheckedType::Product(product) = function.parameter.as_ref() else {
+            return None;
+        };
+        Some(product.elements.len())
+    } else {
+        Some(1)
+    }
+}
+
+fn call_chain_root_and_arity(mut expression: &Expression) -> (&Expression, usize) {
+    let mut arity = 0;
+    while let Expression::Call(call) = expression {
+        arity += 1;
+        expression = &call.callee;
+    }
+    (expression, arity)
+}
+
+fn call_chain_root_and_arguments(mut expression: &Expression) -> (&Expression, Vec<&Expression>) {
+    let mut arguments = Vec::new();
+    while let Expression::Call(call) = expression {
+        arguments.push(call.argument.as_ref());
+        expression = &call.callee;
+    }
+    arguments.reverse();
+    (expression, arguments)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckedProductType {
     pub elements: Vec<CheckedTypeElement>,
@@ -897,8 +930,7 @@ fn format_juxtaposed_checked_parameter(function: &CheckedFunctionType) -> String
                 .name
                 .as_ref()
                 .map_or(String::new(), |name| format!("{name}: "));
-            let default = if element.default.is_some() { " = …" } else { "" };
-            format!("{marker}{name}{}{default}", element.value_type)
+            format!("{marker}{name}{}", element.value_type)
         })
         .collect::<Vec<_>>()
         .join(" * ")
@@ -963,6 +995,7 @@ pub struct TypedModule {
     mutated_parameter_symbols: HashSet<SymbolId>,
     move_parameter_symbols: HashSet<SymbolId>,
     method_symbols: HashMap<SyntaxId, SymbolId>,
+    selected_overloads: HashMap<SyntaxId, SymbolId>,
     symbol_companion_types: HashMap<SymbolId, TypeId>,
     function_result_companion_types: HashMap<FunctionId, TypeId>,
     function_symbols: HashMap<SymbolId, FunctionId>,
@@ -1038,6 +1071,7 @@ impl TypedModule {
         self.method_symbols
             .get(&syntax_id)
             .copied()
+            .or_else(|| self.selected_overloads.get(&syntax_id).copied())
             .or_else(|| self.resolved.symbol_for(syntax_id))
     }
 
@@ -1497,6 +1531,8 @@ pub struct TypeChecker {
     accesses: HashMap<SyntaxId, CheckedAccess>,
     pattern_types: HashMap<SyntaxId, CheckedType>,
     method_symbols: HashMap<SyntaxId, SymbolId>,
+    selected_overloads: HashMap<SyntaxId, SymbolId>,
+    selected_trait_overload_arities: HashMap<SyntaxId, usize>,
     symbol_companion_types: HashMap<SymbolId, TypeId>,
     function_result_companion_types: HashMap<FunctionId, TypeId>,
     string_representation: Option<CheckedType>,
@@ -1655,6 +1691,7 @@ impl TypeChecker {
         for function_id in function_ids {
             self.ensure_function_checked(&module, function_id);
         }
+        self.validate_arity_overloads(&module);
         self.infer_effects(&module);
         self.validate_product_default_effects(&module);
         self.infer_derived_bindings(&module);
@@ -1724,6 +1761,7 @@ impl TypeChecker {
             mutated_parameter_symbols: self.mutated_parameter_symbols,
             move_parameter_symbols: self.move_parameter_symbols,
             method_symbols: self.method_symbols,
+            selected_overloads: self.selected_overloads,
             symbol_companion_types: self.symbol_companion_types,
             function_result_companion_types: self.function_result_companion_types,
             function_symbols: self.function_symbols,
@@ -5645,6 +5683,37 @@ impl TypeChecker {
         }
     }
 
+    fn validate_arity_overloads(&mut self, module: &ResolvedModule) {
+        let mut checked = HashSet::<Vec<SymbolId>>::new();
+        for members in module.overload_sets() {
+            let mut identity = members.to_vec();
+            identity.sort_by_key(|symbol| symbol.0);
+            if identity.len() < 2 || !checked.insert(identity) {
+                continue;
+            }
+            let mut arities = HashMap::<usize, SymbolId>::new();
+            for symbol in members {
+                self.ensure_binding_checked(module, *symbol);
+                let Some(value_type) = self.symbol_types.get(symbol) else {
+                    continue;
+                };
+                let Some(arity) = function_outer_arity(value_type) else {
+                    self.diagnostics.push(Diagnostic::new(
+                        Span::Compiler,
+                        "every member of an overload set must be a function",
+                    ));
+                    continue;
+                };
+                if arities.insert(arity, *symbol).is_some() {
+                    self.diagnostics.push(Diagnostic::new(
+                        Span::Compiler,
+                        format!("duplicate function overload with arity {arity}"),
+                    ));
+                }
+            }
+        }
+    }
+
     fn check_expression(
         &mut self,
         module: &ResolvedModule,
@@ -6066,12 +6135,22 @@ impl TypeChecker {
             self.implicit_thunk_context = true;
             return self.make_implicit_thunk(module, expression, result);
         }
-        let trait_methods = module.trait_methods_for_expression(expression.syntax().id);
+        let mut trait_methods = module.trait_methods_for_expression(expression.syntax().id).to_vec();
+        if trait_methods.len() > 1
+            && let Some(expected_arity) = expected.and_then(function_outer_arity)
+        {
+            trait_methods.retain(|method| {
+                self.trait_method_types
+                    .get(method)
+                    .and_then(function_outer_arity)
+                    == Some(expected_arity)
+            });
+        }
         if !trait_methods.is_empty() && !matches!(expression, Expression::Call(_)) {
             let value_type = self.resolve_trait_method_use(
                 module,
                 expression.syntax().id,
-                trait_methods,
+                &trait_methods,
                 None,
                 expected,
                 expression.syntax().span.clone(),
@@ -6543,6 +6622,154 @@ impl TypeChecker {
                 }
             }
             Expression::Call(call) => {
+                let (overload_root, supplied_arguments) = call_chain_root_and_arity(expression);
+                let root_syntax = overload_root.syntax().id;
+                if !self.selected_overloads.contains_key(&root_syntax) {
+                    let candidates = module.overload_candidates(root_syntax);
+                    if candidates.len() > 1 {
+                        let mut available = Vec::new();
+                        for symbol in candidates {
+                            self.ensure_binding_checked(module, symbol);
+                            if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
+                                self.ensure_function_checked(module, function_id);
+                            }
+                            if let Some(arity) = self
+                                .symbol_types
+                                .get(&symbol)
+                                .and_then(function_outer_arity)
+                            {
+                                available.push((arity, symbol));
+                            }
+                        }
+                        available.sort_by_key(|(arity, _)| *arity);
+                        let selected = available
+                            .iter()
+                            .rev()
+                            .find(|(arity, _)| *arity <= supplied_arguments)
+                            .copied();
+                        let Some((_, symbol)) = selected else {
+                            let arities = available
+                                .iter()
+                                .map(|(arity, _)| arity.to_string())
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            self.diagnostics.push(Diagnostic::new(
+                                overload_root.syntax().span.clone(),
+                                format!(
+                                    "incomplete overloaded function call: supplied {supplied_arguments} argument(s); available arities are {arities}"
+                                ),
+                            ));
+                            return CheckedType::Error;
+                        };
+                        self.selected_overloads.insert(root_syntax, symbol);
+                    }
+                }
+                let trait_candidates = module.trait_methods_for_expression(root_syntax);
+                if trait_candidates.len() > 1
+                    && !self.selected_trait_overload_arities.contains_key(&root_syntax)
+                {
+                    let mut arities = trait_candidates
+                        .iter()
+                        .filter_map(|method| {
+                            self.trait_method_types
+                                .get(method)
+                                .and_then(function_outer_arity)
+                        })
+                        .collect::<Vec<_>>();
+                    arities.sort_unstable();
+                    arities.dedup();
+                    if let Some(arity) = arities
+                        .iter()
+                        .rev()
+                        .find(|arity| **arity <= supplied_arguments)
+                        .copied()
+                    {
+                        self.selected_trait_overload_arities
+                            .insert(root_syntax, arity);
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            overload_root.syntax().span.clone(),
+                            format!(
+                                "incomplete overloaded trait method call: supplied {supplied_arguments} argument(s); available arities are {}",
+                                arities.iter().map(usize::to_string).collect::<Vec<_>>().join(", ")
+                            ),
+                        ));
+                        return CheckedType::Error;
+                    }
+                }
+                if let Some(selected_arity) = self
+                    .selected_trait_overload_arities
+                    .get(&root_syntax)
+                    .copied()
+                    && selected_arity > 1
+                    && supplied_arguments == selected_arity
+                {
+                    let methods = trait_candidates
+                        .iter()
+                        .copied()
+                        .filter(|method| {
+                            self.trait_method_types
+                                .get(method)
+                                .and_then(function_outer_arity)
+                                == Some(selected_arity)
+                        })
+                        .collect::<Vec<_>>();
+                    let (_, arguments) = call_chain_root_and_arguments(expression);
+                    let mut argument_types = Vec::with_capacity(arguments.len());
+                    for argument in &arguments {
+                        argument_types.push(self.check_expression(module, argument));
+                    }
+                    let product_type = CheckedType::Product(CheckedProductType {
+                        elements: argument_types
+                            .iter()
+                            .cloned()
+                            .map(|value_type| CheckedTypeElement {
+                                name: None,
+                                value_type,
+                                default: None,
+                            })
+                            .collect(),
+                        variadic: false,
+                    });
+                    let selected_type = self.resolve_trait_method_use(
+                        module,
+                        root_syntax,
+                        &methods,
+                        Some(&product_type),
+                        expected,
+                        overload_root.syntax().span.clone(),
+                    );
+                    let CheckedType::Function(function) = selected_type else {
+                        return CheckedType::Error;
+                    };
+                    let CheckedType::Product(parameters) = function.parameter.as_ref() else {
+                        return CheckedType::Error;
+                    };
+                    for ((argument, actual), parameter) in arguments
+                        .iter()
+                        .zip(argument_types)
+                        .zip(&parameters.elements)
+                    {
+                        self.check_call_argument(
+                            module,
+                            argument,
+                            actual,
+                            &parameter.value_type,
+                            argument.syntax().span.clone(),
+                        );
+                    }
+                    self.expression_types
+                        .insert(root_syntax, CheckedType::Function(function.clone()));
+                    self.juxtaposed_call_plans.insert(
+                        call.syntax.id,
+                        CheckedJuxtaposedCallPlan {
+                            function: function.clone(),
+                            arguments: arguments.into_iter().cloned().collect(),
+                            consumed_calls: selected_arity,
+                        },
+                    );
+                    return self.finish_expression_type(expression, *function.result, expected);
+                }
                 if let Some(symbol) = module.symbol_for(call.callee.syntax().id)
                     && module.intrinsic_function(symbol)
                         == Some(crate::IntrinsicFunction::SliceFromRef)
@@ -6692,8 +6919,22 @@ impl TypeChecker {
                     }
                     CheckedType::CString
                 } else {
-                    let trait_methods =
-                        module.trait_methods_for_expression(call.callee.syntax().id);
+                    let mut trait_methods = module
+                        .trait_methods_for_expression(call.callee.syntax().id)
+                        .to_vec();
+                    if let Some(arity) = self
+                        .selected_trait_overload_arities
+                        .get(&call.callee.syntax().id)
+                        .copied()
+                    {
+                        trait_methods.retain(|method| {
+                            self.trait_method_types
+                                .get(method)
+                                .and_then(function_outer_arity)
+                                == Some(arity)
+                        });
+                    }
+                    let trait_methods = trait_methods.as_slice();
                     if !trait_methods.is_empty() {
                         if matches!(call.argument.as_ref(), Expression::Block(_)) {
                             let previous = self.implicit_thunk_context;
@@ -7161,7 +7402,7 @@ impl TypeChecker {
                         let CheckedType::Function(template) = raw_callee_type.clone() else {
                             self.diagnostics.push(Diagnostic::new(
                                 call.argument.syntax().span.clone(),
-                                "`_` may only omit a defaulted juxtaposed parameter",
+                                "`_` is not a value expression",
                             ));
                             return CheckedType::Error;
                         };
@@ -7212,10 +7453,6 @@ impl TypeChecker {
                                 CheckedType::Product(product) => product
                                     .elements
                                     .first()
-                                    .filter(|element| {
-                                        element.default.is_none()
-                                            || matches!(call.argument.as_ref(), Expression::Product(_))
-                                    })
                                     .map(|element| erase_type_parameters(&element.value_type)),
                                 _ => None,
                             }
@@ -7292,17 +7529,7 @@ impl TypeChecker {
                     // (not routed through `literal_is_admitted`/`merge_types`
                     // generally) so other expected-type-driven checking
                     // elsewhere in the compiler is unaffected.
-                    let argument_type = if forced_default
-                        && let CheckedType::Function(function) = &raw_callee_type
-                        && function.parameter_style
-                            == staple_syntax::FunctionParameterStyle::Juxtaposed
-                        && let CheckedType::Product(product) = function.parameter.as_ref()
-                        && let Some(first) = product.elements.first()
-                    {
-                        self.expression_types
-                            .insert(call.argument.syntax().id, first.value_type.clone());
-                        first.value_type.clone()
-                    } else if let Some(integer) = bare_natural_number_literal {
+                    let argument_type = if let Some(integer) = bare_natural_number_literal {
                         match integer.literal.parse::<u64>() {
                             Ok(value) => {
                                 let literal_type = CheckedType::NumberLiteral(value);
@@ -7381,15 +7608,6 @@ impl TypeChecker {
                         let consumed_calls = previous
                             .as_ref()
                             .map_or(1, |plan| plan.consumed_calls + 1);
-                        let forced_default = matches!(call.argument.as_ref(), Expression::Name(name) if name.name == "_");
-                        let compatible = |element: &CheckedTypeElement| {
-                            can_coerce_type(&argument_type, &element.value_type)
-                                || infer_type_parameters(
-                                    &element.value_type,
-                                    &argument_type,
-                                    &mut HashMap::new(),
-                                )
-                        };
                         let callback_compatible = |element: &CheckedTypeElement| {
                             let CheckedType::Function(callback) = &element.value_type else {
                                 return false;
@@ -7402,40 +7620,8 @@ impl TypeChecker {
                                         &mut HashMap::new(),
                                     ))
                         };
-                        let selected = if forced_default {
-                            0
-                        } else if matches!(call.argument.as_ref(), Expression::Block(_)) {
-                            product
-                                .elements
-                                .iter()
-                                .enumerate()
-                                .find(|(index, element)| {
-                                    product.elements[..*index]
-                                        .iter()
-                                        .all(|earlier| earlier.default.is_some())
-                                        && matches!(&element.value_type,
-                                            CheckedType::Function(callback)
-                                                if is_empty_product_type(&callback.parameter))
-                                })
-                                .map_or(0, |(index, _)| index)
-                        } else if compatible(first) {
-                            0
-                        } else {
-                            product
-                                .elements
-                                .iter()
-                                .enumerate()
-                                .skip(1)
-                                .find(|(index, element)| {
-                                    product.elements[..*index]
-                                        .iter()
-                                        .all(|earlier| earlier.default.is_some())
-                                        && compatible(element)
-                                })
-                                .map_or(0, |(index, _)| index)
-                        };
-                        let should_thunk = !forced_default
-                            && callback_compatible(&product.elements[selected]);
+                        let selected = 0;
+                        let should_thunk = callback_compatible(first);
                         let argument_type = if should_thunk {
                             self.make_implicit_thunk(module, &call.argument, argument_type)
                         } else {
@@ -7484,57 +7670,15 @@ impl TypeChecker {
                             root_callee.syntax().id,
                             CheckedType::Function(original.clone()),
                         );
-                        for skipped in &product.elements[..selected] {
-                            let default = skipped
-                                .default
-                                .clone()
-                                .expect("only defaulted juxtaposed slots may be skipped");
-                            let actual = self.check_expression_expected(
-                                module,
-                                &default,
-                                Some(&skipped.value_type),
-                            );
-                            self.require_compatible(
-                                actual,
-                                skipped.value_type.clone(),
-                                default.syntax().span.clone(),
-                            );
-                            arguments.push(default);
-                        }
                         let selected_element = &product.elements[selected];
-                        let supplied = if forced_default {
-                            let Some(default) = selected_element.default.clone() else {
-                                self.diagnostics.push(Diagnostic::new(
-                                    call.argument.syntax().span.clone(),
-                                    "the current juxtaposed parameter has no default",
-                                ));
-                                return CheckedType::Error;
-                            };
-                            let actual = self.check_expression_expected(
-                                module,
-                                &default,
-                                Some(&selected_element.value_type),
-                            );
-                            self.require_compatible(
-                                actual,
-                                selected_element.value_type.clone(),
-                                default.syntax().span.clone(),
-                            );
-                            self.expression_types.insert(
-                                call.argument.syntax().id,
-                                selected_element.value_type.clone(),
-                            );
-                            default
-                        } else {
-                            self.check_call_argument(
-                                module,
-                                &call.argument,
-                                argument_type,
-                                &selected_element.value_type,
-                                call.argument.syntax().span.clone(),
-                            );
-                            call.argument.as_ref().clone()
-                        };
+                        self.check_call_argument(
+                            module,
+                            &call.argument,
+                            argument_type,
+                            &selected_element.value_type,
+                            call.argument.syntax().span.clone(),
+                        );
+                        let supplied = call.argument.as_ref().clone();
                         arguments.push(supplied);
                         let mut remaining = product.elements[selected + 1..].to_vec();
                         if !remaining.is_empty()
@@ -7836,7 +7980,12 @@ impl TypeChecker {
                 }
             }
             Expression::Access(access) => {
-                if let Some(symbol) = module.symbol_for(access.syntax.id) {
+                if let Some(symbol) = self
+                    .selected_overloads
+                    .get(&access.syntax.id)
+                    .copied()
+                    .or_else(|| module.symbol_for(access.syntax.id))
+                {
                     self.ensure_binding_checked(module, symbol);
                     if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
                         self.ensure_function_checked(module, function_id);
@@ -8112,11 +8261,43 @@ impl TypeChecker {
                 if name.name == "_" {
                     self.diagnostics.push(Diagnostic::new(
                         name.syntax.span.clone(),
-                        "`_` may only omit a defaulted juxtaposed parameter",
+                        "`_` is not a value expression",
                     ));
                     return CheckedType::Error;
                 }
-                let symbol = module.symbol_for(name.syntax.id);
+                let candidates = module.overload_candidates(name.syntax.id);
+                if candidates.len() > 1 && !self.selected_overloads.contains_key(&name.syntax.id) {
+                    let expected_arity = expected.and_then(function_outer_arity);
+                    let mut matches = Vec::new();
+                    for candidate in candidates {
+                        self.ensure_binding_checked(module, candidate);
+                        if let Some(function_id) = self.function_symbols.get(&candidate).copied() {
+                            self.ensure_function_checked(module, function_id);
+                        }
+                        if self
+                            .symbol_types
+                            .get(&candidate)
+                            .and_then(function_outer_arity)
+                            == expected_arity
+                        {
+                            matches.push(candidate);
+                        }
+                    }
+                    if matches.len() == 1 {
+                        self.selected_overloads.insert(name.syntax.id, matches[0]);
+                    } else {
+                        self.diagnostics.push(Diagnostic::new(
+                            name.syntax.span.clone(),
+                            format!("ambiguous overloaded function `{}`; provide an expected function type", name.name),
+                        ));
+                        return CheckedType::Error;
+                    }
+                }
+                let symbol = self
+                    .selected_overloads
+                    .get(&name.syntax.id)
+                    .copied()
+                    .or_else(|| module.symbol_for(name.syntax.id));
                 if let Some(symbol) = symbol {
                     self.ensure_binding_checked(module, symbol);
                 }
@@ -10113,6 +10294,21 @@ impl TypeChecker {
             }
             Type::Function(function) => {
                 let mut parameter_source = function.parameter.as_ref().clone();
+                if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed
+                    && let Type::Product(product) = function.parameter.as_ref()
+                    && product.elements.iter().any(|element| element.default.is_some())
+                {
+                    let mut stripped = product.clone();
+                    for element in &mut stripped.elements {
+                        if let Some(default) = element.default.take() {
+                            self.diagnostics.push(Diagnostic::new(
+                                default.syntax().span.clone(),
+                                "juxtaposed parameters have exact arity and cannot declare defaults",
+                            ));
+                        }
+                    }
+                    parameter_source = Type::Product(stripped);
+                }
                 if function.parameter_style == staple_syntax::FunctionParameterStyle::Single
                     && let Type::Product(product) = function.parameter.as_ref()
                     && !product.variadic
