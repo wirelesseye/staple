@@ -7101,6 +7101,23 @@ impl TypeChecker {
                         .get(&symbol)
                         .cloned()
                         .unwrap_or(CheckedType::Error);
+                    if matches!(
+                        &raw_type,
+                        CheckedType::Function(function)
+                            if function.parameter_style
+                                == staple_syntax::FunctionParameterStyle::Juxtaposed
+                    ) {
+                        return self.check_juxtaposed_method_call(
+                            module,
+                            expression,
+                            call,
+                            selector,
+                            symbol,
+                            raw_type,
+                            receiver_type,
+                            expected,
+                        );
+                    }
                     let callee_type = self.instantiate_function_use(
                         raw_type.clone(),
                         Some(&receiver_type),
@@ -10435,6 +10452,153 @@ impl TypeChecker {
             }
         }
         instantiated
+    }
+
+    /// Seeds a juxtaposed call plan for `receiver^method` where the companion
+    /// `method` is a non-curried juxtaposed function. The receiver fills the
+    /// first slot; the ordinary juxtaposed continuation logic then consumes the
+    /// remaining slots from the following application chain. Returns the residual
+    /// juxtaposed function type, or the result type when the receiver is the only
+    /// slot or every other slot has a default.
+    #[allow(clippy::too_many_arguments)]
+    fn check_juxtaposed_method_call(
+        &mut self,
+        module: &ResolvedModule,
+        expression: &Expression,
+        call: &staple_syntax::CallExpression,
+        selector: &staple_syntax::AccessExpression,
+        symbol: SymbolId,
+        raw_type: CheckedType,
+        receiver_type: CheckedType,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        let CheckedType::Function(function) = raw_type.clone() else {
+            return CheckedType::Error;
+        };
+        let CheckedType::Product(product) = function.parameter.as_ref() else {
+            self.diagnostics.push(Diagnostic::new(
+                selector.syntax.span.clone(),
+                "a juxtaposed companion method must have a product-shaped parameter",
+            ));
+            return CheckedType::Error;
+        };
+        if product.elements.is_empty() {
+            return CheckedType::Error;
+        }
+        let selected = 0;
+        let mut substitutions = HashMap::new();
+        infer_type_parameters(
+            &product.elements[selected].value_type,
+            &receiver_type,
+            &mut substitutions,
+        );
+        if let Some(expected) = expected {
+            infer_type_parameters_for_expected(&function.result, expected, &mut substitutions);
+        }
+        let CheckedType::Function(instantiated_function) =
+            substitute_type(CheckedType::Function(function.clone()), &substitutions)
+        else {
+            unreachable!()
+        };
+        let CheckedType::Product(instantiated_product) =
+            instantiated_function.parameter.as_ref()
+        else {
+            unreachable!()
+        };
+        let instantiated_product = instantiated_product.clone();
+        // With no earlier juxtaposed step, the "original" full function is just
+        // the instantiated companion function; later continuation steps refine it
+        // further as they infer type parameters from the remaining slots.
+        let original = instantiated_function.clone();
+        if let Some(function_id) = self.function_symbols.get(&symbol).copied() {
+            self.check_function_bounds(
+                function_id,
+                &raw_type,
+                &CheckedType::Function(original.clone()),
+                selector.syntax.span.clone(),
+            );
+        }
+        self.expression_types
+            .insert(selector.syntax.id, CheckedType::Function(original.clone()));
+        let selected_element = &instantiated_product.elements[selected];
+        self.check_call_argument(
+            module,
+            &call.argument,
+            receiver_type,
+            &selected_element.value_type,
+            call.argument.syntax().span.clone(),
+        );
+        let mut arguments = vec![call.argument.as_ref().clone()];
+        let consumed_calls = 1;
+        let mut remaining = instantiated_product.elements[selected + 1..].to_vec();
+        if !remaining.is_empty() && remaining.iter().all(|element| element.default.is_some()) {
+            for element in &remaining {
+                let default = element.default.clone().expect("checked above");
+                let actual =
+                    self.check_expression_expected(module, &default, Some(&element.value_type));
+                self.require_compatible(
+                    actual,
+                    element.value_type.clone(),
+                    default.syntax().span.clone(),
+                );
+                arguments.push(default);
+            }
+            remaining.clear();
+        }
+        if remaining.is_empty() {
+            self.juxtaposed_call_plans.insert(
+                call.syntax.id,
+                CheckedJuxtaposedCallPlan {
+                    function: original,
+                    arguments,
+                    consumed_calls,
+                },
+            );
+            return self.finish_expression_type(
+                expression,
+                *instantiated_function.result,
+                expected,
+            );
+        }
+        let residual = CheckedFunctionType {
+            parameter_style: staple_syntax::FunctionParameterStyle::Juxtaposed,
+            default: None,
+            parameter: Box::new(CheckedType::Product(CheckedProductType {
+                elements: std::mem::take(&mut remaining),
+                variadic: false,
+            })),
+            mutations: function
+                .mutations
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    CheckedMutation::Element(index) if *index > selected => {
+                        Some(CheckedMutation::Element(index - selected - 1))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            moves: function
+                .moves
+                .iter()
+                .filter_map(|mutation| match mutation {
+                    CheckedMutation::Element(index) if *index > selected => {
+                        Some(CheckedMutation::Element(index - selected - 1))
+                    }
+                    _ => None,
+                })
+                .collect(),
+            effects: instantiated_function.effects.clone(),
+            result: instantiated_function.result.clone(),
+        };
+        self.juxtaposed_call_plans.insert(
+            call.syntax.id,
+            CheckedJuxtaposedCallPlan {
+                function: original,
+                arguments,
+                consumed_calls,
+            },
+        );
+        self.finish_expression_type(expression, CheckedType::Function(residual), expected)
     }
 
     fn check_call_argument(

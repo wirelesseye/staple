@@ -5567,6 +5567,45 @@ fn type_checks_companion_method_call_syntax() {
 }
 
 #[test]
+fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
+    let module = type_check(concat!(
+        "type alias Animal = I32\n",
+        "companion Animal {\n",
+        "    pub def move_to: Animal * (F32, F32) -> Animal = animal * _ => animal\n",
+        "    pub def teleport: Animal * F32 * F32 -> Animal = animal * _ * _ => animal\n",
+        "}\n",
+        "let animal: Animal = 1\n",
+        "let moved: Animal = animal^move_to (1.0, 1.0)\n",
+        "let hopped: Animal = animal^teleport 1.0 2.0\n",
+        "def relocate: Animal -> Animal = value => value^move_to (1.0, 1.0)\n",
+        "def make: () -> Animal = () => animal\n",
+        "let moved_from_call: Animal = (make ())^teleport 1.0 2.0\n",
+        "companion Animal { pub def tag: <T> Animal * T -> Animal = animal * _ => animal }\n",
+        "let tagged: Animal = animal^tag 7\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("juxtaposed companion method calls should lower as ordinary juxtaposed calls");
+}
+
+#[test]
+fn rejects_incomplete_method_call_on_a_juxtaposed_companion_method() {
+    TypeChecker::new()
+        .check(resolve(concat!(
+            "type alias Animal = I32\n",
+            "companion Animal {\n",
+            "    pub def move_to: Animal * (F32, F32) -> Animal = animal * _ => animal\n",
+            "}\n",
+            "let animal: Animal = 1\n",
+            "let incomplete = animal^move_to\n",
+        )))
+        .expect_err_diagnostics(
+            "a receiver-applied juxtaposed companion method is an incomplete call",
+        );
+}
+
+#[test]
 fn typegroup_supports_generic_groups_and_reexports_their_variants() {
     let module = type_check(concat!(
         "pub(repr) typegroup Maybe T {\n",

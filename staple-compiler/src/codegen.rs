@@ -3296,6 +3296,42 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     {
                         return Ok(self.unit_value());
                     }
+                    // A companion method reached through `receiver^method` whose
+                    // definition is generic: specialize it to the concrete
+                    // function type the checker recorded for this selector, the
+                    // same way a bare generic function name is specialized.
+                    if let Some(function_id) = self.function_symbols.get(&symbol).copied()
+                        && let Some(CheckedType::Function(function_type)) =
+                            self.concrete_expression_type(expression)
+                        && contains_type_parameter(&CheckedType::Function(
+                            self.typed_module
+                                .type_of_function(function_id)
+                                .expect("checked function")
+                                .clone(),
+                        ))
+                    {
+                        if self
+                            .typed_module
+                            .resolved()
+                            .requires_initialization_check(access.syntax.id)
+                        {
+                            self.check_symbol_initialization(
+                                environment,
+                                symbol,
+                                access.syntax.span.clone(),
+                            )?;
+                        }
+                        let code =
+                            self.ensure_function_specialization(function_id, &function_type)?;
+                        return self
+                            .build_closure_with_code(
+                                environment,
+                                function_id,
+                                code,
+                                access.syntax.span.clone(),
+                            )
+                            .map(|closure| closure.as_any_value_enum());
+                    }
                     return self.compile_symbol_value(
                         environment,
                         symbol,

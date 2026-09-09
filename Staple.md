@@ -761,7 +761,26 @@ let moved = animal^move_to (1.0, 1.0)
 ```
 
 A bare `animal^move_to` is the receiver-applied value, so it may be a
-partially-applied function when the companion function accepts more arguments.
+partially-applied function when the companion function accepts more curried
+arguments.
+
+The receiver may also fill the first slot of a non-curried juxtaposed companion
+function. The remaining slots are then supplied by the following application
+chain, exactly as for a direct juxtaposed call:
+
+```staple
+companion Animal {
+    pub def teleport: Animal * F32 * F32 -> Animal = animal * x * y => animal
+}
+
+let hopped = animal^teleport 1.0 2.0
+// Equivalent to Animal.teleport animal 1.0 2.0
+```
+
+Juxtaposed slots keep their exact arity through `^`: a bare `animal^teleport`,
+or one supplied with fewer arguments than the method's slot count, is an
+incomplete call rather than a partial closure.
+
 Method lookup uses the receiver's static named type; aliases retain companion
 identity when introduced by an annotation or an explicitly typed function
 parameter or result.
