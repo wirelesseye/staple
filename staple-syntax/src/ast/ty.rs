@@ -16,6 +16,7 @@ pub enum Type {
     Sum(SumType),
     Function(FunctionType),
     Application(TypeApplication),
+    EffectApplication(EffectApplication),
     Repeated(RepeatedType),
     Splice(SpliceExpression),
 }
@@ -31,6 +32,7 @@ impl Type {
             Self::Sum(ty) => &ty.syntax,
             Self::Function(ty) => &ty.syntax,
             Self::Application(ty) => &ty.syntax,
+            Self::EffectApplication(ty) => &ty.syntax,
             Self::Repeated(ty) => &ty.syntax,
             Self::Splice(ty) => &ty.syntax,
         }
@@ -106,6 +108,14 @@ impl fmt::Display for Type {
             Self::Application(application) => {
                 write!(formatter, "{}", application.callee)?;
                 format_type_argument(formatter, &application.argument)
+            }
+            Self::EffectApplication(application) => {
+                write!(
+                    formatter,
+                    "{}{}",
+                    application.callee,
+                    format_effect_set(&application.effects)
+                )
             }
             Self::Repeated(repeated) => match &repeated.count {
                 Some(count) => write!(formatter, "{}[{count}]", repeated.element),
@@ -460,6 +470,13 @@ pub struct TypeApplication {
     pub syntax: Syntax,
     pub callee: Box<Type>,
     pub argument: Box<Type>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectApplication {
+    pub syntax: Syntax,
+    pub callee: Box<Type>,
+    pub effects: EffectSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

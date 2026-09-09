@@ -1101,6 +1101,10 @@ impl<'a> Classifier<'a> {
                 self.ty(&value.callee, resolved);
                 self.ty(&value.argument, resolved);
             }
+            Type::EffectApplication(value) => {
+                self.ty(&value.callee, resolved);
+                for resource in &value.effects.resources { self.ty(&resource.value_type, resolved); }
+            }
             Type::Repeated(value) => {
                 self.ty(&value.element, resolved);
                 if let Some(count) = &value.count { self.ty(count, resolved); }

@@ -8241,7 +8241,7 @@ fn compile_type(ty: &Type) -> CompileType {
             Box::new(compile_type(&function.parameter)),
             Box::new(compile_type(&function.result)),
         ),
-        Type::Sum(_) | Type::Application(_) | Type::Repeated(_) => {
+        Type::Sum(_) | Type::Application(_) | Type::EffectApplication(_) | Type::Repeated(_) => {
             CompileType::Named(ty.to_string())
         }
     }
@@ -9187,6 +9187,8 @@ fn type_contains_syntax(ty: &Type) -> bool {
         Type::Application(application) => {
             type_contains_syntax(&application.callee) || type_contains_syntax(&application.argument)
         }
+        Type::EffectApplication(application) => type_contains_syntax(&application.callee)
+            || application.effects.resources.iter().any(|resource| type_contains_syntax(&resource.value_type)),
         Type::Repeated(repeated) => type_contains_syntax(&repeated.element)
             || repeated.count.as_deref().is_some_and(type_contains_syntax),
         Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => false,
@@ -9224,6 +9226,8 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
             type_contains_unshadowed_syntax(&application.callee, declared)
                 || type_contains_unshadowed_syntax(&application.argument, declared)
         }
+        Type::EffectApplication(application) => type_contains_unshadowed_syntax(&application.callee, declared)
+            || application.effects.resources.iter().any(|resource| type_contains_unshadowed_syntax(&resource.value_type, declared)),
         Type::Repeated(repeated) => type_contains_unshadowed_syntax(&repeated.element, declared)
             || repeated.count.as_deref().is_some_and(|count| type_contains_unshadowed_syntax(count, declared)),
     }
@@ -9302,6 +9306,8 @@ fn type_contains_named(ty: &Type, expected: &str) -> bool {
             type_contains_named(&application.callee, expected)
                 || type_contains_named(&application.argument, expected)
         }
+        Type::EffectApplication(application) => type_contains_named(&application.callee, expected)
+            || application.effects.resources.iter().any(|resource| type_contains_named(&resource.value_type, expected)),
         Type::Repeated(repeated) => type_contains_named(&repeated.element, expected)
             || repeated.count.as_deref().is_some_and(|count| type_contains_named(count, expected)),
         Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => false,
@@ -10587,6 +10593,12 @@ fn substitute_type(
             substitute_type(&mut application.callee, environment, diagnostics)?;
             substitute_type(&mut application.argument, environment, diagnostics)?;
         }
+        Type::EffectApplication(application) => {
+            substitute_type(&mut application.callee, environment, diagnostics)?;
+            for resource in &mut application.effects.resources {
+                substitute_type(&mut resource.value_type, environment, diagnostics)?;
+            }
+        }
         Type::Repeated(repeated) => {
             substitute_type(&mut repeated.element, environment, diagnostics)?;
             if let Some(count) = &mut repeated.count {
@@ -11685,6 +11697,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         Type::Sum(ty) => &mut ty.syntax,
         Type::Function(ty) => &mut ty.syntax,
         Type::Application(ty) => &mut ty.syntax,
+        Type::EffectApplication(ty) => &mut ty.syntax,
         Type::Repeated(ty) => &mut ty.syntax,
         Type::Splice(ty) => &mut ty.syntax,
     };
@@ -11718,6 +11731,13 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         Type::Application(application) => {
             freshen_type(expander, &mut application.callee, module, mark);
             freshen_type(expander, &mut application.argument, module, mark);
+        }
+        Type::EffectApplication(application) => {
+            freshen_type(expander, &mut application.callee, module, mark);
+            expander.freshen_syntax(&mut application.effects.syntax, module, mark);
+            for resource in &mut application.effects.resources {
+                freshen_type(expander, &mut resource.value_type, module, mark);
+            }
         }
         Type::Repeated(repeated) => {
             freshen_type(expander, &mut repeated.element, module, mark);

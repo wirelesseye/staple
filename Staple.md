@@ -1638,8 +1638,10 @@ An effect variable may represent the empty set, resources, state effects, or a
 combination of them. It can form an open row with fixed effects, as in
 `{E, IO}`; inference chooses the minimal substitution satisfying every
 occurrence. Each set may contain at most one variable. Effect parameters exist
-only on generic function bindings, may appear only in effect sets, have no
-runtime representation, and are concrete before code generation.
+on generic function bindings and effect-parameterized type declarations, may
+appear only in effect sets, have no runtime representation, and are concrete
+before code generation. Type declarations use the declaration-site syntax
+described under [Types](#types).
 
 ### Signals and reactions
 
@@ -3133,6 +3135,37 @@ type HashMap (K, V) = (key: K, value: V)
 type alias Pair (A, B) = (A, B)
 ```
 
+They may also bind one effect-row parameter in braces immediately after the
+type name. The effect parameter precedes any ordinary compile-time parameters
+and may be used in effect sets within the representation:
+
+```staple
+type alias Callback{E} = () ->{E} ()
+type alias Handler{E} T = T ->{E} ()
+```
+
+Declaration braces must contain exactly one new effect-variable name. They are
+not an effect set themselves: the lone name always declares a variable, while
+empty braces and multiple entries are rejected. Bodyless singleton
+declarations cannot have an effect parameter. Represented, alias, and
+explicitly opaque declarations may have one.
+
+At a use site, braces supply the full effect set before ordinary type
+arguments. The set may be empty or contain resources, state effects, and at
+most one in-scope effect variable, following the same rules as a function
+arrow's effect set:
+
+```staple
+Callback{IO}
+Handler{state, IO} I32
+
+def adapt: <effect F> Callback{F} -> Handler{F, IO} I32
+```
+
+Omitting a type's effect argument is always equivalent to supplying `{}`.
+This default is applied before ordinary type arguments, so `Callback` means
+`Callback{}` and `Handler I32` means `Handler{} I32`.
+
 Type application uses left-associative juxtaposition. A product binder consumes
 one product type argument, while curried binders consume successive arguments:
 
@@ -3143,12 +3176,13 @@ HashMap (String, I32)
 CurriedMap String I32
 ```
 
-A type annotation must apply every compile-time parameter, unless the omitted
-trailing parameters all have defaults (see [Default type
-parameters](#default-type-parameters)). Applying a non-parameterized type,
-supplying the wrong product shape, or leaving a type partially applied is an
-error. This applies to a self-reference too: a recursive `type Node T` must
-still write its own arguments, as `Node T` or `Node I32`, never a bare `Node`.
+A type annotation must apply every ordinary compile-time parameter, unless the
+omitted trailing parameters all have defaults (see [Default type
+parameters](#default-type-parameters)). An omitted effect-row parameter uses
+the empty set as described above. Applying a non-parameterized type, supplying
+the wrong product shape, or leaving a type partially applied is an error. This
+applies to a self-reference too: a recursive `type Node T` must still write its
+own ordinary arguments, as `Node T` or `Node I32`, never a bare `Node`.
 
 A represented type may refer to itself, directly or mutually, only where the
 reference passes through a managed indirection — `Ref`, `Slice`, or a

@@ -352,6 +352,19 @@ fn specializes_generic_effect_parameters() {
 }
 
 #[test]
+fn checks_effect_parameterized_type_declarations() {
+    type_check(concat!(
+        "use std.io.(IO, println)\n",
+        "type alias Callback{E} = () ->{E} ()\n",
+        "type alias Handler{E} T = T ->{E} ()\n",
+        "let pure: Callback = () => ()\n",
+        "let io: Callback{IO} = () => println \"hello\"\n",
+        "let stateful: Handler{state} I32 = value => ()\n",
+        "let empty: Handler I32 = value => ()\n",
+    ));
+}
+
+#[test]
 fn infers_open_effect_rows_and_checks_fixed_effects() {
     type_check(concat!(
         "use std.io.(IO, println)\n",

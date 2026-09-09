@@ -99,6 +99,27 @@ fn parses_effect_parameters_and_open_effect_rows() {
 }
 
 #[test]
+fn parses_effect_parameters_on_type_declarations_and_applications() {
+    let source = concat!(
+        "type alias Callback{E} = () ->{E} ()\n",
+        "type alias Handler{E} T = T ->{E} ()\n",
+        "let pure: Callback = () => ()\n",
+        "let io: Callback{IO} = () => ()\n",
+        "let handler: Handler{state, IO} I32 = value => ()\n",
+    );
+    let module = parse(source).expect("effect-parameterized types should parse");
+    assert_eq!(module.syntax.text(), source);
+    let Item::TypeDeclaration(callback) = &module.items[0] else { panic!("expected type declaration") };
+    assert!(matches!(callback.type_parameters.as_slice(), [staple_syntax::TypeParameterPattern::Effect(binding)] if binding.name == "E"));
+    let Item::Binding(io) = &module.items[3] else { panic!("expected binding") };
+    assert!(matches!(io.annotation, Some(staple_syntax::Type::EffectApplication(_))));
+
+    assert!(parse("type Empty{} = I32\n").is_err());
+    assert!(parse("type Many{E, F} = I32\n").is_err());
+    assert!(parse("type Singleton{E}\n").is_err());
+}
+
+#[test]
 fn parses_fully_qualified_quote_expressions_losslessly() {
     let source = concat!(
         "macro capture = value => std.syntax.quote { $value }\n",

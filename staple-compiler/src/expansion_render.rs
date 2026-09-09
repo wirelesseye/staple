@@ -229,7 +229,15 @@ fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> Stri
         out.push_str("alias ");
     }
     out.push_str(&declaration.name);
-    for parameter in &declaration.type_parameters {
+    let mut parameters = declaration.type_parameters.iter();
+    if let Some(staple_syntax::TypeParameterPattern::Effect(binding)) = parameters.next() {
+        out.push('{');
+        out.push_str(&binding.name);
+        out.push('}');
+    } else {
+        parameters = declaration.type_parameters.iter();
+    }
+    for parameter in parameters {
         out.push(' ');
         if let Some(default) = declaration
             .default_bounds

@@ -1005,6 +1005,10 @@ impl Collector<'_> {
                 self.ty(&value.callee);
                 self.ty(&value.argument);
             }
+            Type::EffectApplication(value) => {
+                self.ty(&value.callee);
+                for resource in &value.effects.resources { self.ty(&resource.value_type); }
+            }
             Type::Repeated(value) => {
                 self.ty(&value.element);
                 if let Some(count) = &value.count { self.ty(count); }

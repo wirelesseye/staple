@@ -937,6 +937,9 @@ fn format_juxtaposed_checked_parameter(function: &CheckedFunctionType) -> String
 }
 
 fn format_type_argument(formatter: &mut fmt::Formatter<'_>, argument: &CheckedType) -> fmt::Result {
+    if let Some(effects) = effect_substitution_value(argument) {
+        return write!(formatter, "{effects}");
+    }
     if matches!(argument, CheckedType::Sum(_) | CheckedType::Function(_))
         || matches!(argument, CheckedType::StringLiteralSet(values) if values.len() > 1)
     {
@@ -10413,6 +10416,12 @@ impl TypeChecker {
                     self.apply_type_argument(module, callee, argument, application.syntax.span.clone());
                 self.require_applied_type_constructor(applied, application.syntax.span.clone())
             }
+            Type::EffectApplication(application) => {
+                let callee = self.resolve_type_application_callee(module, &application.callee);
+                let effects = self.resolve_effect_set(module, &application.effects);
+                let applied = self.apply_effect_argument(module, callee, effects, application.syntax.span.clone());
+                self.require_applied_type_constructor(applied, application.syntax.span.clone())
+            }
             Type::Repeated(repeated) => {
                 let element = self.resolve_source_type_inner(module, &repeated.element);
                 if !element.is_sized() && element != CheckedType::Error {
@@ -10637,6 +10646,14 @@ impl TypeChecker {
         }
         let mut filled = arguments;
         for pattern in &declaration.type_parameters[filled.len()..] {
+            if let TypeParameterPattern::Effect(binding) = pattern {
+                let argument = effect_substitution_type(CheckedEffectSet::canonical(Vec::new()));
+                if let Some(parameter) = module.type_parameter_for(binding.syntax.id) {
+                    substitutions.insert(parameter, argument.clone());
+                }
+                filled.push(argument);
+                continue;
+            }
             let TypeParameterPattern::Binding(binding) = pattern else {
                 return None;
             };
@@ -10677,6 +10694,11 @@ impl TypeChecker {
                 let argument = self.resolve_source_type_inner(module, &application.argument);
                 self.push_type_argument(module, callee, argument, application.syntax.span.clone())
             }
+            Type::EffectApplication(application) => {
+                let callee = self.resolve_type_application_callee(module, &application.callee);
+                let effects = self.resolve_effect_set(module, &application.effects);
+                self.push_effect_argument(module, callee, effects, application.syntax.span.clone())
+            }
             other => self.resolve_source_type_inner(module, other),
         }
     }
@@ -10704,8 +10726,14 @@ impl TypeChecker {
             ));
             return CheckedType::Error;
         };
-        arguments.push(argument);
         let declaration = &self.type_declarations[&id];
+        if matches!(
+            declaration.type_parameters.get(arguments.len()),
+            Some(TypeParameterPattern::Effect(_))
+        ) {
+            arguments.push(effect_substitution_type(CheckedEffectSet::canonical(Vec::new())));
+        }
+        arguments.push(argument);
         if arguments.len() < declaration.type_parameters.len() {
             return CheckedType::TypeConstructor {
                 id,
@@ -10730,6 +10758,55 @@ impl TypeChecker {
             return CheckedType::Error;
         }
         self.instantiate_type_declaration(module, id, arguments)
+    }
+
+    fn push_effect_argument(
+        &mut self,
+        module: &ResolvedModule,
+        callee: CheckedType,
+        effects: CheckedEffectSet,
+        span: Span,
+    ) -> CheckedType {
+        let CheckedType::TypeConstructor {
+            id,
+            name,
+            mut arguments,
+        } = callee
+        else {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("type `{callee}` does not accept an effect argument"),
+            ));
+            return CheckedType::Error;
+        };
+        let declaration = &self.type_declarations[&id];
+        if !matches!(
+            declaration.type_parameters.get(arguments.len()),
+            Some(TypeParameterPattern::Effect(_))
+        ) {
+            self.diagnostics.push(Diagnostic::new(
+                span,
+                format!("type `{name}` does not accept an effect argument here"),
+            ));
+            return CheckedType::Error;
+        }
+        arguments.push(effect_substitution_type(effects));
+        if arguments.len() == declaration.type_parameters.len() {
+            self.instantiate_type_declaration(module, id, arguments)
+        } else {
+            CheckedType::TypeConstructor { id, name, arguments }
+        }
+    }
+
+    fn apply_effect_argument(
+        &mut self,
+        module: &ResolvedModule,
+        callee: CheckedType,
+        effects: CheckedEffectSet,
+        span: Span,
+    ) -> CheckedType {
+        let result = self.push_effect_argument(module, callee, effects, span);
+        self.finish_defaulted_type(module, result)
     }
 
     /// Like `push_type_argument`, but this is the final argument for this
@@ -11016,11 +11093,18 @@ impl TypeChecker {
         }
         match pattern {
             TypeParameterPattern::Effect(binding) => {
-                self.diagnostics.push(Diagnostic::new(
-                    binding.syntax.span.clone(),
-                    "effect parameters do not accept type arguments",
-                ));
-                false
+                let Some(id) = module.type_parameter_for(binding.syntax.id) else {
+                    return false;
+                };
+                if effect_substitution_value(argument).is_none() {
+                    self.diagnostics.push(Diagnostic::new(
+                        binding.syntax.span.clone(),
+                        "effect parameters require an effect-set argument",
+                    ));
+                    return false;
+                }
+                substitutions.insert(id, argument.clone());
+                true
             }
             TypeParameterPattern::Binding(binding) => {
                 let Some(id) = module.type_parameter_for(binding.syntax.id) else {

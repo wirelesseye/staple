@@ -1041,13 +1041,23 @@ impl Collector<'_> {
         } else {
             ""
         };
+        let (effect_parameter, ordinary_parameters) =
+            match declaration.type_parameters.split_first() {
+                Some((TypeParameterPattern::Effect(binding), rest)) => {
+                    (format!("{{{}}}", binding.name), rest)
+                }
+                _ => (String::new(), declaration.type_parameters.as_slice()),
+            };
         let (parameters, where_clause) = self.juxtaposed_generic_suffix(
-            &declaration.type_parameters,
+            ordinary_parameters,
             &declaration.trait_bounds,
             &declaration.subtype_bounds,
             &[],
         );
-        let head = format!("type{alias} {}{parameters}{where_clause}", declaration.name);
+        let head = format!(
+            "type{alias} {}{effect_parameter}{parameters}{where_clause}",
+            declaration.name
+        );
         // A singleton type has no representation to reveal.
         if declaration.kind == TypeDeclarationKind::Singleton {
             return Some(head);
@@ -1699,6 +1709,10 @@ impl Collector<'_> {
             Type::Application(application) => {
                 self.ty(&application.callee);
                 self.ty(&application.argument);
+            }
+            Type::EffectApplication(application) => {
+                self.ty(&application.callee);
+                for resource in &application.effects.resources { self.ty(&resource.value_type); }
             }
             Type::Repeated(repeated) => {
                 self.ty(&repeated.element);

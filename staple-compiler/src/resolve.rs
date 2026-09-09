@@ -4573,6 +4573,12 @@ impl NameResolver {
                 self.resolve_type_with(&application.callee, strict);
                 self.resolve_type_with(&application.argument, strict);
             }
+            Type::EffectApplication(application) => {
+                self.resolve_type_with(&application.callee, strict);
+                for resource in &application.effects.resources {
+                    self.resolve_type_with(&resource.value_type, strict);
+                }
+            }
             Type::Repeated(repeated) => {
                 self.resolve_type_with(&repeated.element, strict);
                 if let Some(count) = &repeated.count {
@@ -4757,6 +4763,12 @@ impl NameResolver {
             Type::Application(application) => {
                 self.validate_representation(&application.callee, required);
                 self.validate_representation(&application.argument, required);
+            }
+            Type::EffectApplication(application) => {
+                self.validate_representation(&application.callee, required);
+                for resource in &application.effects.resources {
+                    self.validate_representation(&resource.value_type, required);
+                }
             }
             Type::Repeated(repeated) => {
                 self.validate_representation(&repeated.element, required);

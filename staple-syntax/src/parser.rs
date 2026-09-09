@@ -1564,7 +1564,30 @@ impl Grammar {
         let name_start = self.position;
         let name = self.parse_quoted_identifier("expected type name")?;
         let name_syntax = self.syntax(name_start);
+        let effect_parameter = if self.at(TokenKind::LBrace) && !self.has_trivia_before_next_token() {
+            self.bump_token();
+            let parameter_start = self.position;
+            let name = self
+                .expect(TokenKind::Identifier, "expected one effect parameter")?
+                .text;
+            if self.eat(TokenKind::Comma) {
+                return Err(self.error("type declarations accept exactly one effect parameter"));
+            }
+            self.expect(TokenKind::RBrace, "expected `}` after effect parameter")?;
+            Some(TypeParameterPattern::Effect(EffectParameterBinding {
+                syntax: self.syntax(parameter_start),
+                name,
+            }))
+        } else {
+            None
+        };
         let (mut type_parameters, default_bounds) = self.parse_juxtaposed_type_parameters()?;
+        if let Some(effect_parameter) = effect_parameter {
+            type_parameters.insert(0, effect_parameter);
+        }
+        if self.at(TokenKind::LBrace) {
+            return Err(self.error("effect parameter must appear immediately after the type name"));
+        }
         let (trait_bounds, subtype_bounds, _) =
             self.parse_where_clause(&mut type_parameters, false)?;
         let has_body = self.eat(TokenKind::Equals);
@@ -2535,18 +2558,29 @@ impl Grammar {
     fn parse_type_postfix(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
         let mut ty = self.parse_type_atom()?;
-        while self.eat(TokenKind::LBracket) {
-            let count = if self.at(TokenKind::RBracket) {
-                None
+        loop {
+            if self.at(TokenKind::LBrace) && !self.has_trivia_before_next_token() {
+                let effects = self.parse_effect_set()?;
+                ty = Type::EffectApplication(crate::EffectApplication {
+                    syntax: self.syntax(start),
+                    callee: Box::new(ty),
+                    effects,
+                });
+            } else if self.eat(TokenKind::LBracket) {
+                let count = if self.at(TokenKind::RBracket) {
+                    None
+                } else {
+                    Some(Box::new(self.parse_type()?))
+                };
+                self.expect(TokenKind::RBracket, "expected `]` after product repetition")?;
+                ty = Type::Repeated(crate::RepeatedType {
+                    syntax: self.syntax(start),
+                    element: Box::new(ty),
+                    count,
+                });
             } else {
-                Some(Box::new(self.parse_type()?))
-            };
-            self.expect(TokenKind::RBracket, "expected `]` after product repetition")?;
-            ty = Type::Repeated(crate::RepeatedType {
-                syntax: self.syntax(start),
-                element: Box::new(ty),
-                count,
-            });
+                break;
+            }
         }
         Ok(ty)
     }
@@ -3935,6 +3969,10 @@ fn contains_mutable_type_element(ty: &Type) -> bool {
             contains_mutable_type_element(&application.callee)
                 || contains_mutable_type_element(&application.argument)
         }
+        Type::EffectApplication(application) => {
+            contains_mutable_type_element(&application.callee)
+                || application.effects.resources.iter().any(|resource| contains_mutable_type_element(&resource.value_type))
+        }
         Type::Repeated(repeated) => contains_mutable_type_element(&repeated.element),
         _ => false,
     }
@@ -3954,6 +3992,10 @@ fn contains_move_type_element(ty: &Type) -> bool {
         Type::Application(application) => {
             contains_move_type_element(&application.callee)
                 || contains_move_type_element(&application.argument)
+        }
+        Type::EffectApplication(application) => {
+            contains_move_type_element(&application.callee)
+                || application.effects.resources.iter().any(|resource| contains_move_type_element(&resource.value_type))
         }
         Type::Repeated(repeated) => contains_move_type_element(&repeated.element),
         _ => false,
@@ -4049,6 +4091,7 @@ fn companion_target_name(ty: &Type) -> Option<String> {
     match ty {
         Type::Named(named) => Some(named.name.clone()),
         Type::Application(application) => companion_target_name(&application.callee),
+        Type::EffectApplication(application) => companion_target_name(&application.callee),
         Type::Splice(splice) => Some(format!("${}", splice.name)),
         _ => None,
     }
