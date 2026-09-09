@@ -67,6 +67,10 @@ pub(crate) struct OwnershipChecker<'a> {
     active_borrows: HashMap<SymbolId, (BorrowKind, usize)>,
     borrow_scopes: Vec<Vec<SymbolId>>,
     parameter_symbols: HashSet<SymbolId>,
+    /// Body-block syntax ids of `coro { ... }` expressions. Their implicit
+    /// thunks own (rather than borrow) their captures — the coroutine moved
+    /// them in at construction.
+    coroutine_body_thunks: HashSet<SyntaxId>,
 }
 
 #[derive(Default)]
@@ -90,6 +94,7 @@ impl<'a> OwnershipChecker<'a> {
             active_borrows: HashMap::new(),
             borrow_scopes: vec![],
             parameter_symbols: HashSet::new(),
+            coroutine_body_thunks: crate::coroutine_lower::coroutine_body_ids(module),
         };
         checker.collect_top_level_symbols();
         checker.check_top_level();
@@ -185,14 +190,20 @@ impl<'a> OwnershipChecker<'a> {
             .collect();
 
         let drop_method = self.module.is_drop_method(function.id);
+        // A coroutine body's implicit thunk owns its captures (moved in when
+        // the coroutine was constructed), so they are consumable inside it.
+        let owns_captures = self
+            .coroutine_body_thunks
+            .contains(&function.body.syntax().id);
         self.bind_function_pattern(&function.pattern, drop_method);
         for capture in &function.captures {
             let Some(value_type) = self.module.type_of_symbol(*capture) else {
                 continue;
             };
-            let state = if self
-                .module
-                .is_copy_in_function(value_type, Some(function.id))
+            let state = if owns_captures
+                || self
+                    .module
+                    .is_copy_in_function(value_type, Some(function.id))
                 || self.module.has_mutable_storage(*capture)
             {
                 ValueState::Available
@@ -283,6 +294,30 @@ impl<'a> OwnershipChecker<'a> {
                 }
                 self.states = merge_states(&entry, &context.breaks);
                 !context.breaks.is_empty()
+            }
+            Expression::Coro(value) => {
+                // Constructing a coroutine moves its owned, non-`Copy`
+                // captures and rejects captured borrowed views. The body is
+                // ownership-checked separately as its own implicit thunk.
+                if let Some(thunk) = self.module.implicit_thunk_for(value.body.syntax.id) {
+                    for capture in thunk.captures.clone() {
+                        if self.borrowed_closures.contains_key(&capture) {
+                            self.diagnostics.push(Diagnostic::new(
+                                value.syntax.span.clone(),
+                                "a coroutine cannot capture a borrowed view",
+                            ));
+                        } else if !self.module.has_mutable_storage(capture) {
+                            self.use_symbol(capture, &value.syntax, true);
+                        }
+                    }
+                }
+                true
+            }
+            Expression::Await(value) => {
+                // `await` consumes its operand. Awaiting the same task or
+                // coroutine handle twice is therefore a use-after-move.
+                self.check_expression(&value.operand, true);
+                true
             }
             Expression::Resource(value) => {
                 if consume

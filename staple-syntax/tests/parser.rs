@@ -120,6 +120,84 @@ fn parses_effect_parameters_on_type_declarations_and_applications() {
 }
 
 #[test]
+fn parses_coroutine_and_await_expressions_losslessly() {
+    let source = concat!(
+        "let task = coro { work () }\n",
+        "let value = await run ()\n",
+        "let chained = await outer (await inner ())\n",
+        "let grouped = await (compute a b)\n",
+        "let sum = await first () + await second ()\n",
+        "let block = coro {\n",
+        "    let x = 1\n",
+        "    x + 1\n",
+        "}\n",
+    );
+    let module = parse(source).expect("coroutine syntax should parse");
+    assert_eq!(module.syntax.text(), source);
+
+    let Item::Binding(task) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    assert!(matches!(task.value, Some(Expression::Coro(_))));
+
+    let Item::Binding(value) = &module.items[1] else {
+        panic!("expected binding")
+    };
+    let Some(Expression::Await(await_)) = &value.value else {
+        panic!("expected await expression")
+    };
+    assert!(matches!(await_.operand.as_ref(), Expression::Call(_)));
+
+    // `await outer (await inner ())`: the outer await consumes the whole call,
+    // whose argument is itself an await.
+    let Item::Binding(chained) = &module.items[2] else {
+        panic!("expected binding")
+    };
+    let Some(Expression::Await(outer)) = &chained.value else {
+        panic!("expected await expression")
+    };
+    let Expression::Call(call) = outer.operand.as_ref() else {
+        panic!("expected call operand")
+    };
+    // The argument keeps its source parentheses as a singleton product.
+    let Expression::Product(argument) = call.argument.as_ref() else {
+        panic!("expected parenthesized argument")
+    };
+    assert!(matches!(argument.elements[0].value, Expression::Await(_)));
+
+    // `await first () + await second ()` parses as `(await first ()) + (await second ())`.
+    let Item::Binding(sum) = &module.items[4] else {
+        panic!("expected binding")
+    };
+    let Some(Expression::Binary(binary)) = &sum.value else {
+        panic!("expected binary expression")
+    };
+    assert!(matches!(binary.left.as_ref(), Expression::Await(_)));
+    assert!(matches!(binary.right.as_ref(), Expression::Await(_)));
+
+    // `coro` and `await` remain usable as ordinary identifiers.
+    let identifiers = "let coro = 1\nlet await = 2\nlet total = coro + await\n";
+    let module = parse(identifiers).expect("coro/await stay valid identifiers");
+    assert_eq!(module.syntax.text(), identifiers);
+
+    // The formatter is stable on coroutine syntax.
+    let formatted = staple_syntax::format_source(source).expect("coroutine syntax should format");
+    assert_eq!(
+        staple_syntax::format_source(&formatted).expect("formatting is idempotent"),
+        formatted,
+    );
+
+    // `coro` without a block is an ordinary identifier reference, not a coroutine.
+    let bare = "let handle = coro\n";
+    let module = parse(bare).expect("bare `coro` is an identifier");
+    assert_eq!(module.syntax.text(), bare);
+    let Item::Binding(handle) = &module.items[0] else {
+        panic!("expected binding")
+    };
+    assert!(matches!(handle.value, Some(Expression::Name(_))));
+}
+
+#[test]
 fn parses_fully_qualified_quote_expressions_losslessly() {
     let source = concat!(
         "macro capture = value => std.syntax.quote { $value }\n",

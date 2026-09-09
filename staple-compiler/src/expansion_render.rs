@@ -420,6 +420,8 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             render_expr(program, &function.body),
         ),
         Expression::Loop(loop_) => format!("loop {}", render_block(program, &loop_.body)),
+        Expression::Coro(coro) => format!("coro {}", render_block(program, &coro.body)),
+        Expression::Await(await_) => format!("await {}", render_expr(program, &await_.operand)),
         Expression::Resource(resource) => format!("resource {}", resource.resource),
         Expression::With(with) => format!(
             "with {}{} = {} {}",
@@ -691,6 +693,8 @@ fn expr_has_generated(expression: &Expression) -> bool {
                     .any(|arm| expr_has_generated(&arm.body) || pattern_is_generated(&arm.pattern))
         }
         Expression::Loop(loop_) => block_has_generated(&loop_.body),
+        Expression::Coro(coro) => block_has_generated(&coro.body),
+        Expression::Await(await_) => expr_has_generated(&await_.operand),
         Expression::With(with) => {
             expr_has_generated(&with.value) || block_has_generated(&with.body)
         }

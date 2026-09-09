@@ -276,6 +276,14 @@ impl Collector<'_> {
                     self.collect_item_declarations(item);
                 }
             }
+            Expression::Coro(coro) => {
+                for item in &coro.body.items {
+                    self.collect_item_declarations(item);
+                }
+            }
+            Expression::Await(await_) => {
+                self.collect_expression_declarations(&await_.operand);
+            }
             Expression::Resource(_) => {}
             Expression::With(with) => {
                 self.collect_expression_declarations(&with.value);
@@ -1428,6 +1436,12 @@ impl Collector<'_> {
                     self.item(item);
                 }
             }
+            Expression::Coro(coro) => {
+                for item in &coro.body.items {
+                    self.item(item);
+                }
+            }
+            Expression::Await(await_) => self.expression(&await_.operand),
             Expression::Resource(resource) => self.ty(&resource.resource),
             Expression::With(with) => {
                 self.ty(&with.resource);

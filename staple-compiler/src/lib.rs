@@ -1,4 +1,5 @@
 mod codegen;
+mod coroutine_lower;
 mod expansion_render;
 mod macro_expand;
 mod ownership;

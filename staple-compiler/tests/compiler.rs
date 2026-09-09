@@ -365,6 +365,485 @@ fn checks_effect_parameterized_type_declarations() {
 }
 
 #[test]
+fn coroutines_lower_to_resume_and_cleanup_functions() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "use std.io.(IO, println)\n",
+        "def worker: () -> Coroutine{IO} I32 = () => coro { println \"work\"; 7 }\n",
+        "def driver: () -> Coroutine{IO} I32 = () => coro { let v = await (worker ()); v + 1 }\n",
+        "let answer = block_on (driver ())\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("coroutines should lower");
+    // One state-machine `resume` (with a `state.0` entry block) and one
+    // `cleanup` (with a `not.freed` block) per user coroutine body.
+    assert_eq!(llvm.matches("\nstate.0:").count(), 2);
+    assert_eq!(llvm.matches("\nnot.freed:").count(), 2);
+    assert!(llvm.contains("@__staple_coro_"));
+    // The frame is rooted at creation and unrooted in cleanup.
+    assert!(llvm.contains("__staple_gc_register_root"));
+    assert!(llvm.contains("__staple_gc_unregister_root"));
+    // `block_on` and the nested `await` both drive a frame indirectly.
+    assert!(llvm.contains("coro.result"));
+}
+
+#[test]
+fn dropping_an_unstarted_coroutine_emits_a_cleanup_call() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "use std.cinterop.(CString, c_string)\n",
+        "def build: () -> Coroutine{} () =\n",
+        "    () => {\n",
+        "        let held = c_string \"captured\"\n",
+        "        coro { let _ = held; () }\n",
+        "    }\n",
+        "let _ = build ()\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("an unstarted coroutine should lower");
+    // The coroutine's cleanup exists and its drop path calls the closure
+    // finalizer that frees the captured CString.
+    assert!(llvm.contains("_cleanup(ptr"));
+    assert!(llvm.contains("__staple_gc_finalize_closure_"));
+}
+
+#[test]
+fn awaiting_a_task_lowers_to_a_waiter_park_and_outcome_branch() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "use std.io.(IO, println)\n",
+        "def leaf: () -> Coroutine{} I32 = () => coro { 9 }\n",
+        "def waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n",
+        "    let t = spawn (leaf ())\n",
+        "    let r = await t\n",
+        "    match r {\n",
+        "        Completed v => v,\n",
+        "        Cancelled() => 0,\n",
+        "    }\n",
+        "}\n",
+        "let sched = scheduler ()\n",
+        "with Tasks = task_scope (sched) {\n",
+        "    let _ = spawn (waiter ())\n",
+        "    let _ = pump (sched, 8)\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("`await <Task>` should lower");
+    // The awaiting body reads the external record and forks on whether it
+    // completed or was cancelled.
+    assert!(llvm.contains("external.record.state"));
+    assert!(llvm.contains("await.ext.completed"));
+    assert!(llvm.contains("await.ext.cancelled"));
+    assert!(llvm.contains("await.ext.merge"));
+    assert!(llvm.contains("__staple_task_await_register"));
+    // The runtime driver gained the task-wait status and the record waiter/wake.
+    assert!(llvm.contains("wake.waiter"));
+    assert!(llvm.contains("wait_task"));
+}
+
+#[test]
+fn completion_await_lowers_to_an_external_wait_with_a_fast_path() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "def observe: move Wait I32 -> Coroutine{} () = move w => coro {\n",
+        "    let outcome = await w\n",
+        "    match outcome { Completed v => (), Cancelled() => () }\n",
+        "}\n",
+        "def make: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
+        "let sched = scheduler ()\n",
+        "with Tasks = task_scope (sched) {\n",
+        "    let (w, r) = make sched\n",
+        "    let _ = spawn (observe w)\n",
+        "    Resolver.complete (r, 1)\n",
+        "    let _ = pump (sched, 4)\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("`await <Wait>` should lower");
+    // Registration (with the already-resolved fast path), the shared outcome
+    // branch, and the resolver/drop runtime shims.
+    assert!(llvm.contains("__staple_completion_register"));
+    assert!(llvm.contains("await.want.suspend"));
+    assert!(llvm.contains("await.external.suspend"));
+    assert!(llvm.contains("await.ext.completed"));
+    assert!(llvm.contains("__staple_completion_complete"));
+    assert!(llvm.contains("__staple_completion_wait_drop"));
+    assert!(llvm.contains("__staple_completion_resolver_drop"));
+}
+
+#[test]
+fn completion_with_cancel_arms_a_callback_and_the_unwind_abandons_it() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "def obs: move Wait I32 -> Coroutine{} () = move w => coro {\n",
+        "    let outcome = await w\n",
+        "    match outcome { Completed v => (), Cancelled() => () }\n",
+        "}\n",
+        "def noop: () -> () = () => ()\n",
+        "def prim: (Scheduler, () -> ()) -> (wait: Wait I32, resolver: Resolver I32) =\n",
+        "    (s, cb) => completion_with_cancel (s, cb)\n",
+        "let sched = scheduler ()\n",
+        "with Tasks = task_scope (sched) {\n",
+        "    let (w, r) = prim (sched, noop)\n",
+        "    let h = spawn (obs w)\n",
+        "    let _ = pump (sched, 4)\n",
+        "    Task.cancel h\n",
+        "    let _ = pump (sched, 4)\n",
+        "    Resolver.cancel r\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("`completion_with_cancel` should lower");
+    // The callback halves are stored and the armed bit is set at creation.
+    assert!(llvm.contains("completion.cancel.fn"));
+    assert!(llvm.contains("completion.cancel.env"));
+    // The cancel unwind branches to an abandon path for a `Wait`-parked state.
+    assert!(llvm.contains("cancel.abandon.wait"));
+    assert!(llvm.contains("__staple_completion_abandon"));
+    // The runtime distinguishes running the callback from releasing it.
+    assert!(llvm.contains("__staple_completion_run_cancel"));
+    assert!(llvm.contains("__staple_completion_disarm_cancel"));
+}
+
+#[test]
+fn completion_tokens_expose_c_entry_points_and_a_staple_facade() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "def obs: move Wait () -> Coroutine{} () = move w => coro {\n",
+        "    let outcome = await w\n",
+        "    match outcome { Completed uu => (), Cancelled() => () }\n",
+        "}\n",
+        "def mk: Scheduler -> (wait: Wait (), token: CompletionToken) = s => completion_token s\n",
+        "let sched = scheduler ()\n",
+        "with Tasks = task_scope (sched) {\n",
+        "    let (w, t) = mk sched\n",
+        "    let _ = spawn (obs w)\n",
+        "    let _ = pump (sched, 4)\n",
+        "    CompletionToken.resolve t\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("`completion_token` should lower");
+    // The three host entry points are emitted with external linkage, and the
+    // Staple `CompletionToken` facade calls into them / the shared cancel path.
+    assert!(llvm.contains("define void @__staple_completion_token_resolve(ptr"));
+    assert!(llvm.contains("define void @__staple_completion_token_cancel(ptr"));
+    assert!(llvm.contains("define void @__staple_completion_token_release(ptr"));
+    assert!(llvm.contains("call void @__staple_completion_token_resolve"));
+}
+
+#[test]
+fn until_lowers_to_a_reaction_backed_completion_coroutine() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "let signal n = 0\n",
+        "let sched = scheduler ()\n",
+        "with Reactive = reactive_scope () {\n",
+        "    with Tasks = task_scope (sched) {\n",
+        "        let _ = spawn (coro {\n",
+        "            let _ = await (until { n >= 5 })\n",
+        "            ()\n",
+        "        })\n",
+        "        let _ = pump (sched, 4)\n",
+        "    }\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("`until` should lower");
+    // The `until` coroutine has its own resume/cleanup and an internal reaction
+    // runner that resolves a completion.
+    assert!(llvm.contains("define %CoroStatus @__staple_until_resume(ptr"));
+    assert!(llvm.contains("define void @__staple_until_cleanup(ptr"));
+    assert!(llvm.contains("@__staple_until_runner_"));
+    assert!(llvm.contains("call ptr @__staple_reaction_create"));
+    assert!(llvm.contains("until.predicate"));
+    // A task cancelled while parked in `until` runs the child's cleanup.
+    assert!(llvm.contains("cancel.cleanup.until"));
+}
+
+#[test]
+fn until_rejects_a_predicate_that_is_not_pure_signal_reads() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "use std.io.(IO, println)\n",
+            "let signal c = 0\n",
+            "def bad: () -> Coroutine{Reactive, IO} () = () => coro {\n",
+            "    let _ = await (until { println \"peek\"; c >= 3 })\n",
+            "    ()\n",
+            "}\n",
+        )))
+        .expect_err_diagnostics("an `until` predicate may only read signals");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("state.read")),
+        "unexpected diagnostics: {diagnostics:?}",
+    );
+}
+
+#[test]
+fn spawned_coroutines_lower_a_cancellation_unwind_path() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "use std.io.(IO, println)\n",
+        "def stepper: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+        "    println \"start\"\n",
+        "    let _ = await (yield_now ())\n",
+        "    println \"resumed\"\n",
+        "}\n",
+        "let sched = scheduler ()\n",
+        "with Tasks = task_scope (sched) {\n",
+        "    let t = spawn (stepper ())\n",
+        "    let _ = pump (sched, 4)\n",
+        "    Task.cancel t\n",
+        "    let _ = pump (sched, 4)\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("cancellation should lower");
+    // Every coroutine `resume` checks its task record for a cancel request and
+    // branches to an unwind that reports CANCELLED.
+    assert!(llvm.contains("cancel.check"));
+    assert!(llvm.contains("cancel.unwind"));
+    assert!(llvm.contains("resume.spent"));
+    // `Task.cancel` and scope teardown call into the runtime.
+    assert!(llvm.contains("__staple_task_cancel"));
+    assert!(llvm.contains("__staple_task_scope_track"));
+    assert!(llvm.contains("__staple_task_scope_close"));
+}
+
+#[test]
+fn the_coroutine_driver_isolates_reactive_tracking_and_guards_pump() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "def leaf: () -> Coroutine{} I32 = () => coro { 3 }\n",
+        "def top: () -> Coroutine{} I32 = () => coro { let r = await (leaf ()); r + 1 }\n",
+        "let sched = scheduler ()\n",
+        "with Tasks = task_scope (sched) {\n",
+        "    let _ = spawn (top ())\n",
+        "    let _ = pump (sched, 4)\n",
+        "}\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("coroutine reactive integration should lower");
+    // The trampoline detaches dependency tracking around every `resume`.
+    assert!(llvm.contains("__staple_tracking_suspend"));
+    assert!(llvm.contains("__staple_tracking_restore"));
+    // `pump` refuses to run inside a reaction or an open batch.
+    assert!(llvm.contains("__staple_reactive_guard_active"));
+}
+
+#[test]
+fn await_in_sub_expression_position_is_rejected() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "def get: () -> Coroutine{} I32\n",
+            "def bad: () -> Coroutine{} I32 =\n",
+            "    () => coro { (await (get ())) + 1 }\n",
+        )))
+        .expect_err_diagnostics("`await` in operand position is not lowered in v1");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("must be a statement")),
+        "unexpected diagnostics: {diagnostics:?}",
+    );
+}
+
+#[test]
+fn coroutine_yield_type_and_empty_effect_row_default() {
+    // `Coroutine T` is `Coroutine{} T`; an explicit `{IO}` row is retained.
+    type_check(concat!(
+        "use std.coroutine.*\n",
+        "use std.io.(IO, println)\n",
+        "let pure: Coroutine I32 = coro { 1 }\n",
+        "let also_pure: Coroutine{} I32 = coro { 1 }\n",
+        "let effectful: Coroutine{IO} () = coro { println \"hi\" }\n",
+    ));
+}
+
+#[test]
+fn macros_can_produce_coroutine_and_await_expressions() {
+    type_check(concat!(
+        "use std.syntax.(parse_quote, Expr)\n",
+        "use std.coroutine.*\n",
+        "macro spawn_pure: Expr -> Expr = value => parse_quote { coro { $value } }\n",
+        "macro unwrap: Expr -> Expr = value => parse_quote { await $value }\n",
+        "let job: Coroutine{} I32 = spawn_pure 7\n",
+        "let outer: Coroutine{} I32 = coro { unwrap (spawn_pure 7) }\n",
+    ));
+}
+
+#[test]
+fn coroutine_construction_is_pure_and_await_incorporates_deferred_effects() {
+    // `coro { ... }` defers its body's effects onto the `Coroutine{E}` type,
+    // so a function that only *builds* a coroutine stays pure, while one that
+    // `await`s it inside another `coro` body takes on the deferred row.
+    type_check(concat!(
+        "use std.coroutine.*\n",
+        "use std.io.(IO, println)\n",
+        "def build: () -> Coroutine{IO} () = () => coro { println \"hi\" }\n",
+        "def run: () -> Coroutine{IO} () = () => coro { await (build ()) }\n",
+    ));
+}
+
+#[test]
+fn coroutine_body_effects_do_not_escape_to_the_enclosing_function() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "use std.io.(IO, println)\n",
+            "def pure: () -> Coroutine{} () = () => coro { println \"hi\" }\n",
+        )))
+        .expect_err_diagnostics("a coro body's IO effect must be reported against the coroutine type");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("IO")),
+        "unexpected diagnostics: {diagnostics:?}",
+    );
+}
+
+#[test]
+fn await_outside_a_coro_body_is_rejected() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "def bad: Coroutine{} I32 -> I32 = task => await task\n",
+        )))
+        .expect_err_diagnostics("`await` outside a coro body should be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("only allowed directly inside a `coro`")),
+        "unexpected diagnostics: {diagnostics:?}",
+    );
+}
+
+#[test]
+fn await_in_a_nested_function_inside_a_coro_is_rejected() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "def apply: <T> (() -> T) -> T = f => f ()\n",
+            "def bad: Coroutine{} I32 -> Coroutine{} I32 =\n",
+            "    task => coro { apply (() => await task) }\n",
+        )))
+        .expect_err_diagnostics("`await` in a nested closure should be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("only allowed directly inside a `coro`")),
+        "unexpected diagnostics: {diagnostics:?}",
+    );
+}
+
+#[test]
+fn await_requires_a_coroutine_or_task_operand() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "def bad: () -> Coroutine{} I32 = () => coro { await 42 }\n",
+        )))
+        .expect_err_diagnostics("`await` on a plain value should be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("requires a coroutine, task, or wait")),
+        "unexpected diagnostics: {diagnostics:?}",
+    );
+}
+
+#[test]
+fn coro_moves_owned_non_copy_captures() {
+    // A `Task` handle is affine. Capturing it into a coroutine moves it, so a
+    // second coroutine that captures the same handle is a use-after-move.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "def get_task: () -> Task I32\n",
+            "def drop_it: <T> T -> () = _ => ()\n",
+            "def bad: () -> () =\n",
+            "    () => {\n",
+            "        let handle = get_task ()\n",
+            "        drop_it (coro { await handle })\n",
+            "        drop_it (coro { await handle })\n",
+            "    }\n",
+        )))
+        .expect_err_diagnostics("a coro that captures a task handle by move must forbid a later capture");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("moved")),
+        "unexpected diagnostics: {diagnostics:?}",
+    );
+}
+
+#[test]
+fn double_await_of_a_task_handle_is_rejected() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.coroutine.*\n",
+            "def get_task: () -> Task I32\n",
+            "def bad: () -> Coroutine{} I32 =\n",
+            "    () => coro {\n",
+            "        let handle = get_task ()\n",
+            "        let _ = await handle\n",
+            "        let _ = await handle\n",
+            "        0\n",
+            "    }\n",
+        )))
+        .expect_err_diagnostics("awaiting the same task handle twice is a use-after-move");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.to_lowercase().contains("move")),
+        "unexpected diagnostics: {diagnostics:?}",
+    );
+}
+
+#[test]
+fn coro_and_await_are_rejected_in_compile_time_evaluation() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            "use std.coroutine.*\nconst bad: I32 = await (coro { 1 })\n",
+            root,
+        )
+        .expect("source should load");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("coroutines are not available at compile time");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("compile-time")),
+        "unexpected diagnostics: {diagnostics:?}",
+    );
+}
+
+#[test]
 fn infers_open_effect_rows_and_checks_fixed_effects() {
     type_check(concat!(
         "use std.io.(IO, println)\n",
@@ -8997,6 +9476,30 @@ fn rejects_out_of_range_and_mixed_integer_arithmetic() {
         )))
         .expect_err_diagnostics("mixed integer arithmetic should require an explicit conversion");
     assert!(!diagnostics.is_empty());
+}
+
+#[test]
+fn the_coroutines_example_type_checks() {
+    // `examples/coroutines.sta` is the worked manual-scheduler walkthrough; keep
+    // it compiling as the surface evolves.
+    type_check(include_str!("../examples/coroutines.sta"));
+}
+
+#[test]
+fn the_game_loop_adapter_example_type_checks() {
+    // `examples/game_loop/` is the host-adapter reference: `game.sta` (reusable
+    // combinators) + `main.sta` (a demo). It must keep compiling as one program.
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_path(&root.join("staple-compiler/examples/game_loop/main.sta"))
+        .expect("the game-loop example should load");
+    let resolved = NameResolver::new()
+        .resolve_program(program)
+        .expect("the game-loop example should resolve");
+    TypeChecker::new()
+        .check(resolved)
+        .expect("the game-loop example should type-check");
 }
 
 #[test]

@@ -344,7 +344,7 @@ return:
   ret void
 }
 
-define void @__staple_reaction_create(ptr %scope, ptr %runner, ptr %payload, {{SIZE}} %payload.size) {
+define ptr @__staple_reaction_create(ptr %scope, ptr %runner, ptr %payload, {{SIZE}} %payload.size) {
 entry:
   call void @__staple_gc_register_root(ptr %payload, {{SIZE}} %payload.size)
   %reaction = call ptr @malloc({{SIZE}} {{REACTION_BYTES}})
@@ -382,7 +382,7 @@ checkpoint:
   call void @__staple_executor_checkpoint()
   br label %return
 return:
-  ret void
+  ret ptr %reaction
 trap:
   call void @llvm.trap()
   unreachable
@@ -580,6 +580,19 @@ define void @__staple_tracking_restore(ptr %previous) {
 entry:
   store ptr %previous, ptr @__staple_current_reaction
   ret void
+}
+
+; True while a reaction is executing or a batch is open. The coroutine scheduler
+; refuses to `pump` in either state (a reaction must not enter the driver, and a
+; pump inside a batch would run effects the batch means to defer).
+define i1 @__staple_reactive_guard_active() {
+entry:
+  %reaction = load ptr, ptr @__staple_current_reaction
+  %in.reaction = icmp ne ptr %reaction, null
+  %depth = load i32, ptr @__staple_batch_depth
+  %in.batch = icmp ne i32 %depth, 0
+  %active = or i1 %in.reaction, %in.batch
+  ret i1 %active
 }
 
 define void @__staple_reactive_scope_dispose(ptr %scope) {

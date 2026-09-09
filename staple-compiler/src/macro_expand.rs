@@ -796,6 +796,12 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
                 desugar_item(item, next_syntax_id);
             }
         }
+        Expression::Coro(coro) => {
+            for item in &mut coro.body.items {
+                desugar_item(item, next_syntax_id);
+            }
+        }
+        Expression::Await(await_) => desugar_expression(&mut await_.operand, next_syntax_id),
         Expression::With(with) => {
             desugar_expression(&mut with.value, next_syntax_id);
             for item in &mut with.body.items {
@@ -2107,6 +2113,20 @@ impl MacroExpander {
                 ));
                 CompileType::Error
             }
+            Expression::Coro(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "coroutines are not available during compile-time macro evaluation",
+                ));
+                CompileType::Error
+            }
+            Expression::Await(value) => {
+                self.diagnostics.push(Diagnostic::new(
+                    value.syntax.span.clone(),
+                    "`await` is not available during compile-time macro evaluation",
+                ));
+                CompileType::Error
+            }
             Expression::CString(_) => CompileType::Named("CString".to_owned()),
         };
         if let Some(expected) = expected
@@ -2421,9 +2441,12 @@ impl MacroExpander {
                 self.check_quoted_expression(module, &value.subject, environment);
                 for arm in &value.arms { self.check_quoted_expression(module, &arm.body, environment); }
             }
-            Expression::Block(value) | Expression::Loop(staple_syntax::LoopExpression { body: value, .. }) => {
+            Expression::Block(value)
+            | Expression::Loop(staple_syntax::LoopExpression { body: value, .. })
+            | Expression::Coro(staple_syntax::CoroExpression { body: value, .. }) => {
                 for item in &value.items { self.check_quoted_item(module, item, environment); }
             }
+            Expression::Await(value) => self.check_quoted_expression(module, &value.operand, environment),
             Expression::Product(value) => for element in &value.elements { self.check_quoted_expression(module, &element.value, environment); },
             Expression::RepeatedProduct(value) => { self.check_quoted_expression(module, &value.value, environment); self.check_quoted_expression(module, &value.count, environment); }
             Expression::Call(value) => { self.check_quoted_expression(module, &value.callee, environment); self.check_quoted_expression(module, &value.argument, environment); }
@@ -4122,6 +4145,15 @@ impl MacroExpander {
                 ));
                 Expression::Splice(splice)
             }
+            Expression::Coro(mut coro) => {
+                self.expand_block(module, &mut coro.body, depth);
+                Expression::Coro(coro)
+            }
+            Expression::Await(mut await_) => {
+                await_.operand =
+                    Box::new(self.expand_expression(module, *await_.operand, depth));
+                Expression::Await(await_)
+            }
             other => other,
         }
     }
@@ -5152,6 +5184,20 @@ impl MacroExpander {
                 self.diagnostics.push(Diagnostic::new(
                     loop_.syntax.span.clone(),
                     "loops are not supported during compile-time evaluation",
+                ));
+                None
+            }
+            Expression::Coro(coro) => {
+                self.diagnostics.push(Diagnostic::new(
+                    coro.syntax.span.clone(),
+                    "coroutines are not available during compile-time macro evaluation",
+                ));
+                None
+            }
+            Expression::Await(await_) => {
+                self.diagnostics.push(Diagnostic::new(
+                    await_.syntax.span.clone(),
+                    "`await` is not available during compile-time macro evaluation",
                 ));
                 None
             }
@@ -6716,6 +6762,15 @@ impl MacroExpander {
                 for item in &mut loop_.body.items {
                     freshen_item(self, item, module, mark);
                 }
+            }
+            Expression::Coro(coro) => {
+                self.freshen_syntax(&mut coro.body.syntax, module, mark);
+                for item in &mut coro.body.items {
+                    freshen_item(self, item, module, mark);
+                }
+            }
+            Expression::Await(await_) => {
+                self.freshen_expression(&mut await_.operand, module, mark);
             }
             Expression::Resource(resource) => {
                 freshen_type(self, &mut resource.resource, module, mark);
@@ -9368,6 +9423,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         }
         Expression::StringTemplate(_) => true,
         Expression::Loop(_) => true,
+        Expression::Coro(_) | Expression::Await(_) => true,
         Expression::Resource(_) | Expression::With(_) => true,
         Expression::Block(block) => block.items.last().is_none_or(|item| match item {
             Item::Expression(expression) => obviously_not_syntax(expression, 0),
@@ -10115,6 +10171,14 @@ fn substitute_splices(
             for item in &mut loop_.body.items {
                 substitute_block_item(item, environment, diagnostics)?;
             }
+        }
+        Expression::Coro(coro) => {
+            for item in &mut coro.body.items {
+                substitute_block_item(item, environment, diagnostics)?;
+            }
+        }
+        Expression::Await(await_) => {
+            *await_.operand = substitute_splices(&await_.operand, environment, diagnostics)?;
         }
         Expression::Resource(resource) => {
             substitute_type(&mut resource.resource, environment, diagnostics)?;
@@ -11230,6 +11294,12 @@ fn alpha_rename_expression(
         Expression::Loop(loop_) => {
             alpha_rename_block(&mut loop_.body, mark, scopes);
         }
+        Expression::Coro(coro) => {
+            alpha_rename_block(&mut coro.body, mark, scopes);
+        }
+        Expression::Await(await_) => {
+            alpha_rename_expression(&mut await_.operand, mark, scopes);
+        }
         Expression::Resource(_) => {}
         Expression::With(with) => {
             alpha_rename_expression(&mut with.value, mark, scopes);
@@ -11339,6 +11409,8 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Satisfies(value) => &mut value.syntax,
         Expression::Match(value) => &mut value.syntax,
         Expression::Loop(value) => &mut value.syntax,
+        Expression::Coro(value) => &mut value.syntax,
+        Expression::Await(value) => &mut value.syntax,
         Expression::Resource(value) => &mut value.syntax,
         Expression::With(value) => &mut value.syntax,
         Expression::Block(value) => &mut value.syntax,

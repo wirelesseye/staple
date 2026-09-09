@@ -21,7 +21,7 @@ use crate::typecheck::{
 };
 use crate::{
     CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType, CheckedResource,
-    CheckedType, CheckedTypeElement, FloatType, FunctionId, IntegerBinaryOperation,
+    CheckedStateEffect, CheckedType, CheckedTypeElement, FloatType, FunctionId, IntegerBinaryOperation,
     IntegerCompareOperation, IntegerType, IntrinsicFunction, ModuleId, NumericType, ResolvedFunction,
     ResolvedModule, SymbolId, TypeParameterId, TypedModule,
 };
@@ -55,6 +55,14 @@ struct ModuleEmitter<'module, 'context> {
     globals: HashMap<SymbolId, inkwell::values::AnyValueEnum<'context>>,
     closure_codes: HashMap<SymbolId, inkwell::values::FunctionValue<'context>>,
     gc_finalizers: HashMap<String, inkwell::values::FunctionValue<'context>>,
+    /// `coro` body syntax id → (resume fn, cleanup fn).
+    coroutine_codes: HashMap<
+        staple_syntax::SyntaxId,
+        (
+            inkwell::values::FunctionValue<'context>,
+            inkwell::values::FunctionValue<'context>,
+        ),
+    >,
     captured_cell_symbols: HashSet<SymbolId>,
     external_symbols: HashSet<SymbolId>,
     storage: HashMap<SymbolId, inkwell::values::GlobalValue<'context>>,
@@ -104,8 +112,12 @@ struct FunctionEnvironment<'context> {
     closure_environment: Option<inkwell::values::PointerValue<'context>>,
     resources: Vec<BoundResource<'context>>,
     reactive_scopes: Vec<inkwell::values::PointerValue<'context>>,
+    task_scopes: Vec<inkwell::values::PointerValue<'context>>,
     did_return: bool,
     loops: Vec<LoopCodegenContext<'context>>,
+    /// Set while emitting a coroutine `resume` body: `await` then lowers to a
+    /// state-machine suspension instead of an inline call.
+    coroutine: Option<CoroutineContext<'context>>,
 }
 
 impl<'context> FunctionEnvironment<'context> {
@@ -117,6 +129,113 @@ impl<'context> FunctionEnvironment<'context> {
         self.binding_cells = snapshot.binding_cells.clone();
         self.parameter_pointers = snapshot.parameter_pointers.clone();
     }
+}
+
+/// Fixed coroutine frame header field indices (see `coroutine.ll`).
+const CORO_STATE: u32 = 0;
+const CORO_RESUME_FN: u32 = 1;
+const CORO_CLEANUP_FN: u32 = 2;
+const CORO_CAPTURE_ENV: u32 = 3;
+const CORO_CHILD: u32 = 4;
+const CORO_RESULT_PTR: u32 = 5;
+const CORO_PENDING_PTR: u32 = 6;
+#[allow(dead_code)] // read only by `coroutine.ll`'s driver
+const CORO_PARENT: u32 = 7;
+/// Pointer to a GC-allocated bundle of the coroutine's deferred-effect resource
+/// values, packed by whoever drives the frame and unpacked by `resume`.
+const CORO_RESOURCES: u32 = 8;
+/// Pointer to this task's `%TaskRecord` when it was `spawn`ed (else null); the
+/// driver marks it complete when the root frame finishes.
+const CORO_RECORD: u32 = 9;
+const CORO_HEADER_FIELDS: u32 = 10;
+
+/// `frame->state`: `0..=resume_points` are live resume states (`0` also means
+/// "created, never resumed"); these two markers are terminal.
+const CORO_STATE_DONE: u64 = 254;
+const CORO_STATE_FREED: u64 = 255;
+/// `%CoroStatus` status codes returned by `resume` (see `coroutine.ll`).
+const CORO_STATUS_DONE: u64 = 0;
+const CORO_STATUS_RESUME_CHILD: u64 = 1;
+/// The body unwound after a cancellation request; the frame is spent.
+const CORO_STATUS_CANCELLED: u64 = 3;
+/// The body is `await`-ing a spawned `Task`; it has registered itself as that
+/// task's waiter and parks until the task completes.
+const CORO_STATUS_WAIT_TASK: u64 = 4;
+/// The body is `await`-ing an external `Wait` / `Task`: it has registered a
+/// waiter and parks until woken. Driver behaviour is identical to `WAIT_TASK`;
+/// the two names distinguish the record kind at the lowering site.
+const CORO_STATUS_WAIT_EXTERNAL: u64 = CORO_STATUS_WAIT_TASK;
+
+/// `%Completion` field indices (see `coroutine.ll`). The record is
+/// `{ i8 state, i8 flags, {{SIZE}} generation, ptr scheduler, ptr waiter,
+/// ptr cancel_env, ptr cancel_fn, T value }`; the runtime only touches the
+/// header, and 4a leaves the cancel-callback fields zero.
+#[allow(dead_code)] // field 0; loaded directly through the record pointer
+const COMPLETION_STATE: u32 = 0;
+const COMPLETION_FLAGS: u32 = 1;
+#[allow(dead_code)] // bumped only by `coroutine.ll`
+const COMPLETION_GENERATION: u32 = 2;
+const COMPLETION_SCHEDULER: u32 = 3;
+#[allow(dead_code)] // written only by `coroutine.ll`
+const COMPLETION_WAITER: u32 = 4;
+const COMPLETION_CANCEL_ENV: u32 = 5;
+const COMPLETION_CANCEL_FN: u32 = 6;
+const COMPLETION_VALUE: u32 = 7;
+/// `%Completion.state`: 0 pending, 1 completed, 2 cancelled, 3 consumer-gone.
+const COMPLETION_STATE_COMPLETED: u64 = 1;
+/// `%Completion.flags` bit 1: a cancellation callback is still armed.
+#[allow(dead_code)] // documents the layout; the value is inlined above / in `coroutine.ll`
+const COMPLETION_FLAG_CANCEL_ARMED: u8 = 0b10;
+
+/// `%TaskRecord` field indices (see `coroutine.ll`). The record is
+/// `{ i8 state, i8 cancel, ptr frame, ptr waiter, ptr scheduler, ptr scope_next,
+/// T result }`; the runtime only ever touches the header.
+#[allow(dead_code)] // field 0; loaded directly through the record pointer
+const TASK_RECORD_STATE: u32 = 0;
+const TASK_RECORD_CANCEL: u32 = 1;
+const TASK_RECORD_FRAME: u32 = 2;
+#[allow(dead_code)] // written only by `coroutine.ll` (`__staple_task_await_register`)
+const TASK_RECORD_WAITER: u32 = 3;
+const TASK_RECORD_SCHEDULER: u32 = 4;
+#[allow(dead_code)] // read/written only by `coroutine.ll` (scope teardown list)
+const TASK_RECORD_SCOPE_NEXT: u32 = 5;
+const TASK_RECORD_RESULT: u32 = 6;
+/// `%TaskRecord.state`: 0 pending, 1 completed, 2 cancelled.
+#[allow(dead_code)] // documents the runtime layout; `coroutine.ll` uses the literal
+const TASK_STATE_CANCELLED: u64 = 2;
+
+/// Which external record an `await` parks on (`compile_external_await`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ExternalAwaitKind {
+    Task,
+    Wait,
+}
+
+struct CoroutineFrameLayout<'context> {
+    ty: inkwell::types::StructType<'context>,
+    frame_size: u64,
+    /// `frame_bindings` symbol → its cell's frame field index.
+    cell_fields: HashMap<SymbolId, u32>,
+    /// Frame field index of the coroutine's own result slot.
+    result_field: u32,
+    /// Frame field index of the pending-result scratch (only when the body has
+    /// at least one `await`).
+    pending_field: u32,
+}
+
+#[derive(Clone)]
+struct CoroutineContext<'context> {
+    frame: inkwell::values::PointerValue<'context>,
+    frame_type: inkwell::types::StructType<'context>,
+    status_type: inkwell::types::StructType<'context>,
+    /// One block per resume state (`0..=resume_points`); the `resume` entry
+    /// `switch`es on `frame->state` to the right one.
+    dispatch: Vec<inkwell::basic_block::BasicBlock<'context>>,
+    /// The state the next `await` in source order will store before suspending.
+    next_state: usize,
+    /// Frame field index of the pending-result scratch (`await` writes the
+    /// child's result there and reads it back on resume).
+    pending_field: u32,
 }
 
 #[derive(Clone)]
@@ -185,6 +304,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             globals: HashMap::new(),
             closure_codes: HashMap::new(),
             gc_finalizers: HashMap::new(),
+            coroutine_codes: HashMap::new(),
             captured_cell_symbols,
             external_symbols: HashSet::new(),
             storage: HashMap::new(),
@@ -258,6 +378,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .set_data_layout(&target_machine.get_target_data().get_data_layout());
         self.install_gc_runtime()?;
         self.install_reactive_runtime()?;
+        self.install_coroutine_runtime()?;
         self.declare_external_functions()?;
         self.declare_functions()?;
         self.declare_top_level_storage()?;
@@ -274,7 +395,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let function_type = typed_module
                 .type_of_function(function.id)
                 .expect("checked function");
-            if !contains_type_parameter(&CheckedType::Function(function_type.clone())) {
+            if !contains_type_parameter(&CheckedType::Function(function_type.clone()))
+                && !self.is_coroutine_body_thunk(function)
+            {
                 self.compile_function_body(function)?;
             }
         }
@@ -332,6 +455,29 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             Diagnostic::new(
                 Span::Compiler,
                 format!("could not link garbage collector runtime: {error}"),
+            )
+        })
+    }
+
+    fn install_coroutine_runtime(&self) -> CodeGenerationResult<()> {
+        let pointer_bytes = self.target_data.get_pointer_byte_size(None) as u64;
+        let bits = pointer_bytes * 8;
+        let runtime = include_str!("coroutine.ll").replace("{{SIZE}}", &format!("i{bits}"));
+        let buffer =
+            MemoryBuffer::create_from_memory_range_copy(runtime.as_bytes(), "staple-coroutine");
+        let module = self
+            .context
+            .create_module_from_ir(buffer)
+            .map_err(|error| {
+                Diagnostic::new(
+                    Span::Compiler,
+                    format!("could not build coroutine runtime: {error}"),
+                )
+            })?;
+        self.llvm_module.link_in_module(module).map_err(|error| {
+            Diagnostic::new(
+                Span::Compiler,
+                format!("could not link coroutine runtime: {error}"),
             )
         })
     }
@@ -644,6 +790,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             if contains_type_parameter(&CheckedType::Function(function_type.clone())) {
                 continue;
             }
+            // Coroutine-body thunks are emitted as `resume`/`cleanup` pairs on
+            // demand, not as ordinary `() -> T` functions.
+            if self.is_coroutine_body_thunk(function) {
+                continue;
+            }
             let llvm_type = self.compile_closure_function_type(function_type)?;
             let llvm_function = self
                 .llvm_module
@@ -902,46 +1053,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 indirect,
             });
         }
-        if !function.captures.is_empty() {
-            let environment_type = self.compile_capture_type(function)?;
-            let environment_value = self
-                .builder
-                .build_load(environment_type, environment_pointer, "closure.environment")
-                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?
-                .into_struct_value();
-            for (index, symbol) in function.captures.iter().copied().enumerate() {
-                let value = self
-                    .builder
-                    .build_extract_value(environment_value, index as u32, "capture")
-                    .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
-                if self
-                    .typed_module
-                    .resolved()
-                    .requires_initialization_state(symbol)
-                    || self.typed_module.has_mutable_storage(symbol)
-                    || self.typed_module.is_derived_symbol(symbol)
-                    || self
-                        .typed_module
-                        .is_borrowed_capture(function.id, symbol)
-                {
-                    if self.typed_module.is_mutated_parameter(symbol)
-                        || self
-                            .typed_module
-                            .is_borrowed_capture(function.id, symbol)
-                    {
-                        environment
-                            .parameter_pointers
-                            .insert(symbol, value.into_pointer_value());
-                    } else {
-                        environment
-                            .binding_cells
-                            .insert(symbol, value.into_pointer_value());
-                    }
-                } else {
-                    environment.locals.insert(symbol, value.as_any_value_enum());
-                }
-            }
-        }
+        self.bind_environment_captures(environment, function, environment_pointer)?;
         let raw_parameters = &parameters[1 + resource_count..];
         let whole_mutation = function_type.mutations.contains(&CheckedMutation::Whole);
         let logical_types = flattened_parameter_types(&function_type.parameter);
@@ -981,6 +1093,56 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             &mutable_pointers,
         )?;
         self.bind_top_level_pattern(environment, &function.pattern, &values)
+    }
+
+    /// Materializes `function`'s captures from a GC-allocated environment
+    /// pointer into `environment` (locals / binding cells / parameter
+    /// pointers), the same way closure bodies see their captures. Shared by
+    /// closure bodies and coroutine `resume` functions.
+    fn bind_environment_captures(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        function: &ResolvedFunction,
+        environment_pointer: inkwell::values::PointerValue<'context>,
+    ) -> CodeGenerationResult<()> {
+        if function.captures.is_empty() {
+            return Ok(());
+        }
+        let environment_type = self.compile_capture_type(function)?;
+        let environment_value = self
+            .builder
+            .build_load(environment_type, environment_pointer, "closure.environment")
+            .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?
+            .into_struct_value();
+        for (index, symbol) in function.captures.iter().copied().enumerate() {
+            let value = self
+                .builder
+                .build_extract_value(environment_value, index as u32, "capture")
+                .map_err(|error| Diagnostic::new(Span::Compiler, error.to_string()))?;
+            if self
+                .typed_module
+                .resolved()
+                .requires_initialization_state(symbol)
+                || self.typed_module.has_mutable_storage(symbol)
+                || self.typed_module.is_derived_symbol(symbol)
+                || self.typed_module.is_borrowed_capture(function.id, symbol)
+            {
+                if self.typed_module.is_mutated_parameter(symbol)
+                    || self.typed_module.is_borrowed_capture(function.id, symbol)
+                {
+                    environment
+                        .parameter_pointers
+                        .insert(symbol, value.into_pointer_value());
+                } else {
+                    environment
+                        .binding_cells
+                        .insert(symbol, value.into_pointer_value());
+                }
+            } else {
+                environment.locals.insert(symbol, value.as_any_value_enum());
+            }
+        }
+        Ok(())
     }
 
     fn bind_mutable_parameter_pointers(
@@ -1312,6 +1474,71 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             if let CheckedType::Distinct { representation, .. } = value_type {
                 self.compile_drop_value(value, representation, Span::Compiler)?;
             }
+            return Ok(());
+        }
+
+        if self.typed_module.is_coroutine_type(value_type) {
+            // Dropping a coroutine value runs its (idempotent) `cleanup`, which
+            // destroys the captures of an unstarted coroutine and releases the
+            // frame's GC root.
+            let BasicValueEnum::PointerValue(frame) = value else {
+                return Err(Diagnostic::new(span, "coroutine value is not a frame pointer"));
+            };
+            let header_type = self.coroutine_header_type();
+            let ptr_type = self.context.ptr_type(AddressSpace::default());
+            let cleanup_slot = self
+                .builder
+                .build_struct_gep(header_type, frame, CORO_CLEANUP_FN, "coro.cleanup.slot")
+                .map_err(compiler_diagnostic)?;
+            let cleanup_ptr = self
+                .builder
+                .build_load(ptr_type, cleanup_slot, "coro.cleanup.fn")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+            let cleanup_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+            self.builder
+                .build_indirect_call(cleanup_type, cleanup_ptr, &[frame.into()], "")
+                .map_err(compiler_diagnostic)?;
+            return Ok(());
+        }
+        if self.typed_module.is_scheduler_type(value_type) {
+            let BasicValueEnum::PointerValue(sched) = value else {
+                return Err(Diagnostic::new(span, "scheduler value is not a pointer"));
+            };
+            let destroy = self
+                .llvm_module
+                .get_function("__staple_sched_destroy")
+                .expect("scheduler destroy");
+            self.builder
+                .build_direct_call(destroy, &[sched.into()], "")
+                .map_err(compiler_diagnostic)?;
+            return Ok(());
+        }
+        if self.typed_module.is_wait_type(value_type)
+            || self.typed_module.is_resolver_type(value_type)
+            || self.typed_module.is_completion_token_type(value_type)
+        {
+            // Dropping an unconsumed `Wait` abandons its completion; dropping an
+            // unresolved `Resolver` or `CompletionToken` cancels it. All are
+            // idempotent once the completion has reached a terminal state.
+            let BasicValueEnum::PointerValue(record) = value else {
+                return Err(Diagnostic::new(span, "completion handle is not a pointer"));
+            };
+            let ptr_type = self.context.ptr_type(AddressSpace::default());
+            let name = if self.typed_module.is_wait_type(value_type) {
+                "__staple_completion_wait_drop"
+            } else if self.typed_module.is_completion_token_type(value_type) {
+                "__staple_completion_token_release"
+            } else {
+                "__staple_completion_resolver_drop"
+            };
+            let drop_fn = self.coroutine_runtime_fn(
+                name,
+                self.context.void_type().fn_type(&[ptr_type.into()], false),
+            );
+            self.builder
+                .build_direct_call(drop_fn, &[record.into()], "")
+                .map_err(compiler_diagnostic)?;
             return Ok(());
         }
 
@@ -2943,14 +3170,26 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     value: stored,
                     indirect: true,
                 });
-                let reactive = self
-                    .typed_module
-                    .is_reactive_type(&environment.resources.last().unwrap().resource.value_type);
+                let bound_type = environment
+                    .resources
+                    .last()
+                    .unwrap()
+                    .resource
+                    .value_type
+                    .clone();
+                let reactive = self.typed_module.is_reactive_type(&bound_type);
+                let tasks = self.typed_module.is_tasks_type(&bound_type);
                 if reactive {
                     let scope = value_as_basic(value)
                         .expect("Reactive is first-class")
                         .into_pointer_value();
                     environment.reactive_scopes.push(scope);
+                }
+                if tasks {
+                    let scope = value_as_basic(value)
+                        .expect("Tasks scope is first-class")
+                        .into_pointer_value();
+                    environment.task_scopes.push(scope);
                 }
                 let result =
                     self.compile_expression(environment, &Expression::Block(with.body.clone()));
@@ -2963,6 +3202,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         )?;
                     }
                     environment.reactive_scopes.pop();
+                }
+                if tasks {
+                    if !environment.did_return {
+                        self.close_task_scopes(
+                            environment,
+                            environment.task_scopes.len() - 1,
+                            with.syntax.span.clone(),
+                        )?;
+                    }
+                    environment.task_scopes.pop();
                 }
                 environment.resources.pop();
                 result
@@ -3251,6 +3500,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 quote.syntax.span.clone(),
                 format!("unexpanded `{}` expression", quote.kind.name()),
             )),
+            Expression::Coro(coro) => self.compile_coro_expression(environment, coro),
+            Expression::Await(await_) => self.compile_coroutine_await(environment, await_),
             Expression::Splice(splice) => Err(Diagnostic::new(
                 splice.syntax.span.clone(),
                 "unexpanded splice expression",
@@ -6026,6 +6277,28 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(())
     }
 
+    fn close_task_scopes(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        keep: usize,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        if environment.task_scopes.len() <= keep {
+            return Ok(());
+        }
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let close = self.coroutine_runtime_fn(
+            "__staple_task_scope_close",
+            self.context.void_type().fn_type(&[ptr_type.into()], false),
+        );
+        for scope in environment.task_scopes[keep..].iter().rev() {
+            self.builder
+                .build_direct_call(close, &[(*scope).into()], "")
+                .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
+        }
+        Ok(())
+    }
+
     fn build_initialization_check(
         &mut self,
         state_slot: inkwell::values::PointerValue<'context>,
@@ -6578,6 +6851,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             IntrinsicFunction::Batch => {
                 return self.compile_batch(environment, call);
             }
+            IntrinsicFunction::Until => {
+                return self.compile_until(environment, call);
+            }
             IntrinsicFunction::ToString { value } => {
                 return self.compile_numeric_to_string(environment, call, value);
             }
@@ -6626,6 +6902,47 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     self.compile_drop_value(value, &value_type, call.syntax.span.clone())?;
                 }
                 return Ok(self.unit_value());
+            }
+            IntrinsicFunction::CoroutineBlockOn => {
+                let operand_type = self
+                    .concrete_expression_type(&call.argument)
+                    .ok_or_else(|| {
+                        Diagnostic::new(
+                            call.argument.syntax().span.clone(),
+                            "`block_on` operand has no concrete type",
+                        )
+                    })?;
+                let frame = self.compile_expression(environment, &call.argument)?;
+                let frame = value_as_basic(frame).ok_or_else(|| {
+                    Diagnostic::new(
+                        call.argument.syntax().span.clone(),
+                        "`block_on` operand is not a coroutine value",
+                    )
+                })?;
+                return self.compile_coroutine_drive(
+                    environment,
+                    frame,
+                    &operand_type,
+                    call.syntax.span.clone(),
+                );
+            }
+            IntrinsicFunction::SchedulerCreate
+            | IntrinsicFunction::TaskScope
+            | IntrinsicFunction::Spawn
+            | IntrinsicFunction::Pump
+            | IntrinsicFunction::YieldNow
+            | IntrinsicFunction::TaskIsFinished
+            | IntrinsicFunction::TaskCancel => {
+                return self.compile_scheduler_intrinsic(environment, call, intrinsic);
+            }
+            IntrinsicFunction::Completion
+            | IntrinsicFunction::CompletionWithCancel
+            | IntrinsicFunction::CompletionToken
+            | IntrinsicFunction::CompletionTokenResolve
+            | IntrinsicFunction::CompletionTokenCancel
+            | IntrinsicFunction::ResolverComplete
+            | IntrinsicFunction::ResolverCancel => {
+                return self.compile_completion_intrinsic(environment, call, intrinsic);
             }
             IntrinsicFunction::Snapshot => {
                 let previous = self
@@ -6886,7 +7203,23 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             | IntrinsicFunction::ReactiveScope
             | IntrinsicFunction::Reaction
             | IntrinsicFunction::Batch
-            | IntrinsicFunction::Snapshot => {
+            | IntrinsicFunction::Snapshot
+            | IntrinsicFunction::CoroutineBlockOn
+            | IntrinsicFunction::SchedulerCreate
+            | IntrinsicFunction::TaskScope
+            | IntrinsicFunction::Spawn
+            | IntrinsicFunction::Pump
+            | IntrinsicFunction::YieldNow
+            | IntrinsicFunction::TaskIsFinished
+            | IntrinsicFunction::TaskCancel
+            | IntrinsicFunction::Completion
+            | IntrinsicFunction::CompletionWithCancel
+            | IntrinsicFunction::CompletionToken
+            | IntrinsicFunction::CompletionTokenResolve
+            | IntrinsicFunction::CompletionTokenCancel
+            | IntrinsicFunction::ResolverComplete
+            | IntrinsicFunction::ResolverCancel
+            | IntrinsicFunction::Until => {
                 unreachable!()
             }
         }
@@ -7099,7 +7432,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 payload.into(),
                 payload_size.into(),
             ],
-            None,
+            Some(self.context.ptr_type(AddressSpace::default()).into()),
             "reaction.create",
             call.syntax.span.clone(),
         )?;
@@ -7183,6 +7516,269 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             call.syntax.span.clone(),
         )?;
         Ok(self.unit_value())
+    }
+
+    /// `%UntilFrame` — a `%CoroHeader` (10 fields) plus, at indices 10..=16:
+    /// completion, reaction, payload, predicate code, predicate env, reactive
+    /// scope, runner fn. Matches `coroutine.ll`'s `%UntilFrame`.
+    fn until_frame_type(&self) -> inkwell::types::StructType<'context> {
+        let ptr: inkwell::types::BasicTypeEnum<'context> =
+            self.context.ptr_type(AddressSpace::default()).into();
+        let mut fields = vec![self.context.i8_type().into()];
+        fields.extend(std::iter::repeat(ptr).take(16));
+        self.context.struct_type(&fields, false)
+    }
+
+    /// `until { predicate }` → a `Coroutine{Reactive} ()` value backed by a
+    /// hand-written state machine (`__staple_until_resume` / `_cleanup`) that
+    /// subscribes the predicate through a reaction and parks on a `Wait ()`.
+    fn compile_until(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = call.syntax.span.clone();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+
+        let thunk = self
+            .typed_module
+            .implicit_thunk_for(call.argument.syntax().id)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`until` requires a `{ predicate }` block"))?;
+        let predicate_type = self
+            .typed_module
+            .type_of_function(thunk.id)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`until` predicate has no function type"))?;
+        // D25: pure apart from reading signals.
+        if !predicate_type.effects.resources.is_empty()
+            || matches!(
+                predicate_type.effects.state,
+                Some(CheckedStateEffect::Write | CheckedStateEffect::ReadWrite)
+            )
+        {
+            return Err(Diagnostic::new(
+                call.argument.syntax().span.clone(),
+                "an `until` predicate must be pure apart from reading signals",
+            ));
+        }
+
+        let closure = self.build_closure(environment, thunk.id, span.clone())?;
+        let pred_code = self
+            .builder
+            .build_extract_value(closure, 0, "until.pred.code")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let pred_env = self
+            .builder
+            .build_extract_value(closure, 1, "until.pred.env")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+
+        // Ambient `Reactive` scope (as `compile_reaction`).
+        let scope = environment
+            .resources
+            .iter()
+            .rev()
+            .find_map(|bound| {
+                if !self.typed_module.is_reactive_type(&bound.resource.value_type) {
+                    return None;
+                }
+                let value = value_as_basic(bound.value)?;
+                if bound.indirect {
+                    self.builder
+                        .build_load(ptr_type, value.into_pointer_value(), "until.reactive")
+                        .ok()
+                        .map(|value| value.into_pointer_value())
+                } else {
+                    Some(value.into_pointer_value())
+                }
+            })
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "resource `Reactive` is not available for `until`")
+            })?;
+
+        let runner = self.emit_until_runner(call.syntax.id, &predicate_type)?;
+
+        let resume = self.coroutine_runtime_fn(
+            "__staple_until_resume",
+            self.context
+                .struct_type(&[i8_type.into(), ptr_type.into()], false)
+                .fn_type(&[ptr_type.into()], false),
+        );
+        let cleanup = self.coroutine_runtime_fn(
+            "__staple_until_cleanup",
+            self.context.void_type().fn_type(&[ptr_type.into()], false),
+        );
+
+        let frame_type = self.until_frame_type();
+        let frame_size = self.target_data.get_store_size(&frame_type);
+        let frame = self.build_gc_allocation(
+            self.size_type.const_int(frame_size, false),
+            "until.frame",
+            span.clone(),
+        )?;
+        self.builder
+            .build_store(frame, frame_type.const_zero())
+            .map_err(compiler_diagnostic)?;
+        let field = |emitter: &Self, index: u32, value: BasicValueEnum<'context>, name: &str| {
+            let slot = emitter
+                .builder
+                .build_struct_gep(frame_type, frame, index, name)
+                .map_err(compiler_diagnostic)?;
+            emitter
+                .builder
+                .build_store(slot, value)
+                .map_err(compiler_diagnostic)?;
+            Ok::<(), Diagnostic>(())
+        };
+        field(self, CORO_STATE, i8_type.const_zero().into(), "until.state")?;
+        field(
+            self,
+            CORO_RESUME_FN,
+            resume.as_global_value().as_pointer_value().into(),
+            "until.resume",
+        )?;
+        field(
+            self,
+            CORO_CLEANUP_FN,
+            cleanup.as_global_value().as_pointer_value().into(),
+            "until.cleanup",
+        )?;
+        field(self, 13, pred_code.into(), "until.code")?;
+        field(self, 14, pred_env.into(), "until.env")?;
+        field(self, 15, scope.into(), "until.scope")?;
+        field(
+            self,
+            16,
+            runner.as_global_value().as_pointer_value().into(),
+            "until.runner",
+        )?;
+
+        self.register_gc_root_region(frame, frame_size, span)?;
+        Ok(frame.as_any_value_enum())
+    }
+
+    /// Emits the internal reaction runner for an `until`: re-evaluates the
+    /// predicate and, on the first `True`, resolves the completion. Payload is
+    /// `{ ptr code, ptr env, ptr completion, ptr reaction }`.
+    fn emit_until_runner(
+        &mut self,
+        call_id: staple_syntax::SyntaxId,
+        predicate_type: &CheckedFunctionType,
+    ) -> CodeGenerationResult<inkwell::values::FunctionValue<'context>> {
+        let name = format!("__staple_until_runner_{}", call_id.0);
+        if let Some(existing) = self.llvm_module.get_function(&name) {
+            return Ok(existing);
+        }
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+        let i32_type = self.context.i32_type();
+        let size_type = self.size_type;
+        let payload_type = self
+            .context
+            .struct_type(&[ptr_type.into(); 4], false);
+        let bool_fn_type = self.compile_closure_function_type(predicate_type)?;
+
+        let previous = self.builder.get_insert_block();
+        let runner = self.llvm_module.add_function(
+            &name,
+            self.context.void_type().fn_type(&[ptr_type.into()], false),
+            Some(inkwell::module::Linkage::Internal),
+        );
+        let entry = self.context.append_basic_block(runner, "entry");
+        let eval = self.context.append_basic_block(runner, "eval");
+        let resolve = self.context.append_basic_block(runner, "resolve");
+        let done = self.context.append_basic_block(runner, "done");
+
+        self.builder.position_at_end(entry);
+        let payload = runner.get_first_param().unwrap().into_pointer_value();
+        let load_field = |emitter: &Self, index: u32, name: &str| {
+            let slot = emitter
+                .builder
+                .build_struct_gep(payload_type, payload, index, name)
+                .map_err(compiler_diagnostic)?;
+            emitter
+                .builder
+                .build_load(ptr_type, slot, name)
+                .map_err(compiler_diagnostic)
+                .map(|value| value.into_pointer_value())
+        };
+        let completion = load_field(self, 2, "until.completion")?;
+        let completion_state = self
+            .builder
+            .build_load(i8_type, completion, "until.completion.state")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let already = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                completion_state,
+                i8_type.const_zero(),
+                "until.already.resolved",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(already, done, eval)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(eval);
+        let code = load_field(self, 0, "until.code")?;
+        let env = load_field(self, 1, "until.env")?;
+        let result = self
+            .builder
+            .build_indirect_call(bool_fn_type, code, &[env.into()], "until.predicate")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_struct_value();
+        let tag = self
+            .builder
+            .build_extract_value(result, 0, "until.bool.tag")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        // `Bool` is `True | False`; `True` is alternative 0.
+        let is_true = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                tag,
+                i32_type.const_zero(),
+                "until.is.true",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_conditional_branch(is_true, resolve, done)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(resolve);
+        let complete = self.coroutine_runtime_fn(
+            "__staple_completion_complete",
+            i8_type.fn_type(
+                &[ptr_type.into(), ptr_type.into(), size_type.into()],
+                false,
+            ),
+        );
+        self.builder
+            .build_direct_call(
+                complete,
+                &[completion.into(), completion.into(), size_type.const_zero().into()],
+                "until.resolve",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_unconditional_branch(done)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(done);
+        self.builder.build_return(None).map_err(compiler_diagnostic)?;
+
+        if let Some(block) = previous {
+            self.builder.position_at_end(block);
+        }
+        Ok(runner)
     }
 
     fn compile_derived_create(
@@ -8114,10 +8710,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .function_by_id(function_id)
             .cloned()
             .ok_or_else(|| Diagnostic::new(span.clone(), "unknown function"))?;
+        let environment_pointer =
+            self.build_capture_environment(environment, &function, span.clone(), true)?;
+        self.build_closure_value(code, environment_pointer)
+    }
+
+    /// Collects `function`'s captures into a GC-allocated environment struct and
+    /// returns a pointer to it (a null pointer when there are no captures).
+    /// Shared by closures and coroutine frames; `install_finalizer` attaches a
+    /// GC finalizer so unreachable environments drop their captures — coroutine
+    /// frames pass `false` because their `cleanup` drops captures deterministically.
+    fn build_capture_environment(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        function: &ResolvedFunction,
+        span: Span,
+        install_finalizer: bool,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
         let environment_pointer = if function.captures.is_empty() {
             self.context.ptr_type(AddressSpace::default()).const_null()
         } else {
-            let environment_type = self.compile_capture_type(&function)?;
+            let environment_type = self.compile_capture_type(function)?;
             let mut environment_value = environment_type.const_zero();
             for (index, symbol) in function.captures.iter().copied().enumerate() {
                 let borrowed = self
@@ -8178,27 +8791,1889 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             self.builder
                 .build_store(pointer, environment_value)
                 .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?;
-            if function.captures.iter().copied().any(|symbol| {
-                !self
-                    .typed_module
-                    .resolved()
-                    .requires_initialization_state(symbol)
-                    && !self
+            if install_finalizer
+                && function.captures.iter().copied().any(|symbol| {
+                    !self
                         .typed_module
-                        .is_borrowed_capture(function.id, symbol)
-                    && self
-                        .typed_module
-                        .type_of_symbol(symbol)
-                        .cloned()
-                        .map(|ty| substitute_type(ty, &self.active_type_substitutions))
-                        .is_some_and(|ty| self.typed_module.type_needs_drop(&ty))
-            }) {
-                let finalizer = self.ensure_closure_finalizer(&function, environment_type)?;
+                        .resolved()
+                        .requires_initialization_state(symbol)
+                        && !self
+                            .typed_module
+                            .is_borrowed_capture(function.id, symbol)
+                        && self
+                            .typed_module
+                            .type_of_symbol(symbol)
+                            .cloned()
+                            .map(|ty| substitute_type(ty, &self.active_type_substitutions))
+                            .is_some_and(|ty| self.typed_module.type_needs_drop(&ty))
+                })
+            {
+                let finalizer = self.ensure_closure_finalizer(function, environment_type)?;
                 self.set_gc_finalizer(pointer, finalizer)?;
             }
             pointer
         };
-        self.build_closure_value(code, environment_pointer)
+        Ok(environment_pointer)
+    }
+
+    fn is_coroutine_body_thunk(&self, function: &ResolvedFunction) -> bool {
+        self.typed_module
+            .coroutine_plan(function.body.syntax().id)
+            .is_some()
+    }
+
+    /// The fixed frame-header prefix every coroutine frame starts with; used to
+    /// GEP a header field through a `ptr` whose full frame type is not known at
+    /// the site (`await`, `block_on`, drop). Matches `coroutine.ll`'s
+    /// `%CoroHeader` plus the trailing `resources` pointer.
+    fn coroutine_header_type(&self) -> inkwell::types::StructType<'context> {
+        let ptr: inkwell::types::BasicTypeEnum<'context> =
+            self.context.ptr_type(AddressSpace::default()).into();
+        self.context.struct_type(
+            &[
+                self.context.i8_type().into(),
+                ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr,
+            ],
+            false,
+        )
+    }
+
+    /// The full `%TaskRecord` layout for a `spawn`ed task whose result type
+    /// lowers to `result_llvm`. Field indices are the `TASK_RECORD_*` constants.
+    fn task_record_type(
+        &self,
+        result_llvm: inkwell::types::BasicTypeEnum<'context>,
+    ) -> inkwell::types::StructType<'context> {
+        let i8_type = self.context.i8_type();
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        self.context.struct_type(
+            &[
+                i8_type.into(),
+                i8_type.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                result_llvm,
+            ],
+            false,
+        )
+    }
+
+    /// The `%TaskRecord` header (everything the runtime touches), for GEPs
+    /// through a `ptr` whose result type is not known at the site.
+    fn task_record_header_type(&self) -> inkwell::types::StructType<'context> {
+        let i8_type = self.context.i8_type();
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        self.context.struct_type(
+            &[
+                i8_type.into(),
+                i8_type.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+                ptr.into(),
+            ],
+            false,
+        )
+    }
+
+    /// The full `%Completion` layout for a completion whose value type lowers to
+    /// `value_llvm`. Field indices are the `COMPLETION_*` constants.
+    fn completion_record_type(
+        &self,
+        value_llvm: inkwell::types::BasicTypeEnum<'context>,
+    ) -> inkwell::types::StructType<'context> {
+        let i8_type = self.context.i8_type();
+        let ptr = self.context.ptr_type(AddressSpace::default());
+        self.context.struct_type(
+            &[
+                i8_type.into(),      // state
+                i8_type.into(),      // flags
+                self.size_type.into(), // generation
+                ptr.into(),          // scheduler
+                ptr.into(),          // waiter
+                ptr.into(),          // cancel_env
+                ptr.into(),          // cancel_fn
+                value_llvm,          // value
+            ],
+            false,
+        )
+    }
+
+    /// A packed struct of a deferred effect row's resource values, GC-allocated
+    /// by whoever drives a coroutine frame and unpacked by its `resume`.
+    fn coroutine_resource_bundle_type(
+        &self,
+        deferred: &CheckedEffectSet,
+    ) -> CodeGenerationResult<inkwell::types::StructType<'context>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let mut fields = Vec::new();
+        for resource in &deferred.resources {
+            if resource.mutable
+                || !self
+                    .typed_module
+                    .is_copy_in_function(&resource.value_type, None)
+            {
+                fields.push(ptr_type.into());
+            } else {
+                fields.push(self.compile_type(&resource.value_type)?);
+            }
+        }
+        Ok(self.context.struct_type(&fields, false))
+    }
+
+    /// The full per-coroutine frame type and the field indices code generation
+    /// needs to lay out and address it.
+    fn coroutine_frame_layout(
+        &self,
+        body_syntax: staple_syntax::SyntaxId,
+    ) -> CodeGenerationResult<CoroutineFrameLayout<'context>> {
+        let plan = self
+            .typed_module
+            .coroutine_plan(body_syntax)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing coroutine plan"))?;
+        let ptr: inkwell::types::BasicTypeEnum<'context> =
+            self.context.ptr_type(AddressSpace::default()).into();
+        let i8_type = self.context.i8_type();
+        let mut fields: Vec<inkwell::types::BasicTypeEnum<'context>> =
+            vec![i8_type.into(), ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr];
+        debug_assert_eq!(fields.len() as u32, CORO_HEADER_FIELDS);
+
+        let mut cell_fields = HashMap::new();
+        for symbol in &plan.frame_bindings {
+            cell_fields.insert(*symbol, fields.len() as u32);
+            fields.push(self.compile_binding_cell_type(*symbol)?.into());
+        }
+        let result_field = fields.len() as u32;
+        fields.push(self.compile_type(&plan.result_type)?);
+        let pending_field = fields.len() as u32;
+        if plan.resume_points > 0 {
+            let mut max_bytes = 1u64;
+            for await_type in &plan.await_result_types {
+                let llvm = self.compile_type(await_type)?;
+                max_bytes = max_bytes.max(self.target_data.get_store_size(&llvm));
+            }
+            fields.push(i8_type.array_type(max_bytes as u32).into());
+        }
+        let ty = self.context.struct_type(&fields, false);
+        Ok(CoroutineFrameLayout {
+            ty,
+            frame_size: self.target_data.get_store_size(&ty),
+            cell_fields,
+            result_field,
+            pending_field,
+        })
+    }
+
+    fn build_fn_type(
+        &self,
+        return_type: inkwell::types::BasicTypeEnum<'context>,
+        parameters: &[inkwell::types::BasicMetadataTypeEnum<'context>],
+    ) -> inkwell::types::FunctionType<'context> {
+        match return_type {
+            inkwell::types::BasicTypeEnum::ArrayType(value) => value.fn_type(parameters, false),
+            inkwell::types::BasicTypeEnum::FloatType(value) => value.fn_type(parameters, false),
+            inkwell::types::BasicTypeEnum::IntType(value) => value.fn_type(parameters, false),
+            inkwell::types::BasicTypeEnum::PointerType(value) => value.fn_type(parameters, false),
+            inkwell::types::BasicTypeEnum::StructType(value) => value.fn_type(parameters, false),
+            inkwell::types::BasicTypeEnum::VectorType(_)
+            | inkwell::types::BasicTypeEnum::ScalableVectorType(_) => {
+                self.context.void_type().fn_type(parameters, false)
+            }
+        }
+    }
+
+    /// Emits (and caches) the state-machine `resume` and `cleanup` functions for
+    /// one coroutine body.
+    fn ensure_coroutine_codes(
+        &mut self,
+        body_syntax: staple_syntax::SyntaxId,
+    ) -> CodeGenerationResult<(
+        inkwell::values::FunctionValue<'context>,
+        inkwell::values::FunctionValue<'context>,
+    )> {
+        if let Some(codes) = self.coroutine_codes.get(&body_syntax).copied() {
+            return Ok(codes);
+        }
+        let plan = self
+            .typed_module
+            .coroutine_plan(body_syntax)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing coroutine plan"))?;
+        let thunk = self
+            .typed_module
+            .implicit_thunk_for(body_syntax)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(Span::Compiler, "missing coroutine body"))?;
+        let layout = self.coroutine_frame_layout(body_syntax)?;
+
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+        let header_type = self.coroutine_header_type();
+        let status_type = self
+            .context
+            .struct_type(&[i8_type.into(), ptr_type.into()], false);
+
+        let resume_type = self.build_fn_type(status_type.into(), &[ptr_type.into()]);
+        let base = format!("__staple_coro_{}", body_syntax.0);
+        let resume_fn = self.llvm_module.add_function(
+            &format!("{base}_resume"),
+            resume_type,
+            Some(inkwell::module::Linkage::Internal),
+        );
+        let cleanup_fn = self.llvm_module.add_function(
+            &format!("{base}_cleanup"),
+            self.context.void_type().fn_type(&[ptr_type.into()], false),
+            Some(inkwell::module::Linkage::Internal),
+        );
+        self.coroutine_codes
+            .insert(body_syntax, (resume_fn, cleanup_fn));
+
+        let previous_block = self.builder.get_insert_block();
+
+        // ---- resume ----
+        {
+            let entry = self.context.append_basic_block(resume_fn, "entry");
+            let bad_state = self.context.append_basic_block(resume_fn, "bad.state");
+            let mut dispatch = Vec::new();
+            for state in 0..=plan.resume_points {
+                dispatch.push(
+                    self.context
+                        .append_basic_block(resume_fn, &format!("state.{state}")),
+                );
+            }
+
+            self.builder.position_at_end(entry);
+            let frame = resume_fn
+                .get_first_param()
+                .expect("resume frame parameter")
+                .into_pointer_value();
+
+            let mut environment = FunctionEnvironment::default();
+
+            // Unpack the deferred-effect resource bundle.
+            if !plan.deferred_effects.resources.is_empty() {
+                let bundle_slot = self
+                    .builder
+                    .build_struct_gep(header_type, frame, CORO_RESOURCES, "coro.resources.slot")
+                    .map_err(compiler_diagnostic)?;
+                let bundle = self
+                    .builder
+                    .build_load(ptr_type, bundle_slot, "coro.resources")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let bundle_type =
+                    self.coroutine_resource_bundle_type(&plan.deferred_effects)?;
+                for (index, resource) in
+                    plan.deferred_effects.resources.iter().cloned().enumerate()
+                {
+                    let field = self
+                        .builder
+                        .build_struct_gep(bundle_type, bundle, index as u32, "coro.resource")
+                        .map_err(compiler_diagnostic)?;
+                    let indirect = resource.mutable
+                        || !self
+                            .typed_module
+                            .is_copy_in_function(&resource.value_type, None);
+                    let value = if indirect {
+                        self.builder
+                            .build_load(ptr_type, field, "coro.resource.ptr")
+                            .map_err(compiler_diagnostic)?
+                            .into_pointer_value()
+                    } else {
+                        field
+                    };
+                    environment.resources.push(BoundResource {
+                        resource,
+                        value: value.as_any_value_enum(),
+                        indirect: true,
+                    });
+                }
+            }
+
+            // Materialise captures from the capture environment.
+            let env_slot = self
+                .builder
+                .build_struct_gep(header_type, frame, CORO_CAPTURE_ENV, "coro.env.slot")
+                .map_err(compiler_diagnostic)?;
+            let env_ptr = self
+                .builder
+                .build_load(ptr_type, env_slot, "coro.env")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+            self.bind_environment_captures(&mut environment, &thunk, env_ptr)?;
+
+            // Point each body-local `let` binding at its frame cell.
+            for (symbol, field_index) in &layout.cell_fields {
+                let cell = self
+                    .builder
+                    .build_struct_gep(layout.ty, frame, *field_index, "coro.cell")
+                    .map_err(compiler_diagnostic)?;
+                environment.binding_cells.insert(*symbol, cell);
+            }
+
+            let state_slot = self
+                .builder
+                .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
+                .map_err(compiler_diagnostic)?;
+            let result_ptr_slot = self
+                .builder
+                .build_struct_gep(header_type, frame, CORO_RESULT_PTR, "coro.result.ptr.slot")
+                .map_err(compiler_diagnostic)?;
+
+            environment.coroutine = Some(CoroutineContext {
+                frame,
+                frame_type: layout.ty,
+                status_type,
+                dispatch: dispatch.clone(),
+                next_state: 1,
+                pending_field: layout.pending_field,
+            });
+
+            let state = self
+                .builder
+                .build_load(i8_type, state_slot, "coro.state")
+                .map_err(compiler_diagnostic)?
+                .into_int_value();
+
+            // Cancellation check: a `spawn`ed task whose record carries a
+            // cancel request unwinds at this boundary instead of resuming.
+            let cancel_check = self.context.append_basic_block(resume_fn, "cancel.check");
+            let unwind = self.context.append_basic_block(resume_fn, "cancel.unwind");
+            let do_switch = self.context.append_basic_block(resume_fn, "resume.dispatch");
+            let already_done = self.context.append_basic_block(resume_fn, "resume.spent");
+
+            let record_slot = self
+                .builder
+                .build_struct_gep(header_type, frame, CORO_RECORD, "coro.record.slot")
+                .map_err(compiler_diagnostic)?;
+            let record = self
+                .builder
+                .build_load(ptr_type, record_slot, "coro.record")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+            let has_record = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    record,
+                    ptr_type.const_null(),
+                    "coro.has.record",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_conditional_branch(has_record, cancel_check, do_switch)
+                .map_err(compiler_diagnostic)?;
+
+            self.builder.position_at_end(cancel_check);
+            let record_header = self.task_record_header_type();
+            let cancel_slot = self
+                .builder
+                .build_struct_gep(record_header, record, TASK_RECORD_CANCEL, "task.cancel.slot")
+                .map_err(compiler_diagnostic)?;
+            let cancel = self
+                .builder
+                .build_load(i8_type, cancel_slot, "task.cancel")
+                .map_err(compiler_diagnostic)?
+                .into_int_value();
+            let cancel_set = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::NE,
+                    cancel,
+                    i8_type.const_zero(),
+                    "task.cancel.set",
+                )
+                .map_err(compiler_diagnostic)?;
+            let state_live = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::ULE,
+                    state,
+                    i8_type.const_int(plan.resume_points as u64, false),
+                    "coro.state.live",
+                )
+                .map_err(compiler_diagnostic)?;
+            let want_unwind = self
+                .builder
+                .build_and(cancel_set, state_live, "coro.want.unwind")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_conditional_branch(want_unwind, unwind, do_switch)
+                .map_err(compiler_diagnostic)?;
+
+            self.builder.position_at_end(do_switch);
+            let mut cases = (0..=plan.resume_points)
+                .map(|k| (i8_type.const_int(k as u64, false), dispatch[k]))
+                .collect::<Vec<_>>();
+            cases.push((i8_type.const_int(CORO_STATE_DONE, false), already_done));
+            cases.push((i8_type.const_int(CORO_STATE_FREED, false), already_done));
+            self.builder
+                .build_switch(state, bad_state, &cases)
+                .map_err(compiler_diagnostic)?;
+
+            // A frame that has already run to its end (or been freed) is driven
+            // again only by a redundant cancel/enqueue; report "done, no value".
+            self.builder.position_at_end(already_done);
+            self.builder
+                .build_return(Some(&status_type.const_zero()))
+                .map_err(compiler_diagnostic)?;
+
+            // The cancellation unwind: if the frame is parked on a `Wait`, run
+            // that completion's cancellation callback and drop the registration;
+            // then drop the frame's initialised locals (and, for a task
+            // cancelled before it ever ran, its owned captures), mark the frame
+            // spent, and report CANCELLED to the driver.
+            self.builder.position_at_end(unwind);
+            if !plan.wait_await_states.is_empty() || !plan.until_await_states.is_empty() {
+                let abandon = self.context.append_basic_block(resume_fn, "cancel.abandon.wait");
+                let child_cleanup =
+                    self.context.append_basic_block(resume_fn, "cancel.cleanup.until");
+                let unwind_cells = self.context.append_basic_block(resume_fn, "cancel.unwind.cells");
+                let mut cases = plan
+                    .wait_await_states
+                    .iter()
+                    .map(|k| (i8_type.const_int(*k as u64, false), abandon))
+                    .collect::<Vec<_>>();
+                cases.extend(
+                    plan.until_await_states
+                        .iter()
+                        .map(|k| (i8_type.const_int(*k as u64, false), child_cleanup)),
+                );
+                let child_slot = self
+                    .builder
+                    .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_switch(state, unwind_cells, &cases)
+                    .map_err(compiler_diagnostic)?;
+
+                // Parked on a `Wait`: run its completion's cancellation teardown.
+                self.builder.position_at_end(abandon);
+                let record = self
+                    .builder
+                    .build_load(ptr_type, child_slot, "cancel.wait.record")
+                    .map_err(compiler_diagnostic)?;
+                let abandon_fn = self.coroutine_runtime_fn(
+                    "__staple_completion_abandon",
+                    self.context.void_type().fn_type(&[ptr_type.into()], false),
+                );
+                self.builder
+                    .build_direct_call(abandon_fn, &[record.into()], "")
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_unconditional_branch(unwind_cells)
+                    .map_err(compiler_diagnostic)?;
+
+                // Parked on a child coroutine: run its `cleanup` so its own
+                // suspended state (e.g. an `until` subscription) is torn down.
+                self.builder.position_at_end(child_cleanup);
+                let child = self
+                    .builder
+                    .build_load(ptr_type, child_slot, "cancel.child.frame")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let cleanup_slot = self
+                    .builder
+                    .build_struct_gep(header_type, child, CORO_CLEANUP_FN, "child.cleanup.slot")
+                    .map_err(compiler_diagnostic)?;
+                let cleanup_ptr = self
+                    .builder
+                    .build_load(ptr_type, cleanup_slot, "child.cleanup.fn")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                self.builder
+                    .build_indirect_call(
+                        self.context.void_type().fn_type(&[ptr_type.into()], false),
+                        cleanup_ptr,
+                        &[child.into()],
+                        "",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_unconditional_branch(unwind_cells)
+                    .map_err(compiler_diagnostic)?;
+
+                self.builder.position_at_end(unwind_cells);
+            }
+            if !thunk.captures.is_empty() {
+                let never_ran = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::EQ,
+                        state,
+                        i8_type.const_zero(),
+                        "coro.cancel.never.ran",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let drop_caps = self.context.append_basic_block(resume_fn, "cancel.drop.captures");
+                let after_caps = self.context.append_basic_block(resume_fn, "cancel.after.captures");
+                self.builder
+                    .build_conditional_branch(never_ran, drop_caps, after_caps)
+                    .map_err(compiler_diagnostic)?;
+                self.builder.position_at_end(drop_caps);
+                let environment_type = self.compile_capture_type(&thunk)?;
+                let finalizer = self.ensure_closure_finalizer(&thunk, environment_type)?;
+                self.builder
+                    .build_direct_call(finalizer, &[env_ptr.into()], "")
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_unconditional_branch(after_caps)
+                    .map_err(compiler_diagnostic)?;
+                self.builder.position_at_end(after_caps);
+            }
+            for (symbol, field_index) in &layout.cell_fields {
+                let Some(value_type) = self.typed_module.type_of_symbol(*symbol).cloned() else {
+                    continue;
+                };
+                let value_type = substitute_type(value_type, &self.active_type_substitutions);
+                if !self.typed_module.type_needs_drop(&value_type) {
+                    continue;
+                }
+                let cell = self
+                    .builder
+                    .build_struct_gep(layout.ty, frame, *field_index, "coro.cancel.cell")
+                    .map_err(compiler_diagnostic)?;
+                self.compile_conditional_cell_drop(cell, &value_type, Span::Compiler)?;
+            }
+            let state_slot_unwind = self
+                .builder
+                .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_store(
+                    state_slot_unwind,
+                    i8_type.const_int(CORO_STATE_DONE, false),
+                )
+                .map_err(compiler_diagnostic)?;
+            let mut cancelled_status = status_type.const_zero();
+            cancelled_status = self
+                .builder
+                .build_insert_value(
+                    cancelled_status,
+                    i8_type.const_int(CORO_STATUS_CANCELLED, false),
+                    0,
+                    "coro.status.cancelled",
+                )
+                .map_err(compiler_diagnostic)?
+                .into_struct_value();
+            self.builder
+                .build_return(Some(&cancelled_status))
+                .map_err(compiler_diagnostic)?;
+
+            self.builder.position_at_end(bad_state);
+            let trap = self.llvm_module.get_function("llvm.trap").unwrap_or_else(|| {
+                self.llvm_module.add_function(
+                    "llvm.trap",
+                    self.context.void_type().fn_type(&[], false),
+                    None,
+                )
+            });
+            self.builder
+                .build_direct_call(trap, &[], "")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_unreachable()
+                .map_err(compiler_diagnostic)?;
+
+            self.builder.position_at_end(dispatch[0]);
+            let value = self.compile_expression(&mut environment, &thunk.body)?;
+            if !environment.did_return {
+                let return_value = value_as_basic(value).ok_or_else(|| {
+                    Diagnostic::new(Span::Compiler, "coroutine result is not a first-class value")
+                })?;
+                self.drop_all_owned(&mut environment, Span::Compiler)?;
+                let result_ptr = self
+                    .builder
+                    .build_load(ptr_type, result_ptr_slot, "coro.result.ptr")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                self.builder
+                    .build_store(result_ptr, return_value)
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_store(state_slot, i8_type.const_int(CORO_STATE_DONE, false))
+                    .map_err(compiler_diagnostic)?;
+                let status = status_type.const_zero();
+                self.builder
+                    .build_return(Some(&status))
+                    .map_err(compiler_diagnostic)?;
+            }
+        }
+
+        // ---- cleanup ----
+        {
+            let entry = self.context.append_basic_block(cleanup_fn, "entry");
+            let not_freed = self.context.append_basic_block(cleanup_fn, "not.freed");
+            let drop_block = self.context.append_basic_block(cleanup_fn, "drop.captures");
+            let finish = self.context.append_basic_block(cleanup_fn, "finish");
+            let done = self.context.append_basic_block(cleanup_fn, "done");
+
+            self.builder.position_at_end(entry);
+            let frame = cleanup_fn
+                .get_first_param()
+                .expect("cleanup frame parameter")
+                .into_pointer_value();
+            let state_slot = self
+                .builder
+                .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
+                .map_err(compiler_diagnostic)?;
+            let state = self
+                .builder
+                .build_load(i8_type, state_slot, "coro.state")
+                .map_err(compiler_diagnostic)?
+                .into_int_value();
+            let is_freed = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    state,
+                    i8_type.const_int(CORO_STATE_FREED, false),
+                    "coro.is.freed",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_conditional_branch(is_freed, done, not_freed)
+                .map_err(compiler_diagnostic)?;
+
+            self.builder.position_at_end(not_freed);
+            // `state == 0` (created, never resumed) is the only case whose
+            // captures are still owned by the frame; a completed body already
+            // dropped its owned locals, and a mid-body suspension leaves its
+            // frame cells for the (Step 3d) unwind path.
+            let never_resumed = self
+                .builder
+                .build_int_compare(
+                    inkwell::IntPredicate::EQ,
+                    state,
+                    i8_type.const_int(0, false),
+                    "coro.never.resumed",
+                )
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_conditional_branch(never_resumed, drop_block, finish)
+                .map_err(compiler_diagnostic)?;
+
+            self.builder.position_at_end(drop_block);
+            if !thunk.captures.is_empty() {
+                let env_slot = self
+                    .builder
+                    .build_struct_gep(header_type, frame, CORO_CAPTURE_ENV, "coro.env.slot")
+                    .map_err(compiler_diagnostic)?;
+                let env_ptr = self
+                    .builder
+                    .build_load(ptr_type, env_slot, "coro.env")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let environment_type = self.compile_capture_type(&thunk)?;
+                let finalizer = self.ensure_closure_finalizer(&thunk, environment_type)?;
+                self.builder
+                    .build_direct_call(finalizer, &[env_ptr.into()], "")
+                    .map_err(compiler_diagnostic)?;
+            }
+            self.builder
+                .build_unconditional_branch(finish)
+                .map_err(compiler_diagnostic)?;
+
+            self.builder.position_at_end(finish);
+            let unregister = self
+                .llvm_module
+                .get_function("__staple_gc_unregister_root")
+                .expect("GC root unregistration function");
+            self.builder
+                .build_direct_call(unregister, &[frame.into()], "")
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_store(state_slot, i8_type.const_int(CORO_STATE_FREED, false))
+                .map_err(compiler_diagnostic)?;
+            self.builder
+                .build_unconditional_branch(done)
+                .map_err(compiler_diagnostic)?;
+
+            self.builder.position_at_end(done);
+            self.builder.build_return(None).map_err(compiler_diagnostic)?;
+        }
+
+        if let Some(block) = previous_block {
+            self.builder.position_at_end(block);
+        }
+        Ok((resume_fn, cleanup_fn))
+    }
+
+    /// Lowers a `coro { ... }` expression: allocates and roots the frame, moves
+    /// the captured environment into it, and yields the frame pointer as the
+    /// coroutine value.
+    fn compile_coro_expression(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        coro: &staple_syntax::CoroExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = coro.syntax.span.clone();
+        let body_syntax = coro.body.syntax.id;
+        let (resume_fn, cleanup_fn) = self.ensure_coroutine_codes(body_syntax)?;
+        let thunk = self
+            .typed_module
+            .implicit_thunk_for(body_syntax)
+            .cloned()
+            .ok_or_else(|| Diagnostic::new(span.clone(), "missing coroutine body"))?;
+        let env_ptr =
+            self.build_capture_environment(environment, &thunk, span.clone(), false)?;
+        let layout = self.coroutine_frame_layout(body_syntax)?;
+        let header_type = self.coroutine_header_type();
+        let i8_type = self.context.i8_type();
+
+        let frame = self.build_gc_allocation(
+            self.size_type.const_int(layout.frame_size, false),
+            "coro.frame",
+            span.clone(),
+        )?;
+        self.builder
+            .build_store(frame, layout.ty.const_zero())
+            .map_err(compiler_diagnostic)?;
+        let store_header =
+            |emitter: &Self, field: u32, value: inkwell::values::BasicValueEnum<'context>| {
+                let slot = emitter
+                    .builder
+                    .build_struct_gep(header_type, frame, field, "coro.header.slot")
+                    .map_err(compiler_diagnostic)?;
+                emitter
+                    .builder
+                    .build_store(slot, value)
+                    .map_err(compiler_diagnostic)?;
+                Ok::<(), Diagnostic>(())
+            };
+        store_header(self, CORO_STATE, i8_type.const_int(0, false).into())?;
+        store_header(
+            self,
+            CORO_RESUME_FN,
+            resume_fn.as_global_value().as_pointer_value().into(),
+        )?;
+        store_header(
+            self,
+            CORO_CLEANUP_FN,
+            cleanup_fn.as_global_value().as_pointer_value().into(),
+        )?;
+        store_header(self, CORO_CAPTURE_ENV, env_ptr.into())?;
+        let own_result = self
+            .builder
+            .build_struct_gep(layout.ty, frame, layout.result_field, "coro.own.result")
+            .map_err(compiler_diagnostic)?;
+        store_header(self, CORO_RESULT_PTR, own_result.into())?;
+
+        self.register_gc_root_region(frame, layout.frame_size, span)?;
+        Ok(frame.as_any_value_enum())
+    }
+
+    /// Packs `deferred`'s resources into a fresh GC bundle and stores its
+    /// pointer in `frame->resources`.
+    fn store_coroutine_resources(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        frame: inkwell::values::PointerValue<'context>,
+        deferred: &CheckedEffectSet,
+        span: Span,
+    ) -> CodeGenerationResult<()> {
+        if deferred.resources.is_empty() {
+            return Ok(());
+        }
+        let arguments = self.compile_resource_arguments(environment, deferred, span.clone())?;
+        let bundle_type = self.coroutine_resource_bundle_type(deferred)?;
+        let bundle = self.build_gc_allocation(
+            self.size_type
+                .const_int(self.target_data.get_store_size(&bundle_type), false),
+            "coro.bundle",
+            span.clone(),
+        )?;
+        let mut value = bundle_type.const_zero();
+        for (index, argument) in arguments.into_iter().enumerate() {
+            let basic = value_as_basic(argument.as_any_value_enum())
+                .ok_or_else(|| Diagnostic::new(span.clone(), "resource is not first-class"))?;
+            value = self
+                .builder
+                .build_insert_value(value, basic, index as u32, "coro.resource")
+                .map_err(compiler_diagnostic)?
+                .into_struct_value();
+        }
+        self.builder
+            .build_store(bundle, value)
+            .map_err(compiler_diagnostic)?;
+        let header_type = self.coroutine_header_type();
+        let slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_RESOURCES, "coro.resources.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(slot, bundle)
+            .map_err(compiler_diagnostic)?;
+        Ok(())
+    }
+
+    /// Suspends the current coroutine at `await <child>` and returns the value
+    /// the driver leaves in the frame's pending slot on resume.
+    fn compile_coroutine_await(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        await_: &staple_syntax::AwaitExpression,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = await_.syntax.span.clone();
+        let Some(context) = environment.coroutine.clone() else {
+            return Err(Diagnostic::new(span, "`await` outside a coroutine body"));
+        };
+        let operand_type = self
+            .concrete_expression_type(&await_.operand)
+            .ok_or_else(|| {
+                Diagnostic::new(
+                    await_.operand.syntax().span.clone(),
+                    "`await` operand has no concrete type",
+                )
+            })?;
+        // `await <Task>` / `await <Wait>` are a different suspension: no child
+        // frame runs; the current frame registers itself as the sole waiter on
+        // an external record and parks until it is resolved.
+        if self.typed_module.task_result(&operand_type).is_some() {
+            return self.compile_external_await(environment, await_, &context, ExternalAwaitKind::Task);
+        }
+        if self.typed_module.wait_result(&operand_type).is_some() {
+            return self.compile_external_await(environment, await_, &context, ExternalAwaitKind::Wait);
+        }
+
+        let (child_deferred, child_result) = self
+            .typed_module
+            .coroutine_parts(&operand_type)
+            .map(|(effects, result)| (effects.clone(), result.clone()))
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`await` requires a coroutine"))?;
+
+        let state = context.next_state;
+        let dispatch = context.dispatch[state];
+        environment
+            .coroutine
+            .as_mut()
+            .expect("coroutine context")
+            .next_state += 1;
+
+        let child = self.compile_expression(environment, &await_.operand)?;
+        let child = value_as_basic(child)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`await` operand is not a coroutine"))?
+            .into_pointer_value();
+        self.store_coroutine_resources(environment, child, &child_deferred, span.clone())?;
+
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+        let header_type = self.coroutine_header_type();
+        let frame = context.frame;
+
+        let child_slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(child_slot, child)
+            .map_err(compiler_diagnostic)?;
+
+        let pending = self
+            .builder
+            .build_struct_gep(
+                context.frame_type,
+                frame,
+                context.pending_field,
+                "coro.own.pending",
+            )
+            .map_err(compiler_diagnostic)?;
+        let pending_ptr_slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_PENDING_PTR, "coro.pending.ptr.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(pending_ptr_slot, pending)
+            .map_err(compiler_diagnostic)?;
+
+        let state_slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(state_slot, i8_type.const_int(state as u64, false))
+            .map_err(compiler_diagnostic)?;
+
+        let mut status = context.status_type.const_zero();
+        status = self
+            .builder
+            .build_insert_value(
+                status,
+                i8_type.const_int(CORO_STATUS_RESUME_CHILD, false),
+                0,
+                "coro.status.kind",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        status = self
+            .builder
+            .build_insert_value(status, child, 1, "coro.status.child")
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        self.builder
+            .build_return(Some(&status))
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(dispatch);
+        let result_llvm = self.compile_type(&child_result)?;
+        let pending = self
+            .builder
+            .build_struct_gep(
+                context.frame_type,
+                frame,
+                context.pending_field,
+                "coro.own.pending",
+            )
+            .map_err(compiler_diagnostic)?;
+        let value = self
+            .builder
+            .build_load(result_llvm, pending, "await.result")
+            .map_err(compiler_diagnostic)?;
+        let _ = ptr_type;
+        Ok(value.as_any_value_enum())
+    }
+
+    /// Suspends the current coroutine at `await <Task>` / `await <Wait>`:
+    /// registers this frame as the sole waiter on the external record and parks
+    /// (status `WAIT_EXTERNAL`), unless the record is already resolved — in which
+    /// case it continues in the same resume. On resume it reads the record into
+    /// a `Completed value | Cancelled` sum.
+    fn compile_external_await(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        await_: &staple_syntax::AwaitExpression,
+        context: &CoroutineContext<'context>,
+        kind: ExternalAwaitKind,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = await_.syntax.span.clone();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+        let header_type = self.coroutine_header_type();
+        let frame = context.frame;
+
+        let outcome_type = self
+            .concrete_expression_type(&Expression::Await(await_.clone()))
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`await` result has no concrete type"))?;
+        let CheckedType::Sum(outcome_sum) = &outcome_type else {
+            return Err(Diagnostic::new(
+                span.clone(),
+                "`await` result is not a `Completed | Cancelled` sum",
+            ));
+        };
+        let completed_type = outcome_sum.alternatives[0].clone();
+        let cancelled_type = outcome_sum.alternatives[1].clone();
+        let CheckedType::Distinct { representation, .. } = &completed_type else {
+            return Err(Diagnostic::new(span.clone(), "`Completed` is not a distinct type"));
+        };
+        let payload_llvm = self.compile_type(representation)?;
+        let (record_type, result_field, completed_state) = match kind {
+            ExternalAwaitKind::Task => (
+                self.task_record_type(payload_llvm),
+                TASK_RECORD_RESULT,
+                COMPLETION_STATE_COMPLETED, // task state 1 == completed
+            ),
+            ExternalAwaitKind::Wait => (
+                self.completion_record_type(payload_llvm),
+                COMPLETION_VALUE,
+                COMPLETION_STATE_COMPLETED,
+            ),
+        };
+
+        let state = context.next_state;
+        let dispatch = context.dispatch[state];
+        environment
+            .coroutine
+            .as_mut()
+            .expect("coroutine context")
+            .next_state += 1;
+        let function = context.dispatch[0]
+            .get_parent()
+            .expect("dispatch block belongs to the resume function");
+
+        let record = self.compile_expression(environment, &await_.operand)?;
+        let record = value_as_basic(record)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`await` operand is not a wait handle"))?
+            .into_pointer_value();
+
+        // Stash the record in the (otherwise unused for an external await) child
+        // slot so both the suspend-then-resume path and the already-resolved
+        // fast path can recover it in the dispatch block.
+        let child_slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(child_slot, record)
+            .map_err(compiler_diagnostic)?;
+
+        // Register the waiter; the runtime returns 0 when the record is already
+        // resolved — an already-completed wait continues in the same resume
+        // without losing a wakeup.
+        let should_suspend = match kind {
+            ExternalAwaitKind::Task => {
+                let register = self.coroutine_runtime_fn(
+                    "__staple_task_await_register",
+                    i8_type.fn_type(&[ptr_type.into(), ptr_type.into()], false),
+                );
+                self.builder
+                    .build_direct_call(register, &[record.into(), frame.into()], "await.suspend")
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_int_value()
+            }
+            ExternalAwaitKind::Wait => {
+                // Current task's scheduler: `frame->record->scheduler`, or null
+                // for a `block_on` root (the runtime rejects a cross-scheduler
+                // await).
+                let task_record_slot = self
+                    .builder
+                    .build_struct_gep(header_type, frame, CORO_RECORD, "coro.record.slot")
+                    .map_err(compiler_diagnostic)?;
+                let task_record = self
+                    .builder
+                    .build_load(ptr_type, task_record_slot, "coro.record")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let has_record = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        task_record,
+                        ptr_type.const_null(),
+                        "await.has.record",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let sched_from_record = self.context.append_basic_block(function, "await.sched.load");
+                let sched_join = self.context.append_basic_block(function, "await.sched.join");
+                let entry_block = self.builder.get_insert_block().expect("await block");
+                self.builder
+                    .build_conditional_branch(has_record, sched_from_record, sched_join)
+                    .map_err(compiler_diagnostic)?;
+                self.builder.position_at_end(sched_from_record);
+                let sched_slot = self
+                    .builder
+                    .build_struct_gep(
+                        self.task_record_header_type(),
+                        task_record,
+                        TASK_RECORD_SCHEDULER,
+                        "task.record.scheduler",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                let sched_value = self
+                    .builder
+                    .build_load(ptr_type, sched_slot, "await.scheduler")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                self.builder
+                    .build_unconditional_branch(sched_join)
+                    .map_err(compiler_diagnostic)?;
+                self.builder.position_at_end(sched_join);
+                let scheduler = self
+                    .builder
+                    .build_phi(ptr_type, "await.scheduler")
+                    .map_err(compiler_diagnostic)?;
+                scheduler.add_incoming(&[
+                    (&ptr_type.const_null(), entry_block),
+                    (&sched_value, sched_from_record),
+                ]);
+                let register = self.coroutine_runtime_fn(
+                    "__staple_completion_register",
+                    i8_type.fn_type(
+                        &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
+                        false,
+                    ),
+                );
+                self.builder
+                    .build_direct_call(
+                        register,
+                        &[
+                            record.into(),
+                            frame.into(),
+                            scheduler.as_basic_value().into_pointer_value().into(),
+                        ],
+                        "await.suspend",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_int_value()
+            }
+        };
+        let want_suspend = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                should_suspend,
+                i8_type.const_zero(),
+                "await.want.suspend",
+            )
+            .map_err(compiler_diagnostic)?;
+        let suspend_block = self.context.append_basic_block(function, "await.external.suspend");
+        self.builder
+            .build_conditional_branch(want_suspend, suspend_block, dispatch)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(suspend_block);
+        let state_slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(state_slot, i8_type.const_int(state as u64, false))
+            .map_err(compiler_diagnostic)?;
+        let mut status = context.status_type.const_zero();
+        status = self
+            .builder
+            .build_insert_value(
+                status,
+                i8_type.const_int(CORO_STATUS_WAIT_EXTERNAL, false),
+                0,
+                "coro.status.kind",
+            )
+            .map_err(compiler_diagnostic)?
+            .into_struct_value();
+        self.builder
+            .build_return(Some(&status))
+            .map_err(compiler_diagnostic)?;
+
+        // ---- resume / fast path: the record is resolved ----
+        self.builder.position_at_end(dispatch);
+        let record_slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_CHILD, "coro.child.slot")
+            .map_err(compiler_diagnostic)?;
+        let record = self
+            .builder
+            .build_load(ptr_type, record_slot, "external.record")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let record_state = self
+            .builder
+            .build_load(i8_type, record, "external.record.state")
+            .map_err(compiler_diagnostic)?
+            .into_int_value();
+        let is_completed = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::EQ,
+                record_state,
+                i8_type.const_int(completed_state, false),
+                "external.completed",
+            )
+            .map_err(compiler_diagnostic)?;
+
+        let completed_block = self.context.append_basic_block(function, "await.ext.completed");
+        let cancelled_block = self.context.append_basic_block(function, "await.ext.cancelled");
+        let merge_block = self.context.append_basic_block(function, "await.ext.merge");
+        self.builder
+            .build_conditional_branch(is_completed, completed_block, cancelled_block)
+            .map_err(compiler_diagnostic)?;
+
+        let outcome_llvm = self.compile_type(&outcome_type)?;
+
+        self.builder.position_at_end(completed_block);
+        let result_slot = self
+            .builder
+            .build_struct_gep(record_type, record, result_field, "external.record.result")
+            .map_err(compiler_diagnostic)?;
+        let payload = self
+            .builder
+            .build_load(payload_llvm, result_slot, "external.result")
+            .map_err(compiler_diagnostic)?;
+        let completed_value = self.coerce_value(
+            payload.as_any_value_enum(),
+            &completed_type,
+            &outcome_type,
+            span.clone(),
+        )?;
+        let completed_value = value_as_basic(completed_value)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`Completed` value is not first-class"))?;
+        let completed_end = self.builder.get_insert_block().expect("completed block");
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(cancelled_block);
+        let cancelled_value = self.coerce_value(
+            self.unit_value(),
+            &cancelled_type,
+            &outcome_type,
+            span.clone(),
+        )?;
+        let cancelled_value = value_as_basic(cancelled_value)
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`Cancelled` value is not first-class"))?;
+        let cancelled_end = self.builder.get_insert_block().expect("cancelled block");
+        self.builder
+            .build_unconditional_branch(merge_block)
+            .map_err(compiler_diagnostic)?;
+
+        self.builder.position_at_end(merge_block);
+        let outcome = self
+            .builder
+            .build_phi(outcome_llvm, "await.ext.outcome")
+            .map_err(compiler_diagnostic)?;
+        outcome.add_incoming(&[
+            (&completed_value, completed_end),
+            (&cancelled_value, cancelled_end),
+        ]);
+        Ok(outcome.as_basic_value().as_any_value_enum())
+    }
+
+    /// Drives a coroutine value to completion and yields its result, running
+    /// its `cleanup` afterwards. Used by `std.coroutine.block_on`.
+    fn compile_coroutine_drive(
+        &mut self,
+        environment: &FunctionEnvironment<'context>,
+        frame_value: BasicValueEnum<'context>,
+        coroutine_type: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let (deferred, result_type) = self
+            .typed_module
+            .coroutine_parts(coroutine_type)
+            .map(|(effects, result)| (effects.clone(), result.clone()))
+            .ok_or_else(|| Diagnostic::new(span.clone(), "`block_on` requires a coroutine"))?;
+        let frame = frame_value.into_pointer_value();
+        let header_type = self.coroutine_header_type();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+
+        self.store_coroutine_resources(environment, frame, &deferred, span.clone())?;
+
+        // `block_on`'s coroutine is a task root.
+        let parent_slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_PARENT, "coro.parent.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(parent_slot, ptr_type.const_null())
+            .map_err(compiler_diagnostic)?;
+        let leaf_out = self
+            .builder
+            .build_alloca(ptr_type, "coro.leaf")
+            .map_err(compiler_diagnostic)?;
+
+        let drive = self
+            .llvm_module
+            .get_function("__staple_coro_drive")
+            .expect("coroutine driver");
+        let status = self
+            .builder
+            .build_direct_call(drive, &[frame.into(), leaf_out.into()], "coro.drive")
+            .map_err(compiler_diagnostic)?
+            .try_as_basic_value()
+            .unwrap_basic()
+            .into_int_value();
+        let suspended = self
+            .builder
+            .build_int_compare(
+                inkwell::IntPredicate::NE,
+                status,
+                i8_type.const_int(CORO_STATUS_DONE, false),
+                "coro.suspended",
+            )
+            .map_err(compiler_diagnostic)?;
+        self.build_trap_if(suspended, span.clone())?;
+
+        let result_ptr_slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_RESULT_PTR, "coro.result.ptr.slot")
+            .map_err(compiler_diagnostic)?;
+        let result_ptr = self
+            .builder
+            .build_load(ptr_type, result_ptr_slot, "coro.result.ptr")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let result_llvm = self.compile_type(&result_type)?;
+        let result = self
+            .builder
+            .build_load(result_llvm, result_ptr, "coro.result")
+            .map_err(compiler_diagnostic)?;
+
+        let cleanup_slot = self
+            .builder
+            .build_struct_gep(header_type, frame, CORO_CLEANUP_FN, "coro.cleanup.slot")
+            .map_err(compiler_diagnostic)?;
+        let cleanup_ptr = self
+            .builder
+            .build_load(ptr_type, cleanup_slot, "coro.cleanup.fn")
+            .map_err(compiler_diagnostic)?
+            .into_pointer_value();
+        let cleanup_type = self.context.void_type().fn_type(&[ptr_type.into()], false);
+        self.builder
+            .build_indirect_call(cleanup_type, cleanup_ptr, &[frame.into()], "")
+            .map_err(compiler_diagnostic)?;
+
+        Ok(result.as_any_value_enum())
+    }
+
+    /// Declares a runtime helper from `coroutine.ll` with the given signature.
+    fn coroutine_runtime_fn(
+        &self,
+        name: &str,
+        signature: inkwell::types::FunctionType<'context>,
+    ) -> inkwell::values::FunctionValue<'context> {
+        self.llvm_module
+            .get_function(name)
+            .unwrap_or_else(|| self.llvm_module.add_function(name, signature, None))
+    }
+
+    fn compile_scheduler_intrinsic(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+        intrinsic: IntrinsicFunction,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = call.syntax.span.clone();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+
+        match intrinsic {
+            IntrinsicFunction::SchedulerCreate => {
+                self.compile_expression(environment, &call.argument)?;
+                let create = self.coroutine_runtime_fn(
+                    "__staple_sched_create",
+                    ptr_type.fn_type(&[], false),
+                );
+                let sched = self
+                    .builder
+                    .build_direct_call(create, &[], "scheduler")
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .unwrap_basic();
+                Ok(sched.as_any_value_enum())
+            }
+            IntrinsicFunction::TaskScope => {
+                let sched = self.compile_expression(environment, &call.argument)?;
+                let sched = value_as_basic(sched)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "scheduler is not first-class"))?;
+                let open = self.coroutine_runtime_fn(
+                    "__staple_task_scope_open",
+                    ptr_type.fn_type(&[ptr_type.into()], false),
+                );
+                let scope = self
+                    .builder
+                    .build_direct_call(open, &[sched.into()], "task.scope")
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .unwrap_basic();
+                Ok(scope.as_any_value_enum())
+            }
+            IntrinsicFunction::YieldNow => {
+                self.compile_expression(environment, &call.argument)?;
+                let header_type = self.coroutine_header_type();
+                let header_size = self.target_data.get_store_size(&header_type);
+                let frame = self.build_gc_allocation(
+                    self.size_type.const_int(header_size, false),
+                    "coro.yield.frame",
+                    span.clone(),
+                )?;
+                self.builder
+                    .build_store(frame, header_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let resume = self.coroutine_runtime_fn(
+                    "__staple_coro_yield_resume",
+                    self.context
+                        .struct_type(&[i8_type.into(), ptr_type.into()], false)
+                        .fn_type(&[ptr_type.into()], false),
+                );
+                let cleanup = self.coroutine_runtime_fn(
+                    "__staple_coro_yield_cleanup",
+                    self.context.void_type().fn_type(&[ptr_type.into()], false),
+                );
+                for (field, value) in [
+                    (
+                        CORO_RESUME_FN,
+                        resume.as_global_value().as_pointer_value(),
+                    ),
+                    (
+                        CORO_CLEANUP_FN,
+                        cleanup.as_global_value().as_pointer_value(),
+                    ),
+                ] {
+                    let slot = self
+                        .builder
+                        .build_struct_gep(header_type, frame, field, "coro.yield.slot")
+                        .map_err(compiler_diagnostic)?;
+                    self.builder
+                        .build_store(slot, value)
+                        .map_err(compiler_diagnostic)?;
+                }
+                self.register_gc_root_region(frame, header_size, span)?;
+                Ok(frame.as_any_value_enum())
+            }
+            IntrinsicFunction::Spawn => {
+                let coroutine_type = self
+                    .concrete_expression_type(&call.argument)
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "`spawn` operand has no concrete type")
+                    })?;
+                let (deferred, result_type) = self
+                    .typed_module
+                    .coroutine_parts(&coroutine_type)
+                    .map(|(effects, result)| (effects.clone(), result.clone()))
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "`spawn` requires a coroutine"))?;
+                let frame = self.compile_expression(environment, &call.argument)?;
+                let frame = value_as_basic(frame)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "coroutine is not first-class"))?
+                    .into_pointer_value();
+                let header_type = self.coroutine_header_type();
+
+                // `%TaskRecord { i8 state, i8 cancel, ptr frame, ptr waiter,
+                // ptr scheduler, ptr scope_next, T result }`. The coroutine
+                // writes its result straight into `record.result`; the driver
+                // sets `state` and wakes `waiter`; `cancel` / `frame` /
+                // `scope_next` drive cancellation and scope teardown.
+                let result_llvm = self.compile_type(&result_type)?;
+                let record_type = self.task_record_type(result_llvm);
+                let record = self.build_gc_allocation(
+                    self.size_type
+                        .const_int(self.target_data.get_store_size(&record_type), false),
+                    "task.record",
+                    span.clone(),
+                )?;
+                self.builder
+                    .build_store(record, record_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let record_field = |emitter: &Self, field: u32, name: &str| {
+                    emitter
+                        .builder
+                        .build_struct_gep(record_type, record, field, name)
+                        .map_err(compiler_diagnostic)
+                };
+                let record_result = record_field(self, TASK_RECORD_RESULT, "task.record.result")?;
+
+                let store_header =
+                    |emitter: &Self, field: u32, value: inkwell::values::BasicValueEnum<'context>| {
+                        let slot = emitter
+                            .builder
+                            .build_struct_gep(header_type, frame, field, "coro.header.slot")
+                            .map_err(compiler_diagnostic)?;
+                        emitter
+                            .builder
+                            .build_store(slot, value)
+                            .map_err(compiler_diagnostic)?;
+                        Ok::<(), Diagnostic>(())
+                    };
+                store_header(self, CORO_RESULT_PTR, record_result.into())?;
+                store_header(self, CORO_RECORD, record.into())?;
+                store_header(self, CORO_PARENT, ptr_type.const_null().into())?;
+
+                self.builder
+                    .build_store(
+                        record_field(self, TASK_RECORD_FRAME, "task.record.frame")?,
+                        frame,
+                    )
+                    .map_err(compiler_diagnostic)?;
+
+                self.store_coroutine_resources(environment, frame, &deferred, span.clone())?;
+
+                let scope = self.coroutine_current_task_scope(environment, span.clone())?;
+                let scheduler = self.coroutine_current_scheduler(environment, span.clone())?;
+                self.builder
+                    .build_store(
+                        record_field(self, TASK_RECORD_SCHEDULER, "task.record.scheduler")?,
+                        scheduler,
+                    )
+                    .map_err(compiler_diagnostic)?;
+
+                // Link the record into its scope's task list (LIFO) so scope
+                // teardown cancels the youngest task first.
+                let track = self.coroutine_runtime_fn(
+                    "__staple_task_scope_track",
+                    self.context
+                        .void_type()
+                        .fn_type(&[ptr_type.into(), ptr_type.into()], false),
+                );
+                self.builder
+                    .build_direct_call(track, &[scope.into(), record.into()], "")
+                    .map_err(compiler_diagnostic)?;
+
+                let enqueue = self.coroutine_runtime_fn(
+                    "__staple_sched_enqueue",
+                    self.context
+                        .void_type()
+                        .fn_type(&[ptr_type.into(), ptr_type.into()], false),
+                );
+                self.builder
+                    .build_direct_call(enqueue, &[scheduler.into(), frame.into()], "")
+                    .map_err(compiler_diagnostic)?;
+                Ok(record.as_any_value_enum())
+            }
+            IntrinsicFunction::Pump => {
+                let argument = self.compile_expression(environment, &call.argument)?;
+                let argument = value_as_basic(argument)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "`pump` argument is not first-class"))?
+                    .into_struct_value();
+                let sched = self
+                    .builder
+                    .build_extract_value(argument, 0, "pump.scheduler")
+                    .map_err(compiler_diagnostic)?;
+                let limit = self
+                    .builder
+                    .build_extract_value(argument, 1, "pump.limit")
+                    .map_err(compiler_diagnostic)?;
+                let counts_type = self
+                    .context
+                    .struct_type(&[self.size_type.into(), self.size_type.into()], false);
+                let pump = self.coroutine_runtime_fn(
+                    "__staple_sched_pump",
+                    counts_type.fn_type(&[ptr_type.into(), self.size_type.into()], false),
+                );
+                let result = self
+                    .builder
+                    .build_direct_call(pump, &[sched.into(), limit.into()], "pump")
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .unwrap_basic();
+                Ok(result.as_any_value_enum())
+            }
+            IntrinsicFunction::TaskIsFinished => {
+                let record = self.compile_expression(environment, &call.argument)?;
+                let record = value_as_basic(record)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "task handle is not first-class"))?
+                    .into_pointer_value();
+                let state = self
+                    .builder
+                    .build_load(i8_type, record, "task.state")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                // `record.state`: 0 pending, 1 completed, 2 cancelled — finished
+                // is anything past pending.
+                let finished = self
+                    .builder
+                    .build_int_compare(
+                        inkwell::IntPredicate::NE,
+                        state,
+                        i8_type.const_int(0, false),
+                        "task.finished",
+                    )
+                    .map_err(compiler_diagnostic)?;
+                self.compile_bool(finished, call.syntax.id, span)
+            }
+            IntrinsicFunction::TaskCancel => {
+                let record = self.compile_expression(environment, &call.argument)?;
+                let record = value_as_basic(record)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "task handle is not first-class"))?
+                    .into_pointer_value();
+                let cancel = self.coroutine_runtime_fn(
+                    "__staple_task_cancel",
+                    self.context.void_type().fn_type(&[ptr_type.into()], false),
+                );
+                self.builder
+                    .build_direct_call(cancel, &[record.into()], "")
+                    .map_err(compiler_diagnostic)?;
+                Ok(self.unit_value())
+            }
+            _ => unreachable!("compile_scheduler_intrinsic: {intrinsic:?}"),
+        }
+    }
+
+    /// `completion` / `Resolver.complete` / `Resolver.cancel` (slice 4a).
+    fn compile_completion_intrinsic(
+        &mut self,
+        environment: &mut FunctionEnvironment<'context>,
+        call: &CallExpression,
+        intrinsic: IntrinsicFunction,
+    ) -> CodeGenerationResult<AnyValueEnum<'context>> {
+        let span = call.syntax.span.clone();
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let i8_type = self.context.i8_type();
+
+        match intrinsic {
+            IntrinsicFunction::Completion
+            | IntrinsicFunction::CompletionWithCancel
+            | IntrinsicFunction::CompletionToken => {
+                // `completion_token sched` is `completion sched` with `T = ()`
+                // and a `CompletionToken` (the record pointer) as the second
+                // handle instead of a `Resolver`.
+                let with_cancel = intrinsic == IntrinsicFunction::CompletionWithCancel;
+                let raw = self.compile_expression(environment, &call.argument)?;
+                let raw = value_as_basic(raw)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "argument is not first-class"))?;
+                // `completion sched` vs `completion_with_cancel (sched, on_cancel)`.
+                let (scheduler, cancel_closure) = if with_cancel {
+                    let product = raw.into_struct_value();
+                    let scheduler = self
+                        .builder
+                        .build_extract_value(product, 0, "completion.scheduler")
+                        .map_err(compiler_diagnostic)?;
+                    let closure = self
+                        .builder
+                        .build_extract_value(product, 1, "completion.on_cancel")
+                        .map_err(compiler_diagnostic)?
+                        .into_struct_value();
+                    (scheduler, Some(closure))
+                } else {
+                    (raw, None)
+                };
+
+                // Result product `(wait: Wait T, resolver: Resolver T)` — pull `T`
+                // out of the `Wait` element.
+                let product = self
+                    .typed_module
+                    .type_of_expression(call.syntax.id)
+                    .cloned()
+                    .map(|ty| substitute_type(ty, &self.active_type_substitutions));
+                let value_type = match &product {
+                    Some(CheckedType::Product(product)) => product
+                        .elements
+                        .first()
+                        .and_then(|element| {
+                            self.typed_module.wait_result(&element.value_type).cloned()
+                        })
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "`completion` result is not a wait product")
+                        })?,
+                    _ => {
+                        return Err(Diagnostic::new(
+                            span.clone(),
+                            "`completion` result has no concrete type",
+                        ));
+                    }
+                };
+                let value_llvm = self.compile_type(&value_type)?;
+                let record_type = self.completion_record_type(value_llvm);
+                let record = self.build_gc_allocation(
+                    self.size_type
+                        .const_int(self.target_data.get_store_size(&record_type), false),
+                    "completion.record",
+                    span.clone(),
+                )?;
+                self.builder
+                    .build_store(record, record_type.const_zero())
+                    .map_err(compiler_diagnostic)?;
+                let field = |emitter: &Self, index: u32, name: &str| {
+                    emitter
+                        .builder
+                        .build_struct_gep(record_type, record, index, name)
+                        .map_err(compiler_diagnostic)
+                };
+                self.builder
+                    .build_store(field(self, COMPLETION_SCHEDULER, "completion.scheduler")?, scheduler)
+                    .map_err(compiler_diagnostic)?;
+
+                if let Some(closure) = cancel_closure {
+                    // `{ code, environment }` — store both halves and arm the
+                    // callback (flags bit1).
+                    let code = self
+                        .builder
+                        .build_extract_value(closure, 0, "on_cancel.code")
+                        .map_err(compiler_diagnostic)?;
+                    let env = self
+                        .builder
+                        .build_extract_value(closure, 1, "on_cancel.env")
+                        .map_err(compiler_diagnostic)?;
+                    self.builder
+                        .build_store(field(self, COMPLETION_CANCEL_ENV, "completion.cancel.env")?, env)
+                        .map_err(compiler_diagnostic)?;
+                    self.builder
+                        .build_store(field(self, COMPLETION_CANCEL_FN, "completion.cancel.fn")?, code)
+                        .map_err(compiler_diagnostic)?;
+                    self.builder
+                        .build_store(
+                            field(self, COMPLETION_FLAGS, "completion.flags")?,
+                            i8_type.const_int(0b10, false),
+                        )
+                        .map_err(compiler_diagnostic)?;
+                }
+
+                // `(wait, resolver)` — both handles are the same record pointer.
+                let handles_type = self
+                    .context
+                    .struct_type(&[ptr_type.into(), ptr_type.into()], true);
+                let mut value = handles_type.const_zero();
+                value = self
+                    .builder
+                    .build_insert_value(value, record, 0, "completion.wait")
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+                value = self
+                    .builder
+                    .build_insert_value(value, record, 1, "completion.resolver")
+                    .map_err(compiler_diagnostic)?
+                    .into_struct_value();
+                Ok(value.as_any_value_enum())
+            }
+            IntrinsicFunction::ResolverComplete => {
+                let argument = self.compile_expression(environment, &call.argument)?;
+                let argument = value_as_basic(argument)
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "`complete` argument is not first-class")
+                    })?
+                    .into_struct_value();
+                let record = self
+                    .builder
+                    .build_extract_value(argument, 0, "resolver.record")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let value = self
+                    .builder
+                    .build_extract_value(argument, 1, "resolver.value")
+                    .map_err(compiler_diagnostic)?;
+
+                let value_type = self
+                    .typed_module
+                    .type_of_expression(call.argument.syntax().id)
+                    .cloned()
+                    .map(|ty| substitute_type(ty, &self.active_type_substitutions))
+                    .and_then(|ty| match ty {
+                        CheckedType::Product(product) => {
+                            product.elements.get(1).map(|element| element.value_type.clone())
+                        }
+                        _ => None,
+                    })
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "`complete` value has no concrete type")
+                    })?;
+                let value_llvm = self.compile_type(&value_type)?;
+                let slot = self
+                    .builder
+                    .build_alloca(value_llvm, "resolver.value.slot")
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_store(slot, value)
+                    .map_err(compiler_diagnostic)?;
+                let size = self
+                    .size_type
+                    .const_int(self.target_data.get_store_size(&value_llvm), false);
+
+                let complete = self.coroutine_runtime_fn(
+                    "__staple_completion_complete",
+                    i8_type.fn_type(
+                        &[ptr_type.into(), ptr_type.into(), self.size_type.into()],
+                        false,
+                    ),
+                );
+                let gone = self
+                    .builder
+                    .build_direct_call(
+                        complete,
+                        &[record.into(), slot.into(), size.into()],
+                        "completion.gone",
+                    )
+                    .map_err(compiler_diagnostic)?
+                    .try_as_basic_value()
+                    .unwrap_basic()
+                    .into_int_value();
+
+                // If the consumer had already abandoned the wait, the runtime did
+                // not take the value — drop the copy we still own.
+                if self.typed_module.type_needs_drop(&value_type) {
+                    let function = self
+                        .builder
+                        .get_insert_block()
+                        .and_then(|block| block.get_parent())
+                        .expect("resolver.complete in a function");
+                    let drop_block = self.context.append_basic_block(function, "complete.drop");
+                    let done_block = self.context.append_basic_block(function, "complete.done");
+                    let is_gone = self
+                        .builder
+                        .build_int_compare(
+                            inkwell::IntPredicate::NE,
+                            gone,
+                            i8_type.const_zero(),
+                            "complete.consumer.gone",
+                        )
+                        .map_err(compiler_diagnostic)?;
+                    self.builder
+                        .build_conditional_branch(is_gone, drop_block, done_block)
+                        .map_err(compiler_diagnostic)?;
+                    self.builder.position_at_end(drop_block);
+                    let owned = self
+                        .builder
+                        .build_load(value_llvm, slot, "complete.orphan")
+                        .map_err(compiler_diagnostic)?;
+                    self.compile_drop_value(owned, &value_type, span.clone())?;
+                    self.builder
+                        .build_unconditional_branch(done_block)
+                        .map_err(compiler_diagnostic)?;
+                    self.builder.position_at_end(done_block);
+                }
+                Ok(self.unit_value())
+            }
+            IntrinsicFunction::ResolverCancel
+            | IntrinsicFunction::CompletionTokenResolve
+            | IntrinsicFunction::CompletionTokenCancel => {
+                let record = self.compile_expression(environment, &call.argument)?;
+                let record = value_as_basic(record)
+                    .ok_or_else(|| Diagnostic::new(span.clone(), "handle is not first-class"))?
+                    .into_pointer_value();
+                let runtime = match intrinsic {
+                    IntrinsicFunction::CompletionTokenResolve => "__staple_completion_token_resolve",
+                    IntrinsicFunction::CompletionTokenCancel => "__staple_completion_token_cancel",
+                    _ => "__staple_completion_cancel",
+                };
+                let function = self.coroutine_runtime_fn(
+                    runtime,
+                    self.context.void_type().fn_type(&[ptr_type.into()], false),
+                );
+                self.builder
+                    .build_direct_call(function, &[record.into()], "")
+                    .map_err(compiler_diagnostic)?;
+                Ok(self.unit_value())
+            }
+            _ => unreachable!("compile_completion_intrinsic: {intrinsic:?}"),
+        }
+    }
+
+    /// The `%TaskScope*` of the ambient `Tasks` resource.
+    fn coroutine_current_task_scope(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let bound = environment
+            .resources
+            .iter()
+            .rev()
+            .find(|candidate| self.typed_module.is_tasks_type(&candidate.resource.value_type))
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "no `Tasks` scope is in scope for `spawn`")
+            })?;
+        if bound.indirect {
+            self.builder
+                .build_load(
+                    ptr_type,
+                    value_as_basic(bound.value)
+                        .expect("Tasks resource pointer")
+                        .into_pointer_value(),
+                    "tasks.scope",
+                )
+                .map_err(compiler_diagnostic)
+                .map(|value| value.into_pointer_value())
+        } else {
+            Ok(value_as_basic(bound.value)
+                .expect("Tasks resource is first-class")
+                .into_pointer_value())
+        }
+    }
+
+    /// Loads the scheduler pointer from the ambient `Tasks` scope resource.
+    fn coroutine_current_scheduler(
+        &self,
+        environment: &FunctionEnvironment<'context>,
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let ptr_type = self.context.ptr_type(AddressSpace::default());
+        let scope = self.coroutine_current_task_scope(environment, span.clone())?;
+        // `%TaskScope { ptr scheduler, ptr tasks_head }`.
+        let scope_type = self
+            .context
+            .struct_type(&[ptr_type.into(), ptr_type.into()], false);
+        let scheduler_slot = self
+            .builder
+            .build_struct_gep(scope_type, scope, 0, "tasks.scheduler.slot")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_load(ptr_type, scheduler_slot, "tasks.scheduler")
+            .map_err(compiler_diagnostic)
+            .map(|value| value.into_pointer_value())
     }
 
     fn ensure_closure_finalizer(
@@ -9306,6 +11781,22 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Ok(self.context.struct_type(&[], false).into())
             }
             CheckedType::Opaque { .. } if self.typed_module.is_reactive_type(value_type) => {
+                Ok(self.context.ptr_type(AddressSpace::default()).into())
+            }
+            CheckedType::Opaque { .. }
+                if self.typed_module.is_coroutine_type(value_type)
+                    || self.typed_module.is_task_type(value_type)
+                    || self.typed_module.is_scheduler_type(value_type)
+                    || self.typed_module.is_tasks_type(value_type)
+                    || self.typed_module.is_wait_type(value_type)
+                    || self.typed_module.is_resolver_type(value_type)
+                    || self.typed_module.is_completion_token_type(value_type) =>
+            {
+                // A coroutine value is a pointer to its GC-allocated frame; a
+                // task handle points to its `%TaskRecord`; a `Wait` / `Resolver`
+                // / `CompletionToken` all point to the shared `%Completion`
+                // record; a scheduler / task scope point to their runtime
+                // records.
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }
             CheckedType::Opaque { name, .. } => Err(Diagnostic::new(

@@ -1,0 +1,67 @@
+// Manual coroutine scheduling: an explicitly pumped scheduler, task scopes,
+// `spawn`/`await`/`pump`, a one-shot `completion` resolved from outside, and
+// cooperative cancellation. Nothing runs until `pump` is called.
+use std.coroutine.*
+use std.io.(IO, println)
+
+// A worker task: yields once so the scheduler can interleave it, then returns.
+def worker: I32 -> Coroutine{Tasks, IO} I32 = seed => coro {
+    println "worker ${seed:?}: start"
+    let _ = await (yield_now ())
+    println "worker ${seed:?}: done"
+    seed * 10
+}
+
+// A consumer task that awaits another task's result.
+def consumer: move Task I32 ->{IO} Coroutine{IO} () = move handle => coro {
+    let outcome = await handle
+    match outcome {
+        Completed value => println "consumer: worker produced ${value:?}",
+        Cancelled() => println "consumer: worker was cancelled",
+    }
+}
+
+// A behaviour that waits on a host-supplied completion.
+def greeter: move Wait I32 ->{IO} Coroutine{IO} () = move wait => coro {
+    let outcome = await wait
+    match outcome {
+        Completed code => println "greeter: host sent ${code:?}",
+        Cancelled() => println "greeter: host went away",
+    }
+}
+
+def make_signal: Scheduler -> (wait: Wait I32, resolver: Resolver I32) =
+    s => completion s
+
+let sched = scheduler ()
+with Tasks = task_scope (sched) {
+    // Spawn a producer/consumer pair and a task we will cancel.
+    let produced = spawn (worker 4)
+    let _ = spawn (consumer produced)
+    let doomed = spawn (worker 9)
+
+    // A completion the "host" resolves between pumps.
+    let (wait, resolver) = make_signal sched
+    let _ = spawn (greeter wait)
+
+    println "-- pump 1 --"
+    let p1 = pump (sched, 16)
+    println "pump 1: executed=${p1.executed:?} ready=${p1.ready:?}"
+
+    // Cancel the doomed task while it is parked at its `yield_now`, and
+    // resolve the host completion.
+    Task.cancel doomed
+    Resolver.complete (resolver, 200)
+
+    println "-- pump 2 --"
+    let p2 = pump (sched, 16)
+    println "pump 2: executed=${p2.executed:?} ready=${p2.ready:?}"
+
+    println "-- pump 3 --"
+    let p3 = pump (sched, 16)
+    println "pump 3: executed=${p3.executed:?} ready=${p3.ready:?}"
+
+    println "doomed finished: ${Task.is_finished doomed:?}"
+}
+// Leaving the `with Tasks` block tears down any tasks still running.
+println "scope closed"

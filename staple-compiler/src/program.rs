@@ -2351,6 +2351,8 @@ fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Su
             }
         }
         Expression::Loop(loop_) => find_block_submodules_in_block(&loop_.body, out),
+        Expression::Coro(coro) => find_block_submodules_in_block(&coro.body, out),
+        Expression::Await(await_) => find_block_submodules_in_expression(&await_.operand, out),
         Expression::Resource(_) => {}
         Expression::With(with) => {
             find_block_submodules_in_expression(&with.value, out);
@@ -2510,6 +2512,10 @@ fn find_block_use_declarations_in_expression(
             }
         }
         Expression::Loop(loop_) => find_block_use_declarations_in_block(&loop_.body, out),
+        Expression::Coro(coro) => find_block_use_declarations_in_block(&coro.body, out),
+        Expression::Await(await_) => {
+            find_block_use_declarations_in_expression(&await_.operand, out)
+        }
         Expression::Resource(_) => {}
         Expression::With(with) => {
             find_block_use_declarations_in_expression(&with.value, out);

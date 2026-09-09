@@ -83,6 +83,15 @@ pub enum BuiltinType {
     IO,
     Reactive,
     Syntax,
+    Coroutine,
+    Task,
+    Completed,
+    Cancelled,
+    Scheduler,
+    Tasks,
+    Wait,
+    Resolver,
+    CompletionToken,
 }
 
 /// Describes a compiler-owned construction strategy that may be entered while
@@ -292,6 +301,24 @@ pub enum IntrinsicFunction {
     Reaction,
     Batch,
     Snapshot,
+    /// Provisional Step-2 coroutine driver: runs a `Coroutine{E} T` to
+    /// completion and yields `T`. Replaced by the scheduler's `pump` in Step 3.
+    CoroutineBlockOn,
+    SchedulerCreate,
+    TaskScope,
+    Spawn,
+    Pump,
+    YieldNow,
+    TaskIsFinished,
+    TaskCancel,
+    Completion,
+    CompletionWithCancel,
+    CompletionToken,
+    CompletionTokenResolve,
+    CompletionTokenCancel,
+    ResolverComplete,
+    ResolverCancel,
+    Until,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -1553,6 +1580,26 @@ impl NameResolver {
                 BuiltinType::Reactive,
             );
         }
+        if let Some(coroutine) = program
+            .modules()
+            .iter()
+            .find(|module| module.path.ends_with("std/coroutine.sta"))
+            .map(|module| module.id)
+        {
+            for (name, builtin) in [
+                ("Coroutine", BuiltinType::Coroutine),
+                ("Task", BuiltinType::Task),
+                ("Completed", BuiltinType::Completed),
+                ("Cancelled", BuiltinType::Cancelled),
+                ("Scheduler", BuiltinType::Scheduler),
+                ("Tasks", BuiltinType::Tasks),
+                ("Wait", BuiltinType::Wait),
+                ("Resolver", BuiltinType::Resolver),
+                ("CompletionToken", BuiltinType::CompletionToken),
+            ] {
+                self.register_builtin_type(coroutine, "std.coroutine", name, builtin);
+            }
+        }
 
         for (id, declaration) in &self.type_declarations {
             if declaration.recursive_constructor && !self.recursive_constructions.contains_key(id) {
@@ -1745,6 +1792,68 @@ impl NameResolver {
                 ));
             }
         }
+        // These live in the on-demand `std.coroutine` module, so they are
+        // wired only when it is actually loaded.
+        for (name, intrinsic) in [
+            ("block_on", IntrinsicFunction::CoroutineBlockOn),
+            ("scheduler", IntrinsicFunction::SchedulerCreate),
+            ("task_scope", IntrinsicFunction::TaskScope),
+            ("spawn", IntrinsicFunction::Spawn),
+            ("pump", IntrinsicFunction::Pump),
+            ("yield_now", IntrinsicFunction::YieldNow),
+            ("completion", IntrinsicFunction::Completion),
+            ("completion_with_cancel", IntrinsicFunction::CompletionWithCancel),
+            ("completion_token", IntrinsicFunction::CompletionToken),
+            ("until", IntrinsicFunction::Until),
+        ] {
+            if let Some(symbol) = program
+                .modules()
+                .iter()
+                .filter(|module| module.path.starts_with(standard_library_directory))
+                .find_map(|module| self.module_values[module.id.0].get(name).copied())
+            {
+                self.intrinsic_functions.insert(symbol, intrinsic);
+            }
+        }
+        // `Task.is_finished` / `Task.cancel` and `Resolver.complete` /
+        // `Resolver.cancel` are companion methods, so they are keyed under their
+        // type's namespace rather than the module's value scope.
+        for (namespace, methods) in [
+            (
+                "Task",
+                [
+                    ("is_finished", IntrinsicFunction::TaskIsFinished),
+                    ("cancel", IntrinsicFunction::TaskCancel),
+                ],
+            ),
+            (
+                "Resolver",
+                [
+                    ("complete", IntrinsicFunction::ResolverComplete),
+                    ("cancel", IntrinsicFunction::ResolverCancel),
+                ],
+            ),
+            (
+                "CompletionToken",
+                [
+                    ("resolve", IntrinsicFunction::CompletionTokenResolve),
+                    ("cancel", IntrinsicFunction::CompletionTokenCancel),
+                ],
+            ),
+        ] {
+            let Some(companion) = self
+                .interfaces
+                .iter()
+                .find_map(|interface| interface.namespaces.get(namespace).copied())
+            else {
+                continue;
+            };
+            for (name, intrinsic) in methods {
+                if let Some(symbol) = self.interfaces[companion.0].values.get(name).copied() {
+                    self.intrinsic_functions.insert(symbol, intrinsic);
+                }
+            }
+        }
         for source_module in program.modules() {
             if source_module.path.starts_with(standard_library_directory) {
                 continue;
@@ -1897,6 +2006,12 @@ impl NameResolver {
             } else if builtin == BuiltinType::Slice {
                 declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
                     && declaration.representation_visibility == Visibility::Private
+            } else if matches!(builtin, BuiltinType::Completed | BuiltinType::Cancelled) {
+                // `await Task` yields `Completed T | Cancelled`, a sum the body
+                // can `match`; both alternatives are represented distinct types
+                // (`Completed T` wraps `T`, `Cancelled` wraps `()`).
+                declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
+                    && declaration.representation_visibility == Visibility::Public
             } else {
                 declaration.kind == staple_syntax::TypeDeclarationKind::Opaque
             };
@@ -1921,6 +2036,43 @@ impl NameResolver {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 "standard library type `IO` must not accept compile-time arguments",
+            ));
+        }
+        if builtin == BuiltinType::Coroutine
+            && !matches!(
+                declaration.type_parameters.as_slice(),
+                [
+                    TypeParameterPattern::Effect(_),
+                    TypeParameterPattern::Binding(_),
+                ]
+            )
+        {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                "standard library type `Coroutine` must accept one effect parameter and one type parameter",
+            ));
+        }
+        if matches!(
+            builtin,
+            BuiltinType::Task | BuiltinType::Completed | BuiltinType::Wait | BuiltinType::Resolver
+        ) && declaration.type_parameters.len() != 1
+        {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("standard library type `{name}` must accept one compile-time argument"),
+            ));
+        }
+        if matches!(
+            builtin,
+            BuiltinType::Cancelled
+                | BuiltinType::Scheduler
+                | BuiltinType::Tasks
+                | BuiltinType::CompletionToken
+        ) && !declaration.type_parameters.is_empty()
+        {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                format!("standard library type `{name}` must not accept compile-time arguments"),
             ));
         }
         if builtin == BuiltinType::Ref
@@ -3815,6 +3967,16 @@ impl NameResolver {
                 }
                 scopes.pop();
             }
+            Expression::Coro(value) => {
+                scopes.push(HashMap::new());
+                for item in &value.body.items {
+                    self.resolve_quoted_item(item, scopes);
+                }
+                scopes.pop();
+            }
+            Expression::Await(value) => {
+                self.resolve_quoted_expression(&value.operand, scopes);
+            }
             Expression::With(value) => {
                 self.resolve_quoted_expression(&value.value, scopes);
                 scopes.push(HashMap::new());
@@ -4251,6 +4413,19 @@ impl NameResolver {
                 self.loop_depth += 1;
                 self.resolve_block(&loop_.body);
                 self.loop_depth -= 1;
+            }
+            Expression::Coro(coro) => {
+                // A coroutine body is a suspension-permitting scope that does
+                // not inherit the enclosing loop. It is not a function
+                // boundary for name resolution: outer locals it mentions are
+                // captured, exactly as for the implicit thunk it lowers to.
+                let outer_loop_depth = self.loop_depth;
+                self.loop_depth = 0;
+                self.resolve_block(&coro.body);
+                self.loop_depth = outer_loop_depth;
+            }
+            Expression::Await(await_) => {
+                self.resolve_expression(&await_.operand, None, None);
             }
             Expression::Resource(resource) => self.resolve_type(&resource.resource),
             Expression::With(with) => {
@@ -5969,6 +6144,19 @@ impl<'a> InitializationAnalyzer<'a> {
             Expression::Loop(loop_) => {
                 self.expression(&Expression::Block(loop_.body.clone()), local, outer);
             }
+            Expression::Coro(coro) => {
+                // Like a closure, a coroutine captures references for deferred
+                // use rather than evaluating them at construction.
+                let mut snapshot = outer.clone();
+                snapshot.extend(local.iter().map(|(symbol, state)| (*symbol, *state)));
+                let mut body_local = HashMap::new();
+                self.expression(
+                    &Expression::Block(coro.body.clone()),
+                    &mut body_local,
+                    &snapshot,
+                );
+            }
+            Expression::Await(await_) => self.expression(&await_.operand, local, outer),
             Expression::Resource(_) => {}
             Expression::With(with) => {
                 self.expression(&with.value, local, outer);
@@ -6205,6 +6393,10 @@ fn find_block_type_declarations_in_expression<'a>(
             }
         }
         Expression::Loop(loop_) => find_block_type_declarations_in_block(&loop_.body, out),
+        Expression::Coro(coro) => find_block_type_declarations_in_block(&coro.body, out),
+        Expression::Await(await_) => {
+            find_block_type_declarations_in_expression(&await_.operand, out)
+        }
         Expression::Resource(_) => {}
         Expression::With(with) => {
             find_block_type_declarations_in_expression(&with.value, out);

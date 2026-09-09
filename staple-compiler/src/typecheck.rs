@@ -994,6 +994,24 @@ pub struct TypedModule {
     iterator_trait: Option<TraitId>,
     io_type: Option<TypeId>,
     reactive_type: Option<TypeId>,
+    #[allow(dead_code)]
+    coroutine_type: Option<TypeId>,
+    #[allow(dead_code)]
+    task_type: Option<TypeId>,
+    #[allow(dead_code)]
+    completed_type: Option<TypeId>,
+    #[allow(dead_code)]
+    cancelled_type: Option<TypeId>,
+    #[allow(dead_code)]
+    tasks_type: Option<TypeId>,
+    #[allow(dead_code)]
+    scheduler_type: Option<TypeId>,
+    #[allow(dead_code)]
+    wait_type: Option<TypeId>,
+    #[allow(dead_code)]
+    resolver_type: Option<TypeId>,
+    #[allow(dead_code)]
+    completion_token_type: Option<TypeId>,
     entry_reactive_required: bool,
     mutated_parameter_symbols: HashSet<SymbolId>,
     move_parameter_symbols: HashSet<SymbolId>,
@@ -1005,9 +1023,17 @@ pub struct TypedModule {
     implicit_thunks: HashMap<SyntaxId, ResolvedFunction>,
     derived_symbols: HashSet<SymbolId>,
     derived_evaluators: HashMap<SymbolId, SyntaxId>,
+    coroutine_plans: HashMap<SyntaxId, crate::coroutine_lower::CoroutinePlan>,
 }
 
 impl TypedModule {
+    pub(crate) fn coroutine_plan(
+        &self,
+        body_syntax: SyntaxId,
+    ) -> Option<&crate::coroutine_lower::CoroutinePlan> {
+        self.coroutine_plans.get(&body_syntax)
+    }
+
     pub fn resolved(&self) -> &ResolvedModule {
         &self.resolved
     }
@@ -1231,6 +1257,65 @@ impl TypedModule {
         matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.reactive_type)
     }
 
+    pub(crate) fn is_coroutine_type(&self, value_type: &CheckedType) -> bool {
+        matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.coroutine_type)
+    }
+
+    pub(crate) fn is_task_type(&self, value_type: &CheckedType) -> bool {
+        matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.task_type)
+    }
+
+    pub(crate) fn is_scheduler_type(&self, value_type: &CheckedType) -> bool {
+        matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.scheduler_type)
+    }
+
+    pub(crate) fn is_tasks_type(&self, value_type: &CheckedType) -> bool {
+        matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.tasks_type)
+    }
+
+    pub(crate) fn is_wait_type(&self, value_type: &CheckedType) -> bool {
+        matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.wait_type)
+    }
+
+    pub(crate) fn is_resolver_type(&self, value_type: &CheckedType) -> bool {
+        matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.resolver_type)
+    }
+
+    pub(crate) fn is_completion_token_type(&self, value_type: &CheckedType) -> bool {
+        matches!(value_type, CheckedType::Opaque { id, .. } if Some(*id) == self.completion_token_type)
+    }
+
+    /// The awaited type of a `Wait T` handle.
+    pub(crate) fn wait_result<'t>(&self, value_type: &'t CheckedType) -> Option<&'t CheckedType> {
+        let CheckedType::Opaque { id, arguments, .. } = value_type else {
+            return None;
+        };
+        (Some(*id) == self.wait_type && arguments.len() == 1).then(|| &arguments[0])
+    }
+
+    /// The deferred effect row and yielded type of a `Coroutine{E} T` value.
+    pub(crate) fn coroutine_parts<'t>(
+        &self,
+        value_type: &'t CheckedType,
+    ) -> Option<(&'t CheckedEffectSet, &'t CheckedType)> {
+        let CheckedType::Opaque { id, arguments, .. } = value_type else {
+            return None;
+        };
+        if Some(*id) != self.coroutine_type || arguments.len() != 2 {
+            return None;
+        }
+        Some((effect_substitution_value(&arguments[0])?, &arguments[1]))
+    }
+
+    /// The yielded type of a `Task T` handle.
+    #[allow(dead_code)]
+    pub(crate) fn task_result<'t>(&self, value_type: &'t CheckedType) -> Option<&'t CheckedType> {
+        let CheckedType::Opaque { id, arguments, .. } = value_type else {
+            return None;
+        };
+        (Some(*id) == self.task_type && arguments.len() == 1).then(|| &arguments[0])
+    }
+
     pub(crate) fn io_resource(&self) -> Option<CheckedResource> {
         self.io_type.map(|id| CheckedResource {
             value_type: CheckedType::Opaque {
@@ -1270,6 +1355,20 @@ impl TypedModule {
     }
 
     pub fn type_needs_drop(&self, value_type: &CheckedType) -> bool {
+        // A coroutine frame owns its captures and must run `cleanup` when
+        // dropped; a scheduler owns its queues. A `Task` handle's record is
+        // GC-managed, so dropping a handle is a no-op (it does not cancel the
+        // task) — but it stays affine via the non-`Copy` opaque rule. A `Wait`
+        // dropped unconsumed abandons its completion; an unresolved `Resolver`
+        // dropped cancels it.
+        if self.is_coroutine_type(value_type)
+            || self.is_scheduler_type(value_type)
+            || self.is_wait_type(value_type)
+            || self.is_resolver_type(value_type)
+            || self.is_completion_token_type(value_type)
+        {
+            return true;
+        }
         type_needs_drop(value_type, self.drop_trait, &self.trait_implementations)
     }
 
@@ -1615,6 +1714,18 @@ pub struct TypeChecker {
     diagnostics: Vec<Diagnostic>,
     io_type: Option<TypeId>,
     reactive_type: Option<TypeId>,
+    coroutine_type: Option<TypeId>,
+    task_type: Option<TypeId>,
+    completed_type: Option<TypeId>,
+    cancelled_type: Option<TypeId>,
+    tasks_type: Option<TypeId>,
+    scheduler_type: Option<TypeId>,
+    wait_type: Option<TypeId>,
+    resolver_type: Option<TypeId>,
+    completion_token_type: Option<TypeId>,
+    /// Whether we are currently checking a `coro` body (or a nested block
+    /// within one). `await` is permitted only when this is true.
+    suspension_allowed: bool,
     /// Whether the entry module's top-level code requires the `Reactive`
     /// resource, so codegen knows whether to implicitly provide one.
     entry_reactive_required: bool,
@@ -1671,6 +1782,22 @@ impl TypeChecker {
             .keys()
             .find(|id| module.builtin_type(**id) == Some(BuiltinType::Reactive))
             .copied();
+        let builtin_type_id = |wanted: BuiltinType| {
+            module
+                .type_declarations()
+                .keys()
+                .find(|id| module.builtin_type(**id) == Some(wanted))
+                .copied()
+        };
+        self.coroutine_type = builtin_type_id(BuiltinType::Coroutine);
+        self.task_type = builtin_type_id(BuiltinType::Task);
+        self.completed_type = builtin_type_id(BuiltinType::Completed);
+        self.cancelled_type = builtin_type_id(BuiltinType::Cancelled);
+        self.tasks_type = builtin_type_id(BuiltinType::Tasks);
+        self.scheduler_type = builtin_type_id(BuiltinType::Scheduler);
+        self.wait_type = builtin_type_id(BuiltinType::Wait);
+        self.resolver_type = builtin_type_id(BuiltinType::Resolver);
+        self.completion_token_type = builtin_type_id(BuiltinType::CompletionToken);
         self.copy_trait = module.standard_trait("Copy");
         self.natural_trait = module.standard_trait("Natural");
         self.sized_trait = module.standard_trait("Sized");
@@ -1793,6 +1920,15 @@ impl TypeChecker {
             iterator_trait: self.iterator_trait,
             io_type: self.io_type,
             reactive_type: self.reactive_type,
+            coroutine_type: self.coroutine_type,
+            task_type: self.task_type,
+            completed_type: self.completed_type,
+            cancelled_type: self.cancelled_type,
+            tasks_type: self.tasks_type,
+            scheduler_type: self.scheduler_type,
+            wait_type: self.wait_type,
+            resolver_type: self.resolver_type,
+            completion_token_type: self.completion_token_type,
             entry_reactive_required: self.entry_reactive_required,
             mutated_parameter_symbols: self.mutated_parameter_symbols,
             move_parameter_symbols: self.move_parameter_symbols,
@@ -1804,13 +1940,19 @@ impl TypeChecker {
             implicit_thunks: self.implicit_thunks,
             derived_symbols: self.derived_symbols,
             derived_evaluators: self.derived_evaluators,
+            coroutine_plans: HashMap::new(),
         };
         let (ownership, ownership_diagnostics) = crate::ownership::OwnershipChecker::check(&typed);
-        if ownership_diagnostics.is_empty() {
-            Ok(TypedModule { ownership, ..typed })
-        } else {
-            Err(ownership_diagnostics)
+        if !ownership_diagnostics.is_empty() {
+            return Err(ownership_diagnostics);
         }
+        let mut typed = TypedModule { ownership, ..typed };
+        let (plans, plan_diagnostics) = crate::coroutine_lower::plan(&typed);
+        if !plan_diagnostics.is_empty() {
+            return Err(plan_diagnostics);
+        }
+        typed.coroutine_plans = plans;
+        Ok(typed)
     }
 
     fn collect_type_declarations(&mut self, module: &ResolvedModule) {
@@ -3138,7 +3280,23 @@ impl TypeChecker {
                 crate::IntrinsicFunction::ReactiveScope
                 | crate::IntrinsicFunction::Reaction
                 | crate::IntrinsicFunction::Batch
-                | crate::IntrinsicFunction::Snapshot => self
+                | crate::IntrinsicFunction::Snapshot
+                | crate::IntrinsicFunction::CoroutineBlockOn
+                | crate::IntrinsicFunction::SchedulerCreate
+                | crate::IntrinsicFunction::TaskScope
+                | crate::IntrinsicFunction::Spawn
+                | crate::IntrinsicFunction::Pump
+                | crate::IntrinsicFunction::YieldNow
+                | crate::IntrinsicFunction::TaskIsFinished
+                | crate::IntrinsicFunction::TaskCancel
+                | crate::IntrinsicFunction::Completion
+                | crate::IntrinsicFunction::CompletionWithCancel
+                | crate::IntrinsicFunction::CompletionToken
+                | crate::IntrinsicFunction::CompletionTokenResolve
+                | crate::IntrinsicFunction::CompletionTokenCancel
+                | crate::IntrinsicFunction::ResolverComplete
+                | crate::IntrinsicFunction::ResolverCancel
+                | crate::IntrinsicFunction::Until => self
                     .symbol_types
                     .get(symbol)
                     .cloned()
@@ -3537,7 +3695,11 @@ impl TypeChecker {
         self.pending_propagations.push(Vec::new());
         let body_expected = (!matches!(*function_type.result, CheckedType::Inferred))
             .then_some(function_type.result.as_ref());
+        // An ordinary nested function does not inherit `await` permission from
+        // an enclosing `coro` body.
+        let outer_suspension = std::mem::replace(&mut self.suspension_allowed, false);
         let body_type = self.check_expression_expected(module, &function.body, body_expected);
+        self.suspension_allowed = outer_suspension;
         let returned = self.did_return;
         let declared_result = self.return_contexts.pop().expect("function return context");
         let mut contributions = self
@@ -3671,6 +3833,23 @@ impl TypeChecker {
             }
             Expression::Loop(value) => {
                 self.block_effects_now(module, &value.body, target_parameters)
+            }
+            // Constructing a coroutine is pure: its body's effects are
+            // deferred and recorded on the `Coroutine{E}` type, inferred via
+            // the body's own implicit thunk.
+            Expression::Coro(_) => CheckedEffectSet::default(),
+            // Awaiting runs the coroutine as a child continuation, so its
+            // deferred row is folded into the current body's effects.
+            Expression::Await(value) => {
+                let mut effects =
+                    self.expression_effects_now(module, &value.operand, target_parameters);
+                if let Some(operand_type) =
+                    self.expression_types.get(&value.operand.syntax().id)
+                    && let Some((deferred, _)) = self.coroutine_parts(operand_type)
+                {
+                    effects = effects.union(deferred);
+                }
+                effects
             }
             Expression::Resource(value) => self
                 .resource_types
@@ -4565,6 +4744,12 @@ impl TypeChecker {
             Expression::Loop(value) => value.body.items.iter().fold(false, |changed, item| {
                 self.refresh_block_item_function_types(module, item) | changed
             }),
+            Expression::Coro(value) => value.body.items.iter().fold(false, |changed, item| {
+                self.refresh_block_item_function_types(module, item) | changed
+            }),
+            Expression::Await(value) => {
+                self.refresh_expression_function_types(module, &value.operand)
+            }
             Expression::With(value) => {
                 let mut changed = self.refresh_expression_function_types(module, &value.value);
                 for item in &value.body.items {
@@ -4719,8 +4904,16 @@ impl TypeChecker {
             .insert(expression.syntax().id, resources);
         match expression {
             // A nested function literal's own syntax nodes are recorded
-            // separately, on its own pass over `module.functions()`.
-            Expression::Function(_) | Expression::Resource(_) => {}
+            // separately, on its own pass over `module.functions()`. A `coro`
+            // body is recorded on its own implicit-thunk pass for the same
+            // reason: its effects are deferred, not the enclosing function's.
+            Expression::Function(_) | Expression::Coro(_) | Expression::Resource(_) => {}
+            Expression::Await(value) => self.record_expression_effects(
+                module,
+                &value.operand,
+                target_parameters,
+                current_module,
+            ),
             Expression::Satisfies(value) => self.record_expression_effects(
                 module,
                 &value.value,
@@ -6150,7 +6343,12 @@ impl TypeChecker {
             && is_empty_product_type(&callback.parameter)
         {
             self.implicit_thunk_context = false;
+            // A thunk-ified callback argument (a `reaction`/`batch` body, and
+            // the like) is its own suspension boundary: it does not inherit an
+            // enclosing `coro` body's `await` permission.
+            let outer_suspension = std::mem::replace(&mut self.suspension_allowed, false);
             let direct = self.check_expression(module, expression);
+            self.suspension_allowed = outer_suspension;
             if merge_types(direct.clone(), CheckedType::Function(callback.clone())).is_some() {
                 self.implicit_thunk_context = true;
                 return direct;
@@ -6221,6 +6419,8 @@ impl TypeChecker {
             Expression::Match(match_) => self.check_match_expression(module, match_, expected),
             Expression::Logical(logical) => self.check_logical_expression(module, logical),
             Expression::Loop(loop_) => self.check_loop_expression(module, loop_, expected),
+            Expression::Coro(coro) => self.check_coro_expression(module, coro, expected),
+            Expression::Await(await_) => self.check_await_expression(module, await_),
             Expression::Resource(resource) => {
                 let resources = self.resolve_effect_set(
                     module,
@@ -8676,6 +8876,139 @@ impl TypeChecker {
         result
     }
 
+    /// The deferred effect row and yielded type of a `Coroutine{E} T` value.
+    fn coroutine_parts<'t>(
+        &self,
+        value_type: &'t CheckedType,
+    ) -> Option<(&'t CheckedEffectSet, &'t CheckedType)> {
+        let CheckedType::Opaque { id, arguments, .. } = value_type else {
+            return None;
+        };
+        if Some(*id) != self.coroutine_type || arguments.len() != 2 {
+            return None;
+        }
+        Some((effect_substitution_value(&arguments[0])?, &arguments[1]))
+    }
+
+    /// The yielded type of a `Task T` handle.
+    fn task_result<'t>(&self, value_type: &'t CheckedType) -> Option<&'t CheckedType> {
+        let CheckedType::Opaque { id, arguments, .. } = value_type else {
+            return None;
+        };
+        (Some(*id) == self.task_type && arguments.len() == 1).then(|| &arguments[0])
+    }
+
+    /// The awaited type of a `Wait T` handle.
+    fn wait_result<'t>(&self, value_type: &'t CheckedType) -> Option<&'t CheckedType> {
+        let CheckedType::Opaque { id, arguments, .. } = value_type else {
+            return None;
+        };
+        (Some(*id) == self.wait_type && arguments.len() == 1).then(|| &arguments[0])
+    }
+
+    fn check_coro_expression(
+        &mut self,
+        module: &ResolvedModule,
+        coro: &staple_syntax::CoroExpression,
+        expected: Option<&CheckedType>,
+    ) -> CheckedType {
+        let Some(coroutine_id) = self.coroutine_type else {
+            self.diagnostics.push(Diagnostic::new(
+                coro.syntax.span.clone(),
+                "`coro` requires `use std.coroutine`",
+            ));
+            return CheckedType::Error;
+        };
+        // A `Coroutine{E} T` annotation supplies the body's expected yield type.
+        let expected_result = expected
+            .and_then(|ty| self.coroutine_parts(ty).map(|(_, result)| result.clone()));
+        let body = Expression::Block(coro.body.clone());
+        // The body is a suspension-permitting scope. Its `await` permission is
+        // independent of the enclosing context in both directions.
+        let previous_suspension = self.suspension_allowed;
+        self.suspension_allowed = true;
+        let body_result =
+            self.check_expression_expected(module, &body, expected_result.as_ref());
+        self.suspension_allowed = previous_suspension;
+        // Lower the body to an implicit nullary thunk so its deferred effect
+        // row is inferred and converges separately from the enclosing
+        // function; the row rides on the coroutine type, not the caller.
+        let deferred = match self.make_implicit_thunk(module, &body, body_result.clone()) {
+            CheckedType::Function(function) => function.effects,
+            _ => CheckedEffectSet::default(),
+        };
+        CheckedType::Opaque {
+            id: coroutine_id,
+            name: "Coroutine".to_owned(),
+            arguments: vec![effect_substitution_type(deferred), body_result],
+        }
+    }
+
+    fn check_await_expression(
+        &mut self,
+        module: &ResolvedModule,
+        await_: &staple_syntax::AwaitExpression,
+    ) -> CheckedType {
+        if !self.suspension_allowed {
+            self.diagnostics.push(Diagnostic::new(
+                await_.syntax.span.clone(),
+                "`await` is only allowed directly inside a `coro` body",
+            ));
+        }
+        let operand = self.check_expression(module, &await_.operand);
+        if let Some((_, result)) = self.coroutine_parts(&operand) {
+            // Awaiting a coroutine runs it as a child continuation; its
+            // deferred effects are folded into this body's row by
+            // `expression_effects_now`.
+            return result.clone();
+        }
+        if let Some(result) = self.task_result(&operand) {
+            let result = result.clone();
+            return self
+                .task_outcome_sum(result)
+                .unwrap_or(CheckedType::Error);
+        }
+        if let Some(result) = self.wait_result(&operand) {
+            // Awaiting a completion parks the task until its resolver fires;
+            // the outcome is the same `Completed T | Cancelled` sum a task
+            // await produces.
+            let result = result.clone();
+            return self
+                .task_outcome_sum(result)
+                .unwrap_or(CheckedType::Error);
+        }
+        if operand != CheckedType::Error {
+            self.diagnostics.push(Diagnostic::new(
+                await_.operand.syntax().span.clone(),
+                format!("`await` requires a coroutine, task, or wait, found `{operand}`"),
+            ));
+        }
+        CheckedType::Error
+    }
+
+    /// The `Completed T | Cancelled` sum produced by `await`-ing a `Task` or a
+    /// `Wait`.
+    fn task_outcome_sum(&self, result: CheckedType) -> Option<CheckedType> {
+        let completed = self.completed_type?;
+        let cancelled = self.cancelled_type?;
+        Some(CheckedType::Sum(CheckedSumType {
+            alternatives: vec![
+                CheckedType::Distinct {
+                    id: completed,
+                    name: "Completed".to_owned(),
+                    arguments: vec![result.clone()],
+                    representation: Box::new(result),
+                },
+                CheckedType::Distinct {
+                    id: cancelled,
+                    name: "Cancelled".to_owned(),
+                    arguments: Vec::new(),
+                    representation: Box::new(CheckedType::empty_product()),
+                },
+            ],
+        }))
+    }
+
     fn check_match_pattern(
         &mut self,
         module: &ResolvedModule,
@@ -10500,7 +10833,9 @@ impl TypeChecker {
             }
             let value_type = self.resolve_source_type_inner(module, &resource.value_type);
             let builtin_resource = matches!(&value_type, CheckedType::Opaque { id, .. }
-                if Some(*id) == self.io_type || Some(*id) == self.reactive_type);
+                if Some(*id) == self.io_type
+                    || Some(*id) == self.reactive_type
+                    || Some(*id) == self.tasks_type);
             let valid_nominal =
                 matches!(&value_type, CheckedType::Distinct { .. }) || builtin_resource;
             let concrete = !contains_type_parameter(&value_type)
@@ -11341,6 +11676,52 @@ impl TypeChecker {
                     id,
                     name: "Reactive".to_owned(),
                     arguments: Vec::new(),
+                },
+                BuiltinType::Scheduler => CheckedType::Opaque {
+                    id,
+                    name: "Scheduler".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::Tasks => CheckedType::Opaque {
+                    id,
+                    name: "Tasks".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::Coroutine => CheckedType::TypeConstructor {
+                    id,
+                    name: "Coroutine".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::Task => CheckedType::TypeConstructor {
+                    id,
+                    name: "Task".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::Wait => CheckedType::TypeConstructor {
+                    id,
+                    name: "Wait".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::Resolver => CheckedType::TypeConstructor {
+                    id,
+                    name: "Resolver".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::CompletionToken => CheckedType::Opaque {
+                    id,
+                    name: "CompletionToken".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::Completed => CheckedType::TypeConstructor {
+                    id,
+                    name: "Completed".to_owned(),
+                    arguments: Vec::new(),
+                },
+                BuiltinType::Cancelled => CheckedType::Distinct {
+                    id,
+                    name: "Cancelled".to_owned(),
+                    arguments: Vec::new(),
+                    representation: Box::new(CheckedType::empty_product()),
                 },
                 BuiltinType::Syntax => {
                     let declaration = &self.type_declarations[&id];
@@ -13205,6 +13586,14 @@ fn expression_reads_reactive(
             .items
             .iter()
             .any(|value| item(module, value, derived)),
+        Expression::Coro(value) => value
+            .body
+            .items
+            .iter()
+            .any(|value| item(module, value, derived)),
+        Expression::Await(value) => {
+            expression_reads_reactive(module, &value.operand, derived)
+        }
         Expression::With(value) => {
             expression_reads_reactive(module, &value.value, derived)
                 || value
@@ -13264,6 +13653,12 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
                     item_value_bindings(item, bindings);
                 }
             }
+            Expression::Coro(value) => {
+                for item in &value.body.items {
+                    item_value_bindings(item, bindings);
+                }
+            }
+            Expression::Await(value) => expression(&value.operand, bindings),
             Expression::With(value) => {
                 expression(&value.value, bindings);
                 for item in &value.body.items {
@@ -13422,6 +13817,14 @@ fn expression_mentions_symbols(
             .items
             .iter()
             .any(|item| block_item(module, item, symbols)),
+        Expression::Coro(value) => value
+            .body
+            .items
+            .iter()
+            .any(|item| block_item(module, item, symbols)),
+        Expression::Await(value) => {
+            expression_mentions_symbols(module, &value.operand, symbols)
+        }
         Expression::With(value) => {
             expression_mentions_symbols(module, &value.value, symbols)
                 || value
@@ -13505,6 +13908,8 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
                     .any(|arm| expression_contains_assignment(&arm.body))
         }
         Expression::Loop(value) => value.body.items.iter().any(block_item),
+        Expression::Coro(value) => value.body.items.iter().any(block_item),
+        Expression::Await(value) => expression_contains_assignment(&value.operand),
         Expression::With(value) => {
             expression_contains_assignment(&value.value) || value.body.items.iter().any(block_item)
         }
@@ -13598,6 +14003,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
         match expression {
             Expression::Block(value) => value.items.iter().for_each(&mut item),
             Expression::Loop(value) => value.body.items.iter().for_each(&mut item),
+            Expression::Coro(value) => value.body.items.iter().for_each(&mut item),
             Expression::With(value) => value.body.items.iter().for_each(&mut item),
             _ => {}
         }
@@ -13668,7 +14074,9 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
             Expression::Match(value) => {
                 visit(module, &value.subject, &declared, captures);
                 for arm in &value.arms {
-                    visit(module, &arm.body, &declared, captures);
+                    let mut arm_declared = declared.clone();
+                    declare_pattern(module, &arm.pattern, &mut arm_declared);
+                    visit(module, &arm.body, &arm_declared, captures);
                 }
             }
             Expression::Loop(value) => {
@@ -13676,6 +14084,12 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
                     visit_item(module, item, &declared, captures);
                 }
             }
+            Expression::Coro(value) => {
+                for item in &value.body.items {
+                    visit_item(module, item, &declared, captures);
+                }
+            }
+            Expression::Await(value) => visit(module, &value.operand, &declared, captures),
             Expression::With(value) => {
                 visit(module, &value.value, &declared, captures);
                 for item in &value.body.items {

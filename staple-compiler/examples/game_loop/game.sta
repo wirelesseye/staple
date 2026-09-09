@@ -1,0 +1,22 @@
+// A host-loop adapter built entirely on `std.coroutine` — no game concept
+// reaches the compiler or the executor. The host drives time by writing
+// signals and calling `pump`; behaviours `await` these combinators.
+pub mod
+use std.coroutine.*
+
+// Resume once a monotonic counter signal (read reactively by `read`) passes
+// `mark`. Used for the per-frame and per-fixed-tick counters.
+pub def after_count: (read: () ->{state.read} I32, mark: I32) ->{Reactive} Coroutine{Reactive} () =
+    (read, mark) => until { read () > mark }
+
+// Absolute-deadline wait on a clock. `clock` reads the clock's millisecond
+// signal; `frames` reads the update-frame counter. It first waits one update
+// tick (so a zero-duration sleep still defers), then the deadline.
+pub def wait_deadline:
+    (clock: () ->{state.read} I32, frames: () ->{state.read} I32, deadline: I32, at_frame: I32)
+        ->{Reactive} Coroutine{Reactive} () =
+    (clock, frames, deadline, at_frame) => coro {
+        let _ = await (until { frames () > at_frame })
+        let _ = await (until { clock () >= deadline })
+        ()
+    }

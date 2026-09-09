@@ -6,6 +6,8 @@ pub enum Expression {
     Satisfies(Box<SatisfiesExpression>),
     Match(MatchExpression),
     Loop(LoopExpression),
+    Coro(CoroExpression),
+    Await(AwaitExpression),
     Resource(Box<ResourceExpression>),
     With(Box<WithResourceExpression>),
     Block(BlockExpression),
@@ -35,6 +37,8 @@ impl Expression {
             Self::Satisfies(expression) => &expression.syntax,
             Self::Match(expression) => &expression.syntax,
             Self::Loop(expression) => &expression.syntax,
+            Self::Coro(expression) => &expression.syntax,
+            Self::Await(expression) => &expression.syntax,
             Self::Resource(expression) => &expression.syntax,
             Self::With(expression) => &expression.syntax,
             Self::Block(expression) => &expression.syntax,
@@ -72,6 +76,23 @@ pub struct SyntaxArgumentExpression {
 pub struct LoopExpression {
     pub syntax: Syntax,
     pub body: BlockExpression,
+}
+
+/// A lazy `coro { ... }` coroutine constructor. The braces delimit a block
+/// whose tail expression is the coroutine's result; the body is not evaluated
+/// when the coroutine value is constructed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoroExpression {
+    pub syntax: Syntax,
+    pub body: BlockExpression,
+}
+
+/// A prefix `await <call-or-postfix expression>`. The operand is parsed at
+/// call/postfix precedence; a larger expression must be parenthesized.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AwaitExpression {
+    pub syntax: Syntax,
+    pub operand: Box<Expression>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

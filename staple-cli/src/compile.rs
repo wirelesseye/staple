@@ -1551,6 +1551,1126 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_coroutines_with_nested_await_and_effect_ordering() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-coro-run-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-coro-run-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "def worker: I32 -> Coroutine{IO} I32 = n => coro {\n",
+                "    println \"worker\"\n",
+                "    n * 10\n",
+                "}\n",
+                "def driver: () -> Coroutine{IO} I32 = () => coro {\n",
+                "    let a = await (worker 4)\n",
+                "    println \"driver resumed\"\n",
+                "    a + 2\n",
+                "}\n",
+                "def sum_to: I32 -> Coroutine{} I32 = n => coro {\n",
+                "    match n <= 0 {\n",
+                "        True() => 0,\n",
+                "        False() => {\n",
+                "            let rest = await (sum_to (n - 1))\n",
+                "            rest + n\n",
+                "        },\n",
+                "    }\n",
+                "}\n",
+                "println \"driver: ${block_on (driver ()):?}\"\n",
+                "println \"sum_to 50: ${block_on (sum_to 50):?}\"\n",
+            ),
+        )
+        .expect("temporary coroutine source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("coroutine executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("coroutine executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "coroutine program exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            "worker\ndriver resumed\ndriver: 42\nsum_to 50: 1275\n",
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn scheduler_pumps_spawned_tasks_with_fifo_carryover_and_a_budget() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-sched-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-sched-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "def job: I32 -> Coroutine{Tasks, IO} () = id => coro {\n",
+                "    println \"job ${id:?} start\"\n",
+                "    let _ = await (yield_now ())\n",
+                "    println \"job ${id:?} done\"\n",
+                "}\n",
+                "let sched = scheduler ()\n",
+                "with Tasks = task_scope (sched) {\n",
+                "    let a = spawn (job 1)\n",
+                "    let _ = spawn (job 2)\n",
+                "    let _ = spawn (job 3)\n",
+                "    println \"a finished before pump: ${Task.is_finished a:?}\"\n",
+                "    let r1 = pump (sched, 2)\n",
+                "    println \"pump 1: e=${r1.executed:?} ready=${r1.ready:?}\"\n",
+                "    let r2 = pump (sched, 10)\n",
+                "    println \"pump 2: e=${r2.executed:?} ready=${r2.ready:?}\"\n",
+                "    let r3 = pump (sched, 10)\n",
+                "    println \"pump 3: e=${r3.executed:?} ready=${r3.ready:?}\"\n",
+                "    println \"a finished after: ${Task.is_finished a:?}\"\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary scheduler source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("scheduler executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("scheduler executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "scheduler program exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                "a finished before pump: False\n",
+                // pump 1, budget 2: jobs 1 and 2 start and yield; job 3 is not
+                // reached, so `ready` = job 3 + the two yielded continuations.
+                "job 1 start\n",
+                "job 2 start\n",
+                "pump 1: e=2 ready=3\n",
+                // pump 2: the un-run job 3 (most senior) runs first and yields,
+                // then the carried-over continuations of jobs 1 and 2 finish.
+                "job 3 start\n",
+                "job 1 done\n",
+                "job 2 done\n",
+                "pump 2: e=3 ready=1\n",
+                // pump 3: job 3's continuation finishes.
+                "job 3 done\n",
+                "pump 3: e=1 ready=0\n",
+                "a finished after: True\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn awaiting_a_spawned_task_delivers_its_completed_value() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-await-task-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-await-task-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "def answer: I32 -> Coroutine{} I32 = base => coro { base + 2 }\n",
+                "def parent: () -> Coroutine{Tasks, IO} () = () => coro {\n",
+                "    let w = spawn (answer 40)\n",
+                "    println \"parent awaiting\"\n",
+                "    let r = await w\n",
+                "    match r {\n",
+                "        Completed v => println \"parent got ${v:?}\",\n",
+                "        Cancelled() => println \"parent saw cancellation\",\n",
+                "    }\n",
+                "}\n",
+                "let sched = scheduler ()\n",
+                "with Tasks = task_scope (sched) {\n",
+                "    let p = spawn (parent ())\n",
+                "    println \"p finished at start: ${Task.is_finished p:?}\"\n",
+                "    let r1 = pump (sched, 10)\n",
+                "    println \"pump 1: e=${r1.executed:?} ready=${r1.ready:?}\"\n",
+                "    let r2 = pump (sched, 10)\n",
+                "    println \"pump 2: e=${r2.executed:?} ready=${r2.ready:?}\"\n",
+                "    let r3 = pump (sched, 10)\n",
+                "    println \"pump 3: e=${r3.executed:?} ready=${r3.ready:?}\"\n",
+                "    println \"p finished after: ${Task.is_finished p:?}\"\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary await-task source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("await-task executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("await-task executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "await-task program exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                "p finished at start: False\n",
+                // pump 1 runs `parent`, which spawns `answer 40` and parks on
+                // `await w`; the spawned task is eligible next pump.
+                "parent awaiting\n",
+                "pump 1: e=1 ready=1\n",
+                // pump 2 runs `answer 40` to completion; finishing it re-queues
+                // the waiting `parent`.
+                "pump 2: e=1 ready=1\n",
+                // pump 3 resumes `parent` past the await with `Completed 42`.
+                "parent got 42\n",
+                "pump 3: e=1 ready=0\n",
+                "p finished after: True\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cancelling_tasks_unwinds_them_at_the_next_boundary() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-cancel-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-cancel-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "def quiet: () -> Coroutine{IO} () = () => coro { println \"quiet ran\" }\n",
+                "def stepper: I32 -> Coroutine{Tasks, IO} () = id => coro {\n",
+                "    println \"step ${id:?} start\"\n",
+                "    let _ = await (yield_now ())\n",
+                "    println \"step ${id:?} resumed\"\n",
+                "}\n",
+                "let sched = scheduler ()\n",
+                "with Tasks = task_scope (sched) {\n",
+                "    let a = spawn (quiet ())\n",
+                "    Task.cancel a\n",
+                "    println \"a finished before pump: ${Task.is_finished a:?}\"\n",
+                "    let _ = pump (sched, 10)\n",
+                "    println \"a finished after pump: ${Task.is_finished a:?}\"\n",
+                "    let b = spawn (stepper 1)\n",
+                "    let _ = pump (sched, 10)\n",
+                "    println \"b finished at yield: ${Task.is_finished b:?}\"\n",
+                "    Task.cancel b\n",
+                "    let _ = pump (sched, 10)\n",
+                "    println \"b finished after cancel: ${Task.is_finished b:?}\"\n",
+                "    let _ = spawn (quiet ())\n",
+                "}\n",
+                // The scope closed with a task still queued: teardown cancelled
+                // it, so pumping the surviving scheduler never runs its body.
+                "let after = pump (sched, 10)\n",
+                "println \"post-close pump executed: ${after.executed:?}\"\n",
+            ),
+        )
+        .expect("temporary cancellation source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("cancellation executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("cancellation executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "cancellation program exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                // `a` is cancelled while still queued: `is_finished` only turns
+                // true once the pump has actually driven it into its unwind, and
+                // its body never runs.
+                "a finished before pump: False\n",
+                "a finished after pump: True\n",
+                // `b` runs to its `yield_now`, is cancelled there, and unwinds on
+                // the next pump without printing its "resumed" line.
+                "step 1 start\n",
+                "b finished at yield: False\n",
+                "b finished after cancel: True\n",
+                // The last `spawn` is still queued at scope close; teardown
+                // cancels it, so the post-close pump drives only the spent frame
+                // and its body never prints.
+                "post-close pump executed: 1\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn pump_traps_inside_a_reaction_or_an_open_batch() {
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        for (label, program) in [
+            (
+                "reaction",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "let signal tick = 0\n",
+                    "let sched = scheduler ()\n",
+                    "with Reactive = reactive_scope () {\n",
+                    "    reaction {\n",
+                    "        let _ = tick\n",
+                    "        let _ = pump (sched, 1)\n",
+                    "        ()\n",
+                    "    }\n",
+                    "    tick = 1\n",
+                    "}\n",
+                ),
+            ),
+            (
+                "batch",
+                concat!(
+                    "use std.coroutine.*\n",
+                    "let sched = scheduler ()\n",
+                    "batch {\n",
+                    "    let _ = pump (sched, 1)\n",
+                    "    ()\n",
+                    "}\n",
+                ),
+            ),
+        ] {
+            let nonce = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos();
+            let source =
+                std::env::temp_dir().join(format!("staple-compiler-pumpguard-{label}-{nonce}.sta"));
+            let output =
+                std::env::temp_dir().join(format!("staple-compiler-pumpguard-{label}-{nonce}"));
+            std::fs::write(&source, program).expect("temporary pump-guard source should be writable");
+            run([
+                "--stdlib".into(),
+                standard_library.clone().into_os_string(),
+                "--emit".into(),
+                "exe".into(),
+                "-o".into(),
+                output.clone().into_os_string(),
+                source.clone().into_os_string(),
+            ])
+            .unwrap_or_else(|_| panic!("pump-guard ({label}) executable should compile"));
+            let result = Command::new(&output)
+                .output()
+                .unwrap_or_else(|_| panic!("pump-guard ({label}) executable should run"));
+            let _ = std::fs::remove_file(&source);
+            let _ = std::fs::remove_file(&output);
+            assert!(
+                !result.status.success(),
+                "`pump` inside a {label} should trap, but the program exited cleanly"
+            );
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_scheduler_drains_to_empty_after_many_task_and_cancel_cycles() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-drain-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-drain-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "def child: () -> Coroutine{} I32 = () => coro { 7 }\n",
+                "def waiter: () -> Coroutine{Tasks, IO} I32 = () => coro {\n",
+                "    let c = spawn (child ())\n",
+                "    let r = await c\n",
+                "    match r { Completed v => v, Cancelled() => 0 }\n",
+                "}\n",
+                "def stepper: () -> Coroutine{Tasks} () = () => coro {\n",
+                "    let _ = await (yield_now ())\n",
+                "    ()\n",
+                "}\n",
+                "let sched = scheduler ()\n",
+                "with Tasks = task_scope (sched) {\n",
+                "    let mut i = 0\n",
+                "    while (i < 300) {\n",
+                "        let _ = spawn (waiter ())\n",
+                "        i = i + 1\n",
+                "    }\n",
+                "    let mut rounds = 0\n",
+                "    while (rounds < 40) {\n",
+                "        let _ = pump (sched, 4096)\n",
+                "        rounds = rounds + 1\n",
+                "    }\n",
+                "    let settled = pump (sched, 4096)\n",
+                "    println \"waiters settled: executed=${settled.executed:?} ready=${settled.ready:?}\"\n",
+                "    let mut c = 0\n",
+                "    while (c < 200) {\n",
+                "        let t = spawn (stepper ())\n",
+                "        let _ = pump (sched, 1)\n",
+                "        Task.cancel t\n",
+                "        let _ = pump (sched, 8)\n",
+                "        c = c + 1\n",
+                "    }\n",
+                "    let mut d = 0\n",
+                "    while (d < 40) {\n",
+                "        let _ = pump (sched, 4096)\n",
+                "        d = d + 1\n",
+                "    }\n",
+                "    let after = pump (sched, 4096)\n",
+                "    println \"cancels settled: executed=${after.executed:?} ready=${after.ready:?}\"\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary drain source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("drain executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("drain executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "drain program exited with {}",
+            result.status
+        );
+        // After 300 spawn/await/complete tasks and 200 spawn/yield/cancel cycles,
+        // the scheduler's ready queue is empty again — no leaked or re-queued work.
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                "waiters settled: executed=0 ready=0\n",
+                "cancels settled: executed=0 ready=0\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_completion_delivers_its_value_across_resolve_orderings() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-completion-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-completion-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "def observe: (I32, move Wait I32) ->{IO} Coroutine{IO} () = (id, move w) => coro {\n",
+                "    println \"task ${id:?} parked\"\n",
+                "    let outcome = await w\n",
+                "    match outcome {\n",
+                "        Completed v => println \"task ${id:?} got ${v:?}\",\n",
+                "        Cancelled() => println \"task ${id:?} cancelled\",\n",
+                "    }\n",
+                "}\n",
+                "def make: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
+                "let sched = scheduler ()\n",
+                "with Tasks = task_scope (sched) {\n",
+                // (1) resolve after the task parks
+                "    let (w1, r1) = make sched\n",
+                "    let _ = spawn (observe (1, w1))\n",
+                "    let _ = pump (sched, 8)\n",
+                "    Resolver.complete (r1, 10)\n",
+                "    let _ = pump (sched, 8)\n",
+                // (2) resolve before the task ever runs — fast path, one resume
+                "    let (w2, r2) = make sched\n",
+                "    let _ = spawn (observe (2, w2))\n",
+                "    Resolver.complete (r2, 20)\n",
+                "    let p2 = pump (sched, 8)\n",
+                "    println \"pump 2: executed=${p2.executed:?}\"\n",
+                // (3) drop the resolver unresolved -> Cancelled
+                "    let (w3, r3) = make sched\n",
+                "    let _ = spawn (observe (3, w3))\n",
+                "    let _ = pump (sched, 8)\n",
+                "    let _ = r3\n",
+                "    let _ = pump (sched, 8)\n",
+                // (4) cancel a task parked on a wait -> unwinds, no value delivered
+                "    let (w4, r4) = make sched\n",
+                "    let h4 = spawn (observe (4, w4))\n",
+                "    let _ = pump (sched, 8)\n",
+                "    Task.cancel h4\n",
+                "    let _ = pump (sched, 8)\n",
+                "    Resolver.complete (r4, 40)\n",
+                "    let _ = pump (sched, 8)\n",
+                "    println \"task 4 finished: ${Task.is_finished h4:?}\"\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary completion source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("completion executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("completion executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "completion program exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                "task 1 parked\n",
+                "task 1 got 10\n",
+                // resolved before the task ran: the `await` returns in the same
+                // resume, so the pump reports a single execution.
+                "task 2 parked\n",
+                "task 2 got 20\n",
+                "pump 2: executed=1\n",
+                // dropped resolver cancels the wait.
+                "task 3 parked\n",
+                "task 3 cancelled\n",
+                // task 4 is cancelled while parked; the later resolve is a no-op.
+                "task 4 parked\n",
+                "task 4 finished: True\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn awaiting_a_completion_from_another_scheduler_traps() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-xsched-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-xsched-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "def observe: move Wait I32 -> Coroutine{} () = move w => coro { let _ = await w; () }\n",
+                "def make: Scheduler -> (wait: Wait I32, resolver: Resolver I32) = s => completion s\n",
+                "let a = scheduler ()\n",
+                "let b = scheduler ()\n",
+                "with Tasks = task_scope (a) {\n",
+                "    let (w, r) = make b\n",
+                "    let _ = spawn (observe w)\n",
+                "    let _ = pump (a, 8)\n",
+                "    let _ = r\n",
+                "    ()\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary cross-scheduler source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("cross-scheduler executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("cross-scheduler executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(
+            !result.status.success(),
+            "awaiting a completion from another scheduler should trap"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_completion_with_a_cancel_callback_handles_every_abandon_path() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-cancelcb-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-cancelcb-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "def obs: (I32, move Wait I32) ->{IO} Coroutine{IO} () = (id, move w) => coro {\n",
+                "    let r = await w\n",
+                "    match r {\n",
+                "        Completed v => println \"task ${id:?} Completed ${v:?}\",\n",
+                "        Cancelled() => println \"task ${id:?} Cancelled\",\n",
+                "    }\n",
+                "}\n",
+                "def noop: () -> () = () => ()\n",
+                "def prim: (Scheduler, () -> ()) -> (wait: Wait I32, resolver: Resolver I32) =\n",
+                "    (s, cb) => completion_with_cancel (s, cb)\n",
+                "let sched = scheduler ()\n",
+                "with Tasks = task_scope (sched) {\n",
+                // A: resolved — the callback is released without running.
+                "    let (wa, ra) = prim (sched, noop)\n",
+                "    let _ = spawn (obs (1, wa))\n",
+                "    let _ = pump (sched, 8)\n",
+                "    Resolver.complete (ra, 100)\n",
+                "    let _ = pump (sched, 8)\n",
+                // B: the `Wait` is dropped unconsumed — the callback runs, and a
+                //    later `complete` reports the consumer is gone and drops 200.
+                "    let (wb, rb) = prim (sched, noop)\n",
+                "    let _ = wb\n",
+                "    Resolver.complete (rb, 200)\n",
+                "    println \"b: complete after abandon returned\"\n",
+                // C: a task parked on the wait is cancelled — the callback runs
+                //    at the unwind, and the later `complete` is a no-op.
+                "    let (wc, rc) = prim (sched, noop)\n",
+                "    let hc = spawn (obs (3, wc))\n",
+                "    let _ = pump (sched, 8)\n",
+                "    Task.cancel hc\n",
+                "    let _ = pump (sched, 8)\n",
+                "    Resolver.complete (rc, 300)\n",
+                "    println \"c: task 3 finished ${Task.is_finished hc:?}\"\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary cancel-callback source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("cancel-callback executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("cancel-callback executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "cancel-callback program exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                "task 1 Completed 100\n",
+                "b: complete after abandon returned\n",
+                "c: task 3 finished True\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_completion_token_resolves_cancels_or_releases_a_unit_wait() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-token-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-token-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "def obs: (I32, move Wait ()) ->{IO} Coroutine{IO} () = (id, move w) => coro {\n",
+                "    let r = await w\n",
+                "    match r {\n",
+                "        Completed uu => println \"task ${id:?} Completed\",\n",
+                "        Cancelled() => println \"task ${id:?} Cancelled\",\n",
+                "    }\n",
+                "}\n",
+                "def mk: Scheduler -> (wait: Wait (), token: CompletionToken) = s => completion_token s\n",
+                "let sched = scheduler ()\n",
+                "with Tasks = task_scope (sched) {\n",
+                "    let (w1, t1) = mk sched\n",
+                "    let _ = spawn (obs (1, w1))\n",
+                "    let _ = pump (sched, 8)\n",
+                "    CompletionToken.resolve t1\n",
+                "    let _ = pump (sched, 8)\n",
+                "    let (w2, t2) = mk sched\n",
+                "    let _ = spawn (obs (2, w2))\n",
+                "    let _ = pump (sched, 8)\n",
+                "    CompletionToken.cancel t2\n",
+                "    let _ = pump (sched, 8)\n",
+                "    let (w3, t3) = mk sched\n",
+                "    let _ = spawn (obs (3, w3))\n",
+                "    let _ = pump (sched, 8)\n",
+                "    let _ = t3\n",
+                "    let _ = pump (sched, 8)\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary token source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("token executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("token executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "token program exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                "task 1 Completed\n",
+                "task 2 Cancelled\n",
+                // dropping the token unresolved releases it, which cancels.
+                "task 3 Cancelled\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn until_resumes_when_its_predicate_first_holds() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-until-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-until-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "let signal n = 0\n",
+                "let sched = scheduler ()\n",
+                "with Reactive = reactive_scope () {\n",
+                "  with Tasks = task_scope (sched) {\n",
+                // (1) already-true: proceeds in the same pump, no suspension.
+                "    n = 9\n",
+                "    let _ = spawn (coro {\n",
+                "      let _ = await (until { n >= 5 })\n",
+                "      println \"a proceeded\"\n",
+                "    })\n",
+                "    let _ = pump (sched, 8)\n",
+                // (2) parks, then resumes on the first committed `True`; a
+                //     transient `True` inside a batch is not an event.
+                "    n = 0\n",
+                "    let _ = spawn (coro {\n",
+                "      let _ = await (until { n >= 5 })\n",
+                "      println \"b proceeded at n=${n:?}\"\n",
+                "    })\n",
+                "    let _ = pump (sched, 8)\n",
+                "    n = 3\n",
+                "    let _ = pump (sched, 8)\n",
+                "    batch { n = 100\n n = 4 }\n",
+                "    let _ = pump (sched, 8)\n",
+                "    println \"b still parked\"\n",
+                "    n = 6\n",
+                "    let _ = pump (sched, 8)\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary until source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("until executable should compile");
+        let result = Command::new(&output).output().expect("until should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(result.status.success(), "until program exited with {}", result.status);
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                "a proceeded\n",
+                "b still parked\n",
+                "b proceeded at n=6\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn cancelling_a_task_parked_in_until_tears_down_the_subscription() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-until-cancel-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-until-cancel-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.(IO, println)\n",
+                "let signal n = 0\n",
+                "let sched = scheduler ()\n",
+                "with Reactive = reactive_scope () {\n",
+                "  with Tasks = task_scope (sched) {\n",
+                "    let h = spawn (coro {\n",
+                "      let _ = await (until { n >= 100 })\n",
+                "      println \"SHOULD NOT PRINT\"\n",
+                "    })\n",
+                "    let _ = pump (sched, 8)\n",
+                "    Task.cancel h\n",
+                "    let _ = pump (sched, 8)\n",
+                "    println \"cancelled, finished=${Task.is_finished h:?}\"\n",
+                // the subscription is gone: driving the signal past the
+                // threshold must not wake anything or crash.
+                "    n = 500\n",
+                "    let r = pump (sched, 8)\n",
+                "    println \"post-cancel pump executed=${r.executed:?}\"\n",
+                "  }\n",
+                "}\n",
+            ),
+        )
+        .expect("temporary until-cancel source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("until-cancel executable should compile");
+        let result = Command::new(&output).output().expect("until-cancel should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(
+            result.status.success(),
+            "until-cancel program exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                "cancelled, finished=True\n",
+                "post-cancel pump executed=0\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_coroutines_example_runs_with_expected_output() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-example-coroutines-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-example-coroutines-{nonce}"));
+        std::fs::write(
+            &source,
+            include_str!("../../staple-compiler/examples/coroutines.sta"),
+        )
+        .expect("temporary example source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("coroutines example should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("coroutines example should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "coroutines example exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                "-- pump 1 --\n",
+                "worker 4: start\n",
+                "worker 9: start\n",
+                "pump 1: executed=4 ready=2\n",
+                "-- pump 2 --\n",
+                "worker 4: done\n",
+                "greeter: host sent 200\n",
+                "pump 2: executed=4 ready=1\n",
+                "-- pump 3 --\n",
+                "consumer: worker produced 40\n",
+                "pump 3: executed=1 ready=0\n",
+                "doomed finished: True\n",
+                "scope closed\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn the_game_loop_adapter_demo_runs_every_scenario() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("staple-example-game-loop-{nonce}"));
+        std::fs::create_dir_all(&dir).expect("temporary example dir should be creatable");
+        std::fs::write(
+            dir.join("game.sta"),
+            include_str!("../../staple-compiler/examples/game_loop/game.sta"),
+        )
+        .expect("game.sta should be writable");
+        std::fs::write(
+            dir.join("main.sta"),
+            include_str!("../../staple-compiler/examples/game_loop/main.sta"),
+        )
+        .expect("main.sta should be writable");
+        let output = dir.join("demo");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            dir.join("main.sta").into_os_string(),
+        ])
+        .expect("game-loop demo should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("game-loop demo should run");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert!(
+            result.status.success(),
+            "game-loop demo exited with {}",
+            result.status
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&result.stdout),
+            concat!(
+                // multiple fixed ticks per update: three ticks, three resumes.
+                "fixed tick 1\n",
+                "fixed tick 2\n",
+                "fixed tick 3\n",
+                // entity destruction: the mob's sleeper is cancelled.
+                "entity destroyed\n",
+                // unscaled progress: the wall sleeper wakes at its deadline.
+                "wall sleeper woke: wall_ms=300\n",
+                // paused scaled time: no "scaled sleeper woke" line — game_ms
+                // froze at 100 once the scale went to 0.
+                "final: game_ms=100 wall_ms=400 frame=4 fixed=3\n",
+            ),
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn deep_coroutine_nesting_does_not_grow_the_native_stack() {
+        // 20 000 nested `await`s; the trampoline driver keeps the native stack
+        // flat, so this completes rather than overflowing.
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-coro-deep-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-coro-deep-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "use std.io.println\n",
+                "def sum_to: I32 -> Coroutine{} I32 = n => coro {\n",
+                "    match n <= 0 {\n",
+                "        True() => 0,\n",
+                "        False() => {\n",
+                "            let rest = await (sum_to (n - 1))\n",
+                "            rest + n\n",
+                "        },\n",
+                "    }\n",
+                "}\n",
+                "println \"${block_on (sum_to 20000):?}\"\n",
+            ),
+        )
+        .expect("temporary coroutine source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("coroutine executable should compile");
+        let result = Command::new(&output)
+            .output()
+            .expect("coroutine executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+
+        assert!(
+            result.status.success(),
+            "deep coroutine program exited with {}",
+            result.status
+        );
+        // 20000 * 20001 / 2
+        assert_eq!(String::from_utf8_lossy(&result.stdout), "200010000\n");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_typed_resources_with_lexical_shadowing() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

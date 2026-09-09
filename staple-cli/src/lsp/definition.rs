@@ -285,6 +285,12 @@ impl DeclarationCollector<'_> {
                     self.item(item);
                 }
             }
+            Expression::Coro(value) => {
+                for item in &value.body.items {
+                    self.item(item);
+                }
+            }
+            Expression::Await(value) => self.expression(&value.operand),
             Expression::Resource(_) => {}
             Expression::With(value) => {
                 self.expression(&value.value);
@@ -858,6 +864,12 @@ impl Collector<'_> {
                     self.item(item);
                 }
             }
+            Expression::Coro(value) => {
+                for item in &value.body.items {
+                    self.item(item);
+                }
+            }
+            Expression::Await(value) => self.expression(&value.operand),
             Expression::Resource(value) => self.ty(&value.resource),
             Expression::With(value) => {
                 self.ty(&value.resource);

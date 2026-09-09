@@ -734,6 +734,8 @@ impl Collector<'_> {
                 }
             }
             Expression::Loop(value) => self.block(&value.body, module_index),
+            Expression::Coro(value) => self.block(&value.body, module_index),
+            Expression::Await(value) => self.expression(&value.operand, module_index),
             Expression::With(value) => {
                 self.expression(&value.value, module_index);
                 self.block(&value.body, module_index);

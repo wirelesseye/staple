@@ -2956,6 +2956,14 @@ impl Grammar {
     /// Parses juxtaposition-based function calls.
     fn parse_call_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
+        if self.peek_text("await") && self.is_await_operand_start() {
+            self.bump_token();
+            let operand = self.parse_call_expression()?;
+            return Ok(Expression::Await(AwaitExpression {
+                syntax: self.syntax(start),
+                operand: Box::new(operand),
+            }));
+        }
         let mut expression = self.parse_access_expression()?;
         while self.starts_atom() {
             let checkpoint = self.position;
@@ -3109,6 +3117,9 @@ impl Grammar {
             return self
                 .parse_with_resource_expression()
                 .map(|value| Expression::With(Box::new(value)));
+        }
+        if self.is_coro_expression_start() {
+            return self.parse_coro_expression().map(Expression::Coro);
         }
         match self.peek() {
             Some(TokenKind::Match) => self.parse_match_expression().map(Expression::Match),
@@ -3466,6 +3477,19 @@ impl Grammar {
         })
     }
 
+    fn parse_coro_expression(&mut self) -> Result<CoroExpression, ParseError> {
+        let start = self.position;
+        let keyword = self.expect(TokenKind::Identifier, "expected `coro`")?;
+        if keyword.text != "coro" {
+            return Err(self.error("expected `coro`"));
+        }
+        let body = self.parse_block_expression()?;
+        Ok(CoroExpression {
+            syntax: self.syntax(start),
+            body,
+        })
+    }
+
     fn parse_resource_expression(&mut self) -> Result<ResourceExpression, ParseError> {
         let start = self.position;
         let keyword = self.expect(TokenKind::Identifier, "expected `resource`")?;
@@ -3618,6 +3642,20 @@ impl Grammar {
             syntax: self.syntax(start),
             elements,
         }))
+    }
+
+    /// Whether the token after a contextual `await` keyword begins an operand,
+    /// as opposed to `await` being used as an ordinary identifier.
+    fn is_await_operand_start(&self) -> bool {
+        let mut candidate = self.clone();
+        candidate.bump_token();
+        candidate.starts_atom()
+    }
+
+    /// Whether the cursor is at a contextual `coro { ... }` expression rather
+    /// than an identifier named `coro`.
+    fn is_coro_expression_start(&self) -> bool {
+        self.peek_text("coro") && self.peek_n(1) == Some(TokenKind::LBrace)
     }
 
     /// Returns whether the next token can begin an atom in the current context.

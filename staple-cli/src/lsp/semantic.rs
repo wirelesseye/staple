@@ -692,6 +692,17 @@ impl<'a> Classifier<'a> {
                     self.item(item, resolved);
                 }
             }
+            Expression::Coro(value) => {
+                // `coro` is a contextual keyword the TextMate grammar
+                // highlights; nothing extra to emit here.
+                for item in &value.body.items {
+                    self.item(item, resolved);
+                }
+            }
+            Expression::Await(value) => {
+                // `await` is likewise handled by the TextMate grammar.
+                self.expression(&value.operand, resolved);
+            }
             Expression::Resource(value) => {
                 // `resource` is a keyword the TextMate grammar already
                 // highlights; see the note in `lexical_kind`.

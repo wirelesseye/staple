@@ -1,0 +1,113 @@
+// A tiny "game" wired to Staple coroutines through the `game` adapter module.
+//
+// The host owns time (five signals) and drives the loop by writing them and
+// calling `pump`. Behaviour coroutines only `await` the adapter's combinators.
+// This one run exercises every adapter behaviour at once:
+//   * multiple fixed ticks per update  — `fixed_counter` resumes 3x
+//   * unscaled progress                — `wall_sleeper` wakes
+//   * paused scaled time               — no `scaled_sleeper` wakes after scale = 0
+//   * entity destruction               — the mob's behaviour is cancelled, never wakes
+//
+// Nothing here (or in `game.sta`) is a compiler or executor feature.
+use std.coroutine.*
+use std.io.(IO, println)
+use std.list.List
+use game.*
+
+// --- host time (a real engine keeps this in its own storage) ---------------
+let signal frame = 0        // update-tick counter
+let signal fixed = 0        // fixed-tick counter
+let signal wall_ms = 0      // unscaled milliseconds
+let signal game_ms = 0      // scaled milliseconds
+let signal scale = 1000     // permille: 1000 == 1x, 0 == paused
+
+def r_frame: () ->{state.read} I32 = () => frame
+def r_fixed: () ->{state.read} I32 = () => fixed
+def r_wall: () ->{state.read} I32 = () => wall_ms
+def r_game: () ->{state.read} I32 = () => game_ms
+
+// Resolve eligible waits (by advancing signals) *before* pumping, so a wait
+// registered during a pump only becomes eligible on the next tick.
+def host_update: (Scheduler, I32) ->{state, IO} () = (s, dt) => {
+    wall_ms = wall_ms + dt
+    game_ms = game_ms + dt * scale / 1000
+    frame = frame + 1
+    let _ = pump (s, 256)
+    ()
+}
+def host_fixed_tick: Scheduler ->{state} () = s => {
+    fixed = fixed + 1
+    let _ = pump (s, 256)
+    ()
+}
+
+// --- behaviours ------------------------------------------------------------
+def scaled_sleeper: (I32, I32) ->{state.read, IO} Coroutine{state.read, Reactive, IO} () =
+    (now, at) => coro {
+        let _ = await (wait_deadline (r_game, r_frame, now + 250, at))
+        println "scaled sleeper woke: game_ms=${game_ms:?}"
+    }
+
+def wall_sleeper: (I32, I32) ->{state.read, IO} Coroutine{state.read, Reactive, IO} () =
+    (now, at) => coro {
+        let _ = await (wait_deadline (r_wall, r_frame, now + 250, at))
+        println "wall sleeper woke: wall_ms=${wall_ms:?}"
+    }
+
+def fixed_counter: I32 ->{IO} Coroutine{Reactive, IO} () =
+    start => coro {
+        let _ = await (after_count (r_fixed, start))
+        println "fixed tick 1"
+        let _ = await (after_count (r_fixed, start + 1))
+        println "fixed tick 2"
+        let _ = await (after_count (r_fixed, start + 2))
+        println "fixed tick 3"
+    }
+
+// An entity owns a list of behaviour tasks; destroying it cancels each one,
+// which unsubscribes any `until` it was parked in (registration cleanup).
+def destroy_entity: mut List (Task ()) ->{IO} () = mut tasks => {
+    loop {
+        match List.pop tasks {
+            Some(t) => { Task.cancel t },
+            None() => { break },
+        }
+    }
+    println "entity destroyed"
+}
+
+// Separate scheduler instances for Update and FixedUpdate.
+let update_sched = scheduler ()
+let fixed_sched = scheduler ()
+with Reactive = reactive_scope () {
+    with Tasks = task_scope (update_sched) {
+        let _ = spawn (scaled_sleeper (game_ms, frame))
+        let _ = spawn (wall_sleeper (wall_ms, frame))
+
+        // An entity: one sleeping behaviour we cancel before it can wake.
+        let mut mob: List (Task ()) = List.new ()
+        let m = spawn (scaled_sleeper (game_ms, frame))
+        List.push mob m
+
+        with Tasks = task_scope (fixed_sched) {
+            let _ = spawn (fixed_counter fixed)
+
+            // frame 1: dt = 100 ms, then three fixed ticks.
+            host_update (update_sched, 100)
+            host_fixed_tick fixed_sched
+            host_fixed_tick fixed_sched
+            host_fixed_tick fixed_sched
+
+            // Pause scaled time and tear the entity down.
+            scale = 0
+            destroy_entity mob
+
+            // frames 2..4: dt = 100 ms each. wall_ms reaches 400, game_ms frozen.
+            host_update (update_sched, 100)
+            host_update (update_sched, 100)
+            host_update (update_sched, 100)
+
+            println "final: game_ms=${game_ms:?} wall_ms=${wall_ms:?} frame=${frame:?} fixed=${fixed:?}"
+        }
+    }
+}
