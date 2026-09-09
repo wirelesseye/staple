@@ -146,8 +146,8 @@ pub def until: (() ->{state.read} Bool) -> Coroutine{Reactive} () =
 companion Resolver {
     /// Consumes the resolver and the value, records completion, and wakes a
     /// registered waiter. If the waiter has already gone the value is dropped.
-    pub def complete: <T> (Resolver T, T) -> () =
-        _ => panic "Resolver.complete is a compiler intrinsic"
+    pub def complete: <T> Resolver T * T -> () =
+        _ * _ => panic "Resolver.complete is a compiler intrinsic"
 
     /// Consumes the resolver and cancels the operation: a registered waiter is
     /// woken with `Cancelled`.

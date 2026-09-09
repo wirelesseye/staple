@@ -1477,11 +1477,21 @@ impl TypedModule {
     }
 
     pub fn is_companion_method(&self, symbol: SymbolId, receiver: TypeId) -> bool {
-        matches!(
-            self.type_of_symbol(symbol),
-            Some(CheckedType::Function(function))
-                if checked_type_id(&function.parameter) == Some(receiver)
-        )
+        let Some(CheckedType::Function(function)) = self.type_of_symbol(symbol) else {
+            return false;
+        };
+        // A curried method takes the receiver as its first curried parameter; a
+        // non-curried juxtaposed method takes it as its first slot.
+        let first_parameter = match (
+            function.parameter_style,
+            function.parameter.as_ref(),
+        ) {
+            (staple_syntax::FunctionParameterStyle::Juxtaposed, CheckedType::Product(product)) => {
+                product.elements.first().map(|element| &element.value_type)
+            }
+            _ => Some(function.parameter.as_ref()),
+        };
+        first_parameter.and_then(checked_type_id) == Some(receiver)
     }
 
     pub fn type_of_function(&self, function: FunctionId) -> Option<&CheckedFunctionType> {

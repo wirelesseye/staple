@@ -460,7 +460,7 @@ fn completion_await_lowers_to_an_external_wait_with_a_fast_path() {
         "with Tasks = task_scope (sched) {\n",
         "    let (w, r) = make sched\n",
         "    let _ = spawn (observe w)\n",
-        "    Resolver.complete (r, 1)\n",
+        "    Resolver.complete r 1\n",
         "    let _ = pump (sched, 4)\n",
         "}\n",
     ));
@@ -2154,7 +2154,7 @@ fn type_checks_and_lowers_mutable_places_and_ref_replace() {
         "let index: USize = 1\n",
         "fixed[index] = 7\n",
         "let mut scalar = Ref 8\n",
-        "let old = Ref.replace (scalar, 9)\n",
+        "let old = Ref.replace scalar 9\n",
         "def local = () => { let mut inside = 10; inside = old; inside }\n",
     );
     let module = type_check(source);
@@ -2397,7 +2397,7 @@ fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
         "type MyInt = Ref I32\n",
         "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
         "  let MyInt mut inner = my_int\n",
-        "  Ref.replace (inner, value)\n",
+        "  Ref.replace inner value\n",
         "  ()\n",
         "}\n",
         "def foo = (mut my_int: MyInt) => { mutate_my_int (my_int, 42) }\n",
@@ -2412,7 +2412,7 @@ fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
             "type MyInt = Ref I32\n",
             "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
             "  let MyInt mut inner = my_int\n",
-            "  Ref.replace (inner, value)\n",
+            "  Ref.replace inner value\n",
             "  ()\n",
             "}\n",
             "def bad = () => {\n",
@@ -2660,7 +2660,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "}\n",
         "def managed = (initial: CString, move next: CString) => {\n",
         "  let mut reference = Ref initial\n",
-        "  let old = Ref.replace (reference, next)\n",
+        "  let old = Ref.replace reference next\n",
         "  drop old\n",
         "}\n",
     ));
@@ -4317,7 +4317,7 @@ fn buffer_intrinsics_type_check_and_compile() {
         "let capacity: USize = Buffer.capacity values\n",
         "Buffer.push values 10\n",
         "Buffer.push values 20\n",
-        "let first: Ref I32 = Buffer.get_ref (values, 0 satisfies USize)\n",
+        "let first: Ref I32 = Buffer.get_ref values (0 satisfies USize)\n",
         "let popped: Option I32 = Buffer.pop values\n",
         "let frozen: Slice I32 = Buffer.freeze values\n",
         "let frozen_length: USize = Slice.length frozen\n",
@@ -4437,7 +4437,7 @@ fn buffer_transfer_type_checks_and_compiles() {
         "Buffer.push source 2\n",
         "let mut destination: Buffer I32 = Buffer.with_capacity (5 satisfies USize)\n",
         "Buffer.push destination 0\n",
-        "Buffer.transfer (source, destination)\n",
+        "Buffer.transfer source destination\n",
         "let moved_length: USize = Buffer.length destination\n",
         "let emptied_length: USize = Buffer.length source\n",
         "()\n}\n",
@@ -4477,6 +4477,27 @@ fn list_grows_past_initial_capacity_and_type_checks() {
         .compile_module(&module)
         .expect("List operations should compile");
     assert!(llvm.contains("buffer.transfer.dest.write"));
+}
+
+#[test]
+fn migrated_stdlib_methods_accept_caret_method_call_syntax() {
+    // The juxtaposed companion methods take the receiver as their first slot,
+    // so `receiver^method rest…` resolves the same call as `Type.method`.
+    let module = type_check(concat!(
+        "def exercise: () -> () = () => {\n",
+        "let mut values: List I32 = List.new ()\n",
+        "values^push 1\n",
+        "values^push 2\n",
+        "let first: Option I32 = values^get (0 satisfies USize)\n",
+        "let first_unchecked: I32 = values^get_unchecked (0 satisfies USize)\n",
+        "let first_ref: Option (Ref I32) = values^get_ref (0 satisfies USize)\n",
+        "let last_ref_unchecked: Ref I32 = values^get_ref_unchecked (0 satisfies USize)\n",
+        "()\n}\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("caret method calls on migrated stdlib methods should compile");
 }
 
 #[test]
@@ -8234,14 +8255,14 @@ fn provides_formatter_display_debug_and_structural_product_debug() {
         "type Point = (x: I32, y: I32)\n",
         "impl Debug Point {\n",
         "  def fmt = (Point (x, y), mut formatter) => {\n",
-        "    Formatter.write (formatter, \"Point \" )\n",
+        "    Formatter.write formatter \"Point \"\n",
         "    Debug.fmt ((x: x, y: y), formatter)\n",
         "  }\n",
         "}\n",
         "def exercise: () -> () = () => {\n",
         "let mut formatter = Formatter.new ()\n",
-        "Formatter.write (formatter, \"left\")\n",
-        "Formatter.write (formatter, \" + right\")\n",
+        "Formatter.write formatter \"left\"\n",
+        "Formatter.write formatter \" + right\"\n",
         "let written: String = Formatter.finish formatter\n",
         "let displayed: String = Formatter.display 42\n",
         "let escaped: String = Formatter.debug \"hello\\n\\\"world\"\n",
@@ -8366,7 +8387,7 @@ fn type_checks_and_generates_string_templates() {
         "use std.fmt.Formatter\n",
         "type Label = String\n",
         "impl Display Label {\n",
-        "  def fmt = (Label value, mut formatter) => Formatter.write (formatter, value)\n",
+        "  def fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
         "}\n",
         "def render: <T where Display T> move T -> String = move value => \"value=$value\"\n",
         "let name: String = \"world\"\n",

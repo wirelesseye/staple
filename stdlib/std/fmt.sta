@@ -37,8 +37,8 @@ def derived_debug_implementation:
             parse_quote {
                 impl Debug $target {
                     def fmt = ($value_pattern, mut formatter) => {
-                        Formatter.write (formatter, $name_expression)
-                        Formatter.write (formatter, " ")
+                        formatter^write $name_expression
+                        formatter^write " "
                         Debug.fmt ($inner_name, formatter)
                     }
                 }
@@ -48,8 +48,8 @@ def derived_debug_implementation:
             parse_quote {
                 impl<$parameters... where Debug $representation> Debug $target {
                     def fmt = ($value_pattern, mut formatter) => {
-                        Formatter.write (formatter, $name_expression)
-                        Formatter.write (formatter, " ")
+                        formatter^write $name_expression
+                        formatter^write " "
                         Debug.fmt ($inner_name, formatter)
                     }
                 }
@@ -65,7 +65,7 @@ def derived_singleton_debug_implementation: (String, Type) -> Item = (name, targ
     let name_expression = StringExpr name
     parse_quote {
         impl Debug $target {
-            def fmt = (_, mut formatter) => Formatter.write (formatter, $name_expression)
+            def fmt = (_, mut formatter) => formatter^write $name_expression
         }
     } satisfies Item
 }
@@ -114,7 +114,7 @@ def grow_formatter: mut Formatter -> () = mut formatter => {
         False() => old_capacity * 2,
     }
     let mut destination: Buffer U8 = Buffer.with_capacity new_capacity
-    Buffer.transfer (source, destination)
+    Buffer.transfer source destination
     formatter = Formatter destination
 }
 
@@ -136,23 +136,23 @@ def formatter_write: (mut Formatter, String) -> () = (mut formatter, value) => {
 }
 
 def formatter_write_debug: (mut Formatter, String) -> () = (mut formatter, value) => {
-    formatter_write (formatter, "\"")
+    formatter^write "\""
     let bytes = String.bytes value
     let mut index: USize = 0
     while (index < Slice.length bytes) {
         let byte = bytes[index]
         when {
-            byte == 0 => Formatter.write (formatter, "\\0"),
-            byte == 9 => Formatter.write (formatter, "\\t"),
-            byte == 10 => Formatter.write (formatter, "\\n"),
-            byte == 13 => Formatter.write (formatter, "\\r"),
-            byte == 34 => Formatter.write (formatter, "\\\""),
-            byte == 92 => Formatter.write (formatter, "\\\\"),
+            byte == 0 => formatter^write "\\0",
+            byte == 9 => formatter^write "\\t",
+            byte == 10 => formatter^write "\\n",
+            byte == 13 => formatter^write "\\r",
+            byte == 34 => formatter^write "\\\"",
+            byte == 92 => formatter^write "\\\\",
             else => write_byte formatter byte,
         }
         index = index + 1
     }
-    formatter_write (formatter, "\"")
+    formatter^write "\""
 }
 
 def formatter_finish: move Formatter -> String = move formatter => {
@@ -167,7 +167,7 @@ companion Formatter {
     pub def new: () -> Formatter = () => formatter_new ()
 
     /// Appends a UTF-8 string to the formatter.
-    pub def write: (mut Formatter, String) -> () = (mut formatter, value) => formatter_write (formatter, value)
+    pub def write: mut Formatter * String -> () = mut formatter * value => formatter_write (formatter, value)
 
     /// Finishes formatting and returns the accumulated string.
     pub def finish: move Formatter -> String = move formatter => formatter_finish formatter
@@ -192,7 +192,7 @@ impl<T where Display T> ToString T {
 }
 
 impl Display String {
-    def fmt = (value, mut formatter) => Formatter.write (formatter, value)
+    def fmt = (value, mut formatter) => formatter^write value
 }
 
 impl Debug String {

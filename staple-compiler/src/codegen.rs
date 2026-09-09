@@ -6408,27 +6408,53 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     };
                     callee = previous.callee.as_ref();
                 }
-                let callee = self.compile_expression(environment, callee)?;
                 let argument = Expression::Product(ProductExpression {
                     syntax: call.syntax.clone(),
                     elements: plan
                         .arguments
-                        .into_iter()
+                        .iter()
                         .map(|value| staple_syntax::ProductElement {
                             syntax: value.syntax().clone(),
                             name: None,
                             designated: false,
-                            value,
+                            value: value.clone(),
                             spread: false,
                             named_spread: false,
                         })
                         .collect(),
                 });
+                // A juxtaposed companion method backed directly by a compiler
+                // intrinsic (`Ref.replace`, `Resolver.complete`): the receiver
+                // and the rest slots reconstitute the product argument the
+                // intrinsic lowering expects.
+                if let Some(intrinsic) = self
+                    .typed_module
+                    .symbol_for(callee.syntax().id)
+                    .and_then(|symbol| self.typed_module.resolved().intrinsic_function(symbol))
+                {
+                    let synthetic = CallExpression {
+                        syntax: call.syntax.clone(),
+                        callee: Box::new(callee.clone()),
+                        argument: Box::new(argument),
+                    };
+                    return self.compile_intrinsic_call(environment, &synthetic, intrinsic);
+                }
+                // Inside a generic body being specialized, the plan's function
+                // type still carries the enclosing type parameters; resolve them
+                // before the call is lowered.
+                let plan_function = match substitute_type(
+                    CheckedType::Function(plan.function.clone()),
+                    &self.active_type_substitutions,
+                ) {
+                    CheckedType::Function(function) => function,
+                    _ => plan.function.clone(),
+                };
+                let callee = self.compile_expression(environment, callee)?;
                 return self.compile_indirect_call_value(
                     environment,
                     callee,
                     &argument,
-                    &plan.function,
+                    &plan_function,
                     call.syntax.span.clone(),
                 );
             }
@@ -10561,6 +10587,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         CheckedType::Product(product) => {
                             product.elements.get(1).map(|element| element.value_type.clone())
                         }
+                        _ => None,
+                    })
+                    // A juxtaposed `resolver^complete value` reconstitutes the
+                    // argument product synthetically, so its node carries the
+                    // call's result type rather than the pair type; read the
+                    // value slot's type from the second argument expression.
+                    .or_else(|| match call.argument.as_ref() {
+                        Expression::Product(product) => product
+                            .elements
+                            .get(1)
+                            .and_then(|element| self.concrete_expression_type(&element.value)),
                         _ => None,
                     })
                     .ok_or_else(|| {

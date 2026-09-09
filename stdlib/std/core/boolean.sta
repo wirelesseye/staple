@@ -12,7 +12,7 @@ pub typegroup Bool {
 pub use Bool.*
 
 impl Display Bool {
-    def fmt = (value, mut formatter) => Formatter.write (formatter, match value {
+    def fmt = (value, mut formatter) => formatter^write (match value {
         True() => "True",
         False() => "False",
     })

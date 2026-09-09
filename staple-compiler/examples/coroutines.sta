@@ -51,7 +51,7 @@ with Tasks = task_scope (sched) {
     // Cancel the doomed task while it is parked at its `yield_now`, and
     // resolve the host completion.
     Task.cancel doomed
-    Resolver.complete (resolver, 200)
+    Resolver.complete resolver 200
 
     println "-- pump 2 --"
     let p2 = pump (sched, 16)

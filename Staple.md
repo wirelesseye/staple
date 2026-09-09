@@ -2757,7 +2757,7 @@ match await wait {
 }
 
 // elsewhere, when the result is ready:
-Resolver.complete (resolver, value)
+Resolver.complete resolver value
 ```
 
 - `completion sched` returns an affine `Wait T` and `Resolver T`, both bound to
@@ -2766,7 +2766,7 @@ Resolver.complete (resolver, value)
 - `await wait` consumes the `Wait` and yields `Completed T | Cancelled`, exactly
   like `await` on a `Task`. It may only be `await`ed from a task **on the same
   scheduler** — doing otherwise traps.
-- `Resolver.complete (resolver, value)` consumes the resolver, stores the value,
+- `Resolver.complete resolver value` consumes the resolver, stores the value,
   and wakes a registered waiter on the next pump. Completing *before* the
   `await` registers is fine: the value is stored, and the `await` returns it in
   the same resume without suspending.
@@ -2959,7 +2959,7 @@ type Point = (x: I32, y: I32)
 
 impl Debug Point {
     def fmt = (Point (x, y), formatter) => {
-        Formatter.write (formatter, "Point ")
+        Formatter.write formatter "Point "
         Debug.fmt ((x: x, y: y), formatter)
     }
 }
@@ -2999,12 +2999,12 @@ point.x = 30
 let Ref (captured_x, captured_y) = point
 ```
 
-The companion function `Ref.replace: <T> (Ref T, T) -> T` replaces a whole fixed
-payload and returns the previous value:
+The companion method `Ref.replace: <T> mut Ref T * move T -> T` replaces a whole
+fixed payload and returns the previous value:
 
 ```staple
-let value = Ref 10
-let previous = Ref.replace (value, 20)
+let mut value = Ref 10
+let previous = Ref.replace value 20
 ```
 
 `Ref` follows the ordinary literal representation rules when nested inside a
