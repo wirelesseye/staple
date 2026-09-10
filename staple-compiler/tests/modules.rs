@@ -132,8 +132,8 @@ fn imports_standard_io_print_functions() {
     );
 
     let llvm = fixture.compile().expect("std.io should compile");
-    assert!(llvm.contains("__staple_m1_print"));
-    assert!(llvm.contains("__staple_m1_println"));
+    assert!(llvm.contains("__staple_mstd.io.print"));
+    assert!(llvm.contains("__staple_mstd.io.println"));
     assert!(llvm.contains("@printf"));
     assert!(llvm.contains("c\"%s\\00\""));
     assert!(llvm.contains("c\"%s\\0A\\00\""));
@@ -155,7 +155,7 @@ fn uses_root_qualified_standard_library_items_without_imports() {
     let llvm = fixture
         .compile()
         .expect("root-qualified standard-library values and types should compile");
-    assert!(llvm.contains("__staple_m1_println"));
+    assert!(llvm.contains("__staple_mstd.io.println"));
     assert!(llvm.contains("c\"hello\\00\""));
 }
 
@@ -212,7 +212,7 @@ fn imports_public_values_and_types_through_all_use_forms() {
     );
 
     let llvm = fixture.compile().expect("imports should compile");
-    assert!(llvm.contains("__staple_m1_add"));
+    assert!(llvm.contains("__staple_mmath.add"));
     assert!(llvm.contains("define i32 @main()"));
 }
 
@@ -221,8 +221,9 @@ fn string_templates_compile_across_multiple_modules() {
     // The formatter helpers backing string templates live in `std.fmt` and
     // are only referenced by synthesised codegen calls. Once a build spans
     // more than one non-standard module the resolver mangles their names to
-    // `__staple_m{module}_{name}`, so codegen must look them up by their
-    // source name rather than the mangled symbol.
+    // `__staple_m{module-path}.{name}` (e.g. `__staple_mstd.fmt.formatter_write`),
+    // so codegen must look them up by their source name rather than the
+    // mangled symbol.
     let fixture = Fixture::new();
     fixture.write("greeting.sta", "pub def who: () -> String = () => \"world\"\n");
     fixture.write(
@@ -407,7 +408,7 @@ fn recursively_nested_submodules_use_super_and_initialize_once() {
     let llvm = fixture
         .compile()
         .expect("recursive relative imports should compile");
-    for initializer in ["m1", "m2", "m3"] {
+    for initializer in ["mlibrary", "mlibrary.outer", "mlibrary.outer.inner"] {
         assert_eq!(
             llvm.matches(&format!("call void @__staple_init_{initializer}()"))
                 .count(),
@@ -1606,7 +1607,7 @@ fn enforces_representation_visibility_for_explicit_and_shortcut_access() {
         .compile()
         .expect_err("private representations must not be projected by either spelling");
     assert!(
-        error.contains("the representation of `m1.User` is private"),
+        error.contains("the representation of `users.User` is private"),
         "{error}"
     );
 
@@ -1716,8 +1717,8 @@ fn resolves_mutually_recursive_module_namespaces() {
     let llvm = fixture
         .compile()
         .expect("mutually recursive modules should compile");
-    assert!(llvm.contains("__staple_m1_a"));
-    assert!(llvm.contains("__staple_m2_b"));
+    assert!(llvm.contains("__staple_mma.a"));
+    assert!(llvm.contains("__staple_mmb.b"));
 }
 
 #[test]
@@ -1744,9 +1745,9 @@ fn emits_dependency_initializers_before_the_entry_initializer() {
         .nth(1)
         .expect("main should exist");
     let dependency = main
-        .find("@__staple_init_m1")
+        .find("@__staple_init_mdependency")
         .expect("dependency init call");
-    let entry = main.find("@__staple_init_m0").expect("entry init call");
+    let entry = main.find("@__staple_init_mmain").expect("entry init call");
     assert!(dependency < entry);
 }
 
@@ -1862,7 +1863,10 @@ fn root_qualified_items_establish_initialization_dependencies() {
         .compile()
         .expect("root-qualified access should load and initialize its module");
     let main = llvm.split("define i32 @main()").nth(1).unwrap();
-    assert!(main.find("@__staple_init_m1").unwrap() < main.find("@__staple_init_m0").unwrap());
+    assert!(
+        main.find("@__staple_init_mdependency").unwrap()
+            < main.find("@__staple_init_mmain").unwrap()
+    );
 }
 
 #[test]
@@ -2221,7 +2225,7 @@ fn loads_an_imported_top_level_global_from_a_function() {
     let llvm = fixture
         .compile()
         .expect("function should load imported global");
-    assert!(llvm.contains("load i32, ptr @__staple_m1_value"));
+    assert!(llvm.contains("load i32, ptr @__staple_mvalues.value"));
 }
 
 #[test]
@@ -2259,7 +2263,7 @@ fn imports_resource_types_and_resource_bearing_functions() {
     let llvm = fixture
         .compile()
         .expect("imported resource contracts should compile and lower");
-    assert!(llvm.contains("__staple_m1_read"));
+    assert!(llvm.contains("__staple_mclocks.read"));
 }
 
 #[test]

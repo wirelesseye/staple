@@ -1119,6 +1119,9 @@ pub struct NameResolver {
     interfaces: Vec<Interface>,
     package_interfaces: Vec<Interface>,
     module_packages: Vec<Option<staple_project::PackageId>>,
+    /// Stable per-module symbol-mangling prefix, indexed by `ModuleId.0`.
+    /// See [`Program::mangled_module_prefix`].
+    module_symbol_prefixes: Vec<String>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
     module_values: Vec<HashMap<String, SymbolId>>,
@@ -1187,6 +1190,11 @@ impl NameResolver {
             .modules()
             .iter()
             .map(|module| program.package_of(module.id))
+            .collect();
+        self.module_symbol_prefixes = program
+            .modules()
+            .iter()
+            .map(|module| program.mangled_module_prefix(module.id))
             .collect();
         for module in program.modules() {
             for item in &module.syntax.items {
@@ -2371,7 +2379,10 @@ impl NameResolver {
             }
         }
         let qualified = if self.multiple_modules {
-            format!("m{}.{}", module.0, declaration.name)
+            format!(
+                "{}.{}",
+                self.module_symbol_prefixes[module.0], declaration.name
+            )
         } else {
             declaration.name.clone()
         };
@@ -4364,7 +4375,10 @@ impl NameResolver {
                     || Some(self.current_module) == self.standard_library_cinterop
                     || Some(self.current_module) == self.standard_library_io
                 {
-                    format!("__staple_m{}_{}", self.current_module.0, base_name)
+                    format!(
+                        "__staple_m{}.{}",
+                        self.module_symbol_prefixes[self.current_module.0], base_name
+                    )
                 } else {
                     base_name
                 };

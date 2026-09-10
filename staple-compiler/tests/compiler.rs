@@ -3726,9 +3726,9 @@ fn permits_deferred_mutual_recursion_with_selective_state() {
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("capturing a forward binding must remain legal");
-    assert!(llvm.contains("_g_state"));
+    assert!(llvm.contains(".g_state"));
     assert!(llvm.contains("binding.uninitialized"));
-    assert!(!llvm.contains("_f_state"));
+    assert!(!llvm.contains(".f_state"));
 }
 
 #[test]
@@ -3771,7 +3771,7 @@ fn does_not_add_state_metadata_to_safe_bindings() {
     let llvm = CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("safe bindings should compile without state metadata");
-    assert!(!llvm.contains("_answer_state"));
+    assert!(!llvm.contains(".answer_state"));
 }
 
 #[test]

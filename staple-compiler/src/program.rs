@@ -545,6 +545,26 @@ impl Program {
         Some(segments.join("."))
     }
 
+    /// The stable, load-order-independent prefix used to mangle a module's
+    /// symbols (`__staple_m{prefix}.{name}`, `__staple_init_m{prefix}`).
+    ///
+    /// This is the escaped [`Self::module_dotted_name`] — a package-qualified
+    /// dotted path such as `std.io` or `example.tools.text`, derived from the
+    /// package name and the file's location rather than its collection order.
+    /// When no dotted name is available (a lone in-memory program, or a file
+    /// outside any package root) it falls back to the positional module index,
+    /// matching the historical scheme for those single-module cases.
+    pub fn mangled_module_prefix(&self, module: ModuleId) -> String {
+        match self.module_dotted_name(module) {
+            Some(dotted) => dotted
+                .split('.')
+                .map(escape_symbol_segment)
+                .collect::<Vec<_>>()
+                .join("."),
+            None => format!("m{}", module.0),
+        }
+    }
+
     pub fn standard_library_core(&self) -> Option<ModuleId> {
         self.standard_library_core
     }
@@ -2072,6 +2092,29 @@ pub fn default_standard_library_root() -> Option<PathBuf> {
 
 fn standard_library_root_for_home(home: &Path) -> PathBuf {
     home.join(".local/lib/staple/stdlib")
+}
+
+/// Renders one dotted-path segment into a form safe to embed in a linker
+/// symbol. Ordinary identifier segments pass through untouched; any other
+/// byte (a `-` in a package name, a space in a file stem, …) is hex-escaped
+/// as `_xx`, mirroring the operator encoding in `resolve::mangle_function_name`.
+fn escape_symbol_segment(segment: &str) -> String {
+    let ordinary = !segment.is_empty()
+        && segment
+            .bytes()
+            .all(|byte| byte == b'_' || byte.is_ascii_alphanumeric());
+    if ordinary {
+        return segment.to_owned();
+    }
+    let mut escaped = String::with_capacity(segment.len());
+    for byte in segment.bytes() {
+        if byte == b'_' || byte.is_ascii_alphanumeric() {
+            escaped.push(byte as char);
+        } else {
+            escaped.push_str(&format!("_{byte:02x}"));
+        }
+    }
+    escaped
 }
 
 fn canonical_directory(path: &Path, description: &str) -> Result<PathBuf, String> {

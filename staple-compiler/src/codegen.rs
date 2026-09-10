@@ -621,8 +621,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(())
     }
 
+    /// The stable, load-order-independent prefix for a module's mangled
+    /// symbols (see [`crate::Program::mangled_module_prefix`]). Callers embed
+    /// it as `__staple_m{prefix}.{name}` / `__staple_init_m{prefix}`.
+    fn module_symbol_prefix(&self, module: ModuleId) -> String {
+        self.typed_module
+            .resolved()
+            .program()
+            .mangled_module_prefix(module)
+    }
+
     fn declare_top_level_storage(&mut self) -> CodeGenerationResult<()> {
         for source_module in self.typed_module.resolved().program().modules() {
+            let module_prefix = self.module_symbol_prefix(source_module.id);
             for item in &source_module.syntax.items {
                 if let Item::PatternBinding(binding) = item {
                     self.declare_pattern_storage(source_module.id, &binding.pattern)?;
@@ -645,7 +656,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 };
                 self.declare_initialization_state(
                     symbol,
-                    &format!("__staple_m{}_{}_state", source_module.id.0, binding_name),
+                    &format!("__staple_m{module_prefix}.{binding_name}_state"),
                 );
                 if !binding.type_parameters.is_empty() {
                     continue;
@@ -657,7 +668,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     continue;
                 };
                 let llvm_type = self.compile_type(value_type)?;
-                let name = format!("__staple_m{}_{}", source_module.id.0, binding_name);
+                let name = format!("__staple_m{module_prefix}.{binding_name}");
                 let global = self.llvm_module.add_global(llvm_type, None, &name);
                 let zero = llvm_type.const_zero();
                 global.set_initializer(&zero);
@@ -705,15 +716,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let Some(value_type) = self.typed_module.type_of_symbol(symbol) else {
                     return Ok(());
                 };
+                let module_prefix = self.module_symbol_prefix(module);
                 self.declare_initialization_state(
                     symbol,
-                    &format!("__staple_m{}_{}_state", module.0, binding.name),
+                    &format!("__staple_m{module_prefix}.{}_state", binding.name),
                 );
                 let llvm_type = self.compile_type(value_type)?;
                 let global = self.llvm_module.add_global(
                     llvm_type,
                     None,
-                    &format!("__staple_m{}_{}", module.0, binding.name),
+                    &format!("__staple_m{module_prefix}.{}", binding.name),
                 );
                 global.set_initializer(&llvm_type.const_zero());
                 global.set_linkage(inkwell::module::Linkage::Internal);
@@ -758,8 +770,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
     fn declare_initializers(&mut self) {
         let function_type = self.context.void_type().fn_type(&[], false);
         for source_module in self.typed_module.resolved().program().modules() {
+            let module_prefix = self.module_symbol_prefix(source_module.id);
             let function = self.llvm_module.add_function(
-                &format!("__staple_init_m{}", source_module.id.0),
+                &format!("__staple_init_m{module_prefix}"),
                 function_type,
                 Some(inkwell::module::Linkage::Internal),
             );
@@ -12000,9 +12013,11 @@ fn create_target_machine(target: Option<&str>) -> CodeGenerationResult<TargetMac
 /// Whether a resolved function `candidate` denotes the standard-library
 /// function whose source name is `name`. Standard-library definitions are
 /// emitted with their bare source name in single-module builds but are
-/// mangled to `__staple_m{module}_{name}` once the program spans more than
-/// one non-standard module (see the name mangling in `resolve`), so a bare
-/// string comparison misses them in package builds.
+/// mangled to `__staple_m{module-prefix}.{name}` once the program spans more
+/// than one non-standard module (see the name mangling in `resolve`), where
+/// `module-prefix` is the module's dotted path (`std.io`). A bare string
+/// comparison misses the mangled form, so also accept a candidate whose final
+/// `.`-separated component is `name`. Callers pass plain identifier names.
 fn standard_function_name_matches(candidate: &str, name: &str) -> bool {
     if candidate == name {
         return true;
@@ -12010,11 +12025,8 @@ fn standard_function_name_matches(candidate: &str, name: &str) -> bool {
     let Some(rest) = candidate.strip_prefix("__staple_m") else {
         return false;
     };
-    let digits = rest.find(|character: char| !character.is_ascii_digit());
-    match digits {
-        Some(offset) if offset > 0 => rest[offset..].strip_prefix('_') == Some(name),
-        _ => false,
-    }
+    rest.rsplit_once('.')
+        .is_some_and(|(_, last)| last == name)
 }
 
 fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {
