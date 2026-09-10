@@ -16,6 +16,7 @@ pub enum Expression {
     Call(CallExpression),
     Access(AccessExpression),
     Index(IndexExpression),
+    Unary(UnaryExpression),
     Binary(BinaryExpression),
     Logical(LogicalExpression),
     SyntaxArgument(SyntaxArgumentExpression),
@@ -47,6 +48,7 @@ impl Expression {
             Self::Call(expression) => &expression.syntax,
             Self::Access(expression) => &expression.syntax,
             Self::Index(expression) => &expression.syntax,
+            Self::Unary(expression) => &expression.syntax,
             Self::Binary(expression) => &expression.syntax,
             Self::Logical(expression) => &expression.syntax,
             Self::SyntaxArgument(expression) => &expression.syntax,
@@ -248,6 +250,42 @@ pub struct IndexExpression {
     pub syntax: Syntax,
     pub value: Box<Expression>,
     pub index: Box<Expression>,
+}
+
+/// A source-level prefix operator expression (`-x`, `!x`). Like
+/// `BinaryExpression`, these nodes are retained through macro expansion and
+/// lowered to a trait method call before name resolution.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnaryExpression {
+    pub syntax: Syntax,
+    pub operator_syntax: Syntax,
+    pub operator: UnaryOperator,
+    pub operand: Box<Expression>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOperator {
+    /// Arithmetic negation `-`, backed by the `Neg` trait.
+    Negate,
+    /// Logical negation `!`, backed by the `Not` trait.
+    Not,
+}
+
+impl UnaryOperator {
+    pub fn text(self) -> &'static str {
+        match self {
+            Self::Negate => "-",
+            Self::Not => "!",
+        }
+    }
+
+    /// The `(trait, method)` pair this operator lowers to.
+    pub fn trait_method(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Negate => ("Neg", "negate"),
+            Self::Not => ("Not", "not"),
+        }
+    }
 }
 
 /// A source-level infix operator expression. These nodes are retained through

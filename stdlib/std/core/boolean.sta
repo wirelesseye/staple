@@ -34,3 +34,10 @@ impl Eq Bool {
         _ => False,
     }
 }
+
+impl Not Bool {
+    def not = value => match value {
+        True() => False,
+        False() => True,
+    }
+}

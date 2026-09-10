@@ -619,3 +619,15 @@ impl PartialOrd F64 {
         },
     }
 }
+
+// Arithmetic negation. `-x` desugars to `Neg.negate x`; each signed
+// implementation is defined in terms of the type's `Subtract` intrinsic, so no
+// dedicated negation intrinsic is required. Unsigned integers have no `Neg`
+// implementation, mirroring their lack of a signed range.
+impl Neg I8 { def negate = value => 0 - value }
+impl Neg I16 { def negate = value => 0 - value }
+impl Neg I32 { def negate = value => 0 - value }
+impl Neg I64 { def negate = value => 0 - value }
+impl Neg ISize { def negate = value => 0 - value }
+impl Neg F32 { def negate = value => 0.0 - value }
+impl Neg F64 { def negate = value => 0.0 - value }

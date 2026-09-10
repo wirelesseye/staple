@@ -4046,6 +4046,7 @@ impl TypeChecker {
             | Expression::Integer(_)
             | Expression::Float(_) => CheckedEffectSet::default(),
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Name(name) => {
                 let state_cell = self.state_cell_symbol(module, name.syntax.id);
                 if let Some(symbol) = state_cell {
@@ -4806,6 +4807,7 @@ impl TypeChecker {
             | Expression::Integer(_)
             | Expression::Float(_) => false,
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         };
         if matches!(
             self.expression_types.get(&expression.syntax().id),
@@ -5087,6 +5089,7 @@ impl TypeChecker {
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         }
     }
 
@@ -6401,6 +6404,7 @@ impl TypeChecker {
         }
         let natural_type = match expression {
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Unary(_) => unreachable!("unary expression reached type checking"),
             Expression::Function(function) => {
                 let Some(function_id) = module.function_for(function.syntax.id) else {
                     return CheckedType::Error;
@@ -13808,6 +13812,7 @@ fn expression_reads_reactive(
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+        Expression::Unary(_) => unreachable!("unary expression reached type checking"),
     }
 }
 
@@ -13884,6 +13889,7 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         }
     }
     fn item_value_bindings(item: &Item, bindings: &mut Vec<Binding>) {
@@ -14050,6 +14056,7 @@ fn expression_mentions_symbols(
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+        Expression::Unary(_) => unreachable!("unary expression reached type checking"),
     }
 }
 
@@ -14127,6 +14134,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
         | Expression::Integer(_)
         | Expression::Float(_) => false,
         Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+        Expression::Unary(_) => unreachable!("unary expression reached type checking"),
     }
 }
 
@@ -14325,6 +14333,7 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
             | Expression::Integer(_)
             | Expression::Float(_) => {}
             Expression::Binary(_) => unreachable!("binary expression reached type checking"),
+            Expression::Unary(_) => unreachable!("unary expression reached type checking"),
         }
     }
 

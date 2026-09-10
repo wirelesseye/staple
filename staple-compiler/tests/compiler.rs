@@ -8166,6 +8166,81 @@ fn compiles_builtin_arithmetic_via_trait_dispatch() {
 }
 
 #[test]
+fn compiles_arithmetic_negation_via_neg_trait() {
+    let module = type_check(concat!(
+        "let literal: I32 = -5\n",
+        "let x: I64 = 3\n",
+        "let negated: I64 = -x\n",
+        "let stacked: I32 = - -literal\n",
+        "let precedence: I32 = -literal * 2\n",
+        "let float: F64 = -1.5\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("prefix `-` should compile via `Neg` trait dispatch");
+}
+
+#[test]
+fn compiles_logical_not_via_not_trait() {
+    let module = type_check(concat!(
+        "let t: Bool = True\n",
+        "let f: Bool = False\n",
+        "let flipped: Bool = !t\n",
+        "let doubled: Bool = !!f\n",
+        "let combined: Bool = !(1 == 2)\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("prefix `!` should compile via `Not` trait dispatch");
+}
+
+#[test]
+fn prefix_operators_dispatch_to_user_defined_impls() {
+    let module = type_check(concat!(
+        "type Vec2 = (x: I32, y: I32)\n",
+        "impl Neg Vec2 { def negate = (Vec2 (x, y)) => Vec2 (x: 0 - x, y: 0 - y) }\n",
+        "type Flag = (raised: Bool)\n",
+        "impl Not Flag { def not = (Flag (raised)) => Flag (raised: !raised) }\n",
+        "let here: Vec2 = Vec2 (x: 3, y: 4)\n",
+        "let away: Vec2 = -here\n",
+        "let up: Flag = Flag (raised: True)\n",
+        "let down: Flag = !up\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("user `Neg`/`Not` implementations should back the prefix operators");
+}
+
+#[test]
+fn folds_const_prefix_negation_at_compile_time() {
+    let module = type_check(concat!(
+        "const negative: I32 = -7\n",
+        "const restored: I32 = - -7\n",
+        "const scaled: I32 = -7 * 3\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("const prefix negation should fold and compile");
+}
+
+#[test]
+fn rejects_arithmetic_negation_of_unsigned_integers() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("let bad: U32 = -(1 satisfies U32)\n"))
+        .expect_err_diagnostics("unsigned integers have no `Neg` implementation");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation")),
+        "expected a missing-implementation diagnostic, found {diagnostics:#?}",
+    );
+}
+
+#[test]
 fn decodes_source_string_literals_before_llvm_generation() {
     let source = concat!(
         "use std.cinterop.*\n",

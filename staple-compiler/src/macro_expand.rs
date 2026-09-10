@@ -666,6 +666,33 @@ fn lower_binary_expression(
     })
 }
 
+fn lower_unary_expression(
+    unary: staple_syntax::UnaryExpression,
+    next_syntax_id: &mut usize,
+) -> Expression {
+    let staple_syntax::UnaryExpression {
+        syntax,
+        operator_syntax,
+        operator,
+        operand,
+    } = unary;
+    let (trait_name, method_name) = operator.trait_method();
+    let name = Expression::Name(staple_syntax::NameExpression {
+        syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+        name: trait_name.to_owned(),
+    });
+    let access = Expression::Access(staple_syntax::AccessExpression {
+        syntax: freshened_syntax(&operator_syntax, next_syntax_id),
+        value: Box::new(name),
+        accessor: Accessor::Name(method_name.to_owned()),
+    });
+    Expression::Call(staple_syntax::CallExpression {
+        syntax,
+        callee: Box::new(access),
+        argument: operand,
+    })
+}
+
 pub(crate) fn desugar_program(program: &mut Program, next_syntax_id: &mut usize) {
     for module in program.modules_mut() {
         for item in &mut module.syntax.items {
@@ -780,6 +807,19 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
             desugar_expression(&mut binary.left, next_syntax_id);
             desugar_expression(&mut binary.right, next_syntax_id);
             *expression = lower_binary_expression(binary, next_syntax_id);
+        }
+        Expression::Unary(_) => {
+            let Expression::Unary(mut unary) = std::mem::replace(
+                expression,
+                Expression::Name(staple_syntax::NameExpression {
+                    syntax: Syntax::compiler(),
+                    name: String::new(),
+                }),
+            ) else {
+                unreachable!()
+            };
+            desugar_expression(&mut unary.operand, next_syntax_id);
+            *expression = lower_unary_expression(unary, next_syntax_id);
         }
         Expression::Function(function) => desugar_expression(&mut function.body, next_syntax_id),
         Expression::Satisfies(satisfies) => {
@@ -2039,6 +2079,25 @@ impl MacroExpander {
                     BinaryOperator::Range | BinaryOperator::RangeInclusive => CompileType::Unknown,
                 }
             }
+            Expression::Unary(unary) => match unary.operator {
+                staple_syntax::UnaryOperator::Negate => {
+                    self.check_compile_expression(module, &unary.operand, environment, None)
+                }
+                staple_syntax::UnaryOperator::Not => {
+                    let operand = self.check_compile_expression(
+                        module,
+                        &unary.operand,
+                        environment,
+                        Some(&CompileType::Bool),
+                    );
+                    self.require_compile_type(
+                        &operand,
+                        &CompileType::Bool,
+                        unary.operand.syntax().span.clone(),
+                    );
+                    CompileType::Bool
+                }
+            },
             Expression::Logical(logical) => {
                 let left = self.check_compile_expression(module, &logical.left, environment, Some(&CompileType::Bool));
                 let right = self.check_compile_expression(module, &logical.right, environment, Some(&CompileType::Bool));
@@ -2452,6 +2511,7 @@ impl MacroExpander {
             Expression::Call(value) => { self.check_quoted_expression(module, &value.callee, environment); self.check_quoted_expression(module, &value.argument, environment); }
             Expression::Access(value) => self.check_quoted_expression(module, &value.value, environment),
             Expression::Index(value) => { self.check_quoted_expression(module, &value.value, environment); self.check_quoted_expression(module, &value.index, environment); }
+            Expression::Unary(value) => self.check_quoted_expression(module, &value.operand, environment),
             Expression::Binary(value) => { self.check_quoted_expression(module, &value.left, environment); self.check_quoted_expression(module, &value.right, environment); }
             Expression::Logical(value) => { self.check_quoted_expression(module, &value.left, environment); self.check_quoted_expression(module, &value.right, environment); }
             Expression::Quote(value) => self.check_quote_splices(module, value, environment),
@@ -4111,6 +4171,10 @@ impl MacroExpander {
                 index.index = Box::new(self.expand_expression(module, *index.index, depth));
                 Expression::Index(index)
             }
+            Expression::Unary(mut unary) => {
+                unary.operand = Box::new(self.expand_expression(module, *unary.operand, depth));
+                Expression::Unary(unary)
+            }
             Expression::Binary(mut binary) => {
                 binary.left = Box::new(self.expand_expression(module, *binary.left, depth));
                 binary.right = Box::new(self.expand_expression(module, *binary.right, depth));
@@ -4689,6 +4753,9 @@ impl MacroExpander {
             }
             Expression::Binary(binary) => {
                 self.eval_binary_expression(module, binary, environment)
+            }
+            Expression::Unary(unary) => {
+                self.eval_unary_expression(module, unary, environment)
             }
             Expression::Quote(quote) => {
                 let expected = match quote.kind {
@@ -5999,6 +6066,43 @@ impl MacroExpander {
         self.eval_expression(module, &lowered, environment)
     }
 
+    /// Folds a prefix operator (`-x`, `!x`) over a compile-time value. The
+    /// standard library backs `Neg`/`Not` with ordinary Staple code rather
+    /// than intrinsics, so — as with `eval_builtin_operator_call` for the
+    /// binary operators — the fold is done directly here on the known scalar
+    /// representations.
+    fn eval_unary_expression(
+        &mut self,
+        module: ModuleId,
+        unary: &staple_syntax::UnaryExpression,
+        environment: &mut Environment,
+    ) -> Option<Value> {
+        let operand = self.eval_expression(module, &unary.operand, environment)?;
+        match (unary.operator, &operand) {
+            (staple_syntax::UnaryOperator::Negate, Value::Integer(value)) => {
+                Some(Value::Integer(value.wrapping_neg()))
+            }
+            (staple_syntax::UnaryOperator::Negate, Value::Float(value)) => {
+                Some(Value::Float(-value))
+            }
+            (staple_syntax::UnaryOperator::Not, Value::Nominal(name, _))
+                if name == "True" || name == "False" =>
+            {
+                Some(bool_value(name == "False"))
+            }
+            _ => {
+                self.diagnostics.push(Diagnostic::new(
+                    unary.operator_syntax.span.clone(),
+                    format!(
+                        "operator `{}` is not available for this compile-time value",
+                        unary.operator.text()
+                    ),
+                ));
+                None
+            }
+        }
+    }
+
     /// Builds the `(left, right)` positional product used by lowered trait
     /// operator calls.
     fn operand_product(&mut self, left: Expression, right: Expression, span: Span) -> Expression {
@@ -6806,6 +6910,10 @@ impl MacroExpander {
             Expression::Index(index) => {
                 self.freshen_expression(&mut index.value, module, mark);
                 self.freshen_expression(&mut index.index, module, mark);
+            }
+            Expression::Unary(unary) => {
+                self.freshen_syntax(&mut unary.operator_syntax, module, mark);
+                self.freshen_expression(&mut unary.operand, module, mark);
             }
             Expression::Binary(binary) => {
                 self.freshen_syntax(&mut binary.operator_syntax, module, mark);
@@ -9421,6 +9529,7 @@ fn obviously_not_syntax(expression: &Expression, arity: usize) -> bool {
         Expression::Binary(binary) => {
             obviously_not_syntax(&binary.left, 0) || obviously_not_syntax(&binary.right, 0)
         }
+        Expression::Unary(unary) => obviously_not_syntax(&unary.operand, 0),
         Expression::StringTemplate(_) => true,
         Expression::Loop(_) => true,
         Expression::Coro(_) | Expression::Await(_) => true,
@@ -10214,6 +10323,9 @@ fn substitute_splices(
         Expression::Index(index) => {
             *index.value = substitute_splices(&index.value, environment, diagnostics)?;
             *index.index = substitute_splices(&index.index, environment, diagnostics)?;
+        }
+        Expression::Unary(unary) => {
+            *unary.operand = substitute_splices(&unary.operand, environment, diagnostics)?;
         }
         Expression::Binary(binary) => {
             *binary.left = substitute_splices(&binary.left, environment, diagnostics)?;
@@ -11326,6 +11438,9 @@ fn alpha_rename_expression(
             alpha_rename_expression(&mut index.value, mark, scopes);
             alpha_rename_expression(&mut index.index, mark, scopes);
         }
+        Expression::Unary(unary) => {
+            alpha_rename_expression(&mut unary.operand, mark, scopes);
+        }
         Expression::Binary(binary) => {
             alpha_rename_expression(&mut binary.left, mark, scopes);
             alpha_rename_expression(&mut binary.right, mark, scopes);
@@ -11419,6 +11534,7 @@ fn expression_syntax_mut(expression: &mut Expression) -> &mut Syntax {
         Expression::Call(value) => &mut value.syntax,
         Expression::Access(value) => &mut value.syntax,
         Expression::Index(value) => &mut value.syntax,
+        Expression::Unary(value) => &mut value.syntax,
         Expression::Binary(value) => &mut value.syntax,
         Expression::Logical(value) => &mut value.syntax,
         Expression::SyntaxArgument(value) => &mut value.syntax,

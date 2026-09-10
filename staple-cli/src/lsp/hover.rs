@@ -321,6 +321,9 @@ impl Collector<'_> {
                 self.collect_expression_declarations(&index.value);
                 self.collect_expression_declarations(&index.index);
             }
+            Expression::Unary(unary) => {
+                self.collect_expression_declarations(&unary.operand);
+            }
             Expression::Binary(binary) => {
                 self.collect_expression_declarations(&binary.left);
                 self.collect_expression_declarations(&binary.right);
@@ -1520,6 +1523,9 @@ impl Collector<'_> {
             Expression::Index(index) => {
                 self.expression(&index.value);
                 self.expression(&index.index);
+            }
+            Expression::Unary(unary) => {
+                self.expression(&unary.operand);
             }
             Expression::Binary(binary) => {
                 self.expression(&binary.left);

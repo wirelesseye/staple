@@ -3598,6 +3598,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 unreachable!("visibility syntax must be eliminated during macro expansion")
             }
             Expression::Binary(_) => unreachable!("binary expression reached code generation"),
+            Expression::Unary(_) => unreachable!("unary expression reached code generation"),
         }
     }
 

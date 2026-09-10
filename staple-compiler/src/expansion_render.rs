@@ -459,6 +459,11 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             )
         }
         Expression::Call(call) => splice(program, &call.syntax, &[&call.callee, &call.argument]),
+        Expression::Unary(unary) => format!(
+            "{}{}",
+            unary.operator.text(),
+            render_expr(program, &unary.operand),
+        ),
         Expression::Binary(binary) => format!(
             "{} {} {}",
             render_expr(program, &binary.left),
@@ -716,6 +721,7 @@ fn expr_has_generated(expression: &Expression) -> bool {
         Expression::Binary(binary) => {
             expr_has_generated(&binary.left) || expr_has_generated(&binary.right)
         }
+        Expression::Unary(unary) => expr_has_generated(&unary.operand),
         Expression::Logical(logical) => {
             expr_has_generated(&logical.left) || expr_has_generated(&logical.right)
         }

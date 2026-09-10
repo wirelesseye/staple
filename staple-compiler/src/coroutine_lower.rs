@@ -294,6 +294,9 @@ fn scan_expression(
             scan_expression(module, &index.value, info, diagnostics);
             scan_expression(module, &index.index, info, diagnostics);
         }
+        Expression::Unary(unary) => {
+            scan_expression(module, &unary.operand, info, diagnostics);
+        }
         Expression::Binary(binary) => {
             scan_expression(module, &binary.left, info, diagnostics);
             scan_expression(module, &binary.right, info, diagnostics);
@@ -430,6 +433,9 @@ fn collect_expression<'a>(
         Expression::Index(index) => {
             collect_expression(&index.value, out);
             collect_expression(&index.index, out);
+        }
+        Expression::Unary(unary) => {
+            collect_expression(&unary.operand, out);
         }
         Expression::Binary(binary) => {
             collect_expression(&binary.left, out);

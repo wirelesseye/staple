@@ -1088,6 +1088,7 @@ implemented with function overloading:
 
 | Operator(s) | Precedence | Associativity | Desugars to |
 |---|---|---|---|
+| `-`, `!` (prefix) | 8 | — | `Neg.negate`, `Not.not` |
 | `*`, `/` | 7 | left | `Multiply.multiply`, `Divide.divide` |
 | `+`, `-` | 6 | left | `Add.add`, `Subtract.subtract` |
 | `==`, `!=`, `<`, `<=`, `>`, `>=` | 4 | none | `Eq.equal`/`Eq.not_equal`, `PartialOrd.lt`/`le`/`gt`/`ge` |
@@ -1102,6 +1103,14 @@ integer implementations of `Add`, `Subtract`, `Multiply`, `Divide`, `Eq`, and
 `PartialOrd` are backed by private compiler intrinsics. `..`/`..=` are not
 trait-based: they call the prelude's `range`/`range_inclusive` functions
 directly, which construct `Range T`/`RangeInclusive T` values.
+
+The prefix operators `-` and `!` bind tighter than every binary operator but
+looser than application and access, so `-a.b` negates `a.b` and `-a * b` is
+`(-a) * b`; a call or larger operand must be parenthesized (`-(f x)`). They
+stack (`- -x`, `!!x`). `-` desugars to `Neg.negate` and `!` to `Not.not`, both
+prefix trait calls of the form `Trait.method operand`. `Neg` is implemented for
+the signed integer types and `F32`/`F64` (in terms of `Subtract`, so unsigned
+integers have no `Neg`); `Not` is implemented for `Bool`.
 
 `&&` and `||` are boolean and/or. Unlike every other operator, they are not
 backed by a trait and cannot be overloaded: both operands and the result are

@@ -23,3 +23,15 @@ pub trait Divide T {
     /// Divides the left value by the right value.
     divide: (T, T) -> T
 }
+
+/// Provides arithmetic negation, the prefix `-` operator.
+pub trait Neg T {
+    /// Returns the negation of a value.
+    negate: T -> T
+}
+
+/// Provides logical negation, the prefix `!` operator.
+pub trait Not T {
+    /// Returns the logical inverse of a value.
+    not: T -> T
+}

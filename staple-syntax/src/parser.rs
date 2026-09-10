@@ -2915,7 +2915,7 @@ impl Grammar {
     /// Parses `*`/`/` (precedence 7, left-associative).
     fn parse_multiplicative_expression(&mut self) -> Result<Expression, ParseError> {
         let start = self.position;
-        let mut expression = self.parse_call_expression()?;
+        let mut expression = self.parse_unary_expression()?;
         loop {
             if self.newline_terminates_expression && self.has_newline_before_next_token() {
                 break;
@@ -2932,10 +2932,36 @@ impl Grammar {
                 break;
             };
             let operator_syntax = self.syntax(operator_start);
-            let right = self.parse_call_expression()?;
+            let right = self.parse_unary_expression()?;
             expression = Expression::Binary(BinaryExpression { syntax: self.syntax(start), operator_syntax, operator, left: Box::new(expression), right: Box::new(right) });
         }
         Ok(expression)
+    }
+
+    /// Parses the prefix operators `-` (arithmetic negation) and `!` (logical
+    /// negation) at precedence 8. They bind tighter than every binary
+    /// operator but looser than function application and access, so `-a.b`
+    /// negates `a.b` and `-a * b` is `(-a) * b`. Prefix operators stack:
+    /// `--x` and `!!x` parse as nested `UnaryExpression`s. An operand that is
+    /// itself a call or larger expression must be parenthesized, exactly as
+    /// with a bare atom (`-(f x)`).
+    fn parse_unary_expression(&mut self) -> Result<Expression, ParseError> {
+        let start = self.position;
+        let operator = if self.eat(TokenKind::Minus) {
+            UnaryOperator::Negate
+        } else if self.eat(TokenKind::Bang) {
+            UnaryOperator::Not
+        } else {
+            return self.parse_call_expression();
+        };
+        let operator_syntax = self.syntax(start);
+        let operand = self.parse_unary_expression()?;
+        Ok(Expression::Unary(UnaryExpression {
+            syntax: self.syntax(start),
+            operator_syntax,
+            operator,
+            operand: Box::new(operand),
+        }))
     }
 
     fn eat_comparison_operator(&mut self) -> Option<BinaryOperator> {

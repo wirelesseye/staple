@@ -767,6 +767,9 @@ impl Collector<'_> {
                 self.expression(&value.value, module_index);
                 self.expression(&value.index, module_index);
             }
+            Expression::Unary(value) => {
+                self.expression(&value.operand, module_index);
+            }
             Expression::Binary(value) => {
                 self.expression(&value.left, module_index);
                 self.expression(&value.right, module_index);
