@@ -1364,9 +1364,15 @@ position type. The compiler derives `Index P USize Output` for every non-empty
 fixed product whose elements are all `Copy`; `Output` is the duplicate-free sum
 of its element types. Thus indexing `(I32, String, I32)` produces
 `I32 | String`, while indexing `I32[N]` produces `I32`. It also derives `Index`
-for fixed and erased homogeneous references when their element type is `Copy`.
-Known bad fixed-product indices are rejected and dynamic out-of-bounds indices
-trap.
+for `Slice T` when `T` is `Copy`. Known bad fixed-product indices are rejected
+and dynamic out-of-bounds indices trap.
+
+A `Ref T` is transparent for indexing, the same way it is for field access:
+`reference[index]` is `(*reference)[index]`, so `Index (Ref T)` and
+`MutateIndex (Ref T)` are derived whenever `T` itself has the corresponding
+implementation, whether structural or explicit. This composes through nested
+references and lets a user-defined `Index`/`MutateIndex` implementation on a
+nominal type be used through a handle without an explicit dereference.
 
 `MutateIndex` replaces one element through a target in place. Indexed
 assignment delegates only to this trait:
@@ -1377,7 +1383,7 @@ target[index] = replacement
 ```
 
 The compiler derives `MutateIndex` for non-empty homogeneous fixed products, by
-value, and for fixed and erased homogeneous references. The mutable `Target`
+value, and for `Slice T`. The mutable `Target`
 parameter passes by address either way (see the "Mutable parameters" subsection
 under "Functions"), so a by-value target's root binding must be declared
 `mut` just as a `Ref` target's must. These structural implementations cannot
@@ -2995,9 +3001,11 @@ declaration is `pub(repr) type Ref T where ?Sized T = T`, so its payload may be
 sized or unsized while the reference value itself always has a known
 representation.
 Constructing `Ref value` copies or moves `value` into a managed allocation;
-copying a `Ref` copies only its non-null handle. Product fields and indices can
-be accessed and assigned directly through the handle when the binding holding
-the handle is declared `mut`. Every alias, not only the binding that performed
+copying a `Ref` copies only its non-null handle. Product fields and indices,
+including bracket indexing and index assignment, can be accessed and assigned
+directly through the handle when the binding holding the handle is declared
+`mut`; a `Ref` is transparent for field access and indexing, so these compose
+through nested references as well. Every alias, not only the binding that performed
 the write, observes the resulting payload mutation, since they all share the
 same managed allocation:
 

@@ -1349,9 +1349,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .cloned()
                     .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
                 {
-                    Some(CheckedType::Ref(payload)) => {
-                        self.load_ref_payload(value, &payload, pattern.syntax.span.clone())?
-                    }
+                    Some(CheckedType::Ref(payload)) => self.load_ref_payloads(
+                        value.as_any_value_enum(),
+                        std::slice::from_ref(payload.as_ref()),
+                        pattern.syntax.span.clone(),
+                    )?,
                     _ => value,
                 };
                 self.bind_pattern_value(environment, &pattern.argument, value)
@@ -2721,15 +2723,13 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     Diagnostic::new(access.syntax.span.clone(), "unchecked access place")
                 })?;
                 if let crate::CheckedAccess::Representation { dereference } = &checked {
-                    if dereference.is_some() {
+                    if !dereference.is_empty() {
                         let reference = self.compile_expression(environment, &access.value)?;
-                        let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(reference)
-                        else {
-                            return Err(Diagnostic::new(
-                                access.syntax.span.clone(),
-                                "invalid Ref place",
-                            ));
-                        };
+                        let pointer = self.ref_payload_pointer(
+                            reference,
+                            dereference,
+                            access.syntax.span.clone(),
+                        )?;
                         return Ok((pointer, result_type, None));
                     }
                     let (pointer, _, symbol) =
@@ -2746,14 +2746,31 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     unreachable!("representation access handled above")
                 };
                 if scalar {
+                    if !dereference.is_empty() {
+                        let reference = self.compile_expression(environment, &access.value)?;
+                        let pointer = self.ref_payload_pointer(
+                            reference,
+                            &dereference,
+                            access.syntax.span.clone(),
+                        )?;
+                        return Ok((pointer, result_type, None));
+                    }
                     let (pointer, _, symbol) =
                         self.compile_place_pointer(environment, &access.value)?;
                     return Ok((pointer, result_type, symbol));
                 }
                 if erased {
                     let reference = self.compile_expression(environment, &access.value)?;
-                    let Some(BasicValueEnum::StructValue(reference)) = value_as_basic(reference)
-                    else {
+                    let value = if dereference.is_empty() {
+                        value_as_basic(reference)
+                    } else {
+                        Some(self.load_ref_payloads(
+                            reference,
+                            &dereference,
+                            access.syntax.span.clone(),
+                        )?)
+                    };
+                    let Some(BasicValueEnum::StructValue(reference)) = value else {
                         return Err(Diagnostic::new(
                             access.syntax.span.clone(),
                             "invalid erased Ref place",
@@ -2789,16 +2806,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     return Ok((pointer, result_type, None));
                 }
 
-                let (pointer, container_type) = if let Some(payload) = dereference {
+                let (pointer, container_type) = if !dereference.is_empty() {
                     let reference = self.compile_expression(environment, &access.value)?;
-                    let Some(BasicValueEnum::PointerValue(pointer)) = value_as_basic(reference)
-                    else {
-                        return Err(Diagnostic::new(
-                            access.syntax.span.clone(),
-                            "invalid Ref place",
-                        ));
-                    };
-                    (pointer, payload)
+                    let pointer = self.ref_payload_pointer(
+                        reference,
+                        &dereference,
+                        access.syntax.span.clone(),
+                    )?;
+                    let container_type =
+                        dereference.last().cloned().expect("non-empty dereference");
+                    (pointer, container_type)
                 } else {
                     if let Some(symbol) = self.typed_module.symbol_for(access.value.syntax().id)
                         && self.typed_module.has_mutable_storage(symbol)
@@ -3374,12 +3391,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     )
                 })?;
                 if let crate::CheckedAccess::Representation { dereference } = &checked {
-                    return if let Some(payload) = dereference {
-                        self.load_ref_payload(value, payload, access.syntax.span.clone())
-                            .map(|value| value.as_any_value_enum())
-                    } else {
-                        Ok(value.as_any_value_enum())
-                    };
+                    if dereference.is_empty() {
+                        return Ok(value.as_any_value_enum());
+                    }
+                    return self
+                        .load_ref_payloads(
+                            value.as_any_value_enum(),
+                            dereference,
+                            access.syntax.span.clone(),
+                        )
+                        .map(|value| value.as_any_value_enum());
                 }
                 let crate::CheckedAccess::Product {
                     index,
@@ -3393,6 +3414,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 if scalar {
                     return Ok(value.as_any_value_enum());
                 }
+                let value = if dereference.is_empty() {
+                    value
+                } else {
+                    self.load_ref_payloads(
+                        value.as_any_value_enum(),
+                        &dereference,
+                        access.syntax.span.clone(),
+                    )?
+                };
                 if erased {
                     let BasicValueEnum::StructValue(reference) = value else {
                         return Err(Diagnostic::new(
@@ -3424,11 +3454,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         )
                         .map(|value| value.as_any_value_enum());
                 }
-                let value = if let Some(payload) = &dereference {
-                    self.load_ref_payload(value, payload, access.syntax.span.clone())?
-                } else {
-                    value
-                };
                 let BasicValueEnum::StructValue(value) = value else {
                     return Err(Diagnostic::new(
                         access.value.syntax().span.clone(),
@@ -3697,12 +3722,27 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 &arguments[2],
                 span.clone(),
             )?,
+            crate::StructuralTraitMethod::DerefIndex => self.compile_structural_deref_index_body(
+                &values,
+                &arguments[0],
+                &arguments[1],
+                &arguments[2],
+                span.clone(),
+            )?,
             crate::StructuralTraitMethod::MutateIndex => self.compile_structural_mutate_body(
                 &values,
                 &arguments[0],
                 &arguments[2],
                 span.clone(),
             )?,
+            crate::StructuralTraitMethod::DerefMutateIndex => self
+                .compile_structural_deref_mutate_body(
+                    &values,
+                    &arguments[0],
+                    &arguments[1],
+                    &arguments[2],
+                    span.clone(),
+                )?,
             crate::StructuralTraitMethod::IntoIterator => {
                 self.compile_structural_into_iterator_body(&values, span.clone())?
             }
@@ -4195,22 +4235,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .const_int(product.elements.len() as u64, false),
                 ))
             }
-            CheckedType::Ref(payload) => match payload.as_ref() {
-                CheckedType::Product(product) => {
-                    let BasicValueEnum::PointerValue(pointer) = value else {
-                        return Err(Diagnostic::new(
-                            span,
-                            "reference has an invalid representation",
-                        ));
-                    };
-                    Ok((
-                        pointer,
-                        self.size_type
-                            .const_int(product.elements.len() as u64, false),
-                    ))
-                }
-                _ => Err(Diagnostic::new(span, "invalid structural Index target")),
-            },
             CheckedType::Slice(_) => {
                 let BasicValueEnum::StructValue(slice) = value else {
                     return Err(Diagnostic::new(span, "slice has an invalid representation"));
@@ -4249,17 +4273,17 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "invalid structural MutateIndex arguments",
             ));
         };
-        // The mutable `Target` parameter passes by address either way, but a
-        // by-value product's address *is* its storage, while a `Ref` target
-        // is itself the value at that address and must be loaded and
-        // unwrapped to reach the storage it points to.
+        // The mutable `Target` parameter passes by address either way; a
+        // by-value product's address *is* its storage, while a `Slice` target
+        // is itself the value at that address and must be loaded to reach the
+        // storage its pointer/length pair views.
         let (pointer, length) = match target {
             CheckedType::Product(product) => (
                 *reference_pointer,
                 self.size_type
                     .const_int(product.elements.len() as u64, false),
             ),
-            CheckedType::Ref(_) | CheckedType::Slice(_) => {
+            CheckedType::Slice(_) => {
                 let reference = self
                     .builder
                     .build_load(
@@ -4287,6 +4311,204 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         )?;
         value_as_basic(self.unit_value())
             .ok_or_else(|| Diagnostic::new(span, "unit is not first-class"))
+    }
+
+    /// `Index` for a `Ref T` target: the reference is transparent, so the
+    /// indexed value is read out of the reference and `T`'s own `Index` is
+    /// dispatched.
+    fn compile_structural_deref_index_body(
+        &mut self,
+        values: &[BasicValueEnum<'context>],
+        target: &CheckedType,
+        position: &CheckedType,
+        output: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let [value, position_value] = values else {
+            return Err(Diagnostic::new(span, "invalid structural Index arguments"));
+        };
+        let CheckedType::Ref(payload) = target else {
+            return Err(Diagnostic::new(span, "invalid structural Index target"));
+        };
+        let BasicValueEnum::PointerValue(pointer) = value else {
+            return Err(Diagnostic::new(
+                span,
+                "reference has an invalid representation",
+            ));
+        };
+        // Indexing a reference to a homogeneous `Copy` product reads the
+        // element straight out of the referenced storage, so indexing a
+        // reference to a large array never copies the array out. Products
+        // only index by `USize`, so the position is known to be an integer.
+        if let CheckedType::Product(product) = payload.as_ref()
+            && !product.variadic
+            && let Some(element) = product.homogeneous_element()
+            && self.typed_module.is_copy_in_function(element, None)
+        {
+            let BasicValueEnum::IntValue(position) = position_value else {
+                return Err(Diagnostic::new(span, "invalid structural Index position"));
+            };
+            let length = self
+                .size_type
+                .const_int(product.elements.len() as u64, false);
+            return self.compile_index_load(*pointer, *position, length, output.clone(), span);
+        }
+        let payload_value = self
+            .builder
+            .build_load(self.compile_type(payload)?, *pointer, "deref.value")
+            .map_err(compiler_diagnostic)?;
+        let trait_id = self.standard_trait_id("Index", span.clone())?;
+        let method = self.trait_method_id(trait_id, span.clone())?;
+        self.build_trait_method_call(
+            trait_id,
+            &[payload.as_ref().clone(), position.clone(), output.clone()],
+            method,
+            &[payload_value, *position_value],
+            "index.deref",
+            span,
+        )
+    }
+
+    /// `MutateIndex` for a `Ref T` target: the referenced address *is* the
+    /// payload's storage, so it is passed through as the `mut T` argument of
+    /// `T`'s own `MutateIndex` without copying the payload.
+    fn compile_structural_deref_mutate_body(
+        &mut self,
+        values: &[BasicValueEnum<'context>],
+        target: &CheckedType,
+        position: &CheckedType,
+        element: &CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let [
+            BasicValueEnum::PointerValue(reference_pointer),
+            position_value,
+            replacement,
+        ] = values
+        else {
+            return Err(Diagnostic::new(
+                span,
+                "invalid structural MutateIndex arguments",
+            ));
+        };
+        let CheckedType::Ref(payload) = target else {
+            return Err(Diagnostic::new(
+                span,
+                "invalid structural MutateIndex target",
+            ));
+        };
+        let reference = self
+            .builder
+            .build_load(
+                self.compile_type(target)?,
+                *reference_pointer,
+                "mutation.target",
+            )
+            .map_err(compiler_diagnostic)?;
+        let BasicValueEnum::PointerValue(pointer) = reference else {
+            return Err(Diagnostic::new(
+                span,
+                "reference has an invalid representation",
+            ));
+        };
+        let trait_id = self.standard_trait_id("MutateIndex", span.clone())?;
+        let method = self.trait_method_id(trait_id, span.clone())?;
+        self.build_trait_method_call(
+            trait_id,
+            &[payload.as_ref().clone(), position.clone(), element.clone()],
+            method,
+            &[
+                BasicValueEnum::PointerValue(pointer),
+                *position_value,
+                *replacement,
+            ],
+            "mutate_index.deref",
+            span,
+        )
+    }
+
+    fn standard_trait_id(
+        &self,
+        name: &str,
+        span: Span,
+    ) -> CodeGenerationResult<crate::TraitId> {
+        self.typed_module
+            .resolved()
+            .standard_trait(name)
+            .ok_or_else(|| {
+                Diagnostic::new(span, format!("standard-library trait `{name}` is unavailable"))
+            })
+    }
+
+    fn trait_method_id(
+        &self,
+        trait_id: crate::TraitId,
+        span: Span,
+    ) -> CodeGenerationResult<crate::TraitMethodId> {
+        self.typed_module
+            .resolved()
+            .traits()
+            .get(&trait_id)
+            .and_then(|trait_| trait_.methods.first())
+            .copied()
+            .ok_or_else(|| Diagnostic::new(span, "standard-library trait has no method"))
+    }
+
+    /// Calls a trait method whose arguments are already evaluated, matching
+    /// the method's flattened parameter ABI.
+    fn build_trait_method_call(
+        &mut self,
+        trait_id: crate::TraitId,
+        arguments: &[CheckedType],
+        method: crate::TraitMethodId,
+        values: &[BasicValueEnum<'context>],
+        name: &str,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let function_type = self
+            .typed_module
+            .instantiated_trait_method_type(trait_id, arguments, method)
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "trait method has no concrete function type")
+            })?;
+        let parameter_types = flattened_parameter_types(&function_type.parameter);
+        if parameter_types.len() != values.len() {
+            return Err(Diagnostic::new(
+                span,
+                "trait method argument layout does not match",
+            ));
+        }
+        let indirect = self.indirect_parameter_mask(&function_type, None);
+        let mutations = mutation_parameter_mask(parameter_types.len(), &function_type.mutations);
+        let mut call_arguments: Vec<inkwell::values::BasicMetadataValueEnum<'context>> =
+            Vec::with_capacity(values.len() + 1);
+        call_arguments.push(
+            self.context
+                .ptr_type(AddressSpace::default())
+                .const_null()
+                .into(),
+        );
+        for (index, value) in values.iter().enumerate() {
+            if indirect[index] && !mutations[index] {
+                let pointer = self
+                    .builder
+                    .build_alloca(self.compile_type(parameter_types[index])?, "trait.argument")
+                    .map_err(compiler_diagnostic)?;
+                self.builder
+                    .build_store(pointer, *value)
+                    .map_err(compiler_diagnostic)?;
+                call_arguments.push(pointer.into());
+            } else {
+                call_arguments.push((*value).into());
+            }
+        }
+        let function = self.trait_method_code(trait_id, arguments, method, span.clone())?;
+        self.builder
+            .build_direct_call(function, &call_arguments, name)
+            .map_err(|error| Diagnostic::new(span.clone(), error.to_string()))?
+            .try_as_basic_value()
+            .basic()
+            .ok_or_else(|| Diagnostic::new(span, "trait method result is not first-class"))
     }
 
     fn compile_structural_into_iterator_body(
@@ -5205,8 +5427,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                                 == Some(crate::BuiltinType::Ref)
                         }) =>
                 {
-                    let payload_value =
-                        self.load_ref_payload(value, payload, pattern.syntax.span.clone())?;
+                    let payload_value = self.load_ref_payloads(
+                        value.as_any_value_enum(),
+                        std::slice::from_ref(payload.as_ref()),
+                        pattern.syntax.span.clone(),
+                    )?;
                     self.compile_match_pattern_branch(
                         environment,
                         &pattern.argument,
@@ -5948,22 +6173,59 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(pointer)
     }
 
-    fn load_ref_payload(
+    /// Loads the value reached by following `payloads` (outermost first),
+    /// loading the final payload as well.
+    fn load_ref_payloads(
         &self,
-        value: BasicValueEnum<'context>,
-        payload: &CheckedType,
+        value: AnyValueEnum<'context>,
+        payloads: &[CheckedType],
         span: Span,
     ) -> CodeGenerationResult<BasicValueEnum<'context>> {
-        let BasicValueEnum::PointerValue(pointer) = value else {
-            return Err(Diagnostic::new(
-                span,
-                "Ref value has an invalid representation",
-            ));
+        let mut value = value_as_basic(value);
+        for payload in payloads {
+            let Some(BasicValueEnum::PointerValue(pointer)) = value else {
+                return Err(Diagnostic::new(
+                    span.clone(),
+                    "Ref value has an invalid representation",
+                ));
+            };
+            let payload_type = self.compile_type(payload)?;
+            value = Some(
+                self.builder
+                    .build_load(payload_type, pointer, "ref.payload")
+                    .map_err(compiler_diagnostic)?,
+            );
+        }
+        value.ok_or_else(|| {
+            Diagnostic::new(span, "Ref value has an invalid representation")
+        })
+    }
+
+    /// The address of the payload reached by following `payloads`, leaving
+    /// the final payload in place rather than loading it.
+    fn ref_payload_pointer(
+        &self,
+        value: AnyValueEnum<'context>,
+        payloads: &[CheckedType],
+        span: Span,
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
+        let mut pointer = match value_as_basic(value) {
+            Some(BasicValueEnum::PointerValue(pointer)) => pointer,
+            _ => {
+                return Err(Diagnostic::new(
+                    span,
+                    "Ref value has an invalid representation",
+                ));
+            }
         };
-        let payload_type = self.compile_type(payload)?;
-        self.builder
-            .build_load(payload_type, pointer, "ref.payload")
-            .map_err(compiler_diagnostic)
+        for payload in &payloads[..payloads.len().saturating_sub(1)] {
+            pointer = self
+                .builder
+                .build_load(self.compile_type(payload)?, pointer, "ref.payload")
+                .map_err(compiler_diagnostic)?
+                .into_pointer_value();
+        }
+        Ok(pointer)
     }
 
     fn slice_type(&self) -> inkwell::types::StructType<'context> {

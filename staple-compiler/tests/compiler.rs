@@ -2843,8 +2843,104 @@ fn rejects_overlapping_structural_indexing_implementations() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("derived structurally for this product type")
+            .contains("derived structurally for this type")
     }));
+}
+
+#[test]
+fn delegates_indexing_through_refs_to_the_payload() {
+    let source = concat!(
+        "use std.list.List\n",
+        "def mixed_at: (Ref (I32, Bool), USize) -> I32 | Bool = (pair, position) => pair[position]\n",
+        "def list_at: (Ref (List I32), USize) -> I32 = (list, position) => list[position]\n",
+        "type Keyed = (key: String, value: I32)\n",
+        "impl Index Keyed String I32 { def index = (entry, key) => entry.value }\n",
+        "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
+        "def nested_at: (Ref (Ref I32[3]), USize) -> I32 = (values, position) => values[position]\n",
+        "def fixed_at: (Ref I32[3], USize) -> I32 = (values, position) => values[position]\n",
+        "def generic_at: <T where Index T USize I32> (Ref T, USize) -> I32 = (values, position) => values[position]\n",
+        "let list = List.of (1, 2, 3)\n",
+        "let value: I32 = generic_at (Ref list, 0)\n",
+        "let operation: (Ref (List I32), USize) -> I32 = Index.index\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("indexing through a Ref should generate LLVM");
+    assert!(llvm.contains("index.deref"));
+}
+
+#[test]
+fn delegates_indexed_assignment_through_refs_to_the_payload() {
+    let source = concat!(
+        "use std.list.List\n",
+        "def set_list = (mut list: Ref (List I32), position: USize, value: I32) => { list[position] = value }\n",
+        "def set_nested = (mut values: Ref (Ref I32[2]), position: USize, value: I32) => { values[position] = value }\n",
+        "def set_fixed = (mut values: Ref I32[2], position: USize, value: I32) => { values[position] = value }\n",
+        "type Counter = I32\n",
+        "impl MutateIndex Counter String I32 { def mutate_index = (mut counter, key, move value) => () }\n",
+        "def set_keyed = (mut counter: Ref Counter, key: String, value: I32) => { counter[key] = value }\n",
+        "let list = List.of (1, 2, 3)\n",
+        "let operation: (mut Ref (List I32), USize, I32) -> () = MutateIndex.mutate_index\n",
+        "let mut reference = Ref list\n",
+        "operation (reference, 0, 9)\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("indexed assignment through a Ref should generate LLVM");
+    assert!(llvm.contains("mutate_index.deref"));
+}
+
+#[test]
+fn rejects_out_of_bounds_indices_known_through_a_ref() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("def invalid = (values: Ref I32[2]) => values[2]\n"))
+        .expect_err_diagnostics("a known out-of-bounds Ref index must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("out of bounds"))
+    );
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "def invalid = (values: Ref (Ref I32[2])) => values[2]\n",
+        ))
+        .expect_err_diagnostics("a known out-of-bounds nested Ref index must be rejected");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("out of bounds"))
+    );
+}
+
+#[test]
+fn rejects_explicit_indexing_implementations_for_ref_targets() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "type Target = I32\n",
+            "impl Index Target String Target { def index = (target, position) => target }\n",
+            "impl Index (Ref Target) String Target { def index = (target, position) => target }\n",
+        )))
+        .expect_err_diagnostics("Ref indexing is derived from the payload's implementation");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("derived structurally for this type")
+    }));
+}
+
+#[test]
+fn auto_derefs_fields_through_nested_refs_and_slices() {
+    type_check(concat!(
+        "use std.slice.Slice\n",
+        "def slice_field: Ref (Slice I32) -> I32 = values => values.0\n",
+        "def nested_field = (point: Ref (Ref (x: I32, y: I32))) => point.x\n",
+        "def nested_write = (mut point: Ref (Ref (x: I32, y: I32))) => { point.x = 1; () }\n",
+    ));
 }
 
 #[test]
@@ -2922,7 +3018,7 @@ fn rejects_overlapping_structural_iterator_implementations() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("derived structurally for this product type")
+            .contains("derived structurally for this type")
     }));
 }
 

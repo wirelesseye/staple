@@ -81,7 +81,11 @@ pub struct CheckedTraitDispatch {
 pub enum StructuralTraitMethod {
     Debug,
     Index,
+    /// `Index` for a `Ref T` target, delegated to `Index T`.
+    DerefIndex,
     MutateIndex,
+    /// `MutateIndex` for a `Ref T` target, delegated to `MutateIndex T`.
+    DerefMutateIndex,
     IntoIterator,
     Iterator,
 }
@@ -121,11 +125,13 @@ pub struct CheckedLogical {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CheckedAccess {
     Representation {
-        dereference: Option<CheckedType>,
+        /// Outermost-first `Ref` payloads crossed to reach the accessed
+        /// value; empty when the access is direct.
+        dereference: Vec<CheckedType>,
     },
     Product {
         index: usize,
-        dereference: Option<CheckedType>,
+        dereference: Vec<CheckedType>,
         erased: bool,
         scalar: bool,
     },
@@ -1399,8 +1405,45 @@ impl TypedModule {
             self.debug_trait,
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
+            |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
         )
         .map(|(_, method)| method)
+    }
+
+    /// Resolves a trait obligation for the fully concrete arguments that
+    /// survive into code generation: either a structural derivation or an
+    /// explicit implementation. This is what lets a derived `Ref` indexing
+    /// method find the payload's `Index`/`MutateIndex`.
+    pub(crate) fn resolve_trait_obligation(
+        &self,
+        trait_id: TraitId,
+        arguments: &[CheckedType],
+    ) -> Option<Vec<CheckedType>> {
+        if let Some((arguments, _)) = structural_trait_arguments(
+            trait_id,
+            arguments,
+            self.index_trait,
+            self.mutate_index_trait,
+            self.into_iterator_trait,
+            self.iterator_trait,
+            self.debug_trait,
+            |value_type| self.is_copy_type(value_type),
+            |value_type| self.is_debug_type(value_type),
+            |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
+        ) {
+            return Some(arguments);
+        }
+        if arguments.iter().any(contains_inferred_type) {
+            return None;
+        }
+        let method = self
+            .resolved
+            .traits()
+            .get(&trait_id)
+            .and_then(|trait_| trait_.methods.first())
+            .copied()?;
+        self.trait_impl_method(trait_id, arguments, method)
+            .map(|_| arguments.to_vec())
     }
 
     fn is_debug_type(&self, value_type: &CheckedType) -> bool {
@@ -1547,6 +1590,7 @@ impl TypedModule {
             self.debug_trait,
             |value_type| self.is_copy_type(value_type),
             |value_type| self.is_debug_type(value_type),
+            |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
         ) {
             return Some(arguments);
         }
@@ -2260,12 +2304,13 @@ impl TypeChecker {
                         self.trait_obligation_available(trait_id, std::slice::from_ref(value_type))
                     })
                 },
+                |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
             ) {
                 self.diagnostics.push(Diagnostic::new(
                     span,
                     match structural {
                         StructuralTraitMethod::Debug => "`Debug` is derived structurally for this product or sum type and cannot be implemented explicitly",
-                        _ => "indexing and iteration traits are derived structurally for this product type and cannot be implemented explicitly",
+                        _ => "indexing and iteration traits are derived structurally for this type and cannot be implemented explicitly",
                     },
                 ));
                 continue;
@@ -8274,14 +8319,7 @@ impl TypeChecker {
                 if self.did_return {
                     return CheckedType::empty_product();
                 }
-                let mut accessible = value_type.clone();
-                let mut dereference = None;
-                if let CheckedType::Ref(payload) = accessible {
-                    dereference = Some(payload.as_ref().clone());
-                    accessible = *payload;
-                } else if let CheckedType::Slice(element) = accessible {
-                    accessible = CheckedType::ErasedProduct(element);
-                }
+                let (mut accessible, mut dereference) = peel_access_wrappers(&value_type);
 
                 let current_module = module
                     .module_for_syntax(access.syntax.id)
@@ -8353,10 +8391,9 @@ impl TypeChecker {
                         return self.finish_expression_type(expression, *representation, expected);
                     }
                     accessible = *representation;
-                    if let CheckedType::Ref(payload) = accessible {
-                        dereference = Some(payload.as_ref().clone());
-                        accessible = *payload;
-                    }
+                    let (peeled, mut nested) = peel_access_wrappers(&accessible);
+                    accessible = peeled;
+                    dereference.append(&mut nested);
                 }
                 match accessible {
                     CheckedType::Product(product) => {
@@ -9990,6 +10027,7 @@ impl TypeChecker {
                     self.trait_obligation_available(trait_id, std::slice::from_ref(value_type))
                 })
             },
+            |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
         ) {
             return Some(arguments);
         }
@@ -10079,6 +10117,7 @@ impl TypeChecker {
                     self.trait_obligation_available(trait_id, std::slice::from_ref(value_type))
                 })
             },
+            |trait_id, arguments| self.resolve_trait_obligation(trait_id, arguments),
         )
         .is_some()
         {
@@ -14342,6 +14381,27 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
     captures
 }
 
+/// Applies the access-site auto-deref rules: a `Ref T` is transparent for
+/// element access, so `reference.field` means `(*reference).field`, and a
+/// `Slice T` is viewed as an erased product. Returns the type the accessor
+/// applies to along with the `Ref` payloads crossed, outermost first.
+fn peel_access_wrappers(value_type: &CheckedType) -> (CheckedType, Vec<CheckedType>) {
+    let mut accessible = value_type.clone();
+    let mut dereference = Vec::new();
+    loop {
+        match accessible {
+            CheckedType::Ref(payload) => {
+                let payload = *payload;
+                dereference.push(payload.clone());
+                accessible = payload;
+            }
+            CheckedType::Slice(element) => accessible = CheckedType::ErasedProduct(element),
+            _ => break,
+        }
+    }
+    (accessible, dereference)
+}
+
 fn is_empty_product_type(value_type: &CheckedType) -> bool {
     matches!(value_type, CheckedType::Product(product) if product.elements.is_empty() && !product.variadic)
 }
@@ -14385,6 +14445,7 @@ fn structural_trait_arguments(
     debug_trait: Option<TraitId>,
     is_copy: impl Fn(&CheckedType) -> bool,
     is_debug: impl Fn(&CheckedType) -> bool,
+    resolve_obligation: impl Fn(TraitId, &[CheckedType]) -> Option<Vec<CheckedType>>,
 ) -> Option<(Vec<CheckedType>, StructuralTraitMethod)> {
     if Some(trait_id) == debug_trait {
         let [target] = arguments else { return None };
@@ -14470,23 +14531,32 @@ fn structural_trait_arguments(
     let [target, position, dependent] = arguments else {
         return None;
     };
-    if *position != CheckedType::USize && *position != CheckedType::Inferred {
-        return None;
-    }
     let accepts = |actual: &CheckedType| *dependent == CheckedType::Inferred || dependent == actual;
 
     if Some(trait_id) == index_trait {
+        // A `Ref T` is transparent for indexing: `reference[position]` means
+        // `(*reference)[position]`, so the derivation delegates to `T`'s own
+        // `Index` implementation, whether structural or explicit.
+        if let CheckedType::Ref(payload) = target {
+            let resolved = resolve_obligation(
+                trait_id,
+                &[payload.as_ref().clone(), position.clone(), dependent.clone()],
+            )?;
+            if accepts(&resolved[2]) {
+                return Some((
+                    vec![target.clone(), resolved[1].clone(), resolved[2].clone()],
+                    StructuralTraitMethod::DerefIndex,
+                ));
+            }
+            return None;
+        }
+        if *position != CheckedType::USize && *position != CheckedType::Inferred {
+            return None;
+        }
         let output = match target {
             CheckedType::Product(product) if is_qualifying_product(product, &is_copy) => {
                 product_item(product)
             }
-            CheckedType::Ref(payload) => match payload.as_ref() {
-                CheckedType::Product(product) if !product.variadic => {
-                    let element = product.homogeneous_element()?.clone();
-                    is_copy(&element).then_some(element)?
-                }
-                _ => return None,
-            },
             CheckedType::Slice(element) => is_copy(element).then(|| element.as_ref().clone())?,
             _ => return None,
         };
@@ -14500,16 +14570,28 @@ fn structural_trait_arguments(
     }
 
     if Some(trait_id) == mutate_index_trait {
+        // The same auto-deref applies to `MutateIndex`, so index assignment
+        // through a `Ref T` writes into the referenced payload.
+        if let CheckedType::Ref(payload) = target {
+            let resolved = resolve_obligation(
+                trait_id,
+                &[payload.as_ref().clone(), position.clone(), dependent.clone()],
+            )?;
+            if accepts(&resolved[2]) {
+                return Some((
+                    vec![target.clone(), resolved[1].clone(), resolved[2].clone()],
+                    StructuralTraitMethod::DerefMutateIndex,
+                ));
+            }
+            return None;
+        }
+        if *position != CheckedType::USize && *position != CheckedType::Inferred {
+            return None;
+        }
         let element = match target {
             CheckedType::Product(product) if !product.variadic => {
                 product.homogeneous_element()?.clone()
             }
-            CheckedType::Ref(payload) => match payload.as_ref() {
-                CheckedType::Product(product) if !product.variadic => {
-                    product.homogeneous_element()?.clone()
-                }
-                _ => return None,
-            },
             CheckedType::Slice(element) => element.as_ref().clone(),
             _ => return None,
         };
@@ -14528,12 +14610,7 @@ fn structural_index_length(target: &CheckedType) -> Option<usize> {
         CheckedType::Product(product) if !product.variadic && !product.elements.is_empty() => {
             Some(product.elements.len())
         }
-        CheckedType::Ref(payload) => match payload.as_ref() {
-            CheckedType::Product(product) if !product.variadic && !product.elements.is_empty() => {
-                Some(product.elements.len())
-            }
-            _ => None,
-        },
+        CheckedType::Ref(payload) => structural_index_length(payload),
         _ => None,
     }
 }
