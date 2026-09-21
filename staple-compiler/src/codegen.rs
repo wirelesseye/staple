@@ -21,9 +21,9 @@ use crate::typecheck::{
 };
 use crate::{
     CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType, CheckedResource,
-    CheckedStateEffect, CheckedType, CheckedTypeElement, FloatType, FunctionId, IntegerBinaryOperation,
-    IntegerCompareOperation, IntegerType, IntrinsicFunction, ModuleId, NumericType, ResolvedFunction,
-    ResolvedModule, SymbolId, TypeParameterId, TypedModule,
+    CheckedStateEffect, CheckedType, CheckedTypeElement, FloatType, FunctionId,
+    IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction, ModuleId,
+    NumericType, ResolvedFunction, ResolvedModule, SymbolId, TypeParameterId, TypedModule,
 };
 use staple_syntax::{
     CallExpression, Diagnostic, Expression, Item, Pattern, PatternBindingKind, ProductExpression,
@@ -544,10 +544,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         ));
                     };
                     let llvm_type = self.compile_native_function_type(function_type)?;
-                    let external_name = if self
-                        .typed_module
-                        .resolved()
-                        .symbol_is_overloaded(symbol)
+                    let external_name = if self.typed_module.resolved().symbol_is_overloaded(symbol)
                     {
                         let arity = if function_type.parameter_style
                             == staple_syntax::FunctionParameterStyle::Juxtaposed
@@ -580,7 +577,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                                 ),
                             ));
                         }
-                        None => self.llvm_module.add_function(&external_name, llvm_type, None),
+                        None => self
+                            .llvm_module
+                            .add_function(&external_name, llvm_type, None),
                     };
                     self.globals.insert(symbol, function.into());
                     self.external_symbols.insert(symbol);
@@ -645,11 +644,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let Some(symbol) = self.typed_module.symbol_for(binding.syntax.id) else {
                     continue;
                 };
-                let binding_name = if self
-                    .typed_module
-                    .resolved()
-                    .symbol_is_overloaded(symbol)
-                {
+                let binding_name = if self.typed_module.resolved().symbol_is_overloaded(symbol) {
                     format!("{}.overload.{}", binding.name, symbol.0)
                 } else {
                     binding.name.clone()
@@ -1497,7 +1492,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             // destroys the captures of an unstarted coroutine and releases the
             // frame's GC root.
             let BasicValueEnum::PointerValue(frame) = value else {
-                return Err(Diagnostic::new(span, "coroutine value is not a frame pointer"));
+                return Err(Diagnostic::new(
+                    span,
+                    "coroutine value is not a frame pointer",
+                ));
             };
             let header_type = self.coroutine_header_type();
             let ptr_type = self.context.ptr_type(AddressSpace::default());
@@ -2996,11 +2994,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .concrete_expression_type(expression)
                 .is_some_and(|value_type| value_type == CheckedType::Never);
         if diverges {
-            self.builder
-                .build_unreachable()
-                .map_err(|error| {
-                    Diagnostic::new(expression.syntax().span.clone(), error.to_string())
-                })?;
+            self.builder.build_unreachable().map_err(|error| {
+                Diagnostic::new(expression.syntax().span.clone(), error.to_string())
+            })?;
             environment.did_return = true;
             self.release_moved_ownership(environment, expression.syntax().id)?;
             return Ok(value);
@@ -4383,16 +4379,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         )
     }
 
-    fn standard_trait_id(
-        &self,
-        name: &str,
-        span: Span,
-    ) -> CodeGenerationResult<crate::TraitId> {
+    fn standard_trait_id(&self, name: &str, span: Span) -> CodeGenerationResult<crate::TraitId> {
         self.typed_module
             .resolved()
             .standard_trait(name)
             .ok_or_else(|| {
-                Diagnostic::new(span, format!("standard-library trait `{name}` is unavailable"))
+                Diagnostic::new(
+                    span,
+                    format!("standard-library trait `{name}` is unavailable"),
+                )
             })
     }
 
@@ -6163,9 +6158,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map_err(compiler_diagnostic)?,
             );
         }
-        value.ok_or_else(|| {
-            Diagnostic::new(span, "Ref value has an invalid representation")
-        })
+        value.ok_or_else(|| Diagnostic::new(span, "Ref value has an invalid representation"))
     }
 
     /// The address of the payload reached by following `payloads`, leaving
@@ -6316,7 +6309,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .into(),
         );
         call_arguments.extend(compiled.values.iter().copied());
-        let result = self.builder
+        let result = self
+            .builder
             .build_direct_call(function, &call_arguments, "index.call")
             .map_err(|error| Diagnostic::new(index.syntax.span.clone(), error.to_string()))?
             .try_as_basic_value()
@@ -7223,14 +7217,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 return Ok(self.unit_value());
             }
             IntrinsicFunction::CoroutineBlockOn => {
-                let operand_type = self
-                    .concrete_expression_type(&call.argument)
-                    .ok_or_else(|| {
-                        Diagnostic::new(
-                            call.argument.syntax().span.clone(),
-                            "`block_on` operand has no concrete type",
-                        )
-                    })?;
+                let operand_type =
+                    self.concrete_expression_type(&call.argument)
+                        .ok_or_else(|| {
+                            Diagnostic::new(
+                                call.argument.syntax().span.clone(),
+                                "`block_on` operand has no concrete type",
+                            )
+                        })?;
                 let frame = self.compile_expression(environment, &call.argument)?;
                 let frame = value_as_basic(frame).ok_or_else(|| {
                     Diagnostic::new(
@@ -7336,9 +7330,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .build_extract_value(*slice, 1, "slice.length")
                     .map_err(compiler_diagnostic)?
                     .into_int_value();
-                let element = match self
-                    .concrete_expression_type(&Expression::Call(call.clone()))
-                {
+                let element = match self.concrete_expression_type(&Expression::Call(call.clone())) {
                     Some(CheckedType::Ref(payload)) => payload.as_ref().clone(),
                     _ => {
                         return Err(Diagnostic::new(
@@ -7908,12 +7900,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .typed_module
             .implicit_thunk_for(call.argument.syntax().id)
             .cloned()
-            .ok_or_else(|| Diagnostic::new(span.clone(), "`until` requires a `{ predicate }` block"))?;
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "`until` requires a `{ predicate }` block")
+            })?;
         let predicate_type = self
             .typed_module
             .type_of_function(thunk.id)
             .cloned()
-            .ok_or_else(|| Diagnostic::new(span.clone(), "`until` predicate has no function type"))?;
+            .ok_or_else(|| {
+                Diagnostic::new(span.clone(), "`until` predicate has no function type")
+            })?;
         // D25: pure apart from reading signals.
         if !predicate_type.effects.resources.is_empty()
             || matches!(
@@ -7945,7 +7941,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .iter()
             .rev()
             .find_map(|bound| {
-                if !self.typed_module.is_reactive_type(&bound.resource.value_type) {
+                if !self
+                    .typed_module
+                    .is_reactive_type(&bound.resource.value_type)
+                {
                     return None;
                 }
                 let value = value_as_basic(bound.value)?;
@@ -7959,7 +7958,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 }
             })
             .ok_or_else(|| {
-                Diagnostic::new(span.clone(), "resource `Reactive` is not available for `until`")
+                Diagnostic::new(
+                    span.clone(),
+                    "resource `Reactive` is not available for `until`",
+                )
             })?;
 
         let runner = self.emit_until_runner(call.syntax.id, &predicate_type)?;
@@ -8039,9 +8041,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let i8_type = self.context.i8_type();
         let i32_type = self.context.i32_type();
         let size_type = self.size_type;
-        let payload_type = self
-            .context
-            .struct_type(&[ptr_type.into(); 4], false);
+        let payload_type = self.context.struct_type(&[ptr_type.into(); 4], false);
         let bool_fn_type = self.compile_closure_function_type(predicate_type)?;
 
         let previous = self.builder.get_insert_block();
@@ -8119,15 +8119,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.builder.position_at_end(resolve);
         let complete = self.coroutine_runtime_fn(
             "__staple_completion_complete",
-            i8_type.fn_type(
-                &[ptr_type.into(), ptr_type.into(), size_type.into()],
-                false,
-            ),
+            i8_type.fn_type(&[ptr_type.into(), ptr_type.into(), size_type.into()], false),
         );
         self.builder
             .build_direct_call(
                 complete,
-                &[completion.into(), completion.into(), size_type.const_zero().into()],
+                &[
+                    completion.into(),
+                    completion.into(),
+                    size_type.const_zero().into(),
+                ],
                 "until.resolve",
             )
             .map_err(compiler_diagnostic)?;
@@ -8136,7 +8137,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map_err(compiler_diagnostic)?;
 
         self.builder.position_at_end(done);
-        self.builder.build_return(None).map_err(compiler_diagnostic)?;
+        self.builder
+            .build_return(None)
+            .map_err(compiler_diagnostic)?;
 
         if let Some(block) = previous {
             self.builder.position_at_end(block);
@@ -9096,9 +9099,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let environment_type = self.compile_capture_type(function)?;
             let mut environment_value = environment_type.const_zero();
             for (index, symbol) in function.captures.iter().copied().enumerate() {
-                let borrowed = self
-                    .typed_module
-                    .is_borrowed_capture(function.id, symbol);
+                let borrowed = self.typed_module.is_borrowed_capture(function.id, symbol);
                 let value = if self
                     .typed_module
                     .resolved()
@@ -9160,9 +9161,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .typed_module
                         .resolved()
                         .requires_initialization_state(symbol)
-                        && !self
-                            .typed_module
-                            .is_borrowed_capture(function.id, symbol)
+                        && !self.typed_module.is_borrowed_capture(function.id, symbol)
                         && self
                             .typed_module
                             .type_of_symbol(symbol)
@@ -9195,7 +9194,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         self.context.struct_type(
             &[
                 self.context.i8_type().into(),
-                ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr, ptr,
+                ptr,
+                ptr,
+                ptr,
+                ptr,
+                ptr,
+                ptr,
+                ptr,
+                ptr,
+                ptr,
             ],
             false,
         )
@@ -9251,14 +9258,14 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let ptr = self.context.ptr_type(AddressSpace::default());
         self.context.struct_type(
             &[
-                i8_type.into(),      // state
-                i8_type.into(),      // flags
+                i8_type.into(),        // state
+                i8_type.into(),        // flags
                 self.size_type.into(), // generation
-                ptr.into(),          // scheduler
-                ptr.into(),          // waiter
-                ptr.into(),          // cancel_env
-                ptr.into(),          // cancel_fn
-                value_llvm,          // value
+                ptr.into(),            // scheduler
+                ptr.into(),            // waiter
+                ptr.into(),            // cancel_env
+                ptr.into(),            // cancel_fn
+                value_llvm,            // value
             ],
             false,
         )
@@ -9427,10 +9434,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .build_load(ptr_type, bundle_slot, "coro.resources")
                     .map_err(compiler_diagnostic)?
                     .into_pointer_value();
-                let bundle_type =
-                    self.coroutine_resource_bundle_type(&plan.deferred_effects)?;
-                for (index, resource) in
-                    plan.deferred_effects.resources.iter().cloned().enumerate()
+                let bundle_type = self.coroutine_resource_bundle_type(&plan.deferred_effects)?;
+                for (index, resource) in plan.deferred_effects.resources.iter().cloned().enumerate()
                 {
                     let field = self
                         .builder
@@ -9505,7 +9510,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             // cancel request unwinds at this boundary instead of resuming.
             let cancel_check = self.context.append_basic_block(resume_fn, "cancel.check");
             let unwind = self.context.append_basic_block(resume_fn, "cancel.unwind");
-            let do_switch = self.context.append_basic_block(resume_fn, "resume.dispatch");
+            let do_switch = self
+                .context
+                .append_basic_block(resume_fn, "resume.dispatch");
             let already_done = self.context.append_basic_block(resume_fn, "resume.spent");
 
             let record_slot = self
@@ -9534,7 +9541,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let record_header = self.task_record_header_type();
             let cancel_slot = self
                 .builder
-                .build_struct_gep(record_header, record, TASK_RECORD_CANCEL, "task.cancel.slot")
+                .build_struct_gep(
+                    record_header,
+                    record,
+                    TASK_RECORD_CANCEL,
+                    "task.cancel.slot",
+                )
                 .map_err(compiler_diagnostic)?;
             let cancel = self
                 .builder
@@ -9591,10 +9603,15 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             // spent, and report CANCELLED to the driver.
             self.builder.position_at_end(unwind);
             if !plan.wait_await_states.is_empty() || !plan.until_await_states.is_empty() {
-                let abandon = self.context.append_basic_block(resume_fn, "cancel.abandon.wait");
-                let child_cleanup =
-                    self.context.append_basic_block(resume_fn, "cancel.cleanup.until");
-                let unwind_cells = self.context.append_basic_block(resume_fn, "cancel.unwind.cells");
+                let abandon = self
+                    .context
+                    .append_basic_block(resume_fn, "cancel.abandon.wait");
+                let child_cleanup = self
+                    .context
+                    .append_basic_block(resume_fn, "cancel.cleanup.until");
+                let unwind_cells = self
+                    .context
+                    .append_basic_block(resume_fn, "cancel.unwind.cells");
                 let mut cases = plan
                     .wait_await_states
                     .iter()
@@ -9671,8 +9688,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "coro.cancel.never.ran",
                     )
                     .map_err(compiler_diagnostic)?;
-                let drop_caps = self.context.append_basic_block(resume_fn, "cancel.drop.captures");
-                let after_caps = self.context.append_basic_block(resume_fn, "cancel.after.captures");
+                let drop_caps = self
+                    .context
+                    .append_basic_block(resume_fn, "cancel.drop.captures");
+                let after_caps = self
+                    .context
+                    .append_basic_block(resume_fn, "cancel.after.captures");
                 self.builder
                     .build_conditional_branch(never_ran, drop_caps, after_caps)
                     .map_err(compiler_diagnostic)?;
@@ -9706,10 +9727,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .build_struct_gep(header_type, frame, CORO_STATE, "coro.state.slot")
                 .map_err(compiler_diagnostic)?;
             self.builder
-                .build_store(
-                    state_slot_unwind,
-                    i8_type.const_int(CORO_STATE_DONE, false),
-                )
+                .build_store(state_slot_unwind, i8_type.const_int(CORO_STATE_DONE, false))
                 .map_err(compiler_diagnostic)?;
             let mut cancelled_status = status_type.const_zero();
             cancelled_status = self
@@ -9727,13 +9745,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(compiler_diagnostic)?;
 
             self.builder.position_at_end(bad_state);
-            let trap = self.llvm_module.get_function("llvm.trap").unwrap_or_else(|| {
-                self.llvm_module.add_function(
-                    "llvm.trap",
-                    self.context.void_type().fn_type(&[], false),
-                    None,
-                )
-            });
+            let trap = self
+                .llvm_module
+                .get_function("llvm.trap")
+                .unwrap_or_else(|| {
+                    self.llvm_module.add_function(
+                        "llvm.trap",
+                        self.context.void_type().fn_type(&[], false),
+                        None,
+                    )
+                });
             self.builder
                 .build_direct_call(trap, &[], "")
                 .map_err(compiler_diagnostic)?;
@@ -9745,7 +9766,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             let value = self.compile_expression(&mut environment, &thunk.body)?;
             if !environment.did_return {
                 let return_value = value_as_basic(value).ok_or_else(|| {
-                    Diagnostic::new(Span::Compiler, "coroutine result is not a first-class value")
+                    Diagnostic::new(
+                        Span::Compiler,
+                        "coroutine result is not a first-class value",
+                    )
                 })?;
                 self.drop_all_owned(&mut environment, Span::Compiler)?;
                 let result_ptr = self
@@ -9856,7 +9880,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(compiler_diagnostic)?;
 
             self.builder.position_at_end(done);
-            self.builder.build_return(None).map_err(compiler_diagnostic)?;
+            self.builder
+                .build_return(None)
+                .map_err(compiler_diagnostic)?;
         }
 
         if let Some(block) = previous_block {
@@ -9881,8 +9907,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .implicit_thunk_for(body_syntax)
             .cloned()
             .ok_or_else(|| Diagnostic::new(span.clone(), "missing coroutine body"))?;
-        let env_ptr =
-            self.build_capture_environment(environment, &thunk, span.clone(), false)?;
+        let env_ptr = self.build_capture_environment(environment, &thunk, span.clone(), false)?;
         let layout = self.coroutine_frame_layout(body_syntax)?;
         let header_type = self.coroutine_header_type();
         let i8_type = self.context.i8_type();
@@ -9996,10 +10021,20 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         // frame runs; the current frame registers itself as the sole waiter on
         // an external record and parks until it is resolved.
         if self.typed_module.task_result(&operand_type).is_some() {
-            return self.compile_external_await(environment, await_, &context, ExternalAwaitKind::Task);
+            return self.compile_external_await(
+                environment,
+                await_,
+                &context,
+                ExternalAwaitKind::Task,
+            );
         }
         if self.typed_module.wait_result(&operand_type).is_some() {
-            return self.compile_external_await(environment, await_, &context, ExternalAwaitKind::Wait);
+            return self.compile_external_await(
+                environment,
+                await_,
+                &context,
+                ExternalAwaitKind::Wait,
+            );
         }
 
         let (child_deferred, child_result) = self
@@ -10046,7 +10081,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map_err(compiler_diagnostic)?;
         let pending_ptr_slot = self
             .builder
-            .build_struct_gep(header_type, frame, CORO_PENDING_PTR, "coro.pending.ptr.slot")
+            .build_struct_gep(
+                header_type,
+                frame,
+                CORO_PENDING_PTR,
+                "coro.pending.ptr.slot",
+            )
             .map_err(compiler_diagnostic)?;
         self.builder
             .build_store(pending_ptr_slot, pending)
@@ -10129,7 +10169,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         let completed_type = outcome_sum.alternatives[0].clone();
         let cancelled_type = outcome_sum.alternatives[1].clone();
         let CheckedType::Distinct { representation, .. } = &completed_type else {
-            return Err(Diagnostic::new(span.clone(), "`Completed` is not a distinct type"));
+            return Err(Diagnostic::new(
+                span.clone(),
+                "`Completed` is not a distinct type",
+            ));
         };
         let payload_llvm = self.compile_type(representation)?;
         let (record_type, result_field, completed_state) = match kind {
@@ -10210,8 +10253,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         "await.has.record",
                     )
                     .map_err(compiler_diagnostic)?;
-                let sched_from_record = self.context.append_basic_block(function, "await.sched.load");
-                let sched_join = self.context.append_basic_block(function, "await.sched.join");
+                let sched_from_record = self
+                    .context
+                    .append_basic_block(function, "await.sched.load");
+                let sched_join = self
+                    .context
+                    .append_basic_block(function, "await.sched.join");
                 let entry_block = self.builder.get_insert_block().expect("await block");
                 self.builder
                     .build_conditional_branch(has_record, sched_from_record, sched_join)
@@ -10245,10 +10292,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 ]);
                 let register = self.coroutine_runtime_fn(
                     "__staple_completion_register",
-                    i8_type.fn_type(
-                        &[ptr_type.into(), ptr_type.into(), ptr_type.into()],
-                        false,
-                    ),
+                    i8_type.fn_type(&[ptr_type.into(), ptr_type.into(), ptr_type.into()], false),
                 );
                 self.builder
                     .build_direct_call(
@@ -10275,7 +10319,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "await.want.suspend",
             )
             .map_err(compiler_diagnostic)?;
-        let suspend_block = self.context.append_basic_block(function, "await.external.suspend");
+        let suspend_block = self
+            .context
+            .append_basic_block(function, "await.external.suspend");
         self.builder
             .build_conditional_branch(want_suspend, suspend_block, dispatch)
             .map_err(compiler_diagnostic)?;
@@ -10329,8 +10375,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             )
             .map_err(compiler_diagnostic)?;
 
-        let completed_block = self.context.append_basic_block(function, "await.ext.completed");
-        let cancelled_block = self.context.append_basic_block(function, "await.ext.cancelled");
+        let completed_block = self
+            .context
+            .append_basic_block(function, "await.ext.completed");
+        let cancelled_block = self
+            .context
+            .append_basic_block(function, "await.ext.cancelled");
         let merge_block = self.context.append_basic_block(function, "await.ext.merge");
         self.builder
             .build_conditional_branch(is_completed, completed_block, cancelled_block)
@@ -10498,10 +10548,8 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         match intrinsic {
             IntrinsicFunction::SchedulerCreate => {
                 self.compile_expression(environment, &call.argument)?;
-                let create = self.coroutine_runtime_fn(
-                    "__staple_sched_create",
-                    ptr_type.fn_type(&[], false),
-                );
+                let create = self
+                    .coroutine_runtime_fn("__staple_sched_create", ptr_type.fn_type(&[], false));
                 let sched = self
                     .builder
                     .build_direct_call(create, &[], "scheduler")
@@ -10549,10 +10597,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     self.context.void_type().fn_type(&[ptr_type.into()], false),
                 );
                 for (field, value) in [
-                    (
-                        CORO_RESUME_FN,
-                        resume.as_global_value().as_pointer_value(),
-                    ),
+                    (CORO_RESUME_FN, resume.as_global_value().as_pointer_value()),
                     (
                         CORO_CLEANUP_FN,
                         cleanup.as_global_value().as_pointer_value(),
@@ -10570,11 +10615,11 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 Ok(frame.as_any_value_enum())
             }
             IntrinsicFunction::Spawn => {
-                let coroutine_type = self
-                    .concrete_expression_type(&call.argument)
-                    .ok_or_else(|| {
-                        Diagnostic::new(span.clone(), "`spawn` operand has no concrete type")
-                    })?;
+                let coroutine_type =
+                    self.concrete_expression_type(&call.argument)
+                        .ok_or_else(|| {
+                            Diagnostic::new(span.clone(), "`spawn` operand has no concrete type")
+                        })?;
                 let (deferred, result_type) = self
                     .typed_module
                     .coroutine_parts(&coroutine_type)
@@ -10611,7 +10656,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let record_result = record_field(self, TASK_RECORD_RESULT, "task.record.result")?;
 
                 let store_header =
-                    |emitter: &Self, field: u32, value: inkwell::values::BasicValueEnum<'context>| {
+                    |emitter: &Self,
+                     field: u32,
+                     value: inkwell::values::BasicValueEnum<'context>| {
                         let slot = emitter
                             .builder
                             .build_struct_gep(header_type, frame, field, "coro.header.slot")
@@ -10670,7 +10717,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             IntrinsicFunction::Pump => {
                 let argument = self.compile_expression(environment, &call.argument)?;
                 let argument = value_as_basic(argument)
-                    .ok_or_else(|| Diagnostic::new(span.clone(), "`pump` argument is not first-class"))?
+                    .ok_or_else(|| {
+                        Diagnostic::new(span.clone(), "`pump` argument is not first-class")
+                    })?
                     .into_struct_value();
                 let sched = self
                     .builder
@@ -10790,7 +10839,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                             self.typed_module.wait_result(&element.value_type).cloned()
                         })
                         .ok_or_else(|| {
-                            Diagnostic::new(span.clone(), "`completion` result is not a wait product")
+                            Diagnostic::new(
+                                span.clone(),
+                                "`completion` result is not a wait product",
+                            )
                         })?,
                     _ => {
                         return Err(Diagnostic::new(
@@ -10817,7 +10869,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .map_err(compiler_diagnostic)
                 };
                 self.builder
-                    .build_store(field(self, COMPLETION_SCHEDULER, "completion.scheduler")?, scheduler)
+                    .build_store(
+                        field(self, COMPLETION_SCHEDULER, "completion.scheduler")?,
+                        scheduler,
+                    )
                     .map_err(compiler_diagnostic)?;
 
                 if let Some(closure) = cancel_closure {
@@ -10832,10 +10887,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         .build_extract_value(closure, 1, "on_cancel.env")
                         .map_err(compiler_diagnostic)?;
                     self.builder
-                        .build_store(field(self, COMPLETION_CANCEL_ENV, "completion.cancel.env")?, env)
+                        .build_store(
+                            field(self, COMPLETION_CANCEL_ENV, "completion.cancel.env")?,
+                            env,
+                        )
                         .map_err(compiler_diagnostic)?;
                     self.builder
-                        .build_store(field(self, COMPLETION_CANCEL_FN, "completion.cancel.fn")?, code)
+                        .build_store(
+                            field(self, COMPLETION_CANCEL_FN, "completion.cancel.fn")?,
+                            code,
+                        )
                         .map_err(compiler_diagnostic)?;
                     self.builder
                         .build_store(
@@ -10885,9 +10946,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .cloned()
                     .map(|ty| substitute_type(ty, &self.active_type_substitutions))
                     .and_then(|ty| match ty {
-                        CheckedType::Product(product) => {
-                            product.elements.get(1).map(|element| element.value_type.clone())
-                        }
+                        CheckedType::Product(product) => product
+                            .elements
+                            .get(1)
+                            .map(|element| element.value_type.clone()),
                         _ => None,
                     })
                     // A juxtaposed `resolver^complete value` reconstitutes the
@@ -10978,7 +11040,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .ok_or_else(|| Diagnostic::new(span.clone(), "handle is not first-class"))?
                     .into_pointer_value();
                 let runtime = match intrinsic {
-                    IntrinsicFunction::CompletionTokenResolve => "__staple_completion_token_resolve",
+                    IntrinsicFunction::CompletionTokenResolve => {
+                        "__staple_completion_token_resolve"
+                    }
                     IntrinsicFunction::CompletionTokenCancel => "__staple_completion_token_cancel",
                     _ => "__staple_completion_cancel",
                 };
@@ -11006,7 +11070,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .resources
             .iter()
             .rev()
-            .find(|candidate| self.typed_module.is_tasks_type(&candidate.resource.value_type))
+            .find(|candidate| {
+                self.typed_module
+                    .is_tasks_type(&candidate.resource.value_type)
+            })
             .ok_or_else(|| {
                 Diagnostic::new(span.clone(), "no `Tasks` scope is in scope for `spawn`")
             })?;
@@ -11095,9 +11162,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .requires_initialization_state(symbol)
                 || self.typed_module.has_mutable_storage(symbol)
                 || self.typed_module.is_derived_symbol(symbol)
-                || self
-                    .typed_module
-                    .is_borrowed_capture(closure.id, symbol)
+                || self.typed_module.is_borrowed_capture(closure.id, symbol)
             {
                 continue;
             }
@@ -11159,9 +11224,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .requires_initialization_state(*symbol)
                     || self.typed_module.has_mutable_storage(*symbol)
                     || self.typed_module.is_derived_symbol(*symbol)
-                    || self
-                        .typed_module
-                        .is_borrowed_capture(function.id, *symbol)
+                    || self.typed_module.is_borrowed_capture(function.id, *symbol)
                 {
                     return Ok(self.context.ptr_type(AddressSpace::default()).into());
                 }
@@ -11827,9 +11890,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map(|(index, value_type)| {
                 mutation_mask[index]
                     || (!move_mask[index]
-                        && !self
-                            .typed_module
-                            .is_copy_in_function(value_type, function))
+                        && !self.typed_module.is_copy_in_function(value_type, function))
             })
             .collect()
     }
@@ -12312,8 +12373,7 @@ fn standard_function_name_matches(candidate: &str, name: &str) -> bool {
     let Some(rest) = candidate.strip_prefix("__staple_m") else {
         return false;
     };
-    rest.rsplit_once('.')
-        .is_some_and(|(_, last)| last == name)
+    rest.rsplit_once('.').is_some_and(|(_, last)| last == name)
 }
 
 fn value_as_basic(value: AnyValueEnum<'_>) -> Option<BasicValueEnum<'_>> {

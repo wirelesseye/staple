@@ -109,10 +109,19 @@ fn parses_effect_parameters_on_type_declarations_and_applications() {
     );
     let module = parse(source).expect("effect-parameterized types should parse");
     assert_eq!(module.syntax.text(), source);
-    let Item::TypeDeclaration(callback) = &module.items[0] else { panic!("expected type declaration") };
-    assert!(matches!(callback.type_parameters.as_slice(), [staple_syntax::TypeParameterPattern::Effect(binding)] if binding.name == "E"));
-    let Item::Binding(io) = &module.items[3] else { panic!("expected binding") };
-    assert!(matches!(io.annotation, Some(staple_syntax::Type::EffectApplication(_))));
+    let Item::TypeDeclaration(callback) = &module.items[0] else {
+        panic!("expected type declaration")
+    };
+    assert!(
+        matches!(callback.type_parameters.as_slice(), [staple_syntax::TypeParameterPattern::Effect(binding)] if binding.name == "E")
+    );
+    let Item::Binding(io) = &module.items[3] else {
+        panic!("expected binding")
+    };
+    assert!(matches!(
+        io.annotation,
+        Some(staple_syntax::Type::EffectApplication(_))
+    ));
 
     assert!(parse("type Empty{} = I32\n").is_err());
     assert!(parse("type Many{E, F} = I32\n").is_err());
@@ -1325,7 +1334,10 @@ fn parses_modifier_prefixes_as_macro_call_metadata() {
     let Item::VisibilityMacroInvocation(invocation) = &root.items[1] else {
         panic!("expected metadata macro invocation");
     };
-    assert_eq!(invocation.visibility.kind, staple_syntax::VisibilityKind::Public);
+    assert_eq!(
+        invocation.visibility.kind,
+        staple_syntax::VisibilityKind::Public
+    );
     assert_eq!(invocation.modifiers.len(), 3);
     assert_eq!(invocation.modifiers[0].name, "doc");
     assert_eq!(invocation.modifiers[1].name, "outer");
@@ -1513,7 +1525,9 @@ fn parses_low_precedence_satisfies_expression() {
         panic!("expected satisfies expression");
     };
     assert!(matches!(satisfies.ty, Type::Named(ref named) if named.name == "I32"));
-    assert!(matches!(satisfies.value.as_ref(), Expression::Binary(binary) if binary.operator == BinaryOperator::Add));
+    assert!(
+        matches!(satisfies.value.as_ref(), Expression::Binary(binary) if binary.operator == BinaryOperator::Add)
+    );
     assert_eq!(root.text(), source);
 }
 
@@ -1540,10 +1554,8 @@ fn parses_contextually_typed_curried_parameters() {
 
 #[test]
 fn parses_juxtaposed_function_parameters_and_types() {
-    let root = parse(
-        "let add: x: I32 * y: I32 -> I32 = x: I32 * y: I32 => x + y\n",
-    )
-    .expect("juxtaposed function should parse");
+    let root = parse("let add: x: I32 * y: I32 -> I32 = x: I32 * y: I32 => x + y\n")
+        .expect("juxtaposed function should parse");
     let staple_syntax::Item::Binding(binding) = &root.items[0] else {
         panic!("expected binding");
     };
@@ -1569,10 +1581,9 @@ fn parses_juxtaposed_function_parameters_and_types() {
 
 #[test]
 fn rejects_defaults_on_juxtaposed_parameter_slots() {
-    let error = parse(
-        "def render: (width: I32 = 800) * body: (() -> ()) -> () = width * body => ()\n",
-    )
-    .expect_err("juxtaposed slots must have exact arity");
+    let error =
+        parse("def render: (width: I32 = 800) * body: (() -> ()) -> () = width * body => ()\n")
+            .expect_err("juxtaposed slots must have exact arity");
     assert!(error.message.contains("exact arity"), "{}", error.message);
 
     parse("def render: ((width: I32 = 800)) * body: (() -> ()) -> () = width * body => ()\n")
@@ -1640,8 +1651,12 @@ fn logical_operators_bind_looser_than_comparisons() {
         panic!("expected `&&` at the top, binding looser than `==`");
     };
     assert_eq!(and.operator, BinaryOperator::And);
-    assert!(matches!(and.left.as_ref(), Expression::Binary(value) if value.operator == BinaryOperator::Equal));
-    assert!(matches!(and.right.as_ref(), Expression::Binary(value) if value.operator == BinaryOperator::Equal));
+    assert!(
+        matches!(and.left.as_ref(), Expression::Binary(value) if value.operator == BinaryOperator::Equal)
+    );
+    assert!(
+        matches!(and.right.as_ref(), Expression::Binary(value) if value.operator == BinaryOperator::Equal)
+    );
 }
 
 #[test]
@@ -1820,7 +1835,8 @@ fn lexes_block_comments_including_nesting_and_unterminated() {
 
 #[test]
 fn block_comments_are_trivia_and_preserved() {
-    let source = "def main/* inline */: _ -> String =\n/* leading */() => {\n  \"ok\" /* trailing */\n}\n";
+    let source =
+        "def main/* inline */: _ -> String =\n/* leading */() => {\n  \"ok\" /* trailing */\n}\n";
     let root = parse(source).expect("block comments should parse");
     assert_eq!(root.syntax.text(), source);
     assert_eq!(

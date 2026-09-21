@@ -539,7 +539,8 @@ impl Server {
         let text = document.text.clone();
         let version = document.version;
         let Some(path) = uri_to_path(uri) else {
-            let tokens = semantic::tokens(&text, staple_syntax::parse(&text).ok().as_ref(), None, None);
+            let tokens =
+                semantic::tokens(&text, staple_syntax::parse(&text).ok().as_ref(), None, None);
             self.documents.get_mut(uri).unwrap().semantic_tokens = tokens;
             self.documents.get_mut(uri).unwrap().hover_entries.clear();
             self.documents
@@ -1160,7 +1161,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-lsp-macro-argument-features.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1242,7 +1248,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-lsp-raw-macro-argument-features.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1446,7 +1457,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-diagnostic-leading-trivia.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let diagnostics = NameResolver::new().resolve_program(program).unwrap_err();
@@ -1490,7 +1506,12 @@ mod tests {
                 },
             )]),
             published_by_root: HashMap::new(),
-            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
         };
 
         server
@@ -1502,7 +1523,10 @@ mod tests {
 
     #[test]
     fn analyzes_an_open_standard_library_module_from_its_package() {
-        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let path = std::fs::canonicalize(stdlib.join("std/flow.sta")).unwrap();
         let source = std::fs::read_to_string(&path).unwrap();
         let uri = path_to_uri(&path).unwrap();
@@ -1581,7 +1605,12 @@ mod tests {
                 },
             )]),
             published_by_root: HashMap::new(),
-            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
         };
 
         server.analyze(&uri).unwrap();
@@ -1630,7 +1659,9 @@ mod tests {
                     && println < entry.range.end
                     && &source[entry.range.clone()] == "println"
             })
-            .unwrap_or_else(|| panic!("no hover entry for `println`: {:?}", document.hover_entries));
+            .unwrap_or_else(|| {
+                panic!("no hover entry for `println`: {:?}", document.hover_entries)
+            });
         assert_eq!(
             println_hover.module.as_deref(),
             Some("std.io"),
@@ -1641,9 +1672,7 @@ mod tests {
         let x_hover = document
             .hover_entries
             .iter()
-            .find(|entry| {
-                entry.range.start == x_decl && &source[entry.range.clone()] == "x"
-            })
+            .find(|entry| entry.range.start == x_decl && &source[entry.range.clone()] == "x")
             .unwrap_or_else(|| panic!("no hover entry for `x`: {:?}", document.hover_entries));
         assert_eq!(
             x_hover.module.as_deref(),
@@ -1654,10 +1683,8 @@ mod tests {
 
     #[test]
     fn hover_names_the_defining_module_for_a_sibling_package_module() {
-        let root = std::env::temp_dir().join(format!(
-            "staple-lsp-sibling-module-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("staple-lsp-sibling-module-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
         std::fs::write(root.join("staple.kdl"), "package \"widgets\"\n").unwrap();
@@ -1683,7 +1710,12 @@ mod tests {
                 },
             )]),
             published_by_root: HashMap::new(),
-            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
         };
 
         server.analyze(&uri).unwrap();
@@ -1697,7 +1729,12 @@ mod tests {
             .find(|entry| {
                 entry.range.start == reference && &source[entry.range.clone()] == "greeting"
             })
-            .unwrap_or_else(|| panic!("no hover entry for `greeting`: {:?}", document.hover_entries));
+            .unwrap_or_else(|| {
+                panic!(
+                    "no hover entry for `greeting`: {:?}",
+                    document.hover_entries
+                )
+            });
         assert_eq!(
             hover.module.as_deref(),
             Some("widgets.helpers"),
@@ -1707,13 +1744,15 @@ mod tests {
 
     #[test]
     fn hover_names_the_defining_module_without_a_manifest() {
-        let root = std::env::temp_dir().join(format!(
-            "staple-lsp-no-manifest-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("staple-lsp-no-manifest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(root.join("helpers.sta"), "pub mod\npub let greeting = \"hi\"\n").unwrap();
+        std::fs::write(
+            root.join("helpers.sta"),
+            "pub mod\npub let greeting = \"hi\"\n",
+        )
+        .unwrap();
         let source = "use helpers.greeting\ngreeting\n";
         std::fs::write(root.join("main.sta"), source).unwrap();
         let path = std::fs::canonicalize(root.join("main.sta")).unwrap();
@@ -1730,7 +1769,12 @@ mod tests {
                 },
             )]),
             published_by_root: HashMap::new(),
-            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
         };
 
         server.analyze(&uri).unwrap();
@@ -1744,7 +1788,12 @@ mod tests {
             .find(|entry| {
                 entry.range.start == reference && &source[entry.range.clone()] == "greeting"
             })
-            .unwrap_or_else(|| panic!("no hover entry for `greeting`: {:?}", document.hover_entries));
+            .unwrap_or_else(|| {
+                panic!(
+                    "no hover entry for `greeting`: {:?}",
+                    document.hover_entries
+                )
+            });
         assert_eq!(
             hover.module.as_deref(),
             Some("helpers"),
@@ -1761,7 +1810,12 @@ mod tests {
                 connection: server_connection,
                 documents: HashMap::new(),
                 published_by_root: HashMap::new(),
-                stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+                stdlib: Some(
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .parent()
+                        .unwrap()
+                        .join("stdlib"),
+                ),
             }
             .event_loop()
             .unwrap();
@@ -2138,7 +2192,11 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("staple.kdl"), "package \"demo\" {\n    root \"src\"\n}\n").unwrap();
+        std::fs::write(
+            root.join("staple.kdl"),
+            "package \"demo\" {\n    root \"src\"\n}\n",
+        )
+        .unwrap();
         std::fs::write(root.join("src/root.sta"), "pub mod\n").unwrap();
         std::fs::write(
             root.join("src/helpers.sta"),
@@ -2163,7 +2221,12 @@ mod tests {
                 },
             )]),
             published_by_root: HashMap::new(),
-            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
         };
 
         // A clean analysis first, so the cross-module index is available.
@@ -2237,7 +2300,11 @@ mod tests {
             .and_then(|edit| edit.changes)
             .and_then(|mut changes| changes.remove(&uri))
             .expect("the quick fix edits the current document");
-        assert!(edits.iter().any(|edit| edit.new_text.contains("use helpers.greet")));
+        assert!(
+            edits
+                .iter()
+                .any(|edit| edit.new_text.contains("use helpers.greet"))
+        );
     }
 
     #[test]
@@ -2269,7 +2336,12 @@ mod tests {
                 },
             )]),
             published_by_root: HashMap::new(),
-            stdlib: Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib")),
+            stdlib: Some(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            ),
         };
 
         server.analyze(&uri).unwrap();

@@ -928,7 +928,8 @@ fn item_uses_package_visibility(item: &Item) -> bool {
         Item::VisibilitySplice(item) => item_uses_package_visibility(&item.item),
         Item::VisibilityMacroInvocation(item) => matches!(
             item.visibility.kind,
-            staple_syntax::VisibilityKind::Package | staple_syntax::VisibilityKind::PublicReprPackage
+            staple_syntax::VisibilityKind::Package
+                | staple_syntax::VisibilityKind::PublicReprPackage
         ),
         _ => false,
     }
@@ -1812,7 +1813,10 @@ impl NameResolver {
             ("pump", IntrinsicFunction::Pump),
             ("yield_now", IntrinsicFunction::YieldNow),
             ("completion", IntrinsicFunction::Completion),
-            ("completion_with_cancel", IntrinsicFunction::CompletionWithCancel),
+            (
+                "completion_with_cancel",
+                IntrinsicFunction::CompletionWithCancel,
+            ),
             ("completion_token", IntrinsicFunction::CompletionToken),
             ("until", IntrinsicFunction::Until),
         ] {
@@ -2099,7 +2103,9 @@ impl NameResolver {
         let recursive_construction = match builtin {
             BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
             BuiltinType::Slice => Some(RecursiveConstruction::Slice),
-            BuiltinType::Syntax if declaration.kind == staple_syntax::TypeDeclarationKind::Distinct => {
+            BuiltinType::Syntax
+                if declaration.kind == staple_syntax::TypeDeclarationKind::Distinct =>
+            {
                 Some(RecursiveConstruction::Syntax)
             }
             _ => None,
@@ -2148,8 +2154,8 @@ impl NameResolver {
                     Item::ExternBlock(block) => {
                         for binding in &block.bindings {
                             let symbol = self.allocate_symbol(binding);
-                            let previous = self.module_values[source_module.id.0]
-                                .remove(&binding.name);
+                            let previous =
+                                self.module_values[source_module.id.0].remove(&binding.name);
                             let root = self.grouped_value_symbol(previous, symbol);
                             self.module_values[source_module.id.0]
                                 .insert(binding.name.clone(), root);
@@ -2212,7 +2218,8 @@ impl NameResolver {
                         for member in &declaration.members {
                             let method = TraitMethodId(self.next_trait_method_id);
                             self.next_trait_method_id += 1;
-                            let arity = source_function_outer_arity(&member.annotation).unwrap_or(0);
+                            let arity =
+                                source_function_outer_arity(&member.annotation).unwrap_or(0);
                             if self
                                 .trait_member_ids
                                 .insert((id, member.name.clone(), arity), method)
@@ -2252,15 +2259,13 @@ impl NameResolver {
                     Item::TraitImplementation(_) => {}
                     Item::Binding(binding) => {
                         let symbol = self.allocate_symbol(binding);
-                        let previous = self.module_values[source_module.id.0]
-                            .remove(&binding.name);
+                        let previous = self.module_values[source_module.id.0].remove(&binding.name);
                         let root = if binding.kind == BindingKind::Def {
                             self.grouped_value_symbol(previous, symbol)
                         } else {
                             previous.map_or(symbol, |_| symbol)
                         };
-                        self.module_values[source_module.id.0]
-                            .insert(binding.name.clone(), root);
+                        self.module_values[source_module.id.0].insert(binding.name.clone(), root);
                         if binding.visibility != Visibility::Private {
                             self.insert_visible_value(
                                 source_module.id,
@@ -3210,7 +3215,11 @@ impl NameResolver {
                 definitions.push(definition);
             }
         };
-        for (name, symbol) in self.current_scope().iter().chain(self.prelude_values.iter()) {
+        for (name, symbol) in self
+            .current_scope()
+            .iter()
+            .chain(self.prelude_values.iter())
+        {
             for member in self
                 .overload_sets
                 .get(symbol)
@@ -3534,7 +3543,10 @@ impl NameResolver {
                     if trait_id.is_some() && method.is_none() {
                         self.diagnostics.push(Diagnostic::new(
                             member.syntax.span.clone(),
-                            format!("trait has no member named `{}` with arity {arity}", member.name),
+                            format!(
+                                "trait has no member named `{}` with arity {arity}",
+                                member.name
+                            ),
                         ));
                     }
                     if let Some(method) = method {
@@ -4023,7 +4035,8 @@ impl NameResolver {
                             (*owner == trait_id && member == name).then_some(*method)
                         })
                         .collect::<Vec<_>>();
-                    self.trait_method_references.insert(value.syntax.id, methods);
+                    self.trait_method_references
+                        .insert(value.syntax.id, methods);
                     if let Expression::Name(trait_name) = value.value.as_ref() {
                         self.trait_references.insert(trait_name.syntax.id, trait_id);
                     }
@@ -4969,7 +4982,10 @@ impl NameResolver {
                     self.validate_representation(count, required);
                 }
             }
-            Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
+            Type::Inferred(_)
+            | Type::NumberLiteral(_)
+            | Type::StringLiteral(_)
+            | Type::Splice(_) => {}
         }
     }
 
@@ -5153,7 +5169,8 @@ impl NameResolver {
             Pattern::Nominal(pattern) => {
                 if let Some(id) = self.named_types.get(&pattern.syntax.id).copied() {
                     let declaration = &self.type_declarations[&id];
-                    let represented = (declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
+                    let represented = (declaration.kind
+                        == staple_syntax::TypeDeclarationKind::Distinct
                         && declaration.underlying.is_some())
                         || declaration.kind == staple_syntax::TypeDeclarationKind::Singleton;
                     if !represented {
@@ -5198,16 +5215,20 @@ impl NameResolver {
         }
         if overloadable
             && self.function_candidate_symbols.contains(&symbol)
-            && !self.namespaces.iter().any(|frame| frame.contains_key(&binding.name))
+            && !self
+                .namespaces
+                .iter()
+                .any(|frame| frame.contains_key(&binding.name))
             && let Some(existing) = self.current_scope().get(&binding.name).copied()
             && self.local_overload_roots.get(&existing) == Some(&self.scopes.len())
-            && self
-                .overload_sets
-                .get(&existing)
-                .map_or_else(
-                    || self.function_candidate_symbols.contains(&existing),
-                    |members| members.iter().all(|member| self.function_candidate_symbols.contains(member)),
-                )
+            && self.overload_sets.get(&existing).map_or_else(
+                || self.function_candidate_symbols.contains(&existing),
+                |members| {
+                    members
+                        .iter()
+                        .all(|member| self.function_candidate_symbols.contains(member))
+                },
+            )
         {
             let root = self.grouped_value_symbol(Some(existing), symbol);
             self.current_scope_mut().insert(binding.name.clone(), root);
@@ -5651,9 +5672,9 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         "StringExpr" => Some("String -> StringExpr"),
         "BindingPattern" => Some("Ident String -> BindingPattern"),
         "NominalPattern" => Some("(name: Ident String, argument: Pattern) -> NominalPattern"),
-        "Sequence" => Some(
-            "<Element> () | (first: Element, rest: Sequence Element) -> Sequence Element",
-        ),
+        "Sequence" => {
+            Some("<Element> () | (first: Element, rest: Sequence Element) -> Sequence Element")
+        }
         "Separated" => Some(
             "<Element Separator> (separator: Separator, elements: Sequence Element, trailing: Bool) -> Separated Element Separator",
         ),

@@ -1,7 +1,7 @@
 use inkwell::context::Context;
 use staple_compiler::{
-    CheckedMutation, CheckedType, CodeGenerator, NameResolver, ProgramLoader, RecursiveConstruction,
-    TypeChecker,
+    CheckedMutation, CheckedType, CodeGenerator, NameResolver, ProgramLoader,
+    RecursiveConstruction, TypeChecker,
 };
 use staple_syntax::{Diagnostic, Item, parse};
 use std::path::Path;
@@ -43,7 +43,10 @@ fn resolve(source: &str) -> staple_compiler::ResolvedModule {
 #[test]
 fn applies_documentation_to_the_current_module() {
     let resolved = resolve("@doc(\"Module docs\")\npub mod\npub let answer = 42\n");
-    assert_eq!(resolved.syntax().visibility, staple_syntax::Visibility::Public);
+    assert_eq!(
+        resolved.syntax().visibility,
+        staple_syntax::Visibility::Public
+    );
     assert_eq!(resolved.syntax().docs, ["Module docs"]);
 }
 
@@ -55,7 +58,10 @@ fn applies_user_modifiers_to_the_current_module() {
         "macro @identity: Item -> Item = item => item\n",
         "pub let answer = 42\n",
     ));
-    assert_eq!(resolved.syntax().visibility, staple_syntax::Visibility::Public);
+    assert_eq!(
+        resolved.syntax().visibility,
+        staple_syntax::Visibility::Public
+    );
     assert!(
         resolved
             .syntax()
@@ -752,7 +758,9 @@ fn coroutine_body_effects_do_not_escape_to_the_enclosing_function() {
             "use std.io.(IO, println)\n",
             "def pure: () -> Coroutine{} () = () => coro { println \"hi\" }\n",
         )))
-        .expect_err_diagnostics("a coro body's IO effect must be reported against the coroutine type");
+        .expect_err_diagnostics(
+            "a coro body's IO effect must be reported against the coroutine type",
+        );
     assert!(
         diagnostics
             .iter()
@@ -770,9 +778,9 @@ fn await_outside_a_coro_body_is_rejected() {
         )))
         .expect_err_diagnostics("`await` outside a coro body should be rejected");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("only allowed directly inside a `coro`")),
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("only allowed directly inside a `coro`")),
         "unexpected diagnostics: {diagnostics:?}",
     );
 }
@@ -788,9 +796,9 @@ fn await_in_a_nested_function_inside_a_coro_is_rejected() {
         )))
         .expect_err_diagnostics("`await` in a nested closure should be rejected");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("only allowed directly inside a `coro`")),
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("only allowed directly inside a `coro`")),
         "unexpected diagnostics: {diagnostics:?}",
     );
 }
@@ -804,9 +812,9 @@ fn await_requires_a_coroutine_or_task_operand() {
         )))
         .expect_err_diagnostics("`await` on a plain value should be rejected");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| diagnostic.message.contains("requires a coroutine, task, or wait")),
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("requires a coroutine, task, or wait")),
         "unexpected diagnostics: {diagnostics:?}",
     );
 }
@@ -827,7 +835,9 @@ fn coro_moves_owned_non_copy_captures() {
             "        drop_it (coro { await handle })\n",
             "    }\n",
         )))
-        .expect_err_diagnostics("a coro that captures a task handle by move must forbid a later capture");
+        .expect_err_diagnostics(
+            "a coro that captures a task handle by move must forbid a later capture",
+        );
     assert!(
         diagnostics
             .iter()
@@ -1580,21 +1590,35 @@ fn number_literal_types_are_natural_usize_refinements() {
         "let widened: USize = exact\n",
     ));
     let diagnostics = TypeChecker::new()
-        .check(resolve("type alias Bad (N) where Natural N = N\nlet invalid: Bad USize = 0\n"))
+        .check(resolve(
+            "type alias Bad (N) where Natural N = N\nlet invalid: Bad USize = 0\n",
+        ))
         .expect_err_diagnostics("USize must not implement Natural");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("trait bound")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("trait bound"))
+    );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("def invalid: <T, N> move T[N] -> T[N] = move values => values\n"))
+        .check(resolve(
+            "def invalid: <T, N> move T[N] -> T[N] = move values => values\n",
+        ))
         .expect_err_diagnostics("dependent sizes require a Natural trait bound");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("must have a `Natural` trait bound")
+        diagnostic
+            .message
+            .contains("must have a `Natural` trait bound")
     }));
 
     let diagnostics = TypeChecker::new()
         .check(resolve("let invalid: 3 = 4\n"))
         .expect_err_diagnostics("literal annotations require the exact value");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic.message.contains("expected `3`, found `4`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `3`, found `4`"))
+    );
 }
 
 #[test]
@@ -1630,7 +1654,9 @@ fn natural_is_a_sealed_structural_trait() {
             .check(resolve(source))
             .expect_err_diagnostics("Natural implementations must be rejected");
         assert!(diagnostics.iter().any(|diagnostic| {
-            diagnostic.message.contains("`Natural` is implemented structurally")
+            diagnostic
+                .message
+                .contains("`Natural` is implemented structurally")
         }));
     }
 }
@@ -1716,7 +1742,9 @@ fn repeated_product_rejects_non_constant_and_non_copy_and_oversized_counts() {
         .check(resolve("def make: I32 -> I32[2] = size => (0; size)\n"))
         .expect_err_diagnostics("a runtime count is not a compile-time integer");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("compile-time non-negative integer")
+        diagnostic
+            .message
+            .contains("compile-time non-negative integer")
     }));
 
     let diagnostics = TypeChecker::new()
@@ -1726,15 +1754,19 @@ fn repeated_product_rejects_non_constant_and_non_copy_and_oversized_counts() {
         )))
         .expect_err_diagnostics("a non-Copy element cannot be repeated");
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("requires a `Copy` element type")
+        diagnostic
+            .message
+            .contains("requires a `Copy` element type")
     }));
 
     let diagnostics = TypeChecker::new()
         .check(resolve("let huge = (0; 70000)\n"))
         .expect_err_diagnostics("the arity limit is enforced");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message.contains("arity exceeds the limit")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("arity exceeds the limit") })
+    );
 }
 
 #[test]
@@ -1831,11 +1863,11 @@ fn rejects_an_inference_placeholder_as_a_value() {
     let diagnostics = TypeChecker::new()
         .check(resolve("let invalid = _\n"))
         .expect_err_diagnostics("a standalone omission placeholder must fail");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("is not a value expression")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("is not a value expression") })
+    );
 }
 
 #[test]
@@ -1864,9 +1896,11 @@ fn rejects_an_uncontextualized_bare_overload_set() {
             "let ambiguous = choose\n",
         )))
         .expect_err_diagnostics("a bare overload set needs an expected function type");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("ambiguous overloaded function `choose`")));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("ambiguous overloaded function `choose`")
+    }));
 }
 
 #[test]
@@ -3260,10 +3294,14 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
     ] {
         let diagnostics = TypeChecker::new()
             .check(resolve(source))
-            .expect_err_diagnostics("external traits for external top-level types must be rejected");
-        assert!(diagnostics.iter().any(|diagnostic| diagnostic
-            .message
-            .contains("cannot implement an external trait for external types")));
+            .expect_err_diagnostics(
+                "external traits for external top-level types must be rejected",
+            );
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("cannot implement an external trait for external types")
+        }));
     }
 
     type_check(concat!(
@@ -4980,7 +5018,10 @@ fn diagnostics_in_macro_generated_syntax_point_at_the_macro_definition() {
         .unwrap_or_else(|| {
             panic!(
                 "expected a non-exhaustive match diagnostic, got: {:?}",
-                diagnostics.iter().map(|d| d.message.clone()).collect::<Vec<_>>()
+                diagnostics
+                    .iter()
+                    .map(|d| d.message.clone())
+                    .collect::<Vec<_>>()
             )
         });
 
@@ -7284,12 +7325,9 @@ fn requires_else_to_be_the_last_braced_when_clause() {
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err_diagnostics("a non-final else clause should be rejected");
-    assert!(
-        diagnostics.iter().any(|diagnostic| {
-            diagnostic.message
-                == "macro `when` panicked: when clauses after else are unsupported"
-        })
-    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.message == "macro `when` panicked: when clauses after else are unsupported"
+    }));
 }
 
 #[test]
@@ -7645,7 +7683,8 @@ fn default_type_bound_does_not_fire_when_a_later_parameter_lacks_one() {
             "cannot fill in for a fully bare `Weird` either"
         ));
     assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic.message == "type constructor `Weird` expects 2 type arguments, but 0 were supplied"
+        diagnostic.message
+            == "type constructor `Weird` expects 2 type arguments, but 0 were supplied"
     }));
 }
 
@@ -8162,15 +8201,17 @@ fn type_checks_and_generates_curried_functions() {
                 mutations: Vec::new(),
                 moves: Vec::new(),
                 effects: staple_compiler::CheckedEffectSet::default(),
-                result: Box::new(CheckedType::Function(staple_compiler::CheckedFunctionType {
-                    parameter_style: staple_syntax::FunctionParameterStyle::Single,
-                    default: None,
-                    parameter: Box::new(CheckedType::I32),
-                    mutations: Vec::new(),
-                    moves: Vec::new(),
-                    effects: staple_compiler::CheckedEffectSet::default(),
-                    result: Box::new(CheckedType::I32),
-                })),
+                result: Box::new(CheckedType::Function(
+                    staple_compiler::CheckedFunctionType {
+                        parameter_style: staple_syntax::FunctionParameterStyle::Single,
+                        default: None,
+                        parameter: Box::new(CheckedType::I32),
+                        mutations: Vec::new(),
+                        moves: Vec::new(),
+                        effects: staple_compiler::CheckedEffectSet::default(),
+                        result: Box::new(CheckedType::I32),
+                    }
+                )),
             },
         );
     }
@@ -8204,9 +8245,11 @@ fn rejects_incomplete_juxtaposed_calls() {
             "let partial = pair_add 1\n",
         )))
         .expect_err_diagnostics("juxtaposed calls cannot be partial");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("incomplete juxtaposed function call")));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("incomplete juxtaposed function call")
+    }));
 }
 
 #[test]
@@ -8230,9 +8273,11 @@ fn keeps_product_and_juxtaposed_function_types_distinct() {
             "let product: (I32, I32) -> I32 = juxtaposed\n",
         )))
         .expect_err_diagnostics("function parameter styles must remain distinct");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("expected `(I32, I32) -> I32`")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("expected `(I32, I32) -> I32`"))
+    );
 }
 
 #[test]
@@ -8270,9 +8315,11 @@ fn rejects_duplicate_function_overload_arities() {
             "def duplicate: String -> String = value => value\n",
         )))
         .expect_err_diagnostics("parameter types do not distinguish overloads");
-    assert!(diagnostics.iter().any(|diagnostic| diagnostic
-        .message
-        .contains("duplicate function overload with arity 1")));
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("duplicate function overload with arity 1")
+    }));
 }
 
 #[test]
@@ -9554,11 +9601,11 @@ fn monomorphizes_curried_generic_function_layers() {
 fn a_default_bound_does_not_imply_default_for_a_product() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-        "def make_list: <T where Default T> () -> T[32] = () => {\n",
-        "  let list: T[32] = default ()\n",
-        "  list\n",
-        "}\n",
-    )))
+            "def make_list: <T where Default T> () -> T[32] = () => {\n",
+            "  let list: T[32] = default ()\n",
+            "  list\n",
+            "}\n",
+        )))
         .expect_err_diagnostics("Default T does not imply Default T[32]");
     assert!(
         diagnostics
@@ -9972,11 +10019,11 @@ fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
             "}\n",
         )))
         .expect_err_diagnostics("every captured parameter must remain borrowed");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("borrowed by a closure")
-    }));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("borrowed by a closure") })
+    );
 }
 
 #[test]
@@ -10925,12 +10972,16 @@ fn statically_checks_macro_match_coverage_before_expansion() {
     let diagnostics = NameResolver::new()
         .resolve_program(program)
         .expect_err_diagnostics("definition checking should precede expansion");
-    assert!(diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.message.contains("non-exhaustive match")));
-    assert!(!diagnostics
-        .iter()
-        .any(|diagnostic| diagnostic.message.contains("must not expand")));
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("non-exhaustive match"))
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("must not expand"))
+    );
 }
 
 #[test]

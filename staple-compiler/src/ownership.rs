@@ -236,12 +236,9 @@ impl<'a> OwnershipChecker<'a> {
                             ));
                         } else if self.parameter_symbols.contains(&capture)
                             && !self.module.is_move_parameter(capture)
-                            && self
-                                .module
-                                .type_of_symbol(capture)
-                                .is_some_and(|ty| {
-                                    !self.module.is_copy_in_function(ty, self.function)
-                                })
+                            && self.module.type_of_symbol(capture).is_some_and(|ty| {
+                                !self.module.is_copy_in_function(ty, self.function)
+                            })
                         {
                             self.info.borrowed_captures.insert((function_id, capture));
                         } else if !self.module.has_mutable_storage(capture) {
@@ -564,11 +561,7 @@ impl<'a> OwnershipChecker<'a> {
                     .contains(&crate::CheckedMutation::Element(index))
                     && let Some(symbol) = self.module.symbol_for(element.value.syntax().id)
                 {
-                    self.check_borrow_conflict(
-                        symbol,
-                        BorrowKind::Mutable,
-                        element.value.syntax(),
-                    );
+                    self.check_borrow_conflict(symbol, BorrowKind::Mutable, element.value.syntax());
                 }
                 let consume = callee
                     .moves
@@ -617,10 +610,7 @@ impl<'a> OwnershipChecker<'a> {
                 };
             }
             Expression::Match(value) => {
-                let mut origins = value
-                    .arms
-                    .iter()
-                    .map(|arm| self.borrow_origins(&arm.body));
+                let mut origins = value.arms.iter().map(|arm| self.borrow_origins(&arm.body));
                 let first = origins.next()??;
                 return origins
                     .all(|origin| origin.as_ref() == Some(&first))
@@ -664,9 +654,10 @@ impl<'a> OwnershipChecker<'a> {
             .filter(|capture| {
                 self.parameter_symbols.contains(capture)
                     && !self.module.is_move_parameter(**capture)
-                    && self.module.type_of_symbol(**capture).is_some_and(|ty| {
-                        !self.module.is_copy_in_function(ty, self.function)
-                    })
+                    && self
+                        .module
+                        .type_of_symbol(**capture)
+                        .is_some_and(|ty| !self.module.is_copy_in_function(ty, self.function))
             })
             .map(|capture| BorrowOrigin {
                 source: *capture,
@@ -691,7 +682,8 @@ impl<'a> OwnershipChecker<'a> {
     }
 
     fn reject_borrowed_escape(&mut self, expression: &Expression) {
-        if self.borrow_origins(expression).is_some() || self.is_borrow_producer_reference(expression)
+        if self.borrow_origins(expression).is_some()
+            || self.is_borrow_producer_reference(expression)
         {
             self.diagnostics.push(Diagnostic::new(
                 expression.syntax().span.clone(),
@@ -701,7 +693,8 @@ impl<'a> OwnershipChecker<'a> {
     }
 
     fn reject_borrowed_argument(&mut self, expression: &Expression) {
-        if self.borrow_origins(expression).is_some() || self.is_borrow_producer_reference(expression)
+        if self.borrow_origins(expression).is_some()
+            || self.is_borrow_producer_reference(expression)
         {
             self.diagnostics.push(Diagnostic::new(
                 expression.syntax().span.clone(),
@@ -1120,7 +1113,9 @@ fn top_level_parameter_symbols(module: &TypedModule, pattern: &Pattern) -> Vec<O
 
 fn call_argument_at(expression: &Expression, position: usize) -> Option<&Expression> {
     match expression {
-        Expression::Product(product) => product.elements.get(position).map(|element| &element.value),
+        Expression::Product(product) => {
+            product.elements.get(position).map(|element| &element.value)
+        }
         _ if position == 0 => Some(expression),
         _ => None,
     }

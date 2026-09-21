@@ -263,7 +263,8 @@ fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> Stri
         out.push_str(&constraints);
     }
     match declaration.kind {
-        staple_syntax::TypeDeclarationKind::Alias | staple_syntax::TypeDeclarationKind::Distinct => {
+        staple_syntax::TypeDeclarationKind::Alias
+        | staple_syntax::TypeDeclarationKind::Distinct => {
             if let Some(underlying) = &declaration.underlying {
                 out.push_str(" = ");
                 out.push_str(&underlying.to_string());

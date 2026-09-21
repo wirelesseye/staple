@@ -815,7 +815,10 @@ mod tests {
                 .as_nanos()
         ));
         std::fs::write(&path, source).expect("temporary expand source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let outcome = run([
             "expand".into(),
             "--stdlib".into(),
@@ -1151,7 +1154,10 @@ mod tests {
             "pub mod\npub let answer: I32 = 42\n",
         )
         .unwrap();
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
 
         let outcome = run([
             "check".into(),
@@ -1274,7 +1280,10 @@ mod tests {
         let source = std::env::temp_dir().join(format!("staple-compiler-run-{nonce}.sta"));
         std::fs::write(&source, "extern \"c\" { exit: I32 -> () }\nexit 7\n")
             .expect("temporary run source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let outcome = run([
             "run".into(),
             "--stdlib".into(),
@@ -1314,7 +1323,10 @@ mod tests {
             ),
         )
         .expect("temporary run source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let outcome = run([
             "run".into(),
             "--stdlib".into(),
@@ -1353,7 +1365,10 @@ mod tests {
             ),
         )
         .expect("temporary run source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let outcome = run([
             "run".into(),
             "--stdlib".into(),
@@ -1379,7 +1394,10 @@ mod tests {
             .as_nanos();
         let source = std::env::temp_dir().join(format!("staple-compiler-run-error-{nonce}.sta"));
         std::fs::write(&source, "missing\n").expect("temporary invalid source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let error = run([
             "run".into(),
             "--stdlib".into(),
@@ -1400,7 +1418,10 @@ mod tests {
             .as_nanos();
         let source = std::env::temp_dir().join(format!("staple-compiler-run-linker-{nonce}.sta"));
         std::fs::write(&source, "()\n").expect("temporary source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let error = run([
             "run".into(),
             "--stdlib".into(),
@@ -1417,8 +1438,10 @@ mod tests {
 
     #[test]
     fn compiles_source_to_llvm() {
-        let module =
-            compile(include_str!("../../staple-compiler/examples/hello_world.sta")).expect("example should compile");
+        let module = compile(include_str!(
+            "../../staple-compiler/examples/hello_world.sta"
+        ))
+        .expect("example should compile");
         let context = inkwell::context::Context::create();
         let llvm = staple_compiler::CodeGenerator::new(&context)
             .compile_module(&module)
@@ -1453,8 +1476,10 @@ mod tests {
 
     #[test]
     fn entry_module_without_reactive_omits_scope_creation() {
-        let module =
-            compile(include_str!("../../staple-compiler/examples/hello_world.sta")).expect("example should compile");
+        let module = compile(include_str!(
+            "../../staple-compiler/examples/hello_world.sta"
+        ))
+        .expect("example should compile");
         let context = inkwell::context::Context::create();
         let llvm = staple_compiler::CodeGenerator::new(&context)
             .compile_module(&module)
@@ -1503,7 +1528,10 @@ mod tests {
             ),
         )
         .expect("temporary source-main source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1537,7 +1565,10 @@ mod tests {
         let source = std::env::temp_dir().join(format!("staple-compiler-process-exit-{nonce}.sta"));
         std::fs::write(&source, "use std.process.exit\nexit 7\n")
             .expect("temporary exit source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let outcome = run([
             "run".into(),
             "--stdlib".into(),
@@ -1564,7 +1595,10 @@ mod tests {
         let output = std::env::temp_dir().join(format!("staple-compiler-panic-{nonce}"));
         std::fs::write(&source, "use std.process.panic\npanic \"boom\"\n")
             .expect("temporary panic source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -1956,7 +1990,8 @@ mod tests {
                 std::env::temp_dir().join(format!("staple-compiler-pumpguard-{label}-{nonce}.sta"));
             let output =
                 std::env::temp_dir().join(format!("staple-compiler-pumpguard-{label}-{nonce}"));
-            std::fs::write(&source, program).expect("temporary pump-guard source should be writable");
+            std::fs::write(&source, program)
+                .expect("temporary pump-guard source should be writable");
             run([
                 "--stdlib".into(),
                 standard_library.clone().into_os_string(),
@@ -2452,14 +2487,14 @@ mod tests {
         let result = Command::new(&output).output().expect("until should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
-        assert!(result.status.success(), "until program exited with {}", result.status);
+        assert!(
+            result.status.success(),
+            "until program exited with {}",
+            result.status
+        );
         assert_eq!(
             String::from_utf8_lossy(&result.stdout),
-            concat!(
-                "a proceeded\n",
-                "b still parked\n",
-                "b proceeded at n=6\n",
-            ),
+            concat!("a proceeded\n", "b still parked\n", "b proceeded at n=6\n",),
         );
     }
 
@@ -2513,7 +2548,9 @@ mod tests {
             source.clone().into_os_string(),
         ])
         .expect("until-cancel executable should compile");
-        let result = Command::new(&output).output().expect("until-cancel should run");
+        let result = Command::new(&output)
+            .output()
+            .expect("until-cancel should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
         assert!(
@@ -2742,7 +2779,10 @@ mod tests {
             ),
         )
         .expect("temporary resource source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2791,7 +2831,10 @@ mod tests {
             ),
         )
         .expect("temporary Ref source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2855,7 +2898,10 @@ mod tests {
             ),
         )
         .expect("temporary Buffer source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -2927,7 +2973,10 @@ mod tests {
             ),
         )
         .expect("temporary Buffer.transfer source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3001,7 +3050,10 @@ mod tests {
             ),
         )
         .expect("temporary List source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3059,7 +3111,10 @@ mod tests {
             ),
         )
         .expect("temporary List index source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3121,7 +3176,10 @@ mod tests {
             ),
         )
         .expect("temporary List.of source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3147,7 +3205,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-erased-product-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-erased-product-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-erased-product-{nonce}"));
         std::fs::write(
             &source,
@@ -3173,7 +3232,10 @@ mod tests {
             ),
         )
         .expect("temporary erased-product source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3233,7 +3295,10 @@ mod tests {
             ),
         )
         .expect("temporary mutable source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3277,7 +3342,10 @@ mod tests {
             ),
         )
         .expect("temporary thunk source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3320,7 +3388,10 @@ mod tests {
             ),
         )
         .expect("temporary reactive source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3375,7 +3446,10 @@ mod tests {
             ),
         )
         .expect("temporary batch source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3401,7 +3475,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-self-reaction-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-self-reaction-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-self-reaction-{nonce}"));
         std::fs::write(
             &source,
@@ -3419,7 +3494,10 @@ mod tests {
             ),
         )
         .expect("temporary self-triggering source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3448,7 +3526,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-queued-reaction-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-queued-reaction-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-queued-reaction-{nonce}"));
         std::fs::write(
             &source,
@@ -3474,7 +3553,10 @@ mod tests {
             ),
         )
         .expect("temporary queued reaction source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3503,7 +3585,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-nonconvergent-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-nonconvergent-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-nonconvergent-{nonce}"));
         std::fs::write(
             &source,
@@ -3513,7 +3596,10 @@ mod tests {
             ),
         )
         .expect("temporary nonconvergent source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3543,7 +3629,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-main-reactive-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-main-reactive-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-main-reactive-{nonce}"));
         std::fs::write(
             &source,
@@ -3557,7 +3644,10 @@ mod tests {
             ),
         )
         .expect("temporary top-level reactive source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3605,7 +3695,10 @@ mod tests {
             ),
         )
         .expect("temporary derived source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3631,7 +3724,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-default-product-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-default-product-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-default-product-{nonce}"));
         std::fs::write(
             &source,
@@ -3644,7 +3738,10 @@ mod tests {
             ),
         )
         .expect("temporary default-product source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3670,7 +3767,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-product-spread-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-product-spread-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-product-spread-{nonce}"));
         std::fs::write(
             &source,
@@ -3684,7 +3782,10 @@ mod tests {
             ),
         )
         .expect("temporary product-spread source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3710,8 +3811,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-named-product-spread-{nonce}.sta"));
-        let output = std::env::temp_dir().join(format!("staple-compiler-named-product-spread-{nonce}"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-named-product-spread-{nonce}.sta"));
+        let output =
+            std::env::temp_dir().join(format!("staple-compiler-named-product-spread-{nonce}"));
         std::fs::write(
             &source,
             concat!(
@@ -3729,7 +3832,10 @@ mod tests {
             ),
         )
         .expect("temporary named-product-spread source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3755,8 +3861,10 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-designated-product-{nonce}.sta"));
-        let output = std::env::temp_dir().join(format!("staple-compiler-designated-product-{nonce}"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-designated-product-{nonce}.sta"));
+        let output =
+            std::env::temp_dir().join(format!("staple-compiler-designated-product-{nonce}"));
         std::fs::write(
             &source,
             concat!(
@@ -3768,7 +3876,10 @@ mod tests {
             ),
         )
         .expect("temporary designated-product source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3794,7 +3905,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-product-defaults-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-product-defaults-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-product-defaults-{nonce}"));
         std::fs::write(
             &source,
@@ -3807,7 +3919,10 @@ mod tests {
             ),
         )
         .expect("temporary product-default source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3833,7 +3948,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-repeated-product-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-repeated-product-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-repeated-product-{nonce}"));
         std::fs::write(
             &source,
@@ -3846,7 +3962,10 @@ mod tests {
             ),
         )
         .expect("temporary repeated-product source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3892,7 +4011,10 @@ mod tests {
             ),
         )
         .expect("temporary Drop source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3918,7 +4040,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-string-literals-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-string-literals-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-string-literals-{nonce}"));
         std::fs::write(
             &source,
@@ -3950,7 +4073,10 @@ mod tests {
             ),
         )
         .expect("temporary string-literal source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -3995,7 +4121,10 @@ mod tests {
             ),
         )
         .expect("temporary loop source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -4043,7 +4172,10 @@ mod tests {
             ),
         )
         .expect("temporary for-loop source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -4086,7 +4218,10 @@ mod tests {
             ),
         )
         .expect("temporary float source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -4147,7 +4282,10 @@ mod tests {
             ),
         )
         .expect("temporary ToString source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -4173,7 +4311,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source = std::env::temp_dir().join(format!("staple-compiler-string-template-{nonce}.sta"));
+        let source =
+            std::env::temp_dir().join(format!("staple-compiler-string-template-{nonce}.sta"));
         let output = std::env::temp_dir().join(format!("staple-compiler-string-template-{nonce}"));
         std::fs::write(
             &source,
@@ -4191,7 +4330,10 @@ mod tests {
             ),
         )
         .expect("temporary string-template source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),
@@ -4236,7 +4378,10 @@ mod tests {
             ),
         )
         .expect("temporary string-add source should be writable");
-        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         run([
             "--stdlib".into(),
             standard_library.into_os_string(),

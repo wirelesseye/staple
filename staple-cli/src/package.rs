@@ -686,11 +686,10 @@ mod tests {
         let fixture = Fixture::new();
         let outside = fixture.root.parent().unwrap().join("main.sta");
         std::fs::write(&outside, "42\n").unwrap();
-        let error =
-            load_package(&fixture.manifest(
-                "package \"hello\" { root \"src\"; entry \"../../main.sta\" }\n",
-            ))
-            .expect_err("escaping entry should fail");
+        let error = load_package(
+            &fixture.manifest("package \"hello\" { root \"src\"; entry \"../../main.sta\" }\n"),
+        )
+        .expect_err("escaping entry should fail");
         let _ = std::fs::remove_file(outside);
 
         assert!(error.contains("escapes") || error.contains("could not resolve"));

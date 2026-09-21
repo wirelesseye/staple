@@ -496,9 +496,11 @@ impl Program {
                 .package_of(file_root)
                 .and_then(|id| self.package_graph.as_ref().map(|graph| graph.package(id)))
             {
-                Some(package) => {
-                    (Some(&package.name), package.source_root(), Some(&package.root))
-                }
+                Some(package) => (
+                    Some(&package.name),
+                    package.source_root(),
+                    Some(&package.root),
+                ),
                 None => match self.package_root_path.as_deref() {
                     Some(package_root_path) => (
                         Some(self.package_name()),
@@ -510,8 +512,7 @@ impl Program {
                 },
             };
 
-        let mut segments: Vec<String> =
-            package_name.map(str::to_owned).into_iter().collect();
+        let mut segments: Vec<String> = package_name.map(str::to_owned).into_iter().collect();
         let is_package_root = self.package_root == Some(file_root)
             || package_root_path.is_some_and(|path| path == root.path);
         if !is_package_root {
@@ -522,7 +523,10 @@ impl Program {
                 .map(Path::to_path_buf)
                 .or_else(|| {
                     let canonical = std::fs::canonicalize(&root.path).ok()?;
-                    canonical.strip_prefix(source_root).ok().map(Path::to_path_buf)
+                    canonical
+                        .strip_prefix(source_root)
+                        .ok()
+                        .map(Path::to_path_buf)
                 })?;
             let relative = relative.with_extension("");
             let file_segments = relative
@@ -2772,7 +2776,12 @@ mod tests {
     fn source_at_reports_a_structured_missing_import() {
         let entry = std::env::temp_dir().join("staple-loader-structured-test.sta");
         let error = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&entry, "use module_that_does_not_exist\n")
             .unwrap_err();
         assert_eq!(
@@ -2804,7 +2813,12 @@ mod tests {
     fn module_dotted_name_uses_dotted_use_paths_for_the_standard_library() {
         let entry = std::env::temp_dir().join("staple-module-dotted-name-std.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&entry, "use std.io.println\nprintln \"hi\"\n")
             .unwrap();
 
@@ -2836,14 +2850,15 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(dir.join("tools")).unwrap();
-        std::fs::write(
-            dir.join("tools/text.sta"),
-            "pub mod\npub let shout = 1\n",
-        )
-        .unwrap();
+        std::fs::write(dir.join("tools/text.sta"), "pub mod\npub let shout = 1\n").unwrap();
         let entry = dir.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&entry, "use tools.text.shout\nshout\n")
             .unwrap();
         assert_eq!(
@@ -2879,7 +2894,12 @@ mod tests {
             .with_module_root(&root)
             .with_package_root(&root_path)
             .with_package_name("example")
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, "use tools.text.shout\nshout\n")
             .unwrap();
 

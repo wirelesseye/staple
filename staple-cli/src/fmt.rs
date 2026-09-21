@@ -27,7 +27,10 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
 /// `compile::run` unchanged so it produces the canonical behaviour or error.
 enum Invocation {
     Delegate,
-    Package { manifest: Option<PathBuf>, check: bool },
+    Package {
+        manifest: Option<PathBuf>,
+        check: bool,
+    },
 }
 
 fn scan(rest: &[OsString]) -> Invocation {
@@ -119,14 +122,16 @@ mod tests {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_nanos();
-            let root = std::env::temp_dir().join(format!(
-                "staple-fmt-package-{}-{nonce}",
-                std::process::id()
-            ));
+            let root = std::env::temp_dir()
+                .join(format!("staple-fmt-package-{}-{nonce}", std::process::id()));
             std::fs::create_dir_all(root.join("src/inner")).unwrap();
             std::fs::write(root.join("staple.kdl"), "package \"fixture\"\n").unwrap();
             std::fs::write(root.join("src/main.sta"), "let   answer=42\n").unwrap();
-            std::fs::write(root.join("src/inner/helper.sta"), "pub mod\npub let   x=1\n").unwrap();
+            std::fs::write(
+                root.join("src/inner/helper.sta"),
+                "pub mod\npub let   x=1\n",
+            )
+            .unwrap();
             Self { root }
         }
 

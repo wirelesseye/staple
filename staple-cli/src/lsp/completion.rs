@@ -1482,7 +1482,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1519,7 +1524,12 @@ mod tests {
         let source = "let signal count = 0\ncount = 1\n";
         let path = std::env::temp_dir().join("staple-completion-signal.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1539,7 +1549,12 @@ mod tests {
         let source = "let value = 1\ndef choose = value: I32 => value\n";
         let path = std::env::temp_dir().join("staple-completion-shadow.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1563,7 +1578,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-completion-at-patterns.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1590,7 +1610,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-completion-trait-bare.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1628,7 +1653,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1664,7 +1694,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-completion-methods.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1694,7 +1729,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-completion-qualified.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1717,7 +1757,12 @@ mod tests {
         let source = "";
         let path = std::env::temp_dir().join("staple-completion-empty-qualified.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1761,7 +1806,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1798,7 +1848,12 @@ mod tests {
         let source = "let mut numbers: List I32 = List.new ()\n";
         let path = std::env::temp_dir().join("staple-completion-new-method-receiver.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1818,7 +1873,11 @@ mod tests {
     #[test]
     fn dotted_module_path_covers_same_package_dependency_and_root() {
         assert_eq!(
-            dotted_module_path(None, Path::new("/ws/src"), Path::new("/ws/src/tools/text.sta")),
+            dotted_module_path(
+                None,
+                Path::new("/ws/src"),
+                Path::new("/ws/src/tools/text.sta")
+            ),
             Some("tools.text".to_owned())
         );
         assert_eq!(
@@ -1826,7 +1885,11 @@ mod tests {
             Some("std.io".to_owned())
         );
         assert_eq!(
-            dotted_module_path(Some("std"), Path::new("/std"), Path::new("/std/core/list.sta")),
+            dotted_module_path(
+                Some("std"),
+                Path::new("/std"),
+                Path::new("/std/core/list.sta")
+            ),
             Some("std.core.list".to_owned())
         );
         // A dependency `root.sta` collapses to the package name.
@@ -1901,7 +1964,10 @@ mod tests {
 
         let public = "pub use std.io.(read)\n";
         let edits = resolve_import_edits(public, "std.io", "println").unwrap();
-        assert_eq!(apply_edits(public, &edits), "pub use std.io.(read, println)\n");
+        assert_eq!(
+            apply_edits(public, &edits),
+            "pub use std.io.(read, println)\n"
+        );
     }
 
     #[test]
@@ -1912,7 +1978,10 @@ mod tests {
 
         let public = "pub use std.io.read\n";
         let edits = resolve_import_edits(public, "std.io", "println").unwrap();
-        assert_eq!(apply_edits(public, &edits), "pub use std.io.(read, println)\n");
+        assert_eq!(
+            apply_edits(public, &edits),
+            "pub use std.io.(read, println)\n"
+        );
     }
 
     #[test]
@@ -1933,13 +2002,15 @@ mod tests {
 
     #[test]
     fn suggests_public_items_from_an_unimported_sibling_module() {
-        let root = std::env::temp_dir().join(format!(
-            "staple-completion-external-{}",
-            std::process::id()
-        ));
+        let root =
+            std::env::temp_dir().join(format!("staple-completion-external-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("src")).unwrap();
-        std::fs::write(root.join("staple.kdl"), "package \"demo\" {\n    root \"src\"\n}\n").unwrap();
+        std::fs::write(
+            root.join("staple.kdl"),
+            "package \"demo\" {\n    root \"src\"\n}\n",
+        )
+        .unwrap();
         std::fs::write(root.join("src/root.sta"), "pub mod\n").unwrap();
         std::fs::write(
             root.join("src/helpers.sta"),
@@ -1952,7 +2023,12 @@ mod tests {
         let graph = staple_project::load_package_graph(&root.join("staple.kdl")).unwrap();
         let program = ProgramLoader::new()
             .with_package_graph(graph)
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_package_graph_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1968,8 +2044,14 @@ mod tests {
             .expect("greet should be offered from the sibling module");
         assert_eq!(greet.kind, Some(CompletionItemKind::FUNCTION));
         let data = greet.data.as_ref().expect("external item carries data");
-        assert_eq!(data.get("staple.import").and_then(|v| v.as_str()), Some("helpers"));
-        assert_eq!(data.get("staple.item").and_then(|v| v.as_str()), Some("greet"));
+        assert_eq!(
+            data.get("staple.import").and_then(|v| v.as_str()),
+            Some("helpers")
+        );
+        assert_eq!(
+            data.get("staple.item").and_then(|v| v.as_str()),
+            Some("greet")
+        );
 
         assert!(items.iter().any(|item| item.label == "Widget"));
         // Private items are never offered.
@@ -1994,7 +2076,12 @@ mod tests {
         let source = "let x = 1\n";
         let path = std::env::temp_dir().join("staple-completion-prelude-panic.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();

@@ -1564,7 +1564,8 @@ impl Grammar {
         let name_start = self.position;
         let name = self.parse_quoted_identifier("expected type name")?;
         let name_syntax = self.syntax(name_start);
-        let effect_parameter = if self.at(TokenKind::LBrace) && !self.has_trivia_before_next_token() {
+        let effect_parameter = if self.at(TokenKind::LBrace) && !self.has_trivia_before_next_token()
+        {
             self.bump_token();
             let parameter_start = self.position;
             let name = self
@@ -2211,7 +2212,10 @@ impl Grammar {
                     return self.parse_non_juxtaposed_function_type(start);
                 }
             };
-            self.expect(TokenKind::Star, "expected `*` between juxtaposed parameters")?;
+            self.expect(
+                TokenKind::Star,
+                "expected `*` between juxtaposed parameters",
+            )?;
             let mut elements = vec![first];
             loop {
                 elements.push(self.parse_juxtaposed_parameter_type_element()?);
@@ -2219,7 +2223,10 @@ impl Grammar {
                     break;
                 }
             }
-            self.expect(TokenKind::Arrow, "expected `->` after juxtaposed parameters")?;
+            self.expect(
+                TokenKind::Arrow,
+                "expected `->` after juxtaposed parameters",
+            )?;
             if elements.len() > crate::MAX_PRODUCT_ARITY {
                 return Err(self.error(format!(
                     "function parameter arity exceeds the limit of {}",
@@ -2398,7 +2405,10 @@ impl Grammar {
                 }
                 TokenKind::Star if depth == 0 => saw_star = true,
                 TokenKind::Arrow if depth == 0 => return saw_star,
-                TokenKind::FatArrow | TokenKind::Equals | TokenKind::Comma | TokenKind::Semicolon
+                TokenKind::FatArrow
+                | TokenKind::Equals
+                | TokenKind::Comma
+                | TokenKind::Semicolon
                     if depth == 0 =>
                 {
                     return false;
@@ -2873,8 +2883,11 @@ impl Grammar {
         let operator_syntax = self.syntax(operator_start);
         let right = self.parse_additive_expression()?;
         let expression = Expression::Binary(BinaryExpression {
-            syntax: self.syntax(start), operator_syntax, operator,
-            left: Box::new(left), right: Box::new(right),
+            syntax: self.syntax(start),
+            operator_syntax,
+            operator,
+            left: Box::new(left),
+            right: Box::new(right),
         });
         if !(self.newline_terminates_expression && self.has_newline_before_next_token())
             && self.at_comparison_operator()
@@ -2907,7 +2920,13 @@ impl Grammar {
             };
             let operator_syntax = self.syntax(operator_start);
             let right = self.parse_multiplicative_expression()?;
-            expression = Expression::Binary(BinaryExpression { syntax: self.syntax(start), operator_syntax, operator, left: Box::new(expression), right: Box::new(right) });
+            expression = Expression::Binary(BinaryExpression {
+                syntax: self.syntax(start),
+                operator_syntax,
+                operator,
+                left: Box::new(expression),
+                right: Box::new(right),
+            });
         }
         Ok(expression)
     }
@@ -2933,7 +2952,13 @@ impl Grammar {
             };
             let operator_syntax = self.syntax(operator_start);
             let right = self.parse_unary_expression()?;
-            expression = Expression::Binary(BinaryExpression { syntax: self.syntax(start), operator_syntax, operator, left: Box::new(expression), right: Box::new(right) });
+            expression = Expression::Binary(BinaryExpression {
+                syntax: self.syntax(start),
+                operator_syntax,
+                operator,
+                left: Box::new(expression),
+                right: Box::new(right),
+            });
         }
         Ok(expression)
     }
@@ -3638,8 +3663,8 @@ impl Grammar {
                 {
                     self.bump_token();
                     let count = self.parse_expression()?;
-                    let close = self
-                        .expect(TokenKind::RParen, "expected `)` after repeated product");
+                    let close =
+                        self.expect(TokenKind::RParen, "expected `)` after repeated product");
                     self.brace_terminates_expression = previous_brace_termination;
                     close?;
                     return Ok(Expression::RepeatedProduct(RepeatedProductExpression {
@@ -4035,7 +4060,11 @@ fn contains_mutable_type_element(ty: &Type) -> bool {
         }
         Type::EffectApplication(application) => {
             contains_mutable_type_element(&application.callee)
-                || application.effects.resources.iter().any(|resource| contains_mutable_type_element(&resource.value_type))
+                || application
+                    .effects
+                    .resources
+                    .iter()
+                    .any(|resource| contains_mutable_type_element(&resource.value_type))
         }
         Type::Repeated(repeated) => contains_mutable_type_element(&repeated.element),
         _ => false,
@@ -4059,7 +4088,11 @@ fn contains_move_type_element(ty: &Type) -> bool {
         }
         Type::EffectApplication(application) => {
             contains_move_type_element(&application.callee)
-                || application.effects.resources.iter().any(|resource| contains_move_type_element(&resource.value_type))
+                || application
+                    .effects
+                    .resources
+                    .iter()
+                    .any(|resource| contains_move_type_element(&resource.value_type))
         }
         Type::Repeated(repeated) => contains_move_type_element(&repeated.element),
         _ => false,

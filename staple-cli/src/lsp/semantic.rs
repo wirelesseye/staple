@@ -1117,13 +1117,20 @@ impl<'a> Classifier<'a> {
             }
             Type::EffectApplication(value) => {
                 self.ty(&value.callee, resolved);
-                for resource in &value.effects.resources { self.ty(&resource.value_type, resolved); }
+                for resource in &value.effects.resources {
+                    self.ty(&resource.value_type, resolved);
+                }
             }
             Type::Repeated(value) => {
                 self.ty(&value.element, resolved);
-                if let Some(count) = &value.count { self.ty(count, resolved); }
+                if let Some(count) = &value.count {
+                    self.ty(count, resolved);
+                }
             }
-            Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
+            Type::Inferred(_)
+            | Type::NumberLiteral(_)
+            | Type::StringLiteral(_)
+            | Type::Splice(_) => {}
         }
     }
 
@@ -1498,7 +1505,10 @@ mod tests {
         // Control / declaration keywords (`resource`, `with`, `use`, `def`,
         // ...) are left to the TextMate grammar and get no semantic token.
         for absent in [("resource", KEYWORD), ("with", KEYWORD), ("use", KEYWORD)] {
-            assert!(!labels.contains(&absent), "unexpected {absent:?} in {labels:?}");
+            assert!(
+                !labels.contains(&absent),
+                "unexpected {absent:?} in {labels:?}"
+            );
         }
     }
 
@@ -1522,7 +1532,12 @@ mod tests {
         let source = "def first = () => second ()\ndef second = () => 1\n";
         let path = std::env::temp_dir().join("staple-semantic-forward.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1566,7 +1581,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1606,7 +1626,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-semantic-generic-impl.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1636,7 +1661,10 @@ mod tests {
 
     #[test]
     fn classifies_quotation_macro_declarations() {
-        let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let path = stdlib_root.join("std").join("syntax.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
@@ -1668,7 +1696,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-semantic-binding-types.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1698,7 +1731,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-semantic-at-patterns.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1733,7 +1771,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1761,7 +1804,12 @@ mod tests {
         let source = "macro always_fail = e: Expr => panic \"internal error\"\n";
         let path = std::env::temp_dir().join("staple-semantic-macro-body-outer-ref.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1801,7 +1849,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1850,7 +1903,12 @@ mod tests {
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
             .with_module_root(&root)
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1880,7 +1938,10 @@ mod tests {
 
     #[test]
     fn classifies_macro_meta_locals_parameters_and_helpers() {
-        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let path = stdlib.join("std/flow.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
@@ -1984,7 +2045,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-semantic-trait-access.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2022,7 +2088,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-semantic-trait-bare.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2052,7 +2123,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-semantic-companion-access.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2091,7 +2167,12 @@ mod tests {
         let source = "let f = std.io.println\n";
         let path = std::env::temp_dir().join("staple-semantic-namespace-access.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2124,7 +2205,12 @@ mod tests {
         let source = "def foo = (mut x: I32, mut y: Bool) => {\n    x\n}\n";
         let path = std::env::temp_dir().join("staple-semantic-mutable-parameter.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2152,7 +2238,12 @@ mod tests {
         let source = "def foo = mut (x: I32, y: I32) => {\n    x = 32\n    y = 64\n}\n";
         let path = std::env::temp_dir().join("staple-semantic-whole-mut-product.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();

@@ -47,7 +47,12 @@ impl Fixture {
 
     fn compile(&self) -> Result<String, String> {
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_path(&self.root.join("main.sta"))?;
         let resolved = NameResolver::new()
             .resolve_program(program)
@@ -64,7 +69,12 @@ impl Fixture {
     fn check_at(&self, entry: &str, root: &str) -> Result<(), String> {
         let program = ProgramLoader::new()
             .with_module_root(self.root.join(root))
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_path(&self.root.join(entry))?;
         let resolved = NameResolver::new()
             .resolve_program(program)
@@ -225,7 +235,10 @@ fn string_templates_compile_across_multiple_modules() {
     // so codegen must look them up by their source name rather than the
     // mangled symbol.
     let fixture = Fixture::new();
-    fixture.write("greeting.sta", "pub def who: () -> String = () => \"world\"\n");
+    fixture.write(
+        "greeting.sta",
+        "pub def who: () -> String = () => \"world\"\n",
+    );
     fixture.write(
         "main.sta",
         concat!(
@@ -1222,7 +1235,12 @@ fn a_complete_file_path_precedes_an_inline_submodule_path() {
     fixture.write("main.sta", "use library.api.file_answer\n");
 
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .load_path(&fixture.root.join("main.sta"))
         .expect("the complete file path should load");
     let Item::UseDeclaration(use_) = &program.module(program.entry()).syntax.items[0] else {
@@ -1816,7 +1834,12 @@ fn package_root_owns_items_and_entry_has_its_relative_module_name() {
     let program = ProgramLoader::new()
         .with_module_root(fixture.root.join("src"))
         .with_package_root(fixture.root.join("src/root.sta"))
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .load_path(&fixture.root.join("src/main.sta"))
         .expect("configured package root and entry should load");
     let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1839,7 +1862,12 @@ fn missing_package_root_still_anchors_entry_and_sibling_modules() {
 
     let program = ProgramLoader::new()
         .with_package_root(fixture.root.join("src/root.sta"))
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .load_path(&fixture.root.join("src/main.sta"))
         .expect("an absent root module should remain a valid package anchor");
     assert!(program.package_root().is_none());
@@ -2294,7 +2322,12 @@ fn resolves_recursive_package_dependencies_with_per_package_aliases() {
 
     let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .expect("package graph should load");
@@ -2340,7 +2373,12 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
     );
     let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .expect("package graph should load");
@@ -2366,7 +2404,12 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
     );
     let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .expect("package graph should load");
@@ -2395,15 +2438,16 @@ fn resolves_package_visible_items_within_a_package() {
         "src/internal.sta",
         "pub(package) mod\npub(package) let answer: I32 = 42\n",
     );
-    fs::write(
-        fixture.root.join("staple.kdl"),
-        "package \"app\"\n",
-    )
-    .unwrap();
+    fs::write(fixture.root.join("staple.kdl"), "package \"app\"\n").unwrap();
 
     let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .expect("package-visible modules should load within their package");
@@ -2448,7 +2492,12 @@ fn rejects_package_visible_dependency_modules() {
 
     let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
     let error = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .expect_err("dependency package modules must not expose package visibility");
@@ -2466,14 +2515,15 @@ fn rejects_promoting_a_package_visible_reexport() {
         "src/internal.sta",
         "pub(package) mod\npub(package) let secret = 42\n",
     );
-    fs::write(
-        fixture.root.join("staple.kdl"),
-        "package \"app\"\n",
-    )
-    .unwrap();
+    fs::write(fixture.root.join("staple.kdl"), "package \"app\"\n").unwrap();
     let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .unwrap();
@@ -2506,7 +2556,12 @@ fn package_representation_is_usable_locally_but_not_by_a_dependency() {
     .unwrap();
     let graph = staple_project::load_package_graph(&fixture.root.join("app/staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .unwrap();
@@ -2532,7 +2587,12 @@ fn checks_a_rootless_library_public_surface_without_entry_resources() {
     .unwrap();
     let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .expect("rootless library should load");
@@ -2552,7 +2612,12 @@ fn checks_a_rootless_library_public_surface_without_entry_resources() {
     );
     let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .unwrap();
@@ -2567,15 +2632,16 @@ fn checks_a_rootless_library_public_surface_without_entry_resources() {
 fn standard_library_imports_resolve_inside_a_package() {
     let fixture = Fixture::new();
     fixture.write("src/main.sta", "use std.io.println\nprintln \"hi\"\n");
-    fs::write(
-        fixture.root.join("staple.kdl"),
-        "package \"app\"\n",
-    )
-    .unwrap();
+    fs::write(fixture.root.join("staple.kdl"), "package \"app\"\n").unwrap();
 
     let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .expect("`std` is an implicit dependency of every package");
@@ -2593,7 +2659,12 @@ fn standard_library_imports_resolve_inside_a_package() {
 fn standard_library_imports_resolve_from_in_memory_source() {
     let root = std::env::temp_dir();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .load_source("use std.io.println\nprintln \"hi\"\n", &root)
         .expect("in-memory builds still carry an implicit `std`");
     let resolved = NameResolver::new()
@@ -2627,7 +2698,12 @@ fn manifest_features_filter_items_before_resolution() {
     .unwrap();
     let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .with_feature_selection(staple_project::FeatureSelection {
             no_default_features: true,
@@ -2659,7 +2735,12 @@ fn package_can_disable_and_explicitly_reimport_the_prelude() {
     .unwrap();
     let graph = staple_project::load_package_graph(&fixture.root.join("staple.kdl")).unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .with_package_graph(graph)
         .load_package_graph()
         .unwrap();
@@ -2682,7 +2763,12 @@ fn no_prelude_modifier_removes_convenience_names_but_keeps_core() {
     )
     .unwrap();
     let program = ProgramLoader::new()
-        .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+        .with_standard_library_root(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib"),
+        )
         .load_path(&fixture.root.join("main.sta"))
         .unwrap();
     let error = NameResolver::new()

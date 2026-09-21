@@ -1025,13 +1025,20 @@ impl Collector<'_> {
             }
             Type::EffectApplication(value) => {
                 self.ty(&value.callee);
-                for resource in &value.effects.resources { self.ty(&resource.value_type); }
+                for resource in &value.effects.resources {
+                    self.ty(&resource.value_type);
+                }
             }
             Type::Repeated(value) => {
                 self.ty(&value.element);
-                if let Some(count) = &value.count { self.ty(count); }
+                if let Some(count) = &value.count {
+                    self.ty(count);
+                }
             }
-            Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
+            Type::Inferred(_)
+            | Type::NumberLiteral(_)
+            | Type::StringLiteral(_)
+            | Type::Splice(_) => {}
         }
     }
 
@@ -1136,8 +1143,7 @@ impl Collector<'_> {
     }
 
     fn add(&mut self, syntax: &Syntax, name: &str, definitions: &[DefinitionId], last: bool) {
-        let Some(range) =
-            crate::lsp::source_projection::named_range(syntax, name, last, self.path)
+        let Some(range) = crate::lsp::source_projection::named_range(syntax, name, last, self.path)
         else {
             return;
         };
@@ -1198,7 +1204,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-local-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1224,7 +1235,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-companion-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1269,7 +1285,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-use-companion-segment.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1312,7 +1333,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-companion-header-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1358,7 +1384,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-trait-access-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1396,7 +1427,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-generic-impl-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1418,7 +1454,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-inline-module-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1449,7 +1490,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-macro-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1496,7 +1542,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1527,7 +1578,10 @@ mod tests {
         // definition made directly from within it (not inside a
         // `quote`/`parse_quote` template) used to have no symbol recorded
         // at all, leaving go-to-definition with nothing to jump to.
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let source = "macro always_fail = e: Expr => panic \"internal error\"\n";
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -1549,7 +1603,10 @@ mod tests {
 
     #[test]
     fn indexes_file_module_segments_in_dotted_item_imports() {
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let source = "use std.io.println\n";
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -1619,7 +1676,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-if-macro-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1675,7 +1737,10 @@ mod tests {
         );
 
         let boolean = std::fs::read_to_string(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib/std/core/boolean.sta"),
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("stdlib/std/core/boolean.sta"),
         )
         .unwrap();
         assert!(
@@ -1693,7 +1758,10 @@ mod tests {
 
     #[test]
     fn indexes_macro_and_helper_body_items_and_helper_annotations() {
-        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let path = stdlib.join("std/flow.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
@@ -1739,7 +1807,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-definition-quote-keywords.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1775,7 +1848,12 @@ mod tests {
         let program = ProgramLoader::new()
             .with_module_root(&root)
             .with_package_root(&root_path)
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1809,7 +1887,12 @@ mod tests {
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
             .with_module_root(&root)
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -1887,7 +1970,12 @@ mod tests {
         let graph = staple_project::load_package_graph(&root.join("staple.kdl")).unwrap();
         let program = ProgramLoader::new()
             .with_package_graph(graph)
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_package_graph_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();

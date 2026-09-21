@@ -925,7 +925,10 @@ fn format_juxtaposed_checked_parameter(function: &CheckedFunctionType) -> String
         .iter()
         .enumerate()
         .map(|(index, element)| {
-            let marker = if function.mutations.contains(&CheckedMutation::Element(index)) {
+            let marker = if function
+                .mutations
+                .contains(&CheckedMutation::Element(index))
+            {
                 "mut "
             } else if function.moves.contains(&CheckedMutation::Element(index)) {
                 "move "
@@ -1478,11 +1481,7 @@ impl TypedModule {
         self.ownership.is_non_owning_symbol(symbol)
     }
 
-    pub(crate) fn is_borrowed_capture(
-        &self,
-        function: FunctionId,
-        symbol: SymbolId,
-    ) -> bool {
+    pub(crate) fn is_borrowed_capture(&self, function: FunctionId, symbol: SymbolId) -> bool {
         self.ownership.is_borrowed_capture(function, symbol)
     }
 
@@ -1525,10 +1524,7 @@ impl TypedModule {
         };
         // A curried method takes the receiver as its first curried parameter; a
         // non-curried juxtaposed method takes it as its first slot.
-        let first_parameter = match (
-            function.parameter_style,
-            function.parameter.as_ref(),
-        ) {
+        let first_parameter = match (function.parameter_style, function.parameter.as_ref()) {
             (staple_syntax::FunctionParameterStyle::Juxtaposed, CheckedType::Product(product)) => {
                 product.elements.first().map(|element| &element.value_type)
             }
@@ -2252,7 +2248,9 @@ impl TypeChecker {
                 };
                 self.diagnostics.push(Diagnostic::new(
                     span,
-                    format!("`{name}` is implemented structurally and cannot be implemented explicitly"),
+                    format!(
+                        "`{name}` is implemented structurally and cannot be implemented explicitly"
+                    ),
                 ));
                 continue;
             }
@@ -2534,7 +2532,10 @@ impl TypeChecker {
     fn bound_could_hold(&self, trait_id: TraitId, arguments: &[CheckedType]) -> bool {
         if Some(trait_id) == self.natural_trait {
             return arguments.first().is_some_and(|argument| {
-                matches!(argument, CheckedType::NumberLiteral(_) | CheckedType::Parameter { .. })
+                matches!(
+                    argument,
+                    CheckedType::NumberLiteral(_) | CheckedType::Parameter { .. }
+                )
             });
         }
         if Some(trait_id) == self.copy_trait
@@ -3913,8 +3914,7 @@ impl TypeChecker {
             Expression::Await(value) => {
                 let mut effects =
                     self.expression_effects_now(module, &value.operand, target_parameters);
-                if let Some(operand_type) =
-                    self.expression_types.get(&value.operand.syntax().id)
+                if let Some(operand_type) = self.expression_types.get(&value.operand.syntax().id)
                     && let Some((deferred, _)) = self.coroutine_parts(operand_type)
                 {
                     effects = effects.union(deferred);
@@ -3955,7 +3955,8 @@ impl TypeChecker {
                     .parts
                     .iter()
                     .filter_map(|part| {
-                        let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part else {
+                        let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part
+                        else {
                             return None;
                         };
                         Some(self.expression_effects_now(
@@ -5218,7 +5219,11 @@ impl TypeChecker {
         }
     }
 
-    fn require_copy_at_pattern(&mut self, pattern: &staple_syntax::AtPattern, value_type: &CheckedType) {
+    fn require_copy_at_pattern(
+        &mut self,
+        pattern: &staple_syntax::AtPattern,
+        value_type: &CheckedType,
+    ) {
         let bounds = self
             .active_function_bounds
             .iter()
@@ -5637,7 +5642,11 @@ impl TypeChecker {
         }
     }
 
-    fn check_assignment_place(&mut self, module: &ResolvedModule, assignment: &staple_syntax::Assignment) {
+    fn check_assignment_place(
+        &mut self,
+        module: &ResolvedModule,
+        assignment: &staple_syntax::Assignment,
+    ) {
         let current_module = module.module_for_syntax(assignment.syntax.id);
         if let Some(issue) =
             self.writable_place_issue(module, &assignment.target, current_module, false, false)
@@ -6440,7 +6449,9 @@ impl TypeChecker {
             self.implicit_thunk_context = true;
             return self.make_implicit_thunk(module, expression, result);
         }
-        let mut trait_methods = module.trait_methods_for_expression(expression.syntax().id).to_vec();
+        let mut trait_methods = module
+            .trait_methods_for_expression(expression.syntax().id)
+            .to_vec();
         if trait_methods.len() > 1
             && let Some(expected_arity) = expected.and_then(function_outer_arity)
         {
@@ -6974,7 +6985,9 @@ impl TypeChecker {
                 }
                 let trait_candidates = module.trait_methods_for_expression(root_syntax);
                 if trait_candidates.len() > 1
-                    && !self.selected_trait_overload_arities.contains_key(&root_syntax)
+                    && !self
+                        .selected_trait_overload_arities
+                        .contains_key(&root_syntax)
                 {
                     let mut arities = trait_candidates
                         .iter()
@@ -7314,18 +7327,13 @@ impl TypeChecker {
                                     &mut HashMap::new(),
                                 ) {
                                     transformed.push((*method, root, selected, candidate.clone()));
-                                    self.trait_method_types.insert(
-                                        *method,
-                                        CheckedType::Function(candidate),
-                                    );
+                                    self.trait_method_types
+                                        .insert(*method, CheckedType::Function(candidate));
                                 }
                             }
                             if !transformed.is_empty() {
-                                let thunk_type = self.make_implicit_thunk(
-                                    module,
-                                    &call.argument,
-                                    block_result,
-                                );
+                                let thunk_type =
+                                    self.make_implicit_thunk(module, &call.argument, block_result);
                                 let selected_type = self.resolve_trait_method_use(
                                     module,
                                     call.callee.syntax().id,
@@ -7335,10 +7343,8 @@ impl TypeChecker {
                                     call.callee.syntax().span.clone(),
                                 );
                                 for (method, root, _, _) in &transformed {
-                                    self.trait_method_types.insert(
-                                        *method,
-                                        CheckedType::Function(root.clone()),
-                                    );
+                                    self.trait_method_types
+                                        .insert(*method, CheckedType::Function(root.clone()));
                                 }
                                 let Some(dispatch) =
                                     self.trait_dispatches.get(&call.callee.syntax().id).cloned()
@@ -7360,10 +7366,9 @@ impl TypeChecker {
                                     &CheckedType::Function(selected_type),
                                     &mut substitutions,
                                 );
-                                let CheckedType::Function(root) = substitute_type(
-                                    CheckedType::Function(root),
-                                    &substitutions,
-                                ) else {
+                                let CheckedType::Function(root) =
+                                    substitute_type(CheckedType::Function(root), &substitutions)
+                                else {
                                     unreachable!()
                                 };
                                 let CheckedType::Product(product) = root.parameter.as_ref() else {
@@ -7513,14 +7518,8 @@ impl TypeChecker {
                         }
                         let mut argument_type = match call.argument.as_ref() {
                             Expression::Product(product) => self
-                                .check_trait_call_product_argument(
-                                    module,
-                                    trait_methods,
-                                    product,
-                                )
-                                .unwrap_or_else(|| {
-                                    self.check_expression(module, &call.argument)
-                                }),
+                                .check_trait_call_product_argument(module, trait_methods, product)
+                                .unwrap_or_else(|| self.check_expression(module, &call.argument)),
                             _ => self.check_expression(module, &call.argument),
                         };
                         if self.did_return {
@@ -7819,31 +7818,33 @@ impl TypeChecker {
                         };
                     let bare_natural_number_literal =
                         match (&raw_callee_type, call.argument.as_ref()) {
-                            (
-                                CheckedType::Function(function),
-                                Expression::Integer(integer),
-                            ) => match function.parameter.as_ref() {
-                                CheckedType::Parameter { id, .. }
-                                    if self.natural_trait.is_some_and(|natural_trait| {
-                                        self.function_origin(module, &call.callee)
-                                            .and_then(|function_id| {
-                                                self.function_bounds.get(&function_id)
-                                            })
-                                            .is_some_and(|bounds| {
-                                                bounds.iter().any(|bound| {
-                                                    bound.trait_id == natural_trait
-                                                        && matches!(
-                                                            bound.arguments.as_slice(),
-                                                            [CheckedType::Parameter {
-                                                                id: bound_id,
-                                                                ..
-                                                            }] if bound_id == id
-                                                        )
+                            (CheckedType::Function(function), Expression::Integer(integer)) => {
+                                match function.parameter.as_ref() {
+                                    CheckedType::Parameter { id, .. }
+                                        if self.natural_trait.is_some_and(|natural_trait| {
+                                            self.function_origin(module, &call.callee)
+                                                .and_then(|function_id| {
+                                                    self.function_bounds.get(&function_id)
                                                 })
-                                            })
-                                    }) => Some(integer),
-                                _ => None,
-                            },
+                                                .is_some_and(|bounds| {
+                                                    bounds.iter().any(|bound| {
+                                                        bound.trait_id == natural_trait
+                                                            && matches!(
+                                                                bound.arguments.as_slice(),
+                                                                [CheckedType::Parameter {
+                                                                    id: bound_id,
+                                                                    ..
+                                                                }] if bound_id == id
+                                                            )
+                                                    })
+                                                })
+                                        }) =>
+                                    {
+                                        Some(integer)
+                                    }
+                                    _ => None,
+                                }
+                            }
                             _ => None,
                         };
                     // A bare top-level `T` parameter and a string literal
@@ -7930,9 +7931,8 @@ impl TypeChecker {
                             .as_ref()
                             .map(|plan| plan.function.clone())
                             .unwrap_or_else(|| function.clone());
-                        let consumed_calls = previous
-                            .as_ref()
-                            .map_or(1, |plan| plan.consumed_calls + 1);
+                        let consumed_calls =
+                            previous.as_ref().map_or(1, |plan| plan.consumed_calls + 1);
                         let callback_compatible = |element: &CheckedTypeElement| {
                             let CheckedType::Function(callback) = &element.value_type else {
                                 return false;
@@ -7977,10 +7977,9 @@ impl TypeChecker {
                             unreachable!()
                         };
                         let product = product.clone();
-                        let CheckedType::Function(instantiated_original) = substitute_type(
-                            CheckedType::Function(original),
-                            &substitutions,
-                        ) else {
+                        let CheckedType::Function(instantiated_original) =
+                            substitute_type(CheckedType::Function(original), &substitutions)
+                        else {
                             unreachable!()
                         };
                         let original = instantiated_original;
@@ -8672,7 +8671,8 @@ impl TypeChecker {
             }
             Expression::StringTemplate(template) => {
                 for part in &template.parts {
-                    let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part else {
+                    let staple_syntax::StringTemplatePart::Interpolation(interpolation) = part
+                    else {
                         continue;
                     };
                     let value_type = self.check_expression(module, &interpolation.expression);
@@ -8720,29 +8720,29 @@ impl TypeChecker {
                     }
                     CheckedType::NumberLiteral(value)
                 } else {
-                let integer_type = expected
-                    .and_then(CheckedType::integer_type)
-                    .unwrap_or(IntegerType::I32);
-                if let Some(width) = integer_type.fixed_width()
-                    && integer.literal.parse::<u128>().ok().is_none_or(|value| {
-                        let value_bits = if integer_type.is_signed() {
-                            width - 1
-                        } else {
-                            width
-                        };
-                        value > ((1_u128 << value_bits) - 1)
-                    })
-                {
-                    self.diagnostics.push(Diagnostic::new(
-                        integer.syntax.span.clone(),
-                        format!(
-                            "integer literal `{}` does not fit in `{}`",
-                            integer.literal,
-                            integer_type.name()
-                        ),
-                    ));
-                }
-                CheckedType::integer(integer_type)
+                    let integer_type = expected
+                        .and_then(CheckedType::integer_type)
+                        .unwrap_or(IntegerType::I32);
+                    if let Some(width) = integer_type.fixed_width()
+                        && integer.literal.parse::<u128>().ok().is_none_or(|value| {
+                            let value_bits = if integer_type.is_signed() {
+                                width - 1
+                            } else {
+                                width
+                            };
+                            value > ((1_u128 << value_bits) - 1)
+                        })
+                    {
+                        self.diagnostics.push(Diagnostic::new(
+                            integer.syntax.span.clone(),
+                            format!(
+                                "integer literal `{}` does not fit in `{}`",
+                                integer.literal,
+                                integer_type.name()
+                            ),
+                        ));
+                    }
+                    CheckedType::integer(integer_type)
                 }
             }
             Expression::Float(float) => {
@@ -9003,15 +9003,14 @@ impl TypeChecker {
             return CheckedType::Error;
         };
         // A `Coroutine{E} T` annotation supplies the body's expected yield type.
-        let expected_result = expected
-            .and_then(|ty| self.coroutine_parts(ty).map(|(_, result)| result.clone()));
+        let expected_result =
+            expected.and_then(|ty| self.coroutine_parts(ty).map(|(_, result)| result.clone()));
         let body = Expression::Block(coro.body.clone());
         // The body is a suspension-permitting scope. Its `await` permission is
         // independent of the enclosing context in both directions.
         let previous_suspension = self.suspension_allowed;
         self.suspension_allowed = true;
-        let body_result =
-            self.check_expression_expected(module, &body, expected_result.as_ref());
+        let body_result = self.check_expression_expected(module, &body, expected_result.as_ref());
         self.suspension_allowed = previous_suspension;
         // Lower the body to an implicit nullary thunk so its deferred effect
         // row is inferred and converges separately from the enclosing
@@ -9047,18 +9046,14 @@ impl TypeChecker {
         }
         if let Some(result) = self.task_result(&operand) {
             let result = result.clone();
-            return self
-                .task_outcome_sum(result)
-                .unwrap_or(CheckedType::Error);
+            return self.task_outcome_sum(result).unwrap_or(CheckedType::Error);
         }
         if let Some(result) = self.wait_result(&operand) {
             // Awaiting a completion parks the task until its resolver fires;
             // the outcome is the same `Completed T | Cancelled` sum a task
             // await produces.
             let result = result.clone();
-            return self
-                .task_outcome_sum(result)
-                .unwrap_or(CheckedType::Error);
+            return self.task_outcome_sum(result).unwrap_or(CheckedType::Error);
         }
         if operand != CheckedType::Error {
             self.diagnostics.push(Diagnostic::new(
@@ -9484,7 +9479,8 @@ impl TypeChecker {
                 let candidates = match first {
                     CoveragePattern::Any => values.iter().map(String::as_str).collect::<Vec<_>>(),
                     CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
-                        let Ok(value) = staple_syntax::string_literal::decode(&pattern.literal) else {
+                        let Ok(value) = staple_syntax::string_literal::decode(&pattern.literal)
+                        else {
                             return false;
                         };
                         if !values.contains(&value) {
@@ -9516,7 +9512,8 @@ impl TypeChecker {
             }
             CheckedType::String => match first {
                 CoveragePattern::Pattern(Pattern::StringLiteral(pattern)) => {
-                    let Ok(literal) = staple_syntax::string_literal::decode(&pattern.literal) else {
+                    let Ok(literal) = staple_syntax::string_literal::decode(&pattern.literal)
+                    else {
                         return false;
                     };
                     let specialized_matrix = matrix
@@ -9954,29 +9951,20 @@ impl TypeChecker {
             }
         })?;
         let is_literal = |expression: &Expression| {
-            matches!(
-                expression,
-                Expression::Integer(_) | Expression::Float(_)
-            )
+            matches!(expression, Expression::Integer(_) | Expression::Float(_))
         };
         let mut substitutions = HashMap::new();
-        let mut element_types: Vec<CheckedType> =
-            vec![CheckedType::Error; product.elements.len()];
+        let mut element_types: Vec<CheckedType> = vec![CheckedType::Error; product.elements.len()];
         for check_literals in [false, true] {
             for (index, element) in product.elements.iter().enumerate() {
                 if is_literal(&element.value) != check_literals {
                     continue;
                 }
-                let expected = substitute_type(
-                    parameter.elements[index].value_type.clone(),
-                    &substitutions,
-                );
+                let expected =
+                    substitute_type(parameter.elements[index].value_type.clone(), &substitutions);
                 let expected = (!contains_type_parameter(&expected)).then_some(expected);
-                let checked = self.check_expression_expected(
-                    module,
-                    &element.value,
-                    expected.as_ref(),
-                );
+                let checked =
+                    self.check_expression_expected(module, &element.value, expected.as_ref());
                 if self.did_return {
                     return Some(CheckedType::empty_product());
                 }
@@ -10568,8 +10556,7 @@ impl TypeChecker {
         else {
             unreachable!()
         };
-        let CheckedType::Product(instantiated_product) =
-            instantiated_function.parameter.as_ref()
+        let CheckedType::Product(instantiated_product) = instantiated_function.parameter.as_ref()
         else {
             unreachable!()
         };
@@ -10838,14 +10825,16 @@ impl TypeChecker {
                     CheckedType::Error
                 }
             },
-            Type::StringLiteral(literal) => match staple_syntax::string_literal::decode(&literal.literal) {
-                Ok(value) => CheckedType::StringLiteralSet(vec![value]),
-                Err(message) => {
-                    self.diagnostics
-                        .push(Diagnostic::new(literal.syntax.span.clone(), message));
-                    CheckedType::Error
+            Type::StringLiteral(literal) => {
+                match staple_syntax::string_literal::decode(&literal.literal) {
+                    Ok(value) => CheckedType::StringLiteralSet(vec![value]),
+                    Err(message) => {
+                        self.diagnostics
+                            .push(Diagnostic::new(literal.syntax.span.clone(), message));
+                        CheckedType::Error
+                    }
                 }
-            },
+            }
             Type::Named(named) => {
                 if let Some(id) = module.type_parameter_for(named.syntax.id) {
                     if module.is_effect_parameter(id) {
@@ -10896,7 +10885,10 @@ impl TypeChecker {
                 let mut parameter_source = function.parameter.as_ref().clone();
                 if function.parameter_style == staple_syntax::FunctionParameterStyle::Juxtaposed
                     && let Type::Product(product) = function.parameter.as_ref()
-                    && product.elements.iter().any(|element| element.default.is_some())
+                    && product
+                        .elements
+                        .iter()
+                        .any(|element| element.default.is_some())
                 {
                     let mut stripped = product.clone();
                     for element in &mut stripped.elements {
@@ -10977,14 +10969,23 @@ impl TypeChecker {
                 if guarded {
                     self.recursive_construction_depth -= 1;
                 }
-                let applied =
-                    self.apply_type_argument(module, callee, argument, application.syntax.span.clone());
+                let applied = self.apply_type_argument(
+                    module,
+                    callee,
+                    argument,
+                    application.syntax.span.clone(),
+                );
                 self.require_applied_type_constructor(applied, application.syntax.span.clone())
             }
             Type::EffectApplication(application) => {
                 let callee = self.resolve_type_application_callee(module, &application.callee);
                 let effects = self.resolve_effect_set(module, &application.effects);
-                let applied = self.apply_effect_argument(module, callee, effects, application.syntax.span.clone());
+                let applied = self.apply_effect_argument(
+                    module,
+                    callee,
+                    effects,
+                    application.syntax.span.clone(),
+                );
                 self.require_applied_type_constructor(applied, application.syntax.span.clone())
             }
             Type::Repeated(repeated) => {
@@ -11018,17 +11019,17 @@ impl TypeChecker {
                         }
                         repeated_product(element, count)
                     }
-                    CheckedType::Parameter { .. } => {
-                        CheckedType::RepeatedProduct {
-                            element: Box::new(element),
-                            count: Box::new(count),
-                        }
-                    }
+                    CheckedType::Parameter { .. } => CheckedType::RepeatedProduct {
+                        element: Box::new(element),
+                        count: Box::new(count),
+                    },
                     CheckedType::Error => CheckedType::Error,
                     other => {
                         self.diagnostics.push(Diagnostic::new(
                             repeated.syntax.span.clone(),
-                            format!("product repetition count must satisfy `Natural`, found `{other}`"),
+                            format!(
+                                "product repetition count must satisfy `Natural`, found `{other}`"
+                            ),
                         ));
                         CheckedType::Error
                     }
@@ -11298,7 +11299,9 @@ impl TypeChecker {
             declaration.type_parameters.get(arguments.len()),
             Some(TypeParameterPattern::Effect(_))
         ) {
-            arguments.push(effect_substitution_type(CheckedEffectSet::canonical(Vec::new())));
+            arguments.push(effect_substitution_type(CheckedEffectSet::canonical(
+                Vec::new(),
+            )));
         }
         arguments.push(argument);
         if arguments.len() < declaration.type_parameters.len() {
@@ -11361,7 +11364,11 @@ impl TypeChecker {
         if arguments.len() == declaration.type_parameters.len() {
             self.instantiate_type_declaration(module, id, arguments)
         } else {
-            CheckedType::TypeConstructor { id, name, arguments }
+            CheckedType::TypeConstructor {
+                id,
+                name,
+                arguments,
+            }
         }
     }
 
@@ -11401,7 +11408,12 @@ impl TypeChecker {
         value_type: CheckedType,
         span: Span,
     ) -> CheckedType {
-        let CheckedType::TypeConstructor { id, name, arguments } = &value_type else {
+        let CheckedType::TypeConstructor {
+            id,
+            name,
+            arguments,
+        } = &value_type
+        else {
             return value_type;
         };
         if self.permit_partial_type_constructor {
@@ -11677,10 +11689,7 @@ impl TypeChecker {
                 let Some(id) = module.type_parameter_for(binding.syntax.id) else {
                     return false;
                 };
-                if binding.sized
-                    && !argument.is_sized()
-                    && *argument != CheckedType::Error
-                {
+                if binding.sized && !argument.is_sized() && *argument != CheckedType::Error {
                     self.diagnostics.push(Diagnostic::new(
                         binding.syntax.span.clone(),
                         format!(
@@ -12131,7 +12140,10 @@ fn merge_types(actual: CheckedType, expected: CheckedType) -> Option<CheckedType
         (CheckedType::CChar, CheckedType::CChar) => Some(CheckedType::CChar),
         (CheckedType::NumberLiteral(_), CheckedType::USize) => Some(CheckedType::USize),
         (CheckedType::NumberLiteral(actual), CheckedType::NumberLiteral(expected))
-            if actual == expected => Some(CheckedType::NumberLiteral(actual)),
+            if actual == expected =>
+        {
+            Some(CheckedType::NumberLiteral(actual))
+        }
         (
             CheckedType::Parameter {
                 id: actual,
@@ -12310,9 +12322,7 @@ fn reconcile_distinct_representation(
     actual: CheckedType,
     expected: CheckedType,
 ) -> Option<CheckedType> {
-    let is_placeholder = |representation: &CheckedType| {
-        matches!(representation, CheckedType::Opaque { id: opaque_id, .. } if *opaque_id == id)
-    };
+    let is_placeholder = |representation: &CheckedType| matches!(representation, CheckedType::Opaque { id: opaque_id, .. } if *opaque_id == id);
     if is_placeholder(&expected) {
         return Some(actual);
     }
@@ -12339,7 +12349,9 @@ fn can_coerce_type(actual: &CheckedType, expected: &CheckedType) -> bool {
                 )
             })
         }
-        (CheckedType::Ref(_), CheckedType::Slice(_)) => slice_ref_length(actual, expected).is_some(),
+        (CheckedType::Ref(_), CheckedType::Slice(_)) => {
+            slice_ref_length(actual, expected).is_some()
+        }
         _ => false,
     }
 }
@@ -13312,7 +13324,11 @@ pub(crate) fn infer_type_parameters(
         CheckedType::RepeatedProduct { element, count } => {
             let (actual_elements, actual_count): (Vec<&CheckedType>, usize) = match actual {
                 CheckedType::Product(product) if !product.variadic => (
-                    product.elements.iter().map(|element| &element.value_type).collect(),
+                    product
+                        .elements
+                        .iter()
+                        .map(|element| &element.value_type)
+                        .collect(),
                     product.elements.len(),
                 ),
                 other => (vec![other], 1),
@@ -13558,8 +13574,7 @@ fn repeated_product_counts_are_natural(
                 }),
                 _ => false,
             };
-            count_is_natural
-                && repeated_product_counts_are_natural(element, bounds, natural_trait)
+            count_is_natural && repeated_product_counts_are_natural(element, bounds, natural_trait)
         }
         CheckedType::CPointer { pointee }
         | CheckedType::Ref(pointee)
@@ -13571,10 +13586,9 @@ fn repeated_product_counts_are_natural(
         CheckedType::Product(product) => product.elements.iter().all(|element| {
             repeated_product_counts_are_natural(&element.value_type, bounds, natural_trait)
         }),
-        CheckedType::Sum(sum) => sum
-            .alternatives
-            .iter()
-            .all(|alternative| repeated_product_counts_are_natural(alternative, bounds, natural_trait)),
+        CheckedType::Sum(sum) => sum.alternatives.iter().all(|alternative| {
+            repeated_product_counts_are_natural(alternative, bounds, natural_trait)
+        }),
         CheckedType::Function(function) => {
             repeated_product_counts_are_natural(&function.parameter, bounds, natural_trait)
                 && repeated_product_counts_are_natural(&function.result, bounds, natural_trait)
@@ -13583,19 +13597,18 @@ fn repeated_product_counts_are_natural(
                 })
         }
         CheckedType::Opaque { arguments, .. } | CheckedType::TypeConstructor { arguments, .. } => {
-            arguments
-                .iter()
-                .all(|argument| repeated_product_counts_are_natural(argument, bounds, natural_trait))
+            arguments.iter().all(|argument| {
+                repeated_product_counts_are_natural(argument, bounds, natural_trait)
+            })
         }
         CheckedType::Distinct {
             arguments,
             representation,
             ..
         } => {
-            arguments
-                .iter()
-                .all(|argument| repeated_product_counts_are_natural(argument, bounds, natural_trait))
-                && repeated_product_counts_are_natural(representation, bounds, natural_trait)
+            arguments.iter().all(|argument| {
+                repeated_product_counts_are_natural(argument, bounds, natural_trait)
+            }) && repeated_product_counts_are_natural(representation, bounds, natural_trait)
         }
         _ => true,
     }
@@ -13823,9 +13836,7 @@ fn expression_reads_reactive(
             .items
             .iter()
             .any(|value| item(module, value, derived)),
-        Expression::Await(value) => {
-            expression_reads_reactive(module, &value.operand, derived)
-        }
+        Expression::Await(value) => expression_reads_reactive(module, &value.operand, derived),
         Expression::With(value) => {
             expression_reads_reactive(module, &value.value, derived)
                 || value
@@ -14056,9 +14067,7 @@ fn expression_mentions_symbols(
             .items
             .iter()
             .any(|item| block_item(module, item, symbols)),
-        Expression::Await(value) => {
-            expression_mentions_symbols(module, &value.operand, symbols)
-        }
+        Expression::Await(value) => expression_mentions_symbols(module, &value.operand, symbols),
         Expression::With(value) => {
             expression_mentions_symbols(module, &value.value, symbols)
                 || value
@@ -14555,7 +14564,11 @@ fn structural_trait_arguments(
         if let CheckedType::Ref(payload) = target {
             let resolved = resolve_obligation(
                 trait_id,
-                &[payload.as_ref().clone(), position.clone(), dependent.clone()],
+                &[
+                    payload.as_ref().clone(),
+                    position.clone(),
+                    dependent.clone(),
+                ],
             )?;
             if accepts(&resolved[2]) {
                 return Some((
@@ -14589,7 +14602,11 @@ fn structural_trait_arguments(
         if let CheckedType::Ref(payload) = target {
             let resolved = resolve_obligation(
                 trait_id,
-                &[payload.as_ref().clone(), position.clone(), dependent.clone()],
+                &[
+                    payload.as_ref().clone(),
+                    position.clone(),
+                    dependent.clone(),
+                ],
             )?;
             if accepts(&resolved[2]) {
                 return Some((
@@ -14912,7 +14929,9 @@ fn is_copy_type(
         | CheckedType::Ref(_)
         | CheckedType::Slice(_)
         | CheckedType::Function(_) => true,
-        CheckedType::CString | CheckedType::Buffer(_) | CheckedType::RepeatedProduct { .. } => false,
+        CheckedType::CString | CheckedType::Buffer(_) | CheckedType::RepeatedProduct { .. } => {
+            false
+        }
         CheckedType::Parameter { .. } => copy_trait.is_some_and(|copy_trait| {
             bounds.iter().any(|bound| {
                 bound.trait_id == copy_trait

@@ -450,7 +450,13 @@ impl Collector<'_> {
                         .map(|declaration| declaration.docs.clone())
                         .unwrap_or_default();
                     let module = self.definition_module_label(DefinitionId::Type(ty));
-                    self.named_with_docs(&submodule.syntax, &submodule.name, signature, docs, module);
+                    self.named_with_docs(
+                        &submodule.syntax,
+                        &submodule.name,
+                        signature,
+                        docs,
+                        module,
+                    );
                 } else {
                     let docs = self
                         .typed
@@ -665,13 +671,7 @@ impl Collector<'_> {
                         .map(|entry| entry.docs.clone())
                         .unwrap_or_default();
                     let module_label = self.definition_module_label(DefinitionId::Type(ty));
-                    self.named_with_docs(
-                        &declaration.syntax,
-                        &name,
-                        signature,
-                        docs,
-                        module_label,
-                    );
+                    self.named_with_docs(&declaration.syntax, &name, signature, docs, module_label);
                 }
             } else if !file_backed {
                 let docs = self.submodule_docs(module);
@@ -817,8 +817,7 @@ impl Collector<'_> {
             let docs = segment_module
                 .map(|module| module.syntax.docs.clone())
                 .unwrap_or_else(|| module_docs_from_file(&path));
-            let module_label =
-                segment_module.and_then(|module| self.module_id_label(module.id));
+            let module_label = segment_module.and_then(|module| self.module_id_label(module.id));
             let name = &components[index];
             self.named_with_docs(
                 &declaration.syntax,
@@ -849,13 +848,7 @@ impl Collector<'_> {
         for (signature, docs) in signatures {
             let module = self.import_module_label(declaration.syntax.id, imported_name);
             if last {
-                self.named_last_with_docs(
-                    &declaration.syntax,
-                    token_name,
-                    signature,
-                    docs,
-                    module,
-                );
+                self.named_last_with_docs(&declaration.syntax, token_name, signature, docs, module);
             } else {
                 self.named_with_docs(&declaration.syntax, token_name, signature, docs, module);
             }
@@ -1332,12 +1325,13 @@ impl Collector<'_> {
             let signature = compile_time_signature(info);
             let instantiation = self.syntax_constructor_instantiation(info);
             match expression {
-                Expression::Name(name) => {
-                    self.named_with_instantiation(&name.syntax, &name.name, signature, instantiation)
-                }
-                Expression::Splice(splice) => {
-                    self.named(&splice.syntax, &splice.name, signature)
-                }
+                Expression::Name(name) => self.named_with_instantiation(
+                    &name.syntax,
+                    &name.name,
+                    signature,
+                    instantiation,
+                ),
+                Expression::Splice(splice) => self.named(&splice.syntax, &splice.name, signature),
                 _ => {}
             }
         }
@@ -1414,7 +1408,9 @@ impl Collector<'_> {
                     .trait_methods_for_expression(expression.syntax().id)
                     .first()
                     .and_then(|method| self.typed.resolved().trait_for_method(*method))
-                    .and_then(|trait_id| self.definition_module_label(DefinitionId::Trait(trait_id)))
+                    .and_then(|trait_id| {
+                        self.definition_module_label(DefinitionId::Trait(trait_id))
+                    })
             });
             self.syntax_with_docs(expression.syntax(), signature, docs, module, instantiation);
         }
@@ -1732,13 +1728,20 @@ impl Collector<'_> {
             }
             Type::EffectApplication(application) => {
                 self.ty(&application.callee);
-                for resource in &application.effects.resources { self.ty(&resource.value_type); }
+                for resource in &application.effects.resources {
+                    self.ty(&resource.value_type);
+                }
             }
             Type::Repeated(repeated) => {
                 self.ty(&repeated.element);
-                if let Some(count) = &repeated.count { self.ty(count); }
+                if let Some(count) = &repeated.count {
+                    self.ty(count);
+                }
             }
-            Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => {}
+            Type::Inferred(_)
+            | Type::NumberLiteral(_)
+            | Type::StringLiteral(_)
+            | Type::Splice(_) => {}
         }
     }
 
@@ -2088,7 +2091,12 @@ mod tests {
             .with_module_root(&root)
             .with_package_root(&root_path)
             .with_package_name("example")
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2108,7 +2116,12 @@ mod tests {
         let source = "use std.io.println\nprintln \"hi\"\n";
         let path = std::env::temp_dir().join("staple-hover-defining-module-std.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2135,7 +2148,12 @@ mod tests {
         let source = "macro always_fail = e: Expr => panic \"internal error\"\n";
         let path = std::env::temp_dir().join("staple-hover-macro-body-outer-ref.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2169,7 +2187,12 @@ mod tests {
             .with_module_root(&root)
             .with_package_root(&root_path)
             .with_package_name("example")
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2196,7 +2219,12 @@ mod tests {
         let source = "def f = (a: I32) => {\n    let x = a\n    x\n}\n";
         let path = std::env::temp_dir().join("staple-hover-defining-module-local.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2222,7 +2250,12 @@ mod tests {
         let source = "use std.io.println\nprintln \"hi\"\n";
         let path = std::env::temp_dir().join("staple-hover-defining-module-no-leak.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2261,7 +2294,12 @@ mod tests {
         let program = ProgramLoader::new()
             .with_module_root(&root)
             .with_package_name("example")
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2299,7 +2337,12 @@ mod tests {
         let source = "let answer = 42\nanswer\n";
         let path = std::env::temp_dir().join("staple-hover-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2323,7 +2366,12 @@ mod tests {
         let source = "let signal count = 0\ncount = 1\n";
         let path = std::env::temp_dir().join("staple-hover-signal-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2355,7 +2403,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-companion-access.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2385,7 +2438,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-companion-header.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2416,7 +2474,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-use-companion-segment.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2444,7 +2507,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-use-typegroup-segment.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2476,7 +2544,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-typegroup-companion-header.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2507,7 +2580,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-trait-access.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2537,7 +2615,12 @@ mod tests {
             "pub(repr) type Box T = (value: T)\ndef unbox: <T> Box T -> T = Box value => value\n";
         let path = std::env::temp_dir().join("staple-hover-generic-signatures.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2567,7 +2650,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-generic-use-site.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2599,13 +2687,15 @@ mod tests {
 
     #[test]
     fn generic_type_constructor_use_site_leads_with_the_declared_type() {
-        let source = concat!(
-            "pub(repr) type Box T = T\n",
-            "let box = Box 32\n",
-        );
+        let source = concat!("pub(repr) type Box T = T\n", "let box = Box 32\n",);
         let path = std::env::temp_dir().join("staple-hover-generic-constructor-use-site.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2633,7 +2723,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-sequence-constructor.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2675,7 +2770,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-reaction-in-wrapping-function.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2684,17 +2784,11 @@ mod tests {
         let entries = entries(&module, &typed);
 
         for (name, signature, instantiation) in [
-            (
-                "test",
-                "def test: () ->{state.read, IO, Reactive} ()",
-                None,
-            ),
+            ("test", "def test: () ->{state.read, IO, Reactive} ()", None),
             (
                 "reaction",
                 "def reaction: <effect E> (() ->{E} ()) ->{E, Reactive} ()",
-                Some(
-                    "reaction: (() ->{state.read, IO} ()) ->{state.read, IO, Reactive} ()",
-                ),
+                Some("reaction: (() ->{state.read, IO} ()) ->{state.read, IO, Reactive} ()"),
             ),
         ] {
             assert!(
@@ -2714,7 +2808,12 @@ mod tests {
             "def sum = pair@(left: I32, right: I32) => pair.0 + left + right\nsum (20, 22)\n";
         let path = std::env::temp_dir().join("staple-hover-at-patterns.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2748,7 +2847,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-docs.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2784,7 +2888,12 @@ mod tests {
         let source = "type Clock = I32\ndef read = () => resource Clock\n";
         let path = std::env::temp_dir().join("staple-hover-resources.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2825,7 +2934,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2861,7 +2975,10 @@ mod tests {
 
     #[test]
     fn indexes_quotation_macro_declarations() {
-        let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let path = stdlib_root.join("std").join("syntax.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
@@ -2897,7 +3014,10 @@ mod tests {
 
     #[test]
     fn displays_declared_types_for_macro_helper_parameters() {
-        let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let stdlib_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let path = stdlib_root.join("std").join("typegroup.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
@@ -2953,7 +3073,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-declarations-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -2985,7 +3110,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-extern-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3009,7 +3139,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-mut-move-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3031,7 +3166,12 @@ mod tests {
         let source = "def foo = (mut x: I32, mut y: Bool) => {\n    x\n}\n";
         let path = std::env::temp_dir().join("staple-hover-mutable-parameter-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3056,7 +3196,12 @@ mod tests {
         let source = "def foo = mut (x: I32, y: I32) => {\n    x = 32\n    y = 64\n}\n";
         let path = std::env::temp_dir().join("staple-hover-whole-mut-product-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3086,7 +3231,12 @@ mod tests {
         let source = concat!("def foo: (() -> I32) -> I32 = x => x ()\n",);
         let path = std::env::temp_dir().join("staple-hover-nested-function-param-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3113,7 +3263,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-generic-impl-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3155,7 +3310,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3212,7 +3372,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3250,7 +3415,10 @@ mod tests {
     #[test]
     fn describes_module_segments_in_dotted_use_declarations() {
         let source = "use std.io.println\n";
-        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .to_path_buf();
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
             .load_source(source, &root)
@@ -3303,7 +3471,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3357,7 +3530,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3390,7 +3568,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-local-types-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3415,7 +3598,12 @@ mod tests {
         );
         let path = std::env::temp_dir().join("staple-hover-singleton-type-test.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3426,7 +3614,11 @@ mod tests {
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "Marker" && entry.signature == "type Marker"
         }));
-        assert!(!entries.iter().any(|entry| entry.signature.contains("Marker = ")));
+        assert!(
+            !entries
+                .iter()
+                .any(|entry| entry.signature.contains("Marker = "))
+        );
     }
 
     #[test]
@@ -3456,7 +3648,12 @@ mod tests {
         );
         let path = root.join("main.sta");
         let program = ProgramLoader::new()
-            .with_standard_library_root(PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib"))
+            .with_standard_library_root(
+                PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                    .parent()
+                    .unwrap()
+                    .join("stdlib"),
+            )
             .load_source_at(&path, source)
             .unwrap();
         let resolved = NameResolver::new().resolve_program(program).unwrap();
@@ -3465,8 +3662,7 @@ mod tests {
         let entries = entries(&module, &typed);
 
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Hidden"
-                && entry.signature == "type Hidden = /* … */"
+            &source[entry.range.clone()] == "Hidden" && entry.signature == "type Hidden = /* … */"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "HiddenGeneric"
@@ -3484,7 +3680,10 @@ mod tests {
 
     #[test]
     fn describes_macro_meta_locals_and_helpers() {
-        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
         let path = stdlib.join("std/flow.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
@@ -3530,8 +3729,14 @@ mod tests {
 
     #[test]
     fn formats_compile_time_lets_and_syntax_constructors_like_source_declarations() {
-        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("staple-compiler/examples/macros.sta");
+        let stdlib = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("staple-compiler/examples/macros.sta");
         let source = std::fs::read_to_string(&path).unwrap();
         let program = ProgramLoader::new()
             .with_standard_library_root(stdlib)

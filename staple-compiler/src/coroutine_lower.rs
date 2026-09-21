@@ -154,9 +154,7 @@ struct AwaitSite {
 fn is_until_call(module: &TypedModule, operand: &Expression) -> bool {
     // `(until { p })` parses as a single-element product; look through it.
     let operand = match operand {
-        Expression::Product(product) if product.elements.len() == 1 => {
-            &product.elements[0].value
-        }
+        Expression::Product(product) if product.elements.len() == 1 => &product.elements[0].value,
         other => other,
     };
     let Expression::Call(call) = operand else {
@@ -185,7 +183,11 @@ fn scan_item(
             }
             if let Some(value) = &binding.value {
                 if let Expression::Await(await_) = value {
-                    info.awaits.push(AwaitSite { await_syntax: await_.syntax.id, operand_syntax: await_.operand.syntax().id, is_until: is_until_call(module, &await_.operand) });
+                    info.awaits.push(AwaitSite {
+                        await_syntax: await_.syntax.id,
+                        operand_syntax: await_.operand.syntax().id,
+                        is_until: is_until_call(module, &await_.operand),
+                    });
                     scan_expression(module, &await_.operand, info, diagnostics);
                 } else {
                     scan_expression(module, value, info, diagnostics);
@@ -195,7 +197,11 @@ fn scan_item(
         Item::PatternBinding(binding) => {
             collect_pattern_bindings(module, &binding.pattern, &mut info.bindings);
             if let Expression::Await(await_) = &binding.value {
-                info.awaits.push(AwaitSite { await_syntax: await_.syntax.id, operand_syntax: await_.operand.syntax().id, is_until: is_until_call(module, &await_.operand) });
+                info.awaits.push(AwaitSite {
+                    await_syntax: await_.syntax.id,
+                    operand_syntax: await_.operand.syntax().id,
+                    is_until: is_until_call(module, &await_.operand),
+                });
                 scan_expression(module, &await_.operand, info, diagnostics);
             } else {
                 scan_expression(module, &binding.value, info, diagnostics);
@@ -212,7 +218,11 @@ fn scan_item(
             }
         }
         Item::Expression(Expression::Await(await_)) => {
-            info.awaits.push(AwaitSite { await_syntax: await_.syntax.id, operand_syntax: await_.operand.syntax().id, is_until: is_until_call(module, &await_.operand) });
+            info.awaits.push(AwaitSite {
+                await_syntax: await_.syntax.id,
+                operand_syntax: await_.operand.syntax().id,
+                is_until: is_until_call(module, &await_.operand),
+            });
             scan_expression(module, &await_.operand, info, diagnostics);
         }
         Item::Expression(expression) => scan_expression(module, expression, info, diagnostics),
@@ -239,9 +249,7 @@ fn scan_expression(
         }
         // Nested coroutines and functions are compiled separately.
         Expression::Coro(_) | Expression::Function(_) => {}
-        Expression::Satisfies(value) => {
-            scan_expression(module, &value.value, info, diagnostics)
-        }
+        Expression::Satisfies(value) => scan_expression(module, &value.value, info, diagnostics),
         Expression::Match(match_) => {
             scan_expression(module, &match_.subject, info, diagnostics);
             for arm in &match_.arms {
@@ -251,7 +259,11 @@ fn scan_expression(
                         scan_item(module, item, info, diagnostics);
                     }
                 } else if let Expression::Await(await_) = &arm.body {
-                    info.awaits.push(AwaitSite { await_syntax: await_.syntax.id, operand_syntax: await_.operand.syntax().id, is_until: is_until_call(module, &await_.operand) });
+                    info.awaits.push(AwaitSite {
+                        await_syntax: await_.syntax.id,
+                        operand_syntax: await_.operand.syntax().id,
+                        is_until: is_until_call(module, &await_.operand),
+                    });
                     scan_expression(module, &await_.operand, info, diagnostics);
                 } else {
                     scan_expression(module, &arm.body, info, diagnostics);
@@ -287,9 +299,7 @@ fn scan_expression(
             scan_expression(module, &call.callee, info, diagnostics);
             scan_expression(module, &call.argument, info, diagnostics);
         }
-        Expression::Access(access) => {
-            scan_expression(module, &access.value, info, diagnostics)
-        }
+        Expression::Access(access) => scan_expression(module, &access.value, info, diagnostics),
         Expression::Index(index) => {
             scan_expression(module, &index.value, info, diagnostics);
             scan_expression(module, &index.index, info, diagnostics);
@@ -333,11 +343,7 @@ fn collect_pattern_bindings(module: &TypedModule, pattern: &Pattern, out: &mut V
             }
         }
         Pattern::At(at) => {
-            collect_pattern_bindings(
-                module,
-                &Pattern::Binding(at.binding.as_ref().clone()),
-                out,
-            );
+            collect_pattern_bindings(module, &Pattern::Binding(at.binding.as_ref().clone()), out);
             collect_pattern_bindings(module, &at.pattern, out);
         }
         Pattern::Product(product) => {
