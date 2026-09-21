@@ -11,8 +11,8 @@ def __slice_get_ref: <T> (Slice T, USize) -> Ref T = (slice, position) => __slic
 companion<T> Slice T {
     /// Returns the number of elements in the slice.
     pub def length: Slice T -> USize = value => 0
-    /// Makes a single-element slice from a reference.
-    pub def from_ref: Ref T -> Slice T = value => value
+    /// Makes a slice from a fixed reference to a homogeneous array.
+    pub def from_ref: <N where Natural N> Ref T[N] -> Slice T = value => value
     /// Borrows an element by position, trapping if out of bounds.
     pub def get_ref: Slice T * USize -> Ref T = slice * position => __slice_get_ref (slice, position)
 }

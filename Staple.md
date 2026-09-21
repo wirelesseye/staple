@@ -3052,12 +3052,13 @@ let third = values[index]
 is still fixed. It is not a dynamic array and is not equal to any `Ref T[N]`;
 a fixed reference is implicitly converted wherever a `Slice T` is expected
 (as in the `let values: Slice I32 = fixed` binding above), and the companion
-function `Slice.from_ref: <T> Ref T -> Slice T` performs the same conversion
-explicitly — `Slice.from_ref fixed` — for use as a first-class function value
-or wherever an explicit spelling is clearer. `Slice.from_ref` also accepts a
-singleton `Ref T` (treated as a length-1 slice) and an empty `Ref ()`
-(treated as a length-0 slice, requiring an expected `Slice` type to infer its
-element type). Literal and variable indexing perform runtime bounds checks.
+function `Slice.from_ref: <N where Natural N> Ref T[N] -> Slice T` performs the
+same conversion explicitly — `Slice.from_ref fixed` — for use as a first-class
+function value or wherever an explicit spelling is clearer. As with the
+implicit conversion, a singleton `Ref T` (a `T[1]`, normalized to `T`) becomes
+a length-1 slice, and an empty `Ref ()` becomes a length-0 slice, requiring an
+expected `Slice` type to infer its element type. Literal and variable indexing
+perform runtime bounds checks.
 `Slice.get_ref: <T> Slice T * USize -> Ref T` borrows an element by position,
 trapping when out of bounds; it is the primitive behind the standard library's
 `Index`/`MutateIndex` implementations for slices. A `Slice T` is a sized view

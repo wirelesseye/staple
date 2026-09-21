@@ -3277,17 +3277,6 @@ impl TypeChecker {
                                 && *function.result == CheckedType::USize
                     ))
                     .unwrap_or(CheckedType::Error),
-                crate::IntrinsicFunction::SliceFromRef => self
-                    .symbol_types
-                    .get(symbol)
-                    .cloned()
-                    .filter(|value_type| matches!(
-                        value_type,
-                        CheckedType::Function(function)
-                            if matches!(function.parameter.as_ref(), CheckedType::Ref(_))
-                                && matches!(function.result.as_ref(), CheckedType::Slice(_))
-                    ))
-                    .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::SliceGetRef => self
                     .symbol_types
                     .get(symbol)
@@ -7091,65 +7080,6 @@ impl TypeChecker {
                     );
                     return self.finish_expression_type(expression, *function.result, expected);
                 }
-                if let Some(symbol) = module.symbol_for(call.callee.syntax().id)
-                    && module.intrinsic_function(symbol)
-                        == Some(crate::IntrinsicFunction::SliceFromRef)
-                {
-                    self.ensure_binding_checked(module, symbol);
-                    self.check_expression(module, &call.callee);
-                    let argument_type = self.check_expression(module, &call.argument);
-                    if self.did_return {
-                        return CheckedType::empty_product();
-                    }
-                    let element = match &argument_type {
-                        CheckedType::Ref(payload) => match payload.as_ref() {
-                            CheckedType::Product(product) if !product.variadic => {
-                                match product.elements.as_slice() {
-                                    [] => match expected {
-                                        Some(CheckedType::Slice(expected_element)) => {
-                                            Some(expected_element.as_ref().clone())
-                                        }
-                                        _ => {
-                                            self.diagnostics.push(Diagnostic::new(
-                                                call.syntax.span.clone(),
-                                                "cannot infer the element type of an empty slice; annotate the expected type",
-                                            ));
-                                            None
-                                        }
-                                    },
-                                    [first, rest @ ..] => {
-                                        if rest
-                                            .iter()
-                                            .all(|element| element.value_type == first.value_type)
-                                        {
-                                            Some(first.value_type.clone())
-                                        } else {
-                                            self.diagnostics.push(Diagnostic::new(
-                                                call.argument.syntax().span.clone(),
-                                                "`from_ref` requires a homogeneous array, found mixed element types",
-                                            ));
-                                            None
-                                        }
-                                    }
-                                }
-                            }
-                            other => Some(other.clone()),
-                        },
-                        CheckedType::Error => None,
-                        other => {
-                            self.diagnostics.push(Diagnostic::new(
-                                call.argument.syntax().span.clone(),
-                                format!("`from_ref` requires a `Ref` value, found `{other}`"),
-                            ));
-                            None
-                        }
-                    };
-                    let result = match element {
-                        Some(element) => CheckedType::Slice(Box::new(element)),
-                        None => CheckedType::Error,
-                    };
-                    return self.finish_expression_type(expression, result, expected);
-                }
                 if let Expression::Access(selector) = call.callee.as_ref()
                     && let Accessor::Method(method) = &selector.accessor
                 {
@@ -8251,18 +8181,24 @@ impl TypeChecker {
                             },
                             result: Box::new(expected_result.clone()),
                         });
+                        // The synthesized callee is not an argument position, so
+                        // it must not be thunk-ified: a nullary call's expected
+                        // callee has an empty-product parameter, which the
+                        // implicit-thunk rule below would otherwise mistake for
+                        // a `() -> T` callback.
+                        let previous_thunk_context = self.implicit_thunk_context;
+                        self.implicit_thunk_context = false;
                         raw_callee_type = self.check_expression_expected(
                             module,
                             &call.callee,
                             Some(&expected_callee),
                         );
+                        self.implicit_thunk_context = previous_thunk_context;
                     }
-                    let instantiation_expected =
-                        expected.filter(|expected| !matches!(expected, CheckedType::Slice(_)));
                     let callee_type = self.instantiate_function_use(
                         raw_callee_type.clone(),
                         Some(&argument_type),
-                        instantiation_expected,
+                        expected,
                         call.callee.syntax().span.clone(),
                     );
                     if let Some(function_id) = self.function_origin(module, &call.callee) {
@@ -9793,7 +9729,7 @@ impl TypeChecker {
                 })
             }
             (CheckedType::Ref(_), CheckedType::Slice(_)) => {
-                slice_ref_length(&actual, expected).is_some()
+                slice_ref_coercion_is_valid(&actual, expected)
             }
             _ => false,
         };
@@ -10378,6 +10314,13 @@ impl TypeChecker {
                 .into_iter()
                 .map(|argument| substitute_type(argument, &substitutions))
                 .collect::<Vec<_>>();
+            // A partially applied callee (the speculative pre-check of
+            // `f a` in `f a b`) can leave some compile-time parameters
+            // unresolved; their bounds become obligations of the enclosing
+            // application that supplies them, and are checked then.
+            if arguments.iter().any(contains_type_parameter) {
+                continue;
+            }
             if !self.trait_obligation_available(bound.trait_id, &arguments) {
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
@@ -10391,6 +10334,9 @@ impl TypeChecker {
                 .cloned()
                 .unwrap_or(CheckedType::Error);
             let supertype = substitute_type(bound.supertype, &substitutions);
+            if contains_type_parameter(&actual) {
+                continue;
+            }
             if !self.is_subtype(&actual, &supertype) {
                 self.diagnostics.push(Diagnostic::new(
                     span.clone(),
@@ -12084,6 +12030,28 @@ pub(crate) fn slice_ref_length(source: &CheckedType, target: &CheckedType) -> Op
     element_matches(homogeneous).then_some(product.elements.len())
 }
 
+/// Whether a `Ref` may coerce to a `Slice` while type checking.
+///
+/// This accepts everything `slice_ref_length` does, plus a still-generic
+/// homogeneous array `Ref T[N]` whose count is a compile-time parameter: the
+/// concrete length is only needed once the surrounding function is
+/// monomorphized, at which point `N` has been substituted and
+/// `slice_ref_length` can compute it.
+pub(crate) fn slice_ref_coercion_is_valid(source: &CheckedType, target: &CheckedType) -> bool {
+    if slice_ref_length(source, target).is_some() {
+        return true;
+    }
+    let (CheckedType::Ref(actual), CheckedType::Slice(element)) = (source, target) else {
+        return false;
+    };
+    matches!(
+        actual.as_ref(),
+        CheckedType::RepeatedProduct { element: repeated, count }
+            if repeated.as_ref() == element.as_ref()
+                && matches!(count.as_ref(), CheckedType::Parameter { .. })
+    )
+}
+
 fn replace_product_default_policy(merged: CheckedType, expected: &CheckedType) -> CheckedType {
     match (merged, expected) {
         (CheckedType::Product(mut merged), CheckedType::Product(expected))
@@ -12350,7 +12318,7 @@ fn can_coerce_type(actual: &CheckedType, expected: &CheckedType) -> bool {
             })
         }
         (CheckedType::Ref(_), CheckedType::Slice(_)) => {
-            slice_ref_length(actual, expected).is_some()
+            slice_ref_coercion_is_valid(actual, expected)
         }
         _ => false,
     }
@@ -13322,6 +13290,17 @@ pub(crate) fn infer_type_parameters(
                 if infer_type_parameters(value, actual_value, substitutions))
         }
         CheckedType::RepeatedProduct { element, count } => {
+            // A still-generic array template unifies directly with another
+            // still-generic array: the counts are compile-time parameters, not
+            // concrete lengths, so they are inferred rather than compared.
+            if let CheckedType::RepeatedProduct {
+                element: actual_element,
+                count: actual_count,
+            } = actual
+            {
+                return infer_type_parameters(element, actual_element, substitutions)
+                    && infer_type_parameters(count, actual_count, substitutions);
+            }
             let (actual_elements, actual_count): (Vec<&CheckedType>, usize) = match actual {
                 CheckedType::Product(product) if !product.variadic => (
                     product
@@ -13529,6 +13508,12 @@ fn infer_type_parameters_for_expected(
             return true;
         }
         return false;
+    }
+    // A `Ref` result coerces to a `Slice` after instantiation (see
+    // `slice_ref_coercion_is_valid`), so an expected `Slice` does not
+    // constrain the call's remaining compile-time parameters here.
+    if matches!(template, CheckedType::Ref(_)) && matches!(expected, CheckedType::Slice(_)) {
+        return true;
     }
     infer_type_parameters(template, expected, substitutions)
 }

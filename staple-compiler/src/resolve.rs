@@ -285,7 +285,6 @@ pub enum IntrinsicFunction {
     StringToCString,
     StringAdd,
     SliceLength,
-    SliceFromRef,
     SliceGetRef,
     BufferWithCapacity,
     BufferLength,
@@ -1751,16 +1750,6 @@ impl NameResolver {
         }) {
             self.intrinsic_functions
                 .insert(symbol, IntrinsicFunction::SliceLength);
-        }
-        if let Some(symbol) = slice_module.and_then(|slice| {
-            self.interfaces[slice.0]
-                .namespaces
-                .get("Slice")
-                .and_then(|companion| self.interfaces[companion.0].values.get("from_ref"))
-                .copied()
-        }) {
-            self.intrinsic_functions
-                .insert(symbol, IntrinsicFunction::SliceFromRef);
         }
         for (name, _) in expected {
             if !found.contains_key(&name) {

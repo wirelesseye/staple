@@ -1563,6 +1563,39 @@ fn supports_repeated_spread_and_erased_product_references() {
 }
 
 #[test]
+fn from_ref_accepts_generic_arrays_and_is_first_class() {
+    let module = type_check(concat!(
+        "use std.slice.Slice\n",
+        "let fixed: Ref I32[3] = Ref (1, 2, 3)\n",
+        "let direct: Slice I32 = Slice.from_ref fixed\n",
+        "let singleton: Slice I32 = Slice.from_ref (Ref 8)\n",
+        "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
+        "let operation: (Ref I32[3]) -> Slice I32 = Slice.from_ref\n",
+        "let applied: Slice I32 = operation fixed\n",
+        "def coerce: <T, N where Natural N> Ref T[N] -> Slice T = value => value\n",
+        "let coerced: Slice I32 = coerce fixed\n",
+        "def forward: <T, N where Natural N> Ref T[N] -> Slice T = value => Slice.from_ref value\n",
+        "let forwarded: Slice I32 = forward fixed\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("`from_ref` should accept a generic array and be first-class");
+}
+
+#[test]
+fn checks_nullary_calls_inside_argument_positions() {
+    let module = type_check(concat!(
+        "def take: <N where Natural N> Ref I32[N] -> I32 = value => 0\n",
+        "let result: I32 = take (Ref ())\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a nullary call should check inside a call argument");
+}
+
+#[test]
 fn supports_number_literal_types_as_generic_product_sizes() {
     let source = concat!(
         "type alias Three = 3\n",

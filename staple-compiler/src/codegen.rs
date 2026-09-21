@@ -7291,23 +7291,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     .map(|value| value.as_any_value_enum())
                     .map_err(compiler_diagnostic);
             }
-            IntrinsicFunction::SliceFromRef => {
-                let source_type = self
-                    .concrete_expression_type(&call.argument)
-                    .unwrap_or(CheckedType::Error);
-                let target_type = self
-                    .concrete_expression_type(&Expression::Call(call.clone()))
-                    .ok_or_else(|| {
-                        Diagnostic::new(call.syntax.span.clone(), "unchecked from_ref result")
-                    })?;
-                let value = self.compile_expression(environment, &call.argument)?;
-                return self.coerce_slice_ref_value(
-                    value,
-                    &source_type,
-                    &target_type,
-                    call.syntax.span.clone(),
-                );
-            }
             IntrinsicFunction::SliceGetRef => {
                 let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
                 let [
@@ -7542,7 +7525,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             | IntrinsicFunction::FloatBinary { .. }
             | IntrinsicFunction::FloatCompare { .. }
             | IntrinsicFunction::SliceLength
-            | IntrinsicFunction::SliceFromRef
             | IntrinsicFunction::SliceGetRef
             | IntrinsicFunction::BufferWithCapacity
             | IntrinsicFunction::BufferLength
