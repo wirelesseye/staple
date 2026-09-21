@@ -1332,6 +1332,46 @@ mod tests {
     }
 
     #[test]
+    fn runs_a_coroutine_returned_from_a_block_tail() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-run-coro-{nonce}.sta"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.coroutine.*\n",
+                "extern \"c\" { exit: I32 -> () }\n",
+                "def f: () -> Coroutine{} I32 = () => { coro { 42 } }\n",
+                "def g: () -> Coroutine{} I32 = () => { { coro { 43 } } }\n",
+                "def h: Bool -> Coroutine{} I32 = b => match b {\n",
+                "    True() => { coro { 44 } },\n",
+                "    False() => coro { 0 },\n",
+                "}\n",
+                "exit (block_on (f ()) + block_on (g ()) + block_on (h (1 == 1)))\n",
+            ),
+        )
+        .expect("temporary run source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().join("stdlib");
+        let outcome = run([
+            "run".into(),
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("block-tail coroutines should run");
+        let _ = std::fs::remove_file(source);
+
+        let Outcome::Executed(status) = outcome else {
+            panic!("run mode should return a process status");
+        };
+        // The frame returned from a block tail must reach `block_on` intact,
+        // so its body actually executes: 42 + 43 + 44.
+        assert_eq!(status.code(), Some(129));
+    }
+
+    #[test]
     fn run_reports_compiler_errors() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

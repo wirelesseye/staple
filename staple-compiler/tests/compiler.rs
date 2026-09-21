@@ -136,6 +136,19 @@ fn type_check(source: &str) -> staple_compiler::TypedModule {
         .expect("source should type-check")
 }
 
+/// Slices the LLVM definition of the function named `name` out of `llvm`,
+/// from its `define` line up to the next definition.
+fn function_definition<'a>(llvm: &'a str, name: &str) -> &'a str {
+    llvm.split("\ndefine")
+        .find(|definition| {
+            definition
+                .lines()
+                .next()
+                .is_some_and(|signature| signature.contains(&format!("@{name}(")))
+        })
+        .unwrap_or_else(|| panic!("`{name}` should be compiled"))
+}
+
 #[test]
 fn implicitly_thunks_call_arguments_and_preserves_callback_effects() {
     let module = type_check(concat!(
@@ -387,6 +400,30 @@ fn coroutines_lower_to_resume_and_cleanup_functions() {
     assert!(llvm.contains("__staple_gc_unregister_root"));
     // `block_on` and the nested `await` both drive a frame indirectly.
     assert!(llvm.contains("coro.result"));
+}
+
+#[test]
+fn a_block_tail_coroutine_is_returned_instead_of_destroyed() {
+    let module = type_check(concat!(
+        "use std.coroutine.*\n",
+        "def f: () -> Coroutine{} I32 = () => { coro { 42 } }\n",
+        "let held = f ()\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a block-tail coroutine should lower");
+    let body = function_definition(&llvm, "f");
+    // Storing the `cleanup` pointer into the frame header is construction;
+    // loading it back (`coro.cleanup.fn`) is what discarding the value emits.
+    assert!(
+        body.contains("store ptr @__staple_coro_"),
+        "the block tail should construct a coroutine frame"
+    );
+    assert!(
+        !body.contains("coro.cleanup.fn"),
+        "a block tail must not drop its coroutine value"
+    );
 }
 
 #[test]
@@ -4841,6 +4878,28 @@ fn c_string_is_an_imported_primitive_macro() {
     assert!(llvm.contains("@memchr"));
     assert!(llvm.contains("@llvm.trap"));
     assert!(llvm.contains("c\"hello\\00\""));
+}
+
+#[test]
+fn a_block_tail_c_string_is_moved_out_instead_of_freed() {
+    let module = type_check(concat!(
+        "use std.cinterop.*\n",
+        "def text: () -> CString = () => { c_string \"hello\" }\n",
+        "let held = text ()\n",
+    ));
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("a block-tail CString should lower");
+    let body = function_definition(&llvm, "text");
+    assert!(
+        body.contains("c_string.data"),
+        "the block tail should allocate the CString"
+    );
+    assert!(
+        !body.contains("c_string.drop"),
+        "a block tail must not free its CString value"
+    );
 }
 
 #[test]

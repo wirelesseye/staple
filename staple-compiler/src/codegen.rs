@@ -2238,6 +2238,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         &mut self,
         environment: &mut FunctionEnvironment<'context>,
         item: &Item,
+        tail: bool,
     ) -> CodeGenerationResult<Option<AnyValueEnum<'context>>> {
         match item {
             Item::Binding(binding) => {
@@ -2452,7 +2453,10 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             }
             Item::Expression(expression) => {
                 let value = self.compile_expression(environment, expression)?;
-                if !environment.did_return {
+                // A block's trailing expression is its value, moved out to the
+                // caller; only an expression statement discards (and drops) its
+                // result here.
+                if !tail && !environment.did_return {
                     let value_type = self
                         .concrete_expression_type(expression)
                         .unwrap_or(CheckedType::Error);
@@ -3250,8 +3254,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let owned_before = environment.owned_order.len();
                 self.predeclare_checked_bindings(environment, &block.items)?;
                 let mut value = None;
-                for item in &block.items {
-                    value = self.compile_item(environment, item)?;
+                let last = block.items.len().checked_sub(1);
+                for (index, item) in block.items.iter().enumerate() {
+                    value = self.compile_item(environment, item, Some(index) == last)?;
                     if environment.did_return {
                         break;
                     }
@@ -4735,8 +4740,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             incoming: Vec::new(),
         });
         environment.did_return = false;
-        self.compile_expression(environment, &Expression::Block(loop_.body.clone()))?;
+        let body = Expression::Block(loop_.body.clone());
+        let value = self.compile_expression(environment, &body)?;
         if !environment.did_return {
+            // A loop body's value is discarded; unlike a block tail, a
+            // droppable result must be dropped here rather than leaked.
+            let body_type = self
+                .concrete_expression_type(&body)
+                .unwrap_or(CheckedType::Error);
+            if self.typed_module.type_needs_drop(&body_type)
+                && let Some(value) = value_as_basic(value)
+            {
+                self.compile_drop_value(value, &body_type, loop_.body.syntax.span.clone())?;
+            }
             self.builder
                 .build_unconditional_branch(header)
                 .map_err(|error| Diagnostic::new(loop_.syntax.span.clone(), error.to_string()))?;
