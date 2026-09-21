@@ -1,5 +1,7 @@
 pub mod
 
+use std.core.cmp.(Eq)
+
 /// A managed mutable reference to a value.
 @recursive_constructor
 pub(repr) type Ref T where ?Sized T = T
@@ -7,4 +9,9 @@ pub(repr) type Ref T where ?Sized T = T
 companion<T> Ref T {
     /// Replaces the referenced value and returns the old value.
     pub def replace: mut Ref T * move T -> T = mut reference * move value => value
+}
+
+impl<T where Eq T> Eq (Ref T) {
+    def equal = (Ref left, Ref right) => Eq.equal (left, right)
+    def not_equal = (Ref left, Ref right) => Eq.not_equal (left, right)
 }

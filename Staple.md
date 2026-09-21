@@ -3007,7 +3007,9 @@ copying a `Ref` copies only its non-null handle. Product fields and indices,
 including bracket indexing and index assignment, can be accessed and assigned
 directly through the handle when the binding holding the handle is declared
 `mut`; a `Ref` is transparent for field access and indexing, so these compose
-through nested references as well. Every alias, not only the binding that performed
+through nested references as well. The standard library implements
+`Eq (Ref T)` whenever `T` implements `Eq`, comparing the referenced values
+rather than the handles. Every alias, not only the binding that performed
 the write, observes the resulting payload mutation, since they all share the
 same managed allocation:
 

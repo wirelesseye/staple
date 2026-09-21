@@ -8145,6 +8145,49 @@ fn type_checks_and_lowers_managed_refs() {
 }
 
 #[test]
+fn compares_refs_through_the_standard_library_eq_implementation() {
+    let source = concat!(
+        "use std.buffer.Buffer\n",
+        "def refs_equal: <T where Eq T> (Ref T, Ref T) -> Bool = (left, right) => left == right\n",
+        "let a: Ref I32 = Ref 1\n",
+        "let b: Ref I32 = Ref 1\n",
+        "let c: Ref I32 = Ref 2\n",
+        "let same: Bool = a == b\n",
+        "let different: Bool = a != c\n",
+        "let generic: Bool = refs_equal (a, b)\n",
+        "let nested: Bool = Ref (Ref 3) == Ref (Ref 3)\n",
+        "type Bag = Buffer I32\n",
+        "impl Eq Bag {\n",
+        "  def equal = (left, right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
+        "  def not_equal = (left, right) => !(Buffer.capacity left.* == Buffer.capacity right.*)\n",
+        "}\n",
+        "let bags: Bool = Ref (Bag (Buffer.with_capacity 2)) == Ref (Bag (Buffer.with_capacity 2))\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("comparing Refs should use the standard-library Eq implementation");
+}
+
+#[test]
+fn rejects_ref_equality_when_the_payload_is_not_eq() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.buffer.Buffer\n",
+            "let left: Ref (Buffer I32) = Ref (Buffer.with_capacity 1)\n",
+            "let right: Ref (Buffer I32) = Ref (Buffer.with_capacity 1)\n",
+            "let same: Bool = left == right\n",
+        )))
+        .expect_err_diagnostics("a payload without Eq must not make its Ref comparable");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("no trait implementation or matching bound is available")
+    }));
+}
+
+#[test]
 fn preserves_literal_nominal_ref_container_semantics() {
     let module = type_check(concat!(
         "type RefPoint = Ref (x: I32, y: I32)\n",
