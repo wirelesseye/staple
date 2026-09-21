@@ -1316,8 +1316,8 @@ let entry = (name: "origin", ...coordinates, visible: True)
 ```
 
 Multiple value spreads may appear in any position. Each spread operand is
-evaluated exactly once and must have a fixed product type; erased products,
-references, and scalar values cannot be spread. Names belonging to the spread
+evaluated exactly once and must have a fixed product type; references and
+scalar values cannot be spread. Names belonging to the spread
 product's elements are preserved. Spreads are also allowed when constructing a
 product used as a function argument.
 
@@ -1363,9 +1363,10 @@ position determining the output. User-defined implementations may use any
 position type. The compiler derives `Index P USize Output` for every non-empty
 fixed product whose elements are all `Copy`; `Output` is the duplicate-free sum
 of its element types. Thus indexing `(I32, String, I32)` produces
-`I32 | String`, while indexing `I32[N]` produces `I32`. It also derives `Index`
-for `Slice T` when `T` is `Copy`. Known bad fixed-product indices are rejected
-and dynamic out-of-bounds indices trap.
+`I32 | String`, while indexing `I32[N]` produces `I32`. The standard library
+implements `Index (Slice T) USize T` when `T` is `Copy`, backed by
+`Slice.get_ref`, so a `Slice T` is indexed like a fixed product of `T`. Known
+bad fixed-product indices are rejected and dynamic out-of-bounds indices trap.
 
 A `Ref T` is transparent for indexing, the same way it is for field access:
 `reference[index]` is `(*reference)[index]`, so `Index (Ref T)` and
@@ -1383,7 +1384,8 @@ target[index] = replacement
 ```
 
 The compiler derives `MutateIndex` for non-empty homogeneous fixed products, by
-value, and for `Slice T`. The mutable `Target`
+value. The standard library implements `MutateIndex (Slice T) USize T` for
+every `T`, backed by `Slice.get_ref` and `Ref.replace`. The mutable `Target`
 parameter passes by address either way (see the "Mutable parameters" subsection
 under "Functions"), so a by-value target's root binding must be declared
 `mut` just as a `Ref` target's must. These structural implementations cannot
@@ -1637,8 +1639,8 @@ type Logger = (
 ```
 
 Transparent aliases use the identity of their underlying nominal type. A
-structural type, ordinary opaque type, unspecialized generic type, or unsized
-type is not eligible. The compiler-represented opaque `std.io.IO` and
+structural type, ordinary opaque type, or unspecialized generic type is not
+eligible. The compiler-represented opaque `std.io.IO` and
 `std.core.Reactive` are exceptions.
 
 Resource ownership follows ordinary parameter ownership. An immutable `Copy`
@@ -3033,7 +3035,7 @@ let point = RefPoint (Ref (x: 10, y: 20))
 let RefPoint (Ref (x, y)) = point
 ```
 
-The length of a homogeneous product can be erased into a `Slice`:
+A homogeneous fixed product can be viewed as a `Slice`:
 
 ```staple
 let fixed: Ref I32[3] = Ref (10, 20, 30)
@@ -3054,17 +3056,11 @@ or wherever an explicit spelling is clearer. `Slice.from_ref` also accepts a
 singleton `Ref T` (treated as a length-1 slice) and an empty `Ref ()`
 (treated as a length-0 slice, requiring an expected `Slice` type to infer its
 element type). Literal and variable indexing perform runtime bounds checks.
-Erased products are unsized: they cannot be used by value, spread,
-destructured, or passed through a foreign ABI.
-
-Transparent aliases may name the underlying unsized array shape (`type alias
-Elements T = T[]`), but that shape can only be completed into a usable type
-through `Slice` — writing `Ref` directly around an unsized array, whether
-spelled out (`Ref T[]`) or reached through such an alias, is rejected; use
-`Slice T` instead. `Ref` remains generic over `?Sized T`, but `Slice T` is a
-distinct, sized pointer-and-length value rather than a `Ref T[]`. Generic
-slice-preserving functions state that directly, for example
-`preserve: <T> Slice T -> Slice T`.
+`Slice.get_ref: <T> Slice T * USize -> Ref T` borrows an element by position,
+trapping when out of bounds; it is the primitive behind the standard library's
+`Index`/`MutateIndex` implementations for slices. A `Slice T` is a sized view
+value, not a product: it cannot be spread or destructured, and it cannot cross
+a foreign ABI.
 
 `Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
 prefix. `Buffer.with_capacity` allocates space without constructing any `T`
@@ -3520,7 +3516,7 @@ pub(repr) type Ok T = T
 
 Every alternative must be a sized value type. Primitive, product,
 function, opaque, reference, and fully applied nominal types may all be
-alternatives. Unsized and partially applied types cannot be alternatives. A
+alternatives. Partially applied types cannot be alternatives. A
 transparent alias may name a sum or alternative, but does not introduce another
 variant identity.
 

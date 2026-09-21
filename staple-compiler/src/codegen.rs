@@ -4206,53 +4206,21 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 .map_err(|error| Diagnostic::new(span, error.to_string()));
         }
 
-        let (pointer, length) = self.structural_index_storage(*value, target, span.clone())?;
+        let CheckedType::Product(product) = target else {
+            return Err(Diagnostic::new(span, "invalid structural Index target"));
+        };
+        let llvm_type = self.compile_type(target)?;
+        let pointer = self
+            .builder
+            .build_alloca(llvm_type, "index.product")
+            .map_err(compiler_diagnostic)?;
+        self.builder
+            .build_store(pointer, *value)
+            .map_err(compiler_diagnostic)?;
+        let length = self
+            .size_type
+            .const_int(product.elements.len() as u64, false);
         self.compile_index_load(pointer, *position, length, output.clone(), span)
-    }
-
-    fn structural_index_storage(
-        &mut self,
-        value: BasicValueEnum<'context>,
-        target: &CheckedType,
-        span: Span,
-    ) -> CodeGenerationResult<(
-        inkwell::values::PointerValue<'context>,
-        inkwell::values::IntValue<'context>,
-    )> {
-        match target {
-            CheckedType::Product(product) => {
-                let llvm_type = self.compile_type(target)?;
-                let pointer = self
-                    .builder
-                    .build_alloca(llvm_type, "index.product")
-                    .map_err(compiler_diagnostic)?;
-                self.builder
-                    .build_store(pointer, value)
-                    .map_err(compiler_diagnostic)?;
-                Ok((
-                    pointer,
-                    self.size_type
-                        .const_int(product.elements.len() as u64, false),
-                ))
-            }
-            CheckedType::Slice(_) => {
-                let BasicValueEnum::StructValue(slice) = value else {
-                    return Err(Diagnostic::new(span, "slice has an invalid representation"));
-                };
-                let pointer = self
-                    .builder
-                    .build_extract_value(slice, 0, "index.pointer")
-                    .map_err(compiler_diagnostic)?
-                    .into_pointer_value();
-                let length = self
-                    .builder
-                    .build_extract_value(slice, 1, "index.length")
-                    .map_err(compiler_diagnostic)?
-                    .into_int_value();
-                Ok((pointer, length))
-            }
-            _ => Err(Diagnostic::new(span, "invalid structural Index target")),
-        }
     }
 
     fn compile_structural_mutate_body(
@@ -4273,36 +4241,19 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "invalid structural MutateIndex arguments",
             ));
         };
-        // The mutable `Target` parameter passes by address either way; a
-        // by-value product's address *is* its storage, while a `Slice` target
-        // is itself the value at that address and must be loaded to reach the
-        // storage its pointer/length pair views.
-        let (pointer, length) = match target {
-            CheckedType::Product(product) => (
-                *reference_pointer,
-                self.size_type
-                    .const_int(product.elements.len() as u64, false),
-            ),
-            CheckedType::Slice(_) => {
-                let reference = self
-                    .builder
-                    .build_load(
-                        self.compile_type(target)?,
-                        *reference_pointer,
-                        "mutation.target",
-                    )
-                    .map_err(compiler_diagnostic)?;
-                self.structural_index_storage(reference, target, span.clone())?
-            }
-            _ => {
-                return Err(Diagnostic::new(
-                    span,
-                    "invalid structural MutateIndex target",
-                ));
-            }
+        // A by-value product's address *is* its storage, and the mutable
+        // `Target` parameter passes by address.
+        let CheckedType::Product(product) = target else {
+            return Err(Diagnostic::new(
+                span,
+                "invalid structural MutateIndex target",
+            ));
         };
+        let length = self
+            .size_type
+            .const_int(product.elements.len() as u64, false);
         self.compile_structural_replace(
-            pointer,
+            *reference_pointer,
             *position,
             length,
             *replacement,
@@ -6361,14 +6312,16 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         Ok(result.into())
     }
 
-    fn compile_index_load(
+    /// Bounds-checks `position` against `length` and returns the address of
+    /// the indexed element in the `pointer`-based storage.
+    fn compile_index_pointer(
         &mut self,
         pointer: inkwell::values::PointerValue<'context>,
         position: inkwell::values::IntValue<'context>,
         length: inkwell::values::IntValue<'context>,
-        element: CheckedType,
+        element_type: BasicTypeEnum<'context>,
         span: Span,
-    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+    ) -> CodeGenerationResult<inkwell::values::PointerValue<'context>> {
         let out_of_bounds = self
             .builder
             .build_int_compare(
@@ -6378,13 +6331,25 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 "index.out_of_bounds",
             )
             .map_err(compiler_diagnostic)?;
-        self.build_trap_if(out_of_bounds, span.clone())?;
-        let element_type = self.compile_type(&element)?;
-        let pointer = unsafe {
+        self.build_trap_if(out_of_bounds, span)?;
+        unsafe {
             self.builder
                 .build_gep(element_type, pointer, &[position], "index.element")
         }
-        .map_err(compiler_diagnostic)?;
+        .map_err(compiler_diagnostic)
+    }
+
+    fn compile_index_load(
+        &mut self,
+        pointer: inkwell::values::PointerValue<'context>,
+        position: inkwell::values::IntValue<'context>,
+        length: inkwell::values::IntValue<'context>,
+        element: CheckedType,
+        span: Span,
+    ) -> CodeGenerationResult<BasicValueEnum<'context>> {
+        let element_type = self.compile_type(&element)?;
+        let pointer =
+            self.compile_index_pointer(pointer, position, length, element_type, span.clone())?;
         self.builder
             .build_load(element_type, pointer, "index.value")
             .map_err(|error| Diagnostic::new(span, error.to_string()))
@@ -7333,6 +7298,49 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     call.syntax.span.clone(),
                 );
             }
+            IntrinsicFunction::SliceGetRef => {
+                let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
+                let [
+                    inkwell::values::BasicMetadataValueEnum::StructValue(slice),
+                    inkwell::values::BasicMetadataValueEnum::IntValue(position),
+                ] = arguments.as_slice()
+                else {
+                    return Err(Diagnostic::new(
+                        call.argument.syntax().span.clone(),
+                        "get_ref requires a slice and a position",
+                    ));
+                };
+                let pointer = self
+                    .builder
+                    .build_extract_value(*slice, 0, "slice.pointer")
+                    .map_err(compiler_diagnostic)?
+                    .into_pointer_value();
+                let length = self
+                    .builder
+                    .build_extract_value(*slice, 1, "slice.length")
+                    .map_err(compiler_diagnostic)?
+                    .into_int_value();
+                let element = match self
+                    .concrete_expression_type(&Expression::Call(call.clone()))
+                {
+                    Some(CheckedType::Ref(payload)) => payload.as_ref().clone(),
+                    _ => {
+                        return Err(Diagnostic::new(
+                            call.syntax.span.clone(),
+                            "unchecked get_ref result",
+                        ));
+                    }
+                };
+                let element_type = self.compile_type(&element)?;
+                let pointer = self.compile_index_pointer(
+                    pointer,
+                    *position,
+                    length,
+                    element_type,
+                    call.syntax.span.clone(),
+                )?;
+                return Ok(pointer.as_any_value_enum());
+            }
             IntrinsicFunction::RefReplace => {
                 let arguments = self.compile_arguments(environment, &call.argument, 2, false)?;
                 let [
@@ -7527,6 +7535,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             | IntrinsicFunction::FloatCompare { .. }
             | IntrinsicFunction::SliceLength
             | IntrinsicFunction::SliceFromRef
+            | IntrinsicFunction::SliceGetRef
             | IntrinsicFunction::BufferWithCapacity
             | IntrinsicFunction::BufferLength
             | IntrinsicFunction::BufferCapacity

@@ -1,12 +1,33 @@
 pub mod
 
-/// A borrowed immutable sequence of values.
+use std.core.index.(Index, MutateIndex)
+
+/// A borrowed view over a contiguous sequence of values.
 @recursive_constructor
 pub type Slice T = T
+
+def __slice_get_ref: <T> (Slice T, USize) -> Ref T = (slice, position) => __slice_get_ref (slice, position)
 
 companion<T> Slice T {
     /// Returns the number of elements in the slice.
     pub def length: Slice T -> USize = value => 0
     /// Makes a single-element slice from a reference.
     pub def from_ref: Ref T -> Slice T = value => value
+    /// Borrows an element by position, trapping if out of bounds.
+    pub def get_ref: Slice T * USize -> Ref T = slice * position => __slice_get_ref (slice, position)
+}
+
+impl<T where Copy T> Index (Slice T) USize T {
+    def index = (values, position) => {
+        let Ref value = Slice.get_ref values position
+        value
+    }
+}
+
+impl<T> MutateIndex (Slice T) USize T {
+    def mutate_index = (mut values, position, move value) => {
+        let mut reference = Slice.get_ref values position
+        Ref.replace reference value
+        ()
+    }
 }

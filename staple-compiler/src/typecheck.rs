@@ -3287,6 +3287,21 @@ impl TypeChecker {
                                 && matches!(function.result.as_ref(), CheckedType::Slice(_))
                     ))
                     .unwrap_or(CheckedType::Error),
+                crate::IntrinsicFunction::SliceGetRef => self
+                    .symbol_types
+                    .get(symbol)
+                    .cloned()
+                    .filter(|value_type| matches!(
+                        value_type,
+                        CheckedType::Function(function)
+                            if matches!(function.parameter.as_ref(),
+                                CheckedType::Product(product)
+                                    if matches!(product.elements.as_slice(),
+                                        [CheckedTypeElement { value_type: CheckedType::Slice(_), .. },
+                                         CheckedTypeElement { value_type: CheckedType::USize, .. }]))
+                                && matches!(function.result.as_ref(), CheckedType::Ref(_))
+                    ))
+                    .unwrap_or(CheckedType::Error),
                 crate::IntrinsicFunction::BufferWithCapacity
                 | crate::IntrinsicFunction::BufferLength
                 | crate::IntrinsicFunction::BufferCapacity
@@ -14557,7 +14572,6 @@ fn structural_trait_arguments(
             CheckedType::Product(product) if is_qualifying_product(product, &is_copy) => {
                 product_item(product)
             }
-            CheckedType::Slice(element) => is_copy(element).then(|| element.as_ref().clone())?,
             _ => return None,
         };
         if accepts(&output) {
@@ -14592,7 +14606,6 @@ fn structural_trait_arguments(
             CheckedType::Product(product) if !product.variadic => {
                 product.homogeneous_element()?.clone()
             }
-            CheckedType::Slice(element) => element.as_ref().clone(),
             _ => return None,
         };
         if accepts(&element) {

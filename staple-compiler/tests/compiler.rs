@@ -2851,8 +2851,12 @@ fn rejects_overlapping_structural_indexing_implementations() {
 fn delegates_indexing_through_refs_to_the_payload() {
     let source = concat!(
         "use std.list.List\n",
+        "use std.slice.Slice\n",
         "def mixed_at: (Ref (I32, Bool), USize) -> I32 | Bool = (pair, position) => pair[position]\n",
         "def list_at: (Ref (List I32), USize) -> I32 = (list, position) => list[position]\n",
+        "let fixed: Ref I32[3] = Ref (1, 2, 3)\n",
+        "let values: Slice I32 = fixed\n",
+        "def slice_at: (Ref (Slice I32), USize) -> I32 = (slice, position) => slice[position]\n",
         "type Keyed = (key: String, value: I32)\n",
         "impl Index Keyed String I32 { def index = (entry, key) => entry.value }\n",
         "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
@@ -2915,6 +2919,26 @@ fn rejects_out_of_bounds_indices_known_through_a_ref() {
             .iter()
             .any(|diagnostic| diagnostic.message.contains("out of bounds"))
     );
+}
+
+#[test]
+fn indexes_slices_through_the_standard_library_implementation() {
+    let source = concat!(
+        "use std.slice.Slice\n",
+        "let fixed: Ref I32[3] = Ref (1, 2, 3)\n",
+        "let mut values: Slice I32 = fixed\n",
+        "let value: I32 = values[0]\n",
+        "values[1] = 9\n",
+        "let operation: (Slice I32, USize) -> I32 = Index.index\n",
+        "let same: I32 = operation (values, 2)\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    let llvm = CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("slice indexing should use the standard-library implementation");
+    assert!(!llvm.contains("structural_Index"));
+    assert!(!llvm.contains("structural_MutateIndex"));
 }
 
 #[test]
