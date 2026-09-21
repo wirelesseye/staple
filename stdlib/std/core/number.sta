@@ -303,8 +303,8 @@ impl Divide USize {
 }
 
 impl Eq I8 {
-    def equal = (left, right) => __i8_equal (left, right)
-    def not_equal = (left, right) => __i8_not_equal (left, right)
+    def eq = (left, right) => __i8_equal (left, right)
+    def ne = (left, right) => __i8_not_equal (left, right)
 }
 
 impl PartialOrd I8 {
@@ -328,8 +328,8 @@ impl Ord I8 {
 }
 
 impl Eq I16 {
-    def equal = (left, right) => __i16_equal (left, right)
-    def not_equal = (left, right) => __i16_not_equal (left, right)
+    def eq = (left, right) => __i16_equal (left, right)
+    def ne = (left, right) => __i16_not_equal (left, right)
 }
 
 impl PartialOrd I16 {
@@ -353,8 +353,8 @@ impl Ord I16 {
 }
 
 impl Eq I32 {
-    def equal = (left, right) => __i32_equal (left, right)
-    def not_equal = (left, right) => __i32_not_equal (left, right)
+    def eq = (left, right) => __i32_equal (left, right)
+    def ne = (left, right) => __i32_not_equal (left, right)
 }
 
 impl PartialOrd I32 {
@@ -378,8 +378,8 @@ impl Ord I32 {
 }
 
 impl Eq I64 {
-    def equal = (left, right) => __i64_equal (left, right)
-    def not_equal = (left, right) => __i64_not_equal (left, right)
+    def eq = (left, right) => __i64_equal (left, right)
+    def ne = (left, right) => __i64_not_equal (left, right)
 }
 
 impl PartialOrd I64 {
@@ -403,8 +403,8 @@ impl Ord I64 {
 }
 
 impl Eq U8 {
-    def equal = (left, right) => __u8_equal (left, right)
-    def not_equal = (left, right) => __u8_not_equal (left, right)
+    def eq = (left, right) => __u8_equal (left, right)
+    def ne = (left, right) => __u8_not_equal (left, right)
 }
 
 impl PartialOrd U8 {
@@ -428,8 +428,8 @@ impl Ord U8 {
 }
 
 impl Eq U16 {
-    def equal = (left, right) => __u16_equal (left, right)
-    def not_equal = (left, right) => __u16_not_equal (left, right)
+    def eq = (left, right) => __u16_equal (left, right)
+    def ne = (left, right) => __u16_not_equal (left, right)
 }
 
 impl PartialOrd U16 {
@@ -453,8 +453,8 @@ impl Ord U16 {
 }
 
 impl Eq U32 {
-    def equal = (left, right) => __u32_equal (left, right)
-    def not_equal = (left, right) => __u32_not_equal (left, right)
+    def eq = (left, right) => __u32_equal (left, right)
+    def ne = (left, right) => __u32_not_equal (left, right)
 }
 
 impl PartialOrd U32 {
@@ -478,8 +478,8 @@ impl Ord U32 {
 }
 
 impl Eq U64 {
-    def equal = (left, right) => __u64_equal (left, right)
-    def not_equal = (left, right) => __u64_not_equal (left, right)
+    def eq = (left, right) => __u64_equal (left, right)
+    def ne = (left, right) => __u64_not_equal (left, right)
 }
 
 impl PartialOrd U64 {
@@ -503,8 +503,8 @@ impl Ord U64 {
 }
 
 impl Eq ISize {
-    def equal = (left, right) => __isize_equal (left, right)
-    def not_equal = (left, right) => __isize_not_equal (left, right)
+    def eq = (left, right) => __isize_equal (left, right)
+    def ne = (left, right) => __isize_not_equal (left, right)
 }
 
 impl PartialOrd ISize {
@@ -528,8 +528,8 @@ impl Ord ISize {
 }
 
 impl Eq USize {
-    def equal = (left, right) => __usize_equal (left, right)
-    def not_equal = (left, right) => __usize_not_equal (left, right)
+    def eq = (left, right) => __usize_equal (left, right)
+    def ne = (left, right) => __usize_not_equal (left, right)
 }
 
 impl PartialOrd USize {
@@ -569,8 +569,8 @@ impl Divide F32 {
 }
 
 impl Eq F32 {
-    def equal = (left, right) => __f32_equal (left, right)
-    def not_equal = (left, right) => __f32_not_equal (left, right)
+    def eq = (left, right) => __f32_equal (left, right)
+    def ne = (left, right) => __f32_not_equal (left, right)
 }
 
 impl PartialOrd F32 {
@@ -603,8 +603,8 @@ impl Divide F64 {
 }
 
 impl Eq F64 {
-    def equal = (left, right) => __f64_equal (left, right)
-    def not_equal = (left, right) => __f64_not_equal (left, right)
+    def eq = (left, right) => __f64_equal (left, right)
+    def ne = (left, right) => __f64_not_equal (left, right)
 }
 
 impl PartialOrd F64 {

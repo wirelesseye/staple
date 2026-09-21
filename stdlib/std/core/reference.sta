@@ -12,6 +12,5 @@ companion<T> Ref T {
 }
 
 impl<T where Eq T> Eq (Ref T) {
-    def equal = (Ref left, Ref right) => Eq.equal (left, right)
-    def not_equal = (Ref left, Ref right) => Eq.not_equal (left, right)
+    def eq = (Ref left, Ref right) => Eq.eq (left, right)
 }

@@ -1091,7 +1091,7 @@ implemented with function overloading:
 | `-`, `!` (prefix) | 8 | — | `Neg.negate`, `Not.not` |
 | `*`, `/` | 7 | left | `Multiply.multiply`, `Divide.divide` |
 | `+`, `-` | 6 | left | `Add.add`, `Subtract.subtract` |
-| `==`, `!=`, `<`, `<=`, `>`, `>=` | 4 | none | `Eq.equal`/`Eq.not_equal`, `PartialOrd.lt`/`le`/`gt`/`ge` |
+| `==`, `!=`, `<`, `<=`, `>`, `>=` | 4 | none | `Eq.eq`/`Eq.ne`, `PartialOrd.lt`/`le`/`gt`/`ge` |
 | `..`, `..=` | 3 | none | the prelude's `range`/`range_inclusive` functions |
 | `&&` | 2 | left | not a call; see below |
 | `\|\|` | 1 | left | not a call; see below |

@@ -4297,6 +4297,32 @@ fn requires_only_the_core_ordering_methods() {
 }
 
 #[test]
+fn requires_only_the_core_equality_method() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve("type Text = String\nimpl Eq Text {}\n"))
+        .expect_err_diagnostics("eq is required");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("missing member `eq`"))
+    );
+
+    let module = type_check(concat!(
+        "type Point = (x: I32, y: I32)\n",
+        "impl Eq Point { def eq = (left, right) => left.x == right.x && left.y == right.y }\n",
+        "let a: Point = Point (x: 1, y: 2)\n",
+        "let b: Point = Point (x: 1, y: 2)\n",
+        "let c: Point = Point (x: 3, y: 4)\n",
+        "let same: Bool = a == b\n",
+        "let different: Bool = a != c\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("the default `ne` should back `!=`");
+}
+
+#[test]
 fn compares_library_defined_bool_values() {
     let module = type_check(concat!(
         "let yes: Bool = True\n",
@@ -8158,10 +8184,10 @@ fn compares_refs_through_the_standard_library_eq_implementation() {
         "let nested: Bool = Ref (Ref 3) == Ref (Ref 3)\n",
         "type Bag = Buffer I32\n",
         "impl Eq Bag {\n",
-        "  def equal = (left, right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
-        "  def not_equal = (left, right) => !(Buffer.capacity left.* == Buffer.capacity right.*)\n",
+        "  def eq = (left, right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
         "}\n",
         "let bags: Bool = Ref (Bag (Buffer.with_capacity 2)) == Ref (Bag (Buffer.with_capacity 2))\n",
+        "let bags_differ: Bool = Ref (Bag (Buffer.with_capacity 2)) != Ref (Bag (Buffer.with_capacity 3))\n",
     );
     let module = type_check(source);
     let context = Context::create();
@@ -8823,7 +8849,7 @@ fn uses_generic_default_trait_members_and_concrete_overrides() {
 #[test]
 fn default_trait_members_use_prerequisites_multiple_arguments_and_macros() {
     let module = type_check(concat!(
-        "trait Same T where Copy T, Eq T { same: (T, T) -> Bool = (left, right) => Eq.equal (left, right) }\n",
+        "trait Same T where Copy T, Eq T { same: (T, T) -> Bool = (left, right) => Eq.eq (left, right) }\n",
         "trait Select Value { select: (Bool, move Value, move Value) -> Value = (condition, move left, move right) => when { condition => left, else => right } }\n",
         "trait First (Left, Right) { first: (move Left, Right) -> Left = (move left, right) => left }\n",
         "impl Same I32 {}\n",
@@ -9089,8 +9115,8 @@ fn prerequisite_copy_bounds_are_visible_to_ownership_checking() {
 fn substitutes_product_parameters_into_multiple_prerequisites() {
     type_check(concat!(
         "trait BothEqual (Left, Right) where Eq Left, Eq Right { equal: (Left, Left, Right, Right) -> (Bool, Bool) }\n",
-        "impl BothEqual (I32, I32) { def equal = (left_a, left_b, right_a, right_b) => (Eq.equal (left_a, left_b), Eq.equal (right_a, right_b)) }\n",
-        "def compare_both: <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (Left, Left, Right, Right) -> (Bool, Bool) = (left_a, left_b, right_a, right_b) => (Eq.equal (left_a, left_b), Eq.equal (right_a, right_b))\n",
+        "impl BothEqual (I32, I32) { def equal = (left_a, left_b, right_a, right_b) => (Eq.eq (left_a, left_b), Eq.eq (right_a, right_b)) }\n",
+        "def compare_both: <Left, Right where Copy Left, Copy Right, BothEqual (Left, Right)> (Left, Left, Right, Right) -> (Bool, Bool) = (left_a, left_b, right_a, right_b) => (Eq.eq (left_a, left_b), Eq.eq (right_a, right_b))\n",
         "let result: (Bool, Bool) = compare_both (1, 1, 2, 2)\n",
     ));
 }

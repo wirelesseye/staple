@@ -14,11 +14,16 @@ pub typegroup Ordering {
 }
 
 /// Provides equality and inequality comparisons.
+///
+/// Implementations must provide `eq`; `ne` defaults to its negation.
 pub trait Eq T {
     /// Returns whether two values are equal.
-    equal: (T, T) -> Bool
+    eq: (T, T) -> Bool
     /// Returns whether two values are unequal.
-    not_equal: (T, T) -> Bool
+    ne: (T, T) -> Bool = (left, right) => match (eq (left, right)) {
+        True() => False,
+        False() => True,
+    }
 }
 
 /// Provides comparisons that may be unordered.
