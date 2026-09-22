@@ -17,7 +17,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - The initial validator rejects functions or implicit thunks that have no checked function type.
 - All CLI and compiler code-generation tests now pass through `Lowerer`.
 - `cargo check --workspace` and `cargo test --workspace` pass. The workspace test run covers 937 tests.
-- **Stage 2 is in progress.** Stage 2.1 and Stage 2.2 Steps 1-7 are complete. Lowering now has insertion-ordered semantic catalogs plus deterministic resolver/type-checker inventory APIs, lowered module catalogs with per-module initializer roots, function templates for declared functions and implicit thunks, classified runtime symbols, owned type/trait metadata with compact representation templates, and type-checker-selected standard/runtime subsystem identities. Stage 2.2 Step 8 is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
+- **Stage 2 is in progress.** Stage 2.1 and all of Stage 2.2 are complete. Lowering now owns validated declaration catalogs for modules, initializer roots, functions, symbols, types, traits, trait methods, trait implementations, and standard/runtime semantic IDs, with deterministic validation and transition comparisons. Stage 2.3 (lower patterns, places, and runtime items) is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
 - The detailed Stage 2 implementation sequence is maintained in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
 
 ## Public Interfaces
@@ -43,7 +43,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - Changed all public `CodeGenerator` entry points to accept `&LoweredModule`; direct public emission from `TypedModule` is no longer available.
 - Kept the old backend reachable only through a private transitional `LoweredModule::typed` bridge. Removing this bridge requires the explicit arenas and metadata introduced in Stage 2.
 
-### Stage 2 - Lower Existing Typed Programs Completely (In Progress: 2.1 Done)
+### Stage 2 - Lower Existing Typed Programs Completely (In Progress: 2.1 and 2.2 Done)
 
 - Add owned, arena-backed lowered modules, expressions, patterns, initializers, callable targets, function templates, trait evidence, closure construction, ownership facts, and helper requirements alongside the temporary legacy backend payload.
 - Preserve source spans and syntax IDs on lowered nodes for diagnostics.
@@ -74,6 +74,7 @@ Progress:
 - Stage 2.2 Step 5 populated the runtime symbol catalog in ascending `SymbolId` with declaration origins, modules, owners, checked types, primary storage classification, orthogonal mutation/move/initialization/capture flags, and optional function/constructor/singleton/intrinsic/external targets. Compile-time-only consts and syntax constructors stay out; function parameter, capture, and binding references are validated against the catalog.
 - Stage 2.2 Step 6 populated type and trait catalogs. Types carry kind, builtin/recursive classification, checked parameter templates, and compact representation templates that reference nested nominal types by ID. Traits carry parameter templates, prerequisites, functional dependencies, declared method order, defaults, and checked implementations with arguments, bounds, negation, and selected method functions.
 - Stage 2.2 Step 7 populated type-checker-selected standard/runtime semantic IDs, canonical IO/reactive resources, the string representation, and the entry-reactive requirement. Absent subsystems stay `None`; present IDs are validated against the trait/type catalogs without name-based rediscovery.
+- Stage 2.2 Step 8 completed catalog validation (unique semantic IDs, lookup agreement, module parents and one-initializer-per-module, function/symbol/type/trait cross-references, semantic-ID families) and added normalized repeated-lowering snapshots plus `TypedModule` transition comparisons. Stage 2.2 is complete. Stage 2.3 begins lowering patterns, places, and runtime items into the existing arenas.
 - The private legacy `TypedModule` payload is now boxed inside `LoweredModule`, reducing transitional stack-frame pressure without changing the public lowering boundary or backend behavior.
 
 > **Complex stage:** The AST and backend support many specialized constructs, including defaults, reactive bindings, structural indexing, ownership cleanup, and coroutines. This stage may need separate breakdown plans by expression family and runtime subsystem during implementation.
@@ -143,6 +144,7 @@ Progress:
 - Existing CLI compile/run, object emission, LLVM verification, module, ownership, trait, reactive, and coroutine coverage now exercises the lowering boundary.
 - Stage 2.1 focused tests cover empty deterministic arenas, dense insertion-ordered typed IDs, and dangling child detection. `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check` pass after the schema addition.
 - After Stage 2.2 Step 2, `cargo test --workspace` passes 943 tests, including the default-stack regression for block-scoped module initialization.
+- Stage 2.2 Steps 3-8 added focused lowering coverage for module/initializer catalogs, function templates and thunks, symbol storage classes, compact type/trait metadata, subsystem semantic IDs, validation, and repeated-lowering determinism. The complete `cargo test --workspace` regression passes 972 tests after Stage 2.2 Step 8.
 
 ### Remaining Verification
 

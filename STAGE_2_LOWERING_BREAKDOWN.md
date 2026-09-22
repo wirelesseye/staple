@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and Stage 2.2 Steps 1-7 are complete. Stage 2.2 Step 8 is next.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and all of Stage 2.2 are complete. Stage 2.3 (lower patterns, places, and runtime items) is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -42,7 +42,7 @@ Completed:
 - Added unit coverage for empty arena validity, dense deterministic ID allocation, and dangling-reference diagnostics.
 - Verified with `cargo fmt --all -- --check`, focused lowering tests, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check`.
 
-## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Steps 1-7 Done)
+## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (Done)
 
 The focused implementation sequence is maintained in [STAGE_2_2_METADATA_CATALOG_PLAN.md](STAGE_2_2_METADATA_CATALOG_PLAN.md).
 
@@ -96,6 +96,11 @@ Progress:
 - Validation now rejects semantic IDs without matching catalog records and checks IO/reactive resources against their selected type IDs.
 - Added focused coverage for ordinary and coroutine-imported programs, `no_prelude`, the reactive entry requirement, and invalid semantic IDs.
 - Verified Step 7 with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (969 tests), and `git diff --check`.
+- Step 8 expanded validation across every catalog: duplicate semantic IDs, lookup agreement, initialization indices and parents, exactly one initializer per module, unique runtime-item sources, function module/body/parameter/capture/binding references, symbol module/owner/target references with storage consistency, type module references, trait/method/implementation cross-references, and semantic-ID catalog families.
+- Added normalized repeated-lowering snapshots over all catalogs and a transition test comparing every semantic-ID field, resource, string representation, and entry-reactive flag with `TypedModule`.
+- Added corruption tests for invalid module parents, duplicate initializers, and symbol module references.
+- Verified Step 8 with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (972 tests), and `git diff --check`.
+- **Stage 2.2 is complete. Stage 2.3 is next: lower patterns, places, and runtime items into the arenas.**
 
 > **Complexity note:** The metadata currently lives across resolver, type-checker, ownership, reactive, and coroutine side tables. This substage may need a focused inventory plan before implementation begins.
 

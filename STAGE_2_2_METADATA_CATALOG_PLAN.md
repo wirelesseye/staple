@@ -223,7 +223,7 @@ Completed:
 - Added focused tests for ordinary, coroutine-imported, and `no_prelude` fixtures, the reactive entry requirement, and invalid semantic IDs.
 - Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (969 tests), and `git diff --check`.
 
-### Step 8 - Complete Validation and Transition Comparisons
+### Step 8 - Complete Validation and Transition Comparisons (Done)
 
 Expand `LoweredProgram::validate` to check:
 
@@ -241,6 +241,16 @@ Add test-only transition comparisons that build the catalog twice and compare no
 Gate: all Stage 2.2 unit and fixture tests pass, followed by the complete regression command set.
 
 After this step, mark Stage 2.2 complete in both plan files and identify Stage 2.3 as next.
+
+Completed:
+
+- Expanded catalog validation to check repeated semantic IDs, lookup-map agreement, module key/semantic-ID agreement, initialization indices, valid module parents, exactly one initializer per module, unique runtime-item sources, function module/body-origin/parameter/capture/binding references, symbol module/owner/function/constructor/singleton references with storage-flag consistency, type module references, and trait/method/implementation cross-references.
+- Standard/runtime semantic IDs are checked against the matching catalog family, and IO/reactive resources are checked against their selected type IDs.
+- Diagnostics use the nearest stored `Origin`; only program-wide inconsistencies (duplicate lookup keys, semantic-ID families) use `Span::Compiler`.
+- Added a normalized repeated-lowering snapshot comparison covering modules, functions, symbols, types, traits, methods, implementations, initializers, and semantic IDs, plus a transition test comparing every semantic-ID field, resource, string representation, and the entry-reactive flag with `TypedModule`.
+- Added corruption tests for invalid module parents, duplicate initializers, and symbol module references.
+- Verified with formatting, workspace checking, focused lowering tests, the complete `cargo test --workspace` regression (972 tests), and `git diff --check`.
+- **Stage 2.2 is complete. Stage 2.3 (lower patterns, places, and runtime items) is next.**
 
 ## Testing Matrix
 

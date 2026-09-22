@@ -155,7 +155,14 @@ where
 
     fn validate(&self, kind: &str) -> Vec<Diagnostic> {
         let mut diagnostics = Vec::new();
+        let mut keys = HashSet::new();
         for (id, entry) in self.entries.iter() {
+            if !keys.insert(entry.key) {
+                diagnostics.push(Diagnostic::new(
+                    entry.origin.span.clone(),
+                    format!("lowered {kind} catalog repeats semantic id {:?}", entry.key),
+                ));
+            }
             if self.by_key.get(&entry.key) != Some(&id) {
                 diagnostics.push(Diagnostic::new(
                     entry.origin.span.clone(),
@@ -1048,6 +1055,22 @@ impl LoweredProgram {
         diagnostics.extend(self.types.validate("type"));
         diagnostics.extend(self.traits.validate("trait"));
         diagnostics.extend(self.trait_methods.validate("trait method"));
+        diagnostics.extend(self.validate_arena_references());
+        diagnostics.extend(self.validate_modules_and_initializers());
+        diagnostics.extend(self.validate_functions());
+        diagnostics.extend(self.validate_symbols());
+        diagnostics.extend(self.validate_types());
+        diagnostics.extend(self.validate_traits());
+        diagnostics.extend(validate_semantic_ids(
+            &self.semantic_ids,
+            &self.types,
+            &self.traits,
+        ));
+        diagnostics
+    }
+
+    fn validate_arena_references(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
         for (_, expression) in self.expressions.iter() {
             match expression.kind {
                 LoweredExpressionKind::Block(id) if !self.blocks.contains(id) => diagnostics.push(
@@ -1089,7 +1112,125 @@ impl LoweredProgram {
                 diagnostics.push(invalid_reference(&item.origin, "item", kind, index));
             }
         }
-        for (_, _, function) in self.functions.iter() {
+        diagnostics
+    }
+
+    fn validate_modules_and_initializers(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        let mut initializer_counts = HashMap::<ModuleId, usize>::new();
+        for (_, initializer) in self.initializers.iter() {
+            *initializer_counts.entry(initializer.module).or_default() += 1;
+            if !self.blocks.contains(initializer.body) {
+                diagnostics.push(invalid_reference(
+                    &initializer.origin,
+                    "initializer",
+                    "block",
+                    initializer.body.index(),
+                ));
+            }
+            if self.modules.get(initializer.module).is_none() {
+                diagnostics.push(invalid_reference(
+                    &initializer.origin,
+                    "initializer",
+                    "module",
+                    initializer.module.0,
+                ));
+            }
+            let mut sources = HashSet::new();
+            for item in &initializer.runtime_items {
+                if !sources.insert(item.origin.syntax) {
+                    diagnostics.push(Diagnostic::new(
+                        item.origin.span.clone(),
+                        format!(
+                            "initializer for module {:?} repeats runtime item source {}",
+                            initializer.module, item.origin.syntax.0
+                        ),
+                    ));
+                }
+            }
+        }
+        for (position, (_, key, info)) in self.modules.iter().enumerate() {
+            if info.semantic_id != key {
+                diagnostics.push(Diagnostic::new(
+                    info.origin.span.clone(),
+                    format!(
+                        "module catalog key {key:?} disagrees with stored semantic id {:?}",
+                        info.semantic_id
+                    ),
+                ));
+            }
+            if info.initialization_index != position {
+                diagnostics.push(Diagnostic::new(
+                    info.origin.span.clone(),
+                    format!(
+                        "module {key:?} has initialization index {} instead of {position}",
+                        info.initialization_index
+                    ),
+                ));
+            }
+            if let Some(parent) = info.parent
+                && self.modules.get(parent).is_none()
+            {
+                diagnostics.push(invalid_reference(
+                    &info.origin,
+                    "module",
+                    "module",
+                    parent.0,
+                ));
+            }
+            if !self.initializers.contains(info.initializer) {
+                diagnostics.push(invalid_reference(
+                    &info.origin,
+                    "module",
+                    "initializer",
+                    info.initializer.index(),
+                ));
+            } else if let Some(initializer) = self.initializers.get(info.initializer)
+                && initializer.module != key
+            {
+                diagnostics.push(Diagnostic::new(
+                    info.origin.span.clone(),
+                    format!(
+                        "module {key:?} points at an initializer for module {:?}",
+                        initializer.module
+                    ),
+                ));
+            }
+            match initializer_counts.get(&key).copied() {
+                Some(1) => {}
+                Some(count) => diagnostics.push(Diagnostic::new(
+                    info.origin.span.clone(),
+                    format!("module {key:?} has {count} initializers instead of one"),
+                )),
+                None => diagnostics.push(Diagnostic::new(
+                    info.origin.span.clone(),
+                    format!("module {key:?} has no initializer"),
+                )),
+            }
+        }
+        diagnostics
+    }
+
+    fn validate_functions(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (_, key, function) in self.functions.iter() {
+            if function.semantic_id != key {
+                diagnostics.push(Diagnostic::new(
+                    function.origin.span.clone(),
+                    format!(
+                        "function catalog key {key:?} disagrees with stored semantic id {:?}",
+                        function.semantic_id
+                    ),
+                ));
+            }
+            if self.modules.get(function.module).is_none() {
+                diagnostics.push(invalid_reference(
+                    &function.origin,
+                    "function",
+                    "module",
+                    function.module.0,
+                ));
+            }
             if let Some(body) = function.body
                 && !self.blocks.contains(body)
             {
@@ -1098,6 +1239,14 @@ impl LoweredProgram {
                     "function",
                     "block",
                     body.index(),
+                ));
+            }
+            if function.body_origin.syntax != function.body_syntax {
+                diagnostics.push(Diagnostic::new(
+                    function.origin.span.clone(),
+                    format!(
+                        "function {key:?} body origin syntax does not match its body syntax id"
+                    ),
                 ));
             }
             for symbol in function
@@ -1125,21 +1274,238 @@ impl LoweredProgram {
                 ));
             }
         }
-        for (_, initializer) in self.initializers.iter() {
-            if !self.blocks.contains(initializer.body) {
+        diagnostics
+    }
+
+    fn validate_symbols(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (_, key, symbol) in self.symbols.iter() {
+            if symbol.semantic_id != key {
+                diagnostics.push(Diagnostic::new(
+                    symbol.origin.span.clone(),
+                    format!(
+                        "symbol catalog key {key:?} disagrees with stored semantic id {:?}",
+                        symbol.semantic_id
+                    ),
+                ));
+            }
+            if self.modules.get(symbol.module).is_none() {
                 diagnostics.push(invalid_reference(
-                    &initializer.origin,
-                    "initializer",
-                    "block",
-                    initializer.body.index(),
+                    &symbol.origin,
+                    "symbol",
+                    "module",
+                    symbol.module.0,
+                ));
+            }
+            if let Some(owner) = symbol.owner
+                && self.functions.get(owner).is_none()
+            {
+                diagnostics.push(invalid_reference(
+                    &symbol.origin,
+                    "symbol",
+                    "function",
+                    owner.0,
+                ));
+            }
+            if let Some(function) = symbol.function
+                && self.functions.get(function).is_none()
+            {
+                diagnostics.push(invalid_reference(
+                    &symbol.origin,
+                    "symbol",
+                    "function",
+                    function.0,
+                ));
+            }
+            if let Some(constructor) = symbol.constructor
+                && self.types.get(constructor).is_none()
+            {
+                diagnostics.push(invalid_reference(
+                    &symbol.origin,
+                    "symbol",
+                    "type",
+                    constructor.0,
+                ));
+            }
+            if let Some(singleton) = symbol.singleton
+                && self.types.get(singleton).is_none()
+            {
+                diagnostics.push(invalid_reference(
+                    &symbol.origin,
+                    "symbol",
+                    "type",
+                    singleton.0,
+                ));
+            }
+            let binding = symbol.function.is_some()
+                || symbol.constructor.is_some()
+                || symbol.singleton.is_some();
+            let consistent = match symbol.storage {
+                SymbolStorage::ExternalSymbol => symbol.external,
+                SymbolStorage::FunctionBinding => binding,
+                SymbolStorage::DerivedBinding => symbol.derived,
+                SymbolStorage::Signal => symbol.signal,
+                SymbolStorage::CapturedCell => symbol.captured_cell,
+                SymbolStorage::GlobalStorage
+                | SymbolStorage::MutableCell
+                | SymbolStorage::ImmutableValue => true,
+            };
+            if !consistent {
+                diagnostics.push(Diagnostic::new(
+                    symbol.origin.span.clone(),
+                    format!(
+                        "symbol {key:?} storage {:?} disagrees with its classification flags",
+                        symbol.storage
+                    ),
                 ));
             }
         }
-        diagnostics.extend(validate_semantic_ids(
-            &self.semantic_ids,
-            &self.types,
-            &self.traits,
-        ));
+        diagnostics
+    }
+
+    fn validate_types(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (_, key, info) in self.types.iter() {
+            if info.semantic_id != key {
+                diagnostics.push(Diagnostic::new(
+                    info.origin.span.clone(),
+                    format!(
+                        "type catalog key {key:?} disagrees with stored semantic id {:?}",
+                        info.semantic_id
+                    ),
+                ));
+            }
+            if self.modules.get(info.module).is_none() {
+                diagnostics.push(invalid_reference(
+                    &info.origin,
+                    "type",
+                    "module",
+                    info.module.0,
+                ));
+            }
+        }
+        diagnostics
+    }
+
+    fn validate_traits(&self) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (_, key, info) in self.traits.iter() {
+            if info.semantic_id != key {
+                diagnostics.push(Diagnostic::new(
+                    info.origin.span.clone(),
+                    format!(
+                        "trait catalog key {key:?} disagrees with stored semantic id {:?}",
+                        info.semantic_id
+                    ),
+                ));
+            }
+            if self.modules.get(info.module).is_none() {
+                diagnostics.push(invalid_reference(
+                    &info.origin,
+                    "trait",
+                    "module",
+                    info.module.0,
+                ));
+            }
+            for method in &info.methods {
+                match self.trait_methods.get(*method) {
+                    Some(record) if record.trait_id == key => {}
+                    Some(_) => diagnostics.push(Diagnostic::new(
+                        info.origin.span.clone(),
+                        format!("trait {key:?} lists method {method:?} owned by another trait"),
+                    )),
+                    None => diagnostics.push(invalid_reference(
+                        &info.origin,
+                        "trait",
+                        "trait method",
+                        method.0,
+                    )),
+                }
+            }
+            for (method, function) in &info.default_methods {
+                if !info.methods.contains(method) {
+                    diagnostics.push(Diagnostic::new(
+                        info.origin.span.clone(),
+                        format!(
+                            "trait {key:?} has a default function for undeclared method {method:?}"
+                        ),
+                    ));
+                }
+                if self.functions.get(*function).is_none() {
+                    diagnostics.push(invalid_reference(
+                        &info.origin,
+                        "trait",
+                        "function",
+                        function.0,
+                    ));
+                }
+            }
+        }
+        for (_, key, method) in self.trait_methods.iter() {
+            if method.semantic_id != key {
+                diagnostics.push(Diagnostic::new(
+                    method.origin.span.clone(),
+                    format!(
+                        "trait method catalog key {key:?} disagrees with stored semantic id {:?}",
+                        method.semantic_id
+                    ),
+                ));
+            }
+            if self.traits.get(method.trait_id).is_none() {
+                diagnostics.push(invalid_reference(
+                    &method.origin,
+                    "trait method",
+                    "trait",
+                    method.trait_id.0,
+                ));
+            }
+            if let Some(default) = method.default_function
+                && self.functions.get(default).is_none()
+            {
+                diagnostics.push(invalid_reference(
+                    &method.origin,
+                    "trait method",
+                    "function",
+                    default.0,
+                ));
+            }
+        }
+        for (_, implementation) in self.trait_implementations.iter() {
+            if self.traits.get(implementation.trait_id).is_none() {
+                diagnostics.push(invalid_reference(
+                    &implementation.origin,
+                    "trait implementation",
+                    "trait",
+                    implementation.trait_id.0,
+                ));
+            }
+            for (method, function) in &implementation.methods {
+                match self.trait_methods.get(*method) {
+                    Some(record) if record.trait_id == implementation.trait_id => {}
+                    Some(_) => diagnostics.push(Diagnostic::new(
+                        implementation.origin.span.clone(),
+                        format!(
+                            "implementation of trait {:?} selects a method from another trait",
+                            implementation.trait_id
+                        ),
+                    )),
+                    None => diagnostics.push(invalid_reference(
+                        &implementation.origin,
+                        "trait implementation",
+                        "trait method",
+                        method.0,
+                    )),
+                }
+                if self.functions.get(*function).is_none() {
+                    diagnostics.push(invalid_reference(
+                        &implementation.origin,
+                        "trait implementation",
+                        "function",
+                        function.0,
+                    ));
+                }
+            }
+        }
         diagnostics
     }
 }
@@ -2829,6 +3195,154 @@ mod tests {
             diagnostics
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("io type TypeId(4)"))
+        );
+    }
+
+    fn normalized_program_snapshot(program: &LoweredProgram) -> Vec<String> {
+        let mut lines = Vec::new();
+        for (_, key, info) in program.modules.iter() {
+            lines.push(format!("module {key:?} {info:?}"));
+        }
+        for (_, key, function) in program.functions.iter() {
+            lines.push(format!("function {key:?} {function:?}"));
+        }
+        for (_, key, symbol) in program.symbols.iter() {
+            lines.push(format!("symbol {key:?} {symbol:?}"));
+        }
+        for (_, key, info) in program.types.iter() {
+            lines.push(format!("type {key:?} {info:?}"));
+        }
+        for (_, key, info) in program.traits.iter() {
+            lines.push(format!("trait {key:?} {info:?}"));
+        }
+        for (_, key, info) in program.trait_methods.iter() {
+            lines.push(format!("trait method {key:?} {info:?}"));
+        }
+        for (_, info) in program.trait_implementations.iter() {
+            lines.push(format!("trait implementation {info:?}"));
+        }
+        for (_, initializer) in program.initializers.iter() {
+            lines.push(format!("initializer {initializer:?}"));
+        }
+        lines.push(format!("semantic ids {:?}", program.semantic_ids));
+        lines
+    }
+
+    #[test]
+    fn stage_2_2_catalogs_are_stable_across_repeated_lowering() {
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "let signal count: I32 = 1\n",
+            "let doubled: I32 = count + count\n",
+            "def add: (I32, I32) -> I32 = (left, right) => left + right\n",
+            "trait TestShow T { test_show: T -> Bool }\n",
+            "impl TestShow I32 { def test_show = _ => True }\n",
+            "type TestBox T = ctor (value: T)\n",
+            "type TestHidden = opaque\n",
+            "type TestEnabled\n",
+            "let enabled: TestEnabled = TestEnabled\n",
+            "let boxed: TestBox I32 = TestBox 3\n",
+            "def captured: () ->{state} I32 = () => { let mut local = 0; local = local + 1; local }\n",
+        ));
+        let mut first = LoweredProgram::default();
+        let mut second = LoweredProgram::default();
+        let diagnostics = first.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(first.validate().is_empty());
+        assert!(second.snapshot(&module).is_empty());
+        assert!(second.validate().is_empty());
+
+        let first_snapshot = normalized_program_snapshot(&first);
+        assert!(!first_snapshot.is_empty());
+        assert_eq!(first_snapshot, normalized_program_snapshot(&second));
+    }
+
+    #[test]
+    fn semantic_ids_match_transition_typed_module_selections() {
+        let module = checked_program(concat!("use std.coroutine.*\n", "let answer: I32 = 42\n",));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let checked = module.semantic_ids();
+        let ids = &program.semantic_ids;
+        assert_eq!(ids.natural_trait, checked.natural_trait);
+        assert_eq!(ids.sized_trait, checked.sized_trait);
+        assert_eq!(ids.copy_trait, checked.copy_trait);
+        assert_eq!(ids.drop_trait, checked.drop_trait);
+        assert_eq!(ids.default_trait, checked.default_trait);
+        assert_eq!(ids.debug_trait, checked.debug_trait);
+        assert_eq!(ids.display_trait, checked.display_trait);
+        assert_eq!(ids.index_trait, checked.index_trait);
+        assert_eq!(ids.mutate_index_trait, checked.mutate_index_trait);
+        assert_eq!(ids.into_iterator_trait, checked.into_iterator_trait);
+        assert_eq!(ids.iterator_trait, checked.iterator_trait);
+        assert_eq!(ids.io_type, checked.io_type);
+        assert_eq!(ids.reactive_type, checked.reactive_type);
+        assert_eq!(ids.coroutine_type, checked.coroutine_type);
+        assert_eq!(ids.task_type, checked.task_type);
+        assert_eq!(ids.completed_type, checked.completed_type);
+        assert_eq!(ids.cancelled_type, checked.cancelled_type);
+        assert_eq!(ids.tasks_type, checked.tasks_type);
+        assert_eq!(ids.scheduler_type, checked.scheduler_type);
+        assert_eq!(ids.wait_type, checked.wait_type);
+        assert_eq!(ids.resolver_type, checked.resolver_type);
+        assert_eq!(ids.completion_token_type, checked.completion_token_type);
+        assert_eq!(ids.io_resource, module.io_resource());
+        assert_eq!(ids.reactive_resource, module.reactive_resource());
+        assert_eq!(
+            ids.string_representation.as_ref(),
+            module.string_representation()
+        );
+        assert_eq!(
+            ids.entry_reactive_required,
+            module.entry_reactive_required()
+        );
+    }
+
+    #[test]
+    fn validator_rejects_inconsistent_catalogs() {
+        let module = checked_program("let answer: I32 = 42\n");
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        program.modules.entries.values[0].value.parent = Some(ModuleId(999));
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("dangling module reference 999")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let entry_id = program.modules.entries.values[0].key;
+        let body = program.initializers.values[0].body;
+        program.initializers.push(LoweredInitializer {
+            origin: Origin::compiler(),
+            module: entry_id,
+            executable_entry: false,
+            resources: Vec::new(),
+            runtime_items: Vec::new(),
+            body,
+        });
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("initializers instead of one")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        program.symbols.entries.values[0].value.module = ModuleId(999);
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("dangling module reference 999")),
+            "unexpected diagnostics: {diagnostics:?}"
         );
     }
 
