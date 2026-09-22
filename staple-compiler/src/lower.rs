@@ -12,13 +12,14 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use staple_syntax::{Diagnostic, Item, Pattern, Span, SyntaxId};
+use staple_syntax::{Diagnostic, Expression, Item, Pattern, Span, SyntaxId};
 
 use crate::{
-    BuiltinType, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
-    CheckedFunctionalDependency, CheckedResource, CheckedTraitBound, CheckedType, DefinitionId,
-    FunctionId, ModuleId, RecursiveConstruction, ResolvedFunction, ResolvedModule, SourceModule,
-    SymbolId, TraitId, TraitMethodId, TypeId, TypeParameterId, TypedModule,
+    BuiltinType, CheckedAccess, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
+    CheckedFunctionalDependency, CheckedPropagation, CheckedResource, CheckedTraitBound,
+    CheckedTraitDispatch, CheckedType, DefinitionId, FunctionId, ModuleId, RecursiveConstruction,
+    ResolvedFunction, ResolvedModule, SourceModule, SymbolId, TraitId, TraitMethodId, TypeId,
+    TypeParameterId, TypedModule,
 };
 
 macro_rules! arena_id {
@@ -45,6 +46,7 @@ trait ArenaId: Copy {
 
 arena_id!(ExpressionId);
 arena_id!(PatternId);
+arena_id!(PlaceId);
 arena_id!(BlockId);
 arena_id!(ItemId);
 arena_id!(LoweredFunctionId);
@@ -223,9 +225,17 @@ pub(crate) struct LoweredExpression {
 
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredExpressionKind {
+    /// A runtime expression whose family is lowered in Stage 2.4. Stage 2.3
+    /// allocates the header (origin, checked type, effects, coercion, moved
+    /// symbols) for every runtime-item payload and place base; Stage 2.4
+    /// replaces every `Unlowered` kind with its concrete form.
+    Unlowered,
     Block(BlockId),
 }
 
+/// A source pattern with its checked type and lowered children. Patterns are
+/// shared by function parameter templates, runtime pattern bindings, and
+/// (from Stage 2.4 on) match arms.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredPattern {
     pub origin: Origin,
@@ -236,6 +246,79 @@ pub(crate) struct LoweredPattern {
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredPatternKind {
     Wildcard,
+    Binding {
+        /// The symbol this pattern binds. Absent for singleton patterns such
+        /// as `True`, which name an existing value instead of binding one.
+        symbol: Option<SymbolId>,
+        /// The singleton type a name-like pattern selects, when it is not a
+        /// binding.
+        singleton: Option<TypeId>,
+        mutable: bool,
+        moved: bool,
+    },
+    Product {
+        elements: Vec<PatternId>,
+        mutable: bool,
+        moved: bool,
+    },
+    /// A nominal destructuring pattern (`Ref inner`, `Some value`, ...) with
+    /// the named type it selects and its argument pattern.
+    Nominal {
+        target: Option<TypeId>,
+        name: String,
+        argument: PatternId,
+    },
+    /// A string literal pattern; the literal is retained exactly as written.
+    Literal {
+        literal: String,
+    },
+    At {
+        binding: PatternId,
+        pattern: PatternId,
+    },
+}
+
+/// A normalized assignment target. Places exist only as mutation destinations;
+/// code generation turns them back into storage pointers without consulting
+/// the source AST.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredPlace {
+    pub origin: Origin,
+    pub value_type: CheckedType,
+    pub kind: LoweredPlaceKind,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum LoweredPlaceKind {
+    /// Direct storage of a local, parameter, or global symbol.
+    Symbol { symbol: SymbolId },
+    /// Symbol storage reached through a shared capture cell.
+    CapturedCell { symbol: SymbolId },
+    /// A non-place base materialized into temporary storage so it can be
+    /// mutated (`x[i] = v` where `x` is not itself a place root).
+    Temporary { expression: ExpressionId },
+    /// An ambient resource value in scope.
+    Resource { resource: CheckedResource },
+    /// A pointer into a reference value: `reference` evaluates the `Ref`
+    /// container and `dereference` records the crossed payloads
+    /// outermost-first, matching `CheckedAccess`.
+    Dereference {
+        reference: ExpressionId,
+        dereference: Vec<CheckedType>,
+    },
+    /// Element `index` of a product place. `slice` marks a `Slice` base,
+    /// whose pointer is loaded from the slice representation and bounds
+    /// checked rather than projected directly.
+    ProductElement {
+        base: PlaceId,
+        index: usize,
+        slice: bool,
+    },
+    /// The representation pointer of a distinct value, covering both `.*`
+    /// and single-element distinct access.
+    Representation { base: PlaceId },
+    /// `base[index]` mutation, dispatched through the `MutateIndex` trait.
+    Indexed { base: PlaceId, index: ExpressionId },
 }
 
 #[derive(Debug, Clone)]
@@ -245,6 +328,7 @@ pub(crate) struct LoweredBlock {
     pub result: Option<ExpressionId>,
 }
 
+/// One runtime item inside a module initializer or a runtime block.
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredItem {
     pub origin: Origin,
@@ -253,8 +337,73 @@ pub(crate) struct LoweredItem {
 
 #[derive(Debug, Clone)]
 pub(crate) enum LoweredItemKind {
-    Expression(ExpressionId),
-    Pattern(PatternId),
+    Binding(LoweredBindingItem),
+    PatternBinding(LoweredPatternBindingItem),
+    Assignment(LoweredAssignmentItem),
+    Return(LoweredReturnItem),
+    Break(LoweredBreakItem),
+    Continue,
+    Expression(LoweredExpressionStatementItem),
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredBindingItem {
+    /// The bound runtime symbol. Absent for compile-time-only `const`
+    /// bindings, which stay outside the runtime symbol catalog.
+    pub symbol: Option<SymbolId>,
+    pub value: Option<ExpressionId>,
+    pub compile_time_only: bool,
+    /// The binding declares compile-time parameters, so code generation only
+    /// records its initialization state.
+    pub generic: bool,
+    pub derived: bool,
+    pub signal: bool,
+    /// The binding's value lives in a local binding cell rather than an SSA
+    /// value or module global storage.
+    pub cell: bool,
+    pub requires_initialization_check: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredPatternBindingItem {
+    pub pattern: PatternId,
+    pub value: ExpressionId,
+    /// `true` for `let pattern? = value` propagation.
+    pub propagating: bool,
+    /// Checked propagation metadata, present exactly for propagating
+    /// bindings.
+    pub propagation: Option<CheckedPropagation>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredAssignmentItem {
+    pub target: PlaceId,
+    pub value: ExpressionId,
+    /// Selected `MutateIndex` dispatch for an indexed target.
+    pub mutate_index: Option<CheckedTraitDispatch>,
+    /// The place's root symbol, whose initialization state is written back.
+    pub initialization_symbol: Option<SymbolId>,
+    /// Whether the place's previous value must be dropped before the store.
+    pub drop_previous: bool,
+    /// Whether the assignment must notify the symbol's signal metadata.
+    pub signal: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredReturnItem {
+    pub value: ExpressionId,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredBreakItem {
+    pub value: Option<ExpressionId>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredExpressionStatementItem {
+    pub expression: ExpressionId,
+    /// Whether the discarded result needs a drop after evaluation.
+    pub drop_result: bool,
 }
 
 /// One capture of a function template, carrying the ownership facts code
@@ -293,33 +442,14 @@ pub(crate) struct LoweredFunction {
     pub signature: CheckedFunctionType,
     pub bounds: Vec<CheckedTraitBound>,
     pub parameter_style: staple_syntax::FunctionParameterStyle,
+    /// The lowered parameter pattern, with bound symbols in source order.
+    pub parameter_pattern: PatternId,
     pub parameters: Vec<SymbolId>,
     pub captures: Vec<LoweredCapture>,
     pub body_origin: Origin,
     pub body_syntax: SyntaxId,
     pub body: Option<BlockId>,
     pub class: LoweredFunctionClass,
-}
-
-/// A top-level source item that belongs to a module initializer at runtime.
-///
-/// The source item itself is deliberately not cloned: Stage 2.2 records the
-/// ordered roots while their lowered bodies remain empty until Stage 2.3.
-#[derive(Debug, Clone)]
-pub(crate) struct RuntimeItemSource {
-    pub origin: Origin,
-    pub category: RuntimeItemCategory,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RuntimeItemCategory {
-    Binding,
-    PatternBinding,
-    Assignment,
-    Return,
-    Break,
-    Continue,
-    Expression,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -343,7 +473,7 @@ pub(crate) struct LoweredInitializer {
     pub module: ModuleId,
     pub executable_entry: bool,
     pub resources: Vec<LoweredEntryResource>,
-    pub runtime_items: Vec<RuntimeItemSource>,
+    /// The module's ordered runtime items, lowered into `body`'s item list.
     pub body: BlockId,
 }
 
@@ -496,7 +626,11 @@ pub(crate) struct LoweredSemanticIds {
 pub(crate) struct LoweredProgram {
     modules: Catalog<ModuleId, LoweredModuleInfo, LoweredModuleId>,
     expressions: Arena<LoweredExpression, ExpressionId>,
+    /// Lookup only; traversal always uses the expression arena. Repeated
+    /// lowering of the same syntax node returns the first allocated ID.
+    expression_lookup: HashMap<SyntaxId, ExpressionId>,
     patterns: Arena<LoweredPattern, PatternId>,
+    places: Arena<LoweredPlace, PlaceId>,
     blocks: Arena<LoweredBlock, BlockId>,
     items: Arena<LoweredItem, ItemId>,
     functions: Catalog<FunctionId, LoweredFunction, LoweredFunctionId>,
@@ -962,6 +1096,13 @@ impl LoweredProgram {
             intrinsic: binding_symbol
                 .is_some_and(|symbol| resolved.intrinsic_function(symbol).is_some()),
         };
+        let parameter_pattern = match self.lower_function_pattern(module, function, &signature) {
+            Ok(pattern) => pattern,
+            Err(diagnostic) => {
+                diagnostics.push(diagnostic);
+                return;
+            }
+        };
         let captures = function
             .captures
             .iter()
@@ -972,6 +1113,13 @@ impl LoweredProgram {
                 requires_cell: capture_requires_cell(module, *symbol),
             })
             .collect();
+        let body = match self.lower_function_body(module, function) {
+            Ok(body) => Some(body),
+            Err(diagnostic) => {
+                diagnostics.push(diagnostic);
+                return;
+            }
+        };
         let value = LoweredFunction {
             origin: origin.clone(),
             semantic_id: function.id,
@@ -981,11 +1129,12 @@ impl LoweredProgram {
             signature,
             bounds: module.bounds_of_function(function.id).to_vec(),
             parameter_style: function.parameter_style,
+            parameter_pattern,
             parameters: pattern_symbols(resolved, &function.pattern),
             captures,
             body_origin: origin.clone(),
             body_syntax: body_syntax.id,
-            body: None,
+            body,
             class,
         };
         if let Err(diagnostic) = self
@@ -1014,9 +1163,10 @@ impl LoweredProgram {
                 continue;
             }
             let is_entry = executable_entry == Some(module_id);
+            let items = self.lower_items(module, &source.syntax.items, &mut diagnostics);
             let body = self.blocks.push(LoweredBlock {
                 origin: origin.clone(),
-                items: Vec::new(),
+                items,
                 result: None,
             });
             let initializer = self.initializers.push(LoweredInitializer {
@@ -1028,7 +1178,6 @@ impl LoweredProgram {
                 } else {
                     Vec::new()
                 },
-                runtime_items: runtime_item_sources(&source.syntax.items),
                 body,
             });
             let info = LoweredModuleInfo {
@@ -1046,6 +1195,614 @@ impl LoweredProgram {
             }
         }
         diagnostics
+    }
+
+    /// Lowers one runtime block's item sequence, preserving source order. The
+    /// trailing expression becomes the block result rather than an item, so a
+    /// block's value is never also a statement.
+    fn lower_block(
+        &mut self,
+        module: &TypedModule,
+        block: &staple_syntax::BlockExpression,
+    ) -> Result<BlockId, Diagnostic> {
+        let origin = Origin {
+            syntax: block.syntax.id,
+            span: block.syntax.span.clone(),
+        };
+        let mut items = Vec::new();
+        let mut result = None;
+        let last = block.items.len().checked_sub(1);
+        for (index, item) in block.items.iter().enumerate() {
+            if Some(index) == last
+                && let Item::Expression(expression) = item
+            {
+                result = Some(self.lower_expression_header(module, expression)?);
+                continue;
+            }
+            if let Some(item) = self.lower_item(module, item)? {
+                items.push(item);
+            }
+        }
+        Ok(self.blocks.push(LoweredBlock {
+            origin,
+            items,
+            result,
+        }))
+    }
+
+    /// Lowers a function template's body into exactly one block. A non-block
+    /// body expression becomes the result of a synthetic single-result block,
+    /// matching how code generation returns the body expression directly.
+    fn lower_function_body(
+        &mut self,
+        module: &TypedModule,
+        function: &ResolvedFunction,
+    ) -> Result<BlockId, Diagnostic> {
+        let body = self.lower_expression_header(module, &function.body)?;
+        if let Some(LoweredExpressionKind::Block(block)) = self
+            .expressions
+            .get(body)
+            .map(|expression| &expression.kind)
+        {
+            return Ok(*block);
+        }
+        let syntax = function.body.syntax();
+        Ok(self.blocks.push(LoweredBlock {
+            origin: Origin {
+                syntax: syntax.id,
+                span: syntax.span.clone(),
+            },
+            items: Vec::new(),
+            result: Some(body),
+        }))
+    }
+
+    /// Lowers every runtime item of a module initializer in source order.
+    /// Declaration-only and other compile-time-only source items are omitted,
+    /// matching how resolution and code generation treat them.
+    fn lower_items(
+        &mut self,
+        module: &TypedModule,
+        items: &[Item],
+        diagnostics: &mut Vec<Diagnostic>,
+    ) -> Vec<ItemId> {
+        let mut lowered = Vec::new();
+        for item in items {
+            match self.lower_item(module, item) {
+                Ok(Some(item)) => lowered.push(item),
+                Ok(None) => {}
+                Err(diagnostic) => diagnostics.push(diagnostic),
+            }
+        }
+        lowered
+    }
+
+    /// Lowers one runtime item. Returns `None` for compile-time-only source
+    /// items that resolution and code generation omit. Unexpanded macro,
+    /// splice, and operator nodes are lowering diagnostics instead of being
+    /// silently dropped.
+    fn lower_item(
+        &mut self,
+        module: &TypedModule,
+        item: &Item,
+    ) -> Result<Option<ItemId>, Diagnostic> {
+        let syntax = item.syntax();
+        let origin = Origin {
+            syntax: syntax.id,
+            span: syntax.span.clone(),
+        };
+        let kind = match item {
+            Item::Binding(binding) => {
+                LoweredItemKind::Binding(self.lower_binding_item(module, binding)?)
+            }
+            Item::PatternBinding(binding) => {
+                LoweredItemKind::PatternBinding(self.lower_pattern_binding_item(module, binding)?)
+            }
+            Item::Assignment(assignment) => {
+                LoweredItemKind::Assignment(self.lower_assignment_item(module, assignment)?)
+            }
+            Item::Return(item) => LoweredItemKind::Return(LoweredReturnItem {
+                value: self.lower_expression_header(module, &item.value)?,
+            }),
+            Item::Break(item) => LoweredItemKind::Break(LoweredBreakItem {
+                value: match &item.value {
+                    Some(value) => Some(self.lower_expression_header(module, value)?),
+                    None => None,
+                },
+            }),
+            Item::Continue(_) => LoweredItemKind::Continue,
+            Item::Expression(expression) => {
+                let expression = self.lower_expression_header(module, expression)?;
+                let drop_result = self.expression_needs_drop(module, expression);
+                LoweredItemKind::Expression(LoweredExpressionStatementItem {
+                    expression,
+                    drop_result,
+                })
+            }
+            Item::VisibilitySplice(splice) => {
+                return Err(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    "unexpanded visibility splice reached lowering",
+                ));
+            }
+            Item::RepeatedItemSplice(splice) => {
+                return Err(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    "unexpanded repeated item splice reached lowering",
+                ));
+            }
+            // A surviving visibility-macro invocation is the marker left by a
+            // successfully expanded item-producing macro; its generated items
+            // are lowered separately. Resolution and code generation both
+            // treat it as a compile-time-only no-op.
+            Item::VisibilityMacroInvocation(_)
+            | Item::Modified(_)
+            | Item::UseDeclaration(_)
+            | Item::Submodule(_)
+            | Item::ExternBlock(_)
+            | Item::TypeDeclaration(_)
+            | Item::MacroDeclaration(_)
+            | Item::TraitDeclaration(_)
+            | Item::TraitImplementation(_) => return Ok(None),
+        };
+        Ok(Some(self.items.push(LoweredItem { origin, kind })))
+    }
+
+    fn lower_binding_item(
+        &mut self,
+        module: &TypedModule,
+        binding: &staple_syntax::Binding,
+    ) -> Result<LoweredBindingItem, Diagnostic> {
+        let resolved = module.resolved();
+        let Some(symbol) = module.symbol_for(binding.syntax.id) else {
+            return Err(Diagnostic::new(
+                binding.syntax.span.clone(),
+                format!(
+                    "cannot lower binding `{}` without a resolved symbol",
+                    binding.name
+                ),
+            ));
+        };
+        let value = match &binding.value {
+            Some(value) => Some(self.lower_expression_header(module, value)?),
+            None => None,
+        };
+        Ok(LoweredBindingItem {
+            symbol: Some(symbol),
+            value,
+            compile_time_only: compile_time_only_symbol(module, symbol),
+            generic: !binding.type_parameters.is_empty(),
+            derived: module.is_derived_symbol(symbol),
+            signal: resolved.is_signal_symbol(symbol),
+            cell: symbol_requires_cell(module, symbol),
+            requires_initialization_check: resolved.requires_initialization_state(symbol),
+        })
+    }
+
+    fn lower_pattern_binding_item(
+        &mut self,
+        module: &TypedModule,
+        binding: &staple_syntax::PatternBinding,
+    ) -> Result<LoweredPatternBindingItem, Diagnostic> {
+        let pattern = self.lower_pattern(module, &binding.pattern)?;
+        let value = self.lower_expression_header(module, &binding.value)?;
+        let propagating = binding.kind == staple_syntax::PatternBindingKind::Propagating;
+        let propagation = module.propagation_for(binding.syntax.id).cloned();
+        if propagating && propagation.is_none() {
+            return Err(Diagnostic::new(
+                binding.syntax.span.clone(),
+                "cannot lower a propagating binding without checked propagation metadata",
+            ));
+        }
+        Ok(LoweredPatternBindingItem {
+            pattern,
+            value,
+            propagating,
+            propagation,
+        })
+    }
+
+    fn lower_assignment_item(
+        &mut self,
+        module: &TypedModule,
+        assignment: &staple_syntax::Assignment,
+    ) -> Result<LoweredAssignmentItem, Diagnostic> {
+        if let Expression::Index(index) = &assignment.target {
+            let target = self.lower_indexed_place(module, index)?;
+            let value = self.lower_expression_header(module, &assignment.value)?;
+            let mutate_index = module.trait_dispatch_for(assignment.syntax.id).cloned();
+            if mutate_index.is_none() {
+                return Err(Diagnostic::new(
+                    assignment.syntax.span.clone(),
+                    "cannot lower an indexed assignment without a checked MutateIndex dispatch",
+                ));
+            }
+            return Ok(LoweredAssignmentItem {
+                target,
+                value,
+                mutate_index,
+                initialization_symbol: None,
+                drop_previous: false,
+                signal: false,
+            });
+        }
+        let target = self.lower_place(module, &assignment.target)?;
+        let value = self.lower_expression_header(module, &assignment.value)?;
+        let target_type = self
+            .places
+            .get(target)
+            .map(|place| place.value_type.clone())
+            .unwrap_or(CheckedType::Error);
+        let initialization_symbol = self.place_root_symbol(target);
+        let signal =
+            initialization_symbol.is_some_and(|symbol| module.resolved().is_signal_symbol(symbol));
+        Ok(LoweredAssignmentItem {
+            target,
+            value,
+            mutate_index: None,
+            initialization_symbol,
+            drop_previous: module.type_needs_drop(&target_type),
+            signal,
+        })
+    }
+
+    /// The symbol whose initialization state an assignment writes back. Mirrors
+    /// code generation's place-pointer result: direct storage keeps its symbol,
+    /// slice and dereference places do not.
+    fn place_root_symbol(&self, place: PlaceId) -> Option<SymbolId> {
+        match &self.places.get(place)?.kind {
+            LoweredPlaceKind::Symbol { symbol } | LoweredPlaceKind::CapturedCell { symbol } => {
+                Some(*symbol)
+            }
+            LoweredPlaceKind::ProductElement { base, slice, .. } => {
+                if *slice {
+                    None
+                } else {
+                    self.place_root_symbol(*base)
+                }
+            }
+            LoweredPlaceKind::Representation { base } => self.place_root_symbol(*base),
+            LoweredPlaceKind::Temporary { .. }
+            | LoweredPlaceKind::Resource { .. }
+            | LoweredPlaceKind::Dereference { .. }
+            | LoweredPlaceKind::Indexed { .. } => None,
+        }
+    }
+
+    fn lower_indexed_place(
+        &mut self,
+        module: &TypedModule,
+        index: &staple_syntax::IndexExpression,
+    ) -> Result<PlaceId, Diagnostic> {
+        let syntax = &index.syntax;
+        let Some(value_type) = module.type_of_expression(syntax.id).cloned() else {
+            return Err(Diagnostic::new(
+                syntax.span.clone(),
+                "cannot lower an indexed place without a checked element type",
+            ));
+        };
+        let base = if expression_has_place_root(module.resolved(), &index.value) {
+            self.lower_place(module, &index.value)?
+        } else {
+            let value_syntax = index.value.syntax();
+            let Some(base_type) = module.type_of_expression(value_syntax.id).cloned() else {
+                return Err(Diagnostic::new(
+                    value_syntax.span.clone(),
+                    "cannot lower an indexed base without a checked type",
+                ));
+            };
+            let expression = self.lower_expression_header(module, &index.value)?;
+            self.places.push(LoweredPlace {
+                origin: Origin {
+                    syntax: value_syntax.id,
+                    span: value_syntax.span.clone(),
+                },
+                value_type: base_type,
+                kind: LoweredPlaceKind::Temporary { expression },
+            })
+        };
+        let position = self.lower_expression_header(module, &index.index)?;
+        Ok(self.places.push(LoweredPlace {
+            origin: Origin {
+                syntax: syntax.id,
+                span: syntax.span.clone(),
+            },
+            value_type,
+            kind: LoweredPlaceKind::Indexed {
+                base,
+                index: position,
+            },
+        }))
+    }
+
+    /// Lowers an assignment target into an explicit place tree.
+    fn lower_place(
+        &mut self,
+        module: &TypedModule,
+        expression: &Expression,
+    ) -> Result<PlaceId, Diagnostic> {
+        let syntax = expression.syntax();
+        let origin = Origin {
+            syntax: syntax.id,
+            span: syntax.span.clone(),
+        };
+        let Some(value_type) = module.type_of_expression(syntax.id).cloned() else {
+            return Err(Diagnostic::new(
+                syntax.span.clone(),
+                "cannot lower a place without a checked type",
+            ));
+        };
+        if let Some(symbol) = module.symbol_for(syntax.id) {
+            let kind = if symbol_requires_cell(module, symbol) {
+                LoweredPlaceKind::CapturedCell { symbol }
+            } else {
+                LoweredPlaceKind::Symbol { symbol }
+            };
+            return Ok(self.places.push(LoweredPlace {
+                origin,
+                value_type,
+                kind,
+            }));
+        }
+        let kind = match expression {
+            Expression::Product(product) if product.elements.len() == 1 => {
+                return self.lower_place(module, &product.elements[0].value);
+            }
+            Expression::Satisfies(satisfies) => {
+                return self.lower_place(module, &satisfies.value);
+            }
+            Expression::Resource(resource) => {
+                let Some(resource) = module.resource_for_expression(resource.syntax.id).cloned()
+                else {
+                    return Err(Diagnostic::new(
+                        resource.syntax.span.clone(),
+                        "cannot lower a resource place without checked resource metadata",
+                    ));
+                };
+                LoweredPlaceKind::Resource { resource }
+            }
+            Expression::Access(access) => self.lower_access_place(module, access)?,
+            Expression::Index(index) => {
+                return self.lower_indexed_place(module, index);
+            }
+            other => {
+                return Err(Diagnostic::new(
+                    other.syntax().span.clone(),
+                    "assignment target is not a lowerable place",
+                ));
+            }
+        };
+        Ok(self.places.push(LoweredPlace {
+            origin,
+            value_type,
+            kind,
+        }))
+    }
+
+    fn lower_access_place(
+        &mut self,
+        module: &TypedModule,
+        access: &staple_syntax::AccessExpression,
+    ) -> Result<LoweredPlaceKind, Diagnostic> {
+        let Some(checked) = module.access_for(access.syntax.id).cloned() else {
+            return Err(Diagnostic::new(
+                access.syntax.span.clone(),
+                "cannot lower an access place without checked access metadata",
+            ));
+        };
+        match checked {
+            CheckedAccess::Representation { dereference } => {
+                let base = self.lower_access_base(module, &access.value, dereference)?;
+                Ok(LoweredPlaceKind::Representation { base })
+            }
+            CheckedAccess::Product {
+                index,
+                dereference,
+                slice,
+                scalar,
+            } => {
+                let base = self.lower_access_base(module, &access.value, dereference)?;
+                if scalar {
+                    Ok(LoweredPlaceKind::Representation { base })
+                } else {
+                    Ok(LoweredPlaceKind::ProductElement { base, index, slice })
+                }
+            }
+        }
+    }
+
+    /// The base of an access place: a recursive place when no `Ref` payloads
+    /// are crossed, or a dereference of the evaluated value expression.
+    fn lower_access_base(
+        &mut self,
+        module: &TypedModule,
+        value: &Expression,
+        dereference: Vec<CheckedType>,
+    ) -> Result<PlaceId, Diagnostic> {
+        if dereference.is_empty() {
+            return self.lower_place(module, value);
+        }
+        let syntax = value.syntax();
+        let Some(value_type) = dereference.last().cloned() else {
+            return Err(Diagnostic::new(
+                syntax.span.clone(),
+                "cannot lower an empty dereference chain",
+            ));
+        };
+        let reference = self.lower_expression_header(module, value)?;
+        Ok(self.places.push(LoweredPlace {
+            origin: Origin {
+                syntax: syntax.id,
+                span: syntax.span.clone(),
+            },
+            value_type,
+            kind: LoweredPlaceKind::Dereference {
+                reference,
+                dereference,
+            },
+        }))
+    }
+
+    /// Lowers a function template's parameter pattern. Compiler-synthesized
+    /// implicit-thunk parameters carry no source pattern type, so their
+    /// checked signature parameter and body origin stand in.
+    fn lower_function_pattern(
+        &mut self,
+        module: &TypedModule,
+        function: &ResolvedFunction,
+        signature: &CheckedFunctionType,
+    ) -> Result<PatternId, Diagnostic> {
+        if module
+            .type_of_pattern(function.pattern.syntax().id)
+            .is_some()
+        {
+            return self.lower_pattern(module, &function.pattern);
+        }
+        let Pattern::Product(product) = &function.pattern else {
+            return Err(Diagnostic::new(
+                Span::Compiler,
+                "cannot lower a compiler-synthesized function parameter pattern",
+            ));
+        };
+        if !product.elements.is_empty() {
+            return Err(Diagnostic::new(
+                Span::Compiler,
+                "compiler-synthesized function parameter patterns must be empty products",
+            ));
+        }
+        let syntax = function.body.syntax();
+        Ok(self.patterns.push(LoweredPattern {
+            origin: Origin {
+                syntax: syntax.id,
+                span: syntax.span.clone(),
+            },
+            value_type: signature.parameter.as_ref().clone(),
+            kind: LoweredPatternKind::Product {
+                elements: Vec::new(),
+                mutable: product.mutable,
+                moved: product.moved,
+            },
+        }))
+    }
+
+    /// Lowers a checked pattern recursively, recording bound symbols and
+    /// singleton targets.
+    fn lower_pattern(
+        &mut self,
+        module: &TypedModule,
+        pattern: &Pattern,
+    ) -> Result<PatternId, Diagnostic> {
+        let syntax = pattern.syntax();
+        let Some(value_type) = module.type_of_pattern(syntax.id).cloned() else {
+            return Err(Diagnostic::new(
+                syntax.span.clone(),
+                "cannot lower a pattern without a checked type",
+            ));
+        };
+        let resolved = module.resolved();
+        let kind = match pattern {
+            Pattern::Wildcard(_) => LoweredPatternKind::Wildcard,
+            Pattern::Binding(binding) => LoweredPatternKind::Binding {
+                symbol: resolved.symbol_for(binding.syntax.id),
+                singleton: resolved.type_for_pattern(binding.syntax.id),
+                mutable: binding.mutable,
+                moved: binding.moved,
+            },
+            Pattern::Product(product) => {
+                let mut elements = Vec::with_capacity(product.elements.len());
+                for element in &product.elements {
+                    elements.push(self.lower_pattern(module, element)?);
+                }
+                LoweredPatternKind::Product {
+                    elements,
+                    mutable: product.mutable,
+                    moved: product.moved,
+                }
+            }
+            Pattern::Nominal(nominal) => LoweredPatternKind::Nominal {
+                target: resolved.type_for_pattern(syntax.id),
+                name: nominal.name.clone(),
+                argument: self.lower_pattern(module, &nominal.argument)?,
+            },
+            Pattern::StringLiteral(literal) => LoweredPatternKind::Literal {
+                literal: literal.literal.clone(),
+            },
+            Pattern::At(at) => {
+                let binding =
+                    self.lower_pattern(module, &Pattern::Binding(at.binding.as_ref().clone()))?;
+                let pattern = self.lower_pattern(module, &at.pattern)?;
+                LoweredPatternKind::At { binding, pattern }
+            }
+            Pattern::Splice(splice) => {
+                return Err(Diagnostic::new(
+                    splice.syntax.span.clone(),
+                    "unexpanded pattern splice reached lowering",
+                ));
+            }
+        };
+        Ok(self.patterns.push(LoweredPattern {
+            origin: Origin {
+                syntax: syntax.id,
+                span: syntax.span.clone(),
+            },
+            value_type,
+            kind,
+        }))
+    }
+
+    /// Allocates the header of a runtime expression, returning the existing
+    /// ID when the same syntax node was already lowered. Stage 2.4 replaces
+    /// the `Unlowered` kind with the expression family's concrete form; block
+    /// expressions are lowered here because their items are runtime items.
+    fn lower_expression_header(
+        &mut self,
+        module: &TypedModule,
+        expression: &Expression,
+    ) -> Result<ExpressionId, Diagnostic> {
+        let syntax = expression.syntax();
+        if let Some(existing) = self.expression_lookup.get(&syntax.id) {
+            return Ok(*existing);
+        }
+        reject_compile_time_expression(expression)?;
+        let value_type = match module.type_of_expression(syntax.id).cloned() {
+            Some(value_type) => value_type,
+            // The checker stops recording a type once control flow diverges
+            // (`return`, `break`, `continue`, or a `Never` sub-expression), so
+            // an expression with no recorded type is unreachable and its
+            // value is `Never`.
+            None => CheckedType::Never,
+        };
+        let effects = module
+            .effects_of_expression(syntax.id)
+            .cloned()
+            .unwrap_or_default();
+        let coercion = module.coercion_for(syntax.id).cloned();
+        let moved_symbols = module.moved_symbols(syntax.id).collect();
+        let kind = match expression {
+            Expression::Block(block) => {
+                LoweredExpressionKind::Block(self.lower_block(module, block)?)
+            }
+            _ => LoweredExpressionKind::Unlowered,
+        };
+        let id = self.expressions.push(LoweredExpression {
+            origin: Origin {
+                syntax: syntax.id,
+                span: syntax.span.clone(),
+            },
+            value_type,
+            effects,
+            coercion,
+            moved_symbols,
+            kind,
+        });
+        self.expression_lookup.insert(syntax.id, id);
+        Ok(id)
+    }
+
+    fn expression_needs_drop(&self, module: &TypedModule, expression: ExpressionId) -> bool {
+        self.expressions
+            .get(expression)
+            .is_some_and(|expression| module.type_needs_drop(&expression.value_type))
     }
 
     fn validate(&self) -> Vec<Diagnostic> {
@@ -1073,10 +1830,153 @@ impl LoweredProgram {
         let mut diagnostics = Vec::new();
         for (_, expression) in self.expressions.iter() {
             match expression.kind {
+                LoweredExpressionKind::Unlowered => {}
                 LoweredExpressionKind::Block(id) if !self.blocks.contains(id) => diagnostics.push(
                     invalid_reference(&expression.origin, "expression", "block", id.index()),
                 ),
                 LoweredExpressionKind::Block(_) => {}
+            }
+        }
+        for (_, pattern) in self.patterns.iter() {
+            match &pattern.kind {
+                LoweredPatternKind::Wildcard | LoweredPatternKind::Literal { .. } => {}
+                LoweredPatternKind::Binding {
+                    symbol, singleton, ..
+                } => {
+                    if let Some(symbol) = symbol
+                        && self.symbols.get(*symbol).is_none()
+                    {
+                        diagnostics.push(invalid_reference(
+                            &pattern.origin,
+                            "pattern",
+                            "symbol",
+                            symbol.0,
+                        ));
+                    }
+                    if let Some(singleton) = singleton
+                        && self.types.get(*singleton).is_none()
+                    {
+                        diagnostics.push(invalid_reference(
+                            &pattern.origin,
+                            "pattern",
+                            "type",
+                            singleton.0,
+                        ));
+                    }
+                }
+                LoweredPatternKind::Product { elements, .. } => {
+                    for element in elements {
+                        if !self.patterns.contains(*element) {
+                            diagnostics.push(invalid_reference(
+                                &pattern.origin,
+                                "pattern",
+                                "pattern",
+                                element.index(),
+                            ));
+                        }
+                    }
+                }
+                LoweredPatternKind::Nominal {
+                    target, argument, ..
+                } => {
+                    if let Some(target) = target
+                        && self.types.get(*target).is_none()
+                    {
+                        diagnostics.push(invalid_reference(
+                            &pattern.origin,
+                            "pattern",
+                            "type",
+                            target.0,
+                        ));
+                    }
+                    if !self.patterns.contains(*argument) {
+                        diagnostics.push(invalid_reference(
+                            &pattern.origin,
+                            "pattern",
+                            "pattern",
+                            argument.index(),
+                        ));
+                    }
+                }
+                LoweredPatternKind::At {
+                    binding,
+                    pattern: nested,
+                } => {
+                    for child in [*binding, *nested] {
+                        if !self.patterns.contains(child) {
+                            diagnostics.push(invalid_reference(
+                                &pattern.origin,
+                                "at pattern",
+                                "pattern",
+                                child.index(),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for (_, place) in self.places.iter() {
+            match &place.kind {
+                LoweredPlaceKind::Symbol { symbol } | LoweredPlaceKind::CapturedCell { symbol } => {
+                    if self.symbols.get(*symbol).is_none() {
+                        diagnostics.push(invalid_reference(
+                            &place.origin,
+                            "place",
+                            "symbol",
+                            symbol.0,
+                        ));
+                    }
+                }
+                LoweredPlaceKind::Temporary { expression } => {
+                    if !self.expressions.contains(*expression) {
+                        diagnostics.push(invalid_reference(
+                            &place.origin,
+                            "place",
+                            "expression",
+                            expression.index(),
+                        ));
+                    }
+                }
+                LoweredPlaceKind::Resource { .. } => {}
+                LoweredPlaceKind::Dereference { reference, .. } => {
+                    if !self.expressions.contains(*reference) {
+                        diagnostics.push(invalid_reference(
+                            &place.origin,
+                            "place",
+                            "expression",
+                            reference.index(),
+                        ));
+                    }
+                }
+                LoweredPlaceKind::ProductElement { base, .. }
+                | LoweredPlaceKind::Representation { base } => {
+                    if !self.places.contains(*base) {
+                        diagnostics.push(invalid_reference(
+                            &place.origin,
+                            "place",
+                            "place",
+                            base.index(),
+                        ));
+                    }
+                }
+                LoweredPlaceKind::Indexed { base, index } => {
+                    if !self.places.contains(*base) {
+                        diagnostics.push(invalid_reference(
+                            &place.origin,
+                            "place",
+                            "place",
+                            base.index(),
+                        ));
+                    }
+                    if !self.expressions.contains(*index) {
+                        diagnostics.push(invalid_reference(
+                            &place.origin,
+                            "place",
+                            "expression",
+                            index.index(),
+                        ));
+                    }
+                }
             }
         }
         for (_, block) in self.blocks.iter() {
@@ -1102,14 +2002,77 @@ impl LoweredProgram {
             }
         }
         for (_, item) in self.items.iter() {
-            let (kind, index, valid) = match item.kind {
-                LoweredItemKind::Expression(id) => {
-                    ("expression", id.index(), self.expressions.contains(id))
+            let mut check = |target: &str, index: usize, valid: bool| {
+                if !valid {
+                    diagnostics.push(invalid_reference(&item.origin, "item", target, index));
                 }
-                LoweredItemKind::Pattern(id) => ("pattern", id.index(), self.patterns.contains(id)),
             };
-            if !valid {
-                diagnostics.push(invalid_reference(&item.origin, "item", kind, index));
+            match &item.kind {
+                LoweredItemKind::Binding(binding) => {
+                    if let Some(symbol) = binding.symbol
+                        && !binding.compile_time_only
+                    {
+                        check("symbol", symbol.0, self.symbols.get(symbol).is_some());
+                    }
+                    if let Some(value) = binding.value {
+                        check(
+                            "expression",
+                            value.index(),
+                            self.expressions.contains(value),
+                        );
+                    }
+                }
+                LoweredItemKind::PatternBinding(binding) => {
+                    check(
+                        "pattern",
+                        binding.pattern.index(),
+                        self.patterns.contains(binding.pattern),
+                    );
+                    check(
+                        "expression",
+                        binding.value.index(),
+                        self.expressions.contains(binding.value),
+                    );
+                }
+                LoweredItemKind::Assignment(assignment) => {
+                    check(
+                        "place",
+                        assignment.target.index(),
+                        self.places.contains(assignment.target),
+                    );
+                    check(
+                        "expression",
+                        assignment.value.index(),
+                        self.expressions.contains(assignment.value),
+                    );
+                    if let Some(symbol) = assignment.initialization_symbol {
+                        check("symbol", symbol.0, self.symbols.get(symbol).is_some());
+                    }
+                }
+                LoweredItemKind::Return(item) => {
+                    check(
+                        "expression",
+                        item.value.index(),
+                        self.expressions.contains(item.value),
+                    );
+                }
+                LoweredItemKind::Break(item) => {
+                    if let Some(value) = item.value {
+                        check(
+                            "expression",
+                            value.index(),
+                            self.expressions.contains(value),
+                        );
+                    }
+                }
+                LoweredItemKind::Continue => {}
+                LoweredItemKind::Expression(item) => {
+                    check(
+                        "expression",
+                        item.expression.index(),
+                        self.expressions.contains(item.expression),
+                    );
+                }
             }
         }
         diagnostics
@@ -1135,18 +2098,6 @@ impl LoweredProgram {
                     "module",
                     initializer.module.0,
                 ));
-            }
-            let mut sources = HashSet::new();
-            for item in &initializer.runtime_items {
-                if !sources.insert(item.origin.syntax) {
-                    diagnostics.push(Diagnostic::new(
-                        item.origin.span.clone(),
-                        format!(
-                            "initializer for module {:?} repeats runtime item source {}",
-                            initializer.module, item.origin.syntax.0
-                        ),
-                    ));
-                }
             }
         }
         for (position, (_, key, info)) in self.modules.iter().enumerate() {
@@ -1239,6 +2190,14 @@ impl LoweredProgram {
                     "function",
                     "block",
                     body.index(),
+                ));
+            }
+            if !self.patterns.contains(function.parameter_pattern) {
+                diagnostics.push(invalid_reference(
+                    &function.origin,
+                    "function",
+                    "pattern",
+                    function.parameter_pattern.index(),
                 ));
             }
             if function.body_origin.syntax != function.body_syntax {
@@ -1634,30 +2593,44 @@ fn module_origin(module: &SourceModule) -> Origin {
     }
 }
 
-fn runtime_item_sources(items: &[Item]) -> Vec<RuntimeItemSource> {
-    items
-        .iter()
-        .filter_map(|item| {
-            let category = match item {
-                Item::Binding(_) => RuntimeItemCategory::Binding,
-                Item::PatternBinding(_) => RuntimeItemCategory::PatternBinding,
-                Item::Assignment(_) => RuntimeItemCategory::Assignment,
-                Item::Return(_) => RuntimeItemCategory::Return,
-                Item::Break(_) => RuntimeItemCategory::Break,
-                Item::Continue(_) => RuntimeItemCategory::Continue,
-                Item::Expression(_) => RuntimeItemCategory::Expression,
-                _ => return None,
-            };
-            let syntax = item.syntax();
-            Some(RuntimeItemSource {
-                origin: Origin {
-                    syntax: syntax.id,
-                    span: syntax.span.clone(),
-                },
-                category,
-            })
-        })
-        .collect()
+/// Rejects compile-time-only expression nodes that earlier phases must have
+/// eliminated. These are lowering diagnostics rather than backend panics.
+fn reject_compile_time_expression(expression: &Expression) -> Result<(), Diagnostic> {
+    let message = match expression {
+        Expression::Unary(unary) => format!(
+            "unresolved `{}` operator expression reached lowering",
+            unary.operator.text()
+        ),
+        Expression::Binary(binary) => format!(
+            "unresolved `{}` operator expression reached lowering",
+            binary.operator.text()
+        ),
+        Expression::Quote(quote) => {
+            format!(
+                "unexpanded `{}` expression reached lowering",
+                quote.kind.name()
+            )
+        }
+        Expression::Splice(_) => "unexpanded splice expression reached lowering".to_owned(),
+        Expression::SyntaxArgument(_) => {
+            "unexpanded grouped syntax argument reached lowering".to_owned()
+        }
+        Expression::VisibilityArgument(_) => "visibility syntax reached lowering".to_owned(),
+        _ => return Ok(()),
+    };
+    Err(Diagnostic::new(expression.syntax().span.clone(), message))
+}
+
+/// Whether an expression has a place root, mirroring code generation's
+/// mutation-argument test: a direct symbol or an access chain ending in one.
+fn expression_has_place_root(module: &ResolvedModule, expression: &Expression) -> bool {
+    if module.symbol_for(expression.syntax().id).is_some() {
+        return true;
+    }
+    match expression {
+        Expression::Access(access) => expression_has_place_root(module, &access.value),
+        _ => false,
+    }
 }
 
 fn entry_resources(module: &TypedModule) -> Vec<LoweredEntryResource> {
@@ -1683,6 +2656,17 @@ fn capture_requires_cell(module: &TypedModule, symbol: SymbolId) -> bool {
     module.resolved().requires_initialization_state(symbol)
         || module.has_mutable_storage(symbol)
         || module.is_derived_symbol(symbol)
+}
+
+/// Whether a symbol's place is reached through a shared binding cell rather
+/// than direct storage. Mutable/derived/initialization-checked locals and
+/// captures use cells; module symbols live in global storage and mutated
+/// parameters arrive as caller-provided pointers.
+fn symbol_requires_cell(module: &TypedModule, symbol: SymbolId) -> bool {
+    if module.resolved().is_module_symbol(symbol) || module.is_mutated_parameter(symbol) {
+        return false;
+    }
+    capture_requires_cell(module, symbol)
 }
 
 /// Collects binding symbols from a resolved pattern in source order, matching
@@ -2090,15 +3074,33 @@ mod tests {
             .expect("a lowered program should have one executable entry")
     }
 
-    fn runtime_categories(program: &LoweredProgram, module: ModuleId) -> Vec<RuntimeItemCategory> {
-        program
+    fn item_category(kind: &LoweredItemKind) -> &'static str {
+        match kind {
+            LoweredItemKind::Binding(_) => "binding",
+            LoweredItemKind::PatternBinding(_) => "pattern-binding",
+            LoweredItemKind::Assignment(_) => "assignment",
+            LoweredItemKind::Return(_) => "return",
+            LoweredItemKind::Break(_) => "break",
+            LoweredItemKind::Continue => "continue",
+            LoweredItemKind::Expression(_) => "expression",
+        }
+    }
+
+    fn runtime_categories(program: &LoweredProgram, module: ModuleId) -> Vec<&'static str> {
+        let initializer = program
             .modules
             .get(module)
             .and_then(|info| program.initializers.get(info.initializer))
-            .expect("module should have an initializer")
-            .runtime_items
+            .expect("module should have an initializer");
+        program
+            .blocks
+            .get(initializer.body)
+            .expect("initializer body")
+            .items
             .iter()
-            .map(|item| item.category)
+            .map(|item| {
+                item_category(&program.items.get(*item).expect("lowered runtime item").kind)
+            })
             .collect()
     }
 
@@ -2110,7 +3112,7 @@ mod tests {
         Option<ModuleId>,
         bool,
         usize,
-        Vec<RuntimeItemCategory>,
+        Vec<&'static str>,
     )> {
         program
             .modules
@@ -2189,16 +3191,12 @@ mod tests {
     }
 
     #[test]
-    fn runtime_item_sources_follow_source_order_and_category() {
+    fn runtime_items_follow_source_order_and_category() {
         let program = snapshot("let first: I32 = 1\nlet second: I32 = first\nfirst == second\n");
         let (entry_id, _) = entry_module(&program);
         assert_eq!(
             runtime_categories(&program, entry_id),
-            vec![
-                RuntimeItemCategory::Binding,
-                RuntimeItemCategory::Binding,
-                RuntimeItemCategory::Expression
-            ]
+            vec!["binding", "binding", "expression"]
         );
     }
 
@@ -2213,10 +3211,7 @@ mod tests {
             .find(|(_, _, info)| info.companion && info.parent == Some(entry_id))
             .expect("the companion module should be lowered");
         assert_eq!(companion.2.parent, Some(entry_id));
-        assert_eq!(
-            runtime_categories(&program, companion.1),
-            vec![RuntimeItemCategory::Binding]
-        );
+        assert_eq!(runtime_categories(&program, companion.1), vec!["binding"]);
     }
 
     #[test]
@@ -2275,10 +3270,7 @@ mod tests {
         assert!(program.snapshot(&module).is_empty());
         let tools = program.modules.get(tools_id).expect("lowered file module");
         assert_eq!(tools.origin.syntax, declaration.id);
-        assert_eq!(
-            runtime_categories(&program, tools_id),
-            vec![RuntimeItemCategory::Binding]
-        );
+        assert_eq!(runtime_categories(&program, tools_id), vec!["binding"]);
         std::fs::remove_dir_all(root).expect("clean temp root");
     }
 
@@ -2448,7 +3440,12 @@ mod tests {
         );
         assert_eq!(lowered.body_syntax, source.body.syntax().id);
         assert_eq!(lowered.body_origin.syntax, source.body.syntax().id);
-        assert!(lowered.body.is_none());
+        let body = lowered
+            .body
+            .and_then(|body| program.blocks.get(body))
+            .expect("every function template should have a lowered body");
+        assert_eq!(body.origin, lowered.body_origin);
+        assert!(program.patterns.contains(lowered.parameter_pattern));
         assert_eq!(
             lowered.module,
             module
@@ -2604,6 +3601,38 @@ mod tests {
             .symbols
             .get(symbol)
             .unwrap_or_else(|| panic!("symbol {symbol:?} should be lowered"))
+    }
+
+    fn body_block<'a>(program: &'a LoweredProgram, function: &LoweredFunction) -> &'a LoweredBlock {
+        program
+            .blocks
+            .get(function.body.expect("every lowered function has a body"))
+            .expect("lowered body block")
+    }
+
+    fn body_items<'a>(
+        program: &'a LoweredProgram,
+        function: &LoweredFunction,
+    ) -> Vec<&'a LoweredItem> {
+        body_block(program, function)
+            .items
+            .iter()
+            .map(|item| program.items.get(*item).expect("lowered item"))
+            .collect()
+    }
+
+    fn lowered_pattern(program: &LoweredProgram, pattern: PatternId) -> &LoweredPattern {
+        program
+            .patterns
+            .get(pattern)
+            .unwrap_or_else(|| panic!("pattern {} should be lowered", pattern.index()))
+    }
+
+    fn lowered_place(program: &LoweredProgram, place: PlaceId) -> &LoweredPlace {
+        program
+            .places
+            .get(place)
+            .unwrap_or_else(|| panic!("place {} should be lowered", place.index()))
     }
 
     #[test]
@@ -3239,6 +4268,21 @@ mod tests {
         for (_, initializer) in program.initializers.iter() {
             lines.push(format!("initializer {initializer:?}"));
         }
+        for (_, expression) in program.expressions.iter() {
+            lines.push(format!("expression {expression:?}"));
+        }
+        for (_, pattern) in program.patterns.iter() {
+            lines.push(format!("pattern {pattern:?}"));
+        }
+        for (_, place) in program.places.iter() {
+            lines.push(format!("place {place:?}"));
+        }
+        for (_, block) in program.blocks.iter() {
+            lines.push(format!("block {block:?}"));
+        }
+        for (_, item) in program.items.iter() {
+            lines.push(format!("item {item:?}"));
+        }
         lines.push(format!("semantic ids {:?}", program.semantic_ids));
         lines
     }
@@ -3338,7 +4382,6 @@ mod tests {
             module: entry_id,
             executable_entry: false,
             resources: Vec::new(),
-            runtime_items: Vec::new(),
             body,
         });
         let diagnostics = program.validate();
@@ -3379,5 +4422,716 @@ mod tests {
                 .message
                 .contains("dangling block reference 4")
         );
+    }
+
+    #[test]
+    fn function_parameter_patterns_lower_every_source_form() {
+        let module = checked_program(concat!(
+            "def pair = (left: I32, right: I32) => left + right\n",
+            "def wildcard = (_: I32) => 0\n",
+            "def moved: move String -> String = move value => value\n",
+            "def singleton: True -> I32 = True => 0\n",
+            "def borrowed: Ref I32 -> I32 = (Ref inner) => inner\n",
+            "def literal: \"literal\" -> I32 = \"literal\" => 0\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (_, pair) = lowered_function(&program, "pair");
+        let product = lowered_pattern(&program, pair.parameter_pattern);
+        assert!(matches!(product.value_type, CheckedType::Product(_)));
+        let LoweredPatternKind::Product { elements, .. } = &product.kind else {
+            panic!("pair should lower to a product pattern");
+        };
+        assert_eq!(elements.len(), 2);
+        for element in elements {
+            let pattern = lowered_pattern(&program, *element);
+            let LoweredPatternKind::Binding {
+                symbol: Some(symbol),
+                singleton: None,
+                ..
+            } = &pattern.kind
+            else {
+                panic!("pair elements should bind symbols");
+            };
+            assert_eq!(pattern.value_type, CheckedType::I32);
+            assert!(program.symbols.get(*symbol).is_some());
+        }
+
+        let (_, wildcard) = lowered_function(&program, "wildcard");
+        let pattern = lowered_pattern(&program, wildcard.parameter_pattern);
+        let LoweredPatternKind::Product { elements, .. } = &pattern.kind else {
+            panic!("`(_: I32)` should lower to a single-element product");
+        };
+        assert_eq!(elements.len(), 1);
+        let element = lowered_pattern(&program, elements[0]);
+        assert!(matches!(element.kind, LoweredPatternKind::Wildcard));
+        assert_eq!(element.value_type, CheckedType::I32);
+
+        let (_, moved) = lowered_function(&program, "moved");
+        let pattern = lowered_pattern(&program, moved.parameter_pattern);
+        let LoweredPatternKind::Binding {
+            symbol: Some(_),
+            moved: true,
+            mutable: false,
+            ..
+        } = &pattern.kind
+        else {
+            panic!("a `move` parameter should lower to a moved binding");
+        };
+        assert_eq!(pattern.value_type, CheckedType::String);
+
+        let (_, singleton) = lowered_function(&program, "singleton");
+        let pattern = lowered_pattern(&program, singleton.parameter_pattern);
+        let LoweredPatternKind::Binding {
+            symbol: None,
+            singleton: Some(target),
+            ..
+        } = &pattern.kind
+        else {
+            panic!("a singleton parameter should lower to a name-like binding");
+        };
+        let source = module
+            .functions()
+            .iter()
+            .find(|function| function.name.contains("singleton"))
+            .expect("singleton function");
+        assert_eq!(
+            Some(*target),
+            module
+                .resolved()
+                .type_for_pattern(source.pattern.syntax().id)
+        );
+
+        let (_, borrowed) = lowered_function(&program, "borrowed");
+        let pattern = lowered_pattern(&program, borrowed.parameter_pattern);
+        let LoweredPatternKind::Product { elements, .. } = &pattern.kind else {
+            panic!("`(Ref inner)` should lower to a single-element product");
+        };
+        assert_eq!(elements.len(), 1);
+        let pattern = lowered_pattern(&program, elements[0]);
+        let LoweredPatternKind::Nominal {
+            target: Some(target),
+            name,
+            argument,
+        } = &pattern.kind
+        else {
+            panic!("`Ref inner` should lower to a nominal pattern");
+        };
+        assert_eq!(name, "Ref");
+        assert_eq!(
+            module.resolved().builtin_type(*target),
+            Some(BuiltinType::Ref)
+        );
+        let argument = lowered_pattern(&program, *argument);
+        assert!(matches!(
+            argument.kind,
+            LoweredPatternKind::Binding {
+                symbol: Some(_),
+                ..
+            }
+        ));
+        assert_eq!(argument.value_type, CheckedType::I32);
+
+        let (_, literal) = lowered_function(&program, "literal");
+        let pattern = lowered_pattern(&program, literal.parameter_pattern);
+        let LoweredPatternKind::Literal { literal } = &pattern.kind else {
+            panic!("a string literal parameter should lower to a literal pattern");
+        };
+        assert_eq!(literal, "\"literal\"");
+    }
+
+    #[test]
+    fn pattern_binding_items_lower_patterns_and_propagation_metadata() {
+        let module = checked_program(concat!(
+            "pub type Wrapper = pub ctor (value: I32)\n",
+            "pub type Ok T = pub ctor T\n",
+            "pub type IOError = pub ctor String\n",
+            "def read: () -> Ok I32 | IOError = () => Ok(42)\n",
+            "def patterns = () => {\n",
+            "  let (first, second) = (1, 2)\n",
+            "  let whole@(third, fourth) = (3, 4)\n",
+            "  let Wrapper inner = Wrapper (value: 5)\n",
+            "  let Ref payload = Ref 6\n",
+            "  let Ok(value)? = read()\n",
+            "  first + second + third + fourth + whole.0 + inner + payload + value\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (_, patterns) = lowered_function(&program, "patterns");
+        let items = body_items(&program, patterns);
+        assert_eq!(items.len(), 5);
+
+        let LoweredItemKind::PatternBinding(binding) = &items[0].kind else {
+            panic!("the product pattern binding should lower");
+        };
+        assert!(!binding.propagating && binding.propagation.is_none());
+        assert!(matches!(
+            lowered_pattern(&program, binding.pattern).kind,
+            LoweredPatternKind::Product { .. }
+        ));
+
+        let LoweredItemKind::PatternBinding(binding) = &items[1].kind else {
+            panic!("the at pattern binding should lower");
+        };
+        let LoweredPatternKind::At {
+            binding: at_binding,
+            pattern: nested,
+        } = &lowered_pattern(&program, binding.pattern).kind
+        else {
+            panic!("`whole@(third, fourth)` should lower to an at pattern");
+        };
+        assert!(matches!(
+            lowered_pattern(&program, *at_binding).kind,
+            LoweredPatternKind::Binding {
+                symbol: Some(_),
+                ..
+            }
+        ));
+        let LoweredPatternKind::Product { elements, .. } = &lowered_pattern(&program, *nested).kind
+        else {
+            panic!("the at pattern's nested pattern should be a product");
+        };
+        assert_eq!(elements.len(), 2);
+
+        let LoweredItemKind::PatternBinding(binding) = &items[2].kind else {
+            panic!("the nominal pattern binding should lower");
+        };
+        let LoweredPatternKind::Nominal {
+            name,
+            target: Some(target),
+            ..
+        } = &lowered_pattern(&program, binding.pattern).kind
+        else {
+            panic!("`Wrapper inner` should lower to a nominal pattern");
+        };
+        assert_eq!(name, "Wrapper");
+        assert_eq!(
+            program.types.get(*target).map(|info| info.name.as_str()),
+            Some("Wrapper")
+        );
+
+        let LoweredItemKind::PatternBinding(binding) = &items[3].kind else {
+            panic!("the reference pattern binding should lower");
+        };
+        assert!(matches!(
+            lowered_pattern(&program, binding.pattern).kind,
+            LoweredPatternKind::Nominal { .. }
+        ));
+
+        let LoweredItemKind::PatternBinding(binding) = &items[4].kind else {
+            panic!("the propagating pattern binding should lower");
+        };
+        assert!(binding.propagating);
+        let propagation = binding.propagation.as_ref().expect("checked propagation");
+        assert_eq!(propagation.success_index, 0);
+        let pattern = lowered_pattern(&program, binding.pattern);
+        assert!(matches!(
+            &pattern.kind,
+            LoweredPatternKind::Nominal { name, .. } if name == "Ok"
+        ));
+        assert_eq!(pattern.value_type, propagation.source);
+    }
+
+    #[test]
+    fn assignment_targets_lower_to_explicit_places() {
+        let module = checked_program(concat!(
+            "type Wrapper = ctor (value: I32)\n",
+            "type Counter = ctor I32\n",
+            "def places = (mut direct: I32, mut pair: (I32, I32), mut wrapper: Wrapper, mut counter: Counter, mut values: (I32; 2)) => {\n",
+            "  direct = 1\n",
+            "  pair.0 = 2\n",
+            "  wrapper.value = 3\n",
+            "  counter.* = 4\n",
+            "  values[0] = 5\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (_, places) = lowered_function(&program, "places");
+        let items = body_items(&program, places);
+        assert_eq!(items.len(), 5);
+
+        let LoweredItemKind::Assignment(assignment) = &items[0].kind else {
+            panic!("`direct = 1` should lower to an assignment item");
+        };
+        let LoweredPlaceKind::Symbol { symbol } = &lowered_place(&program, assignment.target).kind
+        else {
+            panic!("a parameter target should lower to symbol storage");
+        };
+        assert_eq!(assignment.initialization_symbol, Some(*symbol));
+        assert!(assignment.mutate_index.is_none());
+        assert!(!assignment.drop_previous && !assignment.signal);
+
+        let LoweredItemKind::Assignment(assignment) = &items[1].kind else {
+            panic!("`pair.0 = 2` should lower to an assignment item");
+        };
+        let LoweredPlaceKind::ProductElement {
+            base,
+            index: 0,
+            slice: false,
+        } = &lowered_place(&program, assignment.target).kind
+        else {
+            panic!("`pair.0` should lower to a product element place");
+        };
+        assert_eq!(
+            assignment.initialization_symbol,
+            program.place_root_symbol(*base)
+        );
+
+        let LoweredItemKind::Assignment(assignment) = &items[2].kind else {
+            panic!("`wrapper.value = 3` should lower to an assignment item");
+        };
+        assert!(matches!(
+            &lowered_place(&program, assignment.target).kind,
+            LoweredPlaceKind::Representation { .. }
+        ));
+
+        let LoweredItemKind::Assignment(assignment) = &items[3].kind else {
+            panic!("`counter.* = 4` should lower to an assignment item");
+        };
+        let LoweredPlaceKind::Representation { base } =
+            &lowered_place(&program, assignment.target).kind
+        else {
+            panic!("`counter.*` should lower to a representation place");
+        };
+        assert!(matches!(
+            &lowered_place(&program, *base).kind,
+            LoweredPlaceKind::Symbol { .. }
+        ));
+
+        let LoweredItemKind::Assignment(assignment) = &items[4].kind else {
+            panic!("`values[0] = 5` should lower to an assignment item");
+        };
+        let LoweredPlaceKind::Indexed { base, .. } =
+            &lowered_place(&program, assignment.target).kind
+        else {
+            panic!("`values[0]` should lower to an indexed place");
+        };
+        assert!(matches!(
+            &lowered_place(&program, *base).kind,
+            LoweredPlaceKind::Symbol { .. }
+        ));
+        assert!(assignment.mutate_index.is_some());
+        assert!(assignment.initialization_symbol.is_none());
+    }
+
+    #[test]
+    fn assignment_places_cross_references_and_materialize_temporaries() {
+        let module = checked_program(concat!(
+            "def make_ref: () -> Ref (I32, I32) = () => Ref (1, 2)\n",
+            "def through_ref = (mut reference: Ref (I32, I32)) => { reference.0 = 9 }\n",
+            "def through_call = () => { (make_ref())[0] = 9 }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (_, through_ref) = lowered_function(&program, "through_ref");
+        let items = body_items(&program, through_ref);
+        let LoweredItemKind::Assignment(assignment) = &items[0].kind else {
+            panic!("the reference assignment should lower");
+        };
+        let LoweredPlaceKind::ProductElement { base, index: 0, .. } =
+            &lowered_place(&program, assignment.target).kind
+        else {
+            panic!("`reference.0` should lower to a product element");
+        };
+        let deref_place = lowered_place(&program, *base);
+        let LoweredPlaceKind::Dereference {
+            reference,
+            dereference: payloads,
+        } = &deref_place.kind
+        else {
+            panic!("crossing `Ref` should lower to a dereference place");
+        };
+        assert_eq!(payloads.len(), 1);
+        assert_eq!(payloads.last(), Some(&deref_place.value_type));
+        assert!(program.expressions.contains(*reference));
+        assert!(assignment.initialization_symbol.is_none());
+
+        let (_, through_call) = lowered_function(&program, "through_call");
+        let items = body_items(&program, through_call);
+        let LoweredItemKind::Assignment(assignment) = &items[0].kind else {
+            panic!("the call-rooted assignment should lower");
+        };
+        let LoweredPlaceKind::Indexed { base, .. } =
+            &lowered_place(&program, assignment.target).kind
+        else {
+            panic!("`(make_ref())[0]` should lower to an indexed place");
+        };
+        let LoweredPlaceKind::Temporary { expression } = &lowered_place(&program, *base).kind
+        else {
+            panic!("a non-place indexed base should materialize a temporary");
+        };
+        assert!(program.expressions.contains(*expression));
+    }
+
+    #[test]
+    fn captured_cell_and_resource_places_are_explicit() {
+        let module = checked_program(concat!(
+            "def counter = () => {\n",
+            "  let mut count: I32 = 0\n",
+            "  let bump = () => { count = count + 1; count }\n",
+            "  bump ()\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let (_, bump) = lowered_function(&program, "bump");
+        let items = body_items(&program, bump);
+        let LoweredItemKind::Assignment(assignment) = &items[0].kind else {
+            panic!("the captured assignment should lower");
+        };
+        let LoweredPlaceKind::CapturedCell { symbol } =
+            &lowered_place(&program, assignment.target).kind
+        else {
+            panic!("a captured mutable local should lower to a captured cell");
+        };
+        assert!(lowered_symbol(&program, *symbol).captured_cell);
+
+        let module = checked_program(concat!(
+            "type Counter = ctor (value: I32)\n",
+            "def increment: () ->{mut Counter} () = () => {\n",
+            "  (resource Counter).value = (resource Counter).value + 1\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let (_, increment) = lowered_function(&program, "increment");
+        let items = body_items(&program, increment);
+        let LoweredItemKind::Assignment(assignment) = &items[0].kind else {
+            panic!("the resource assignment should lower");
+        };
+        let LoweredPlaceKind::Representation { base } =
+            &lowered_place(&program, assignment.target).kind
+        else {
+            panic!("`(resource Counter).value` should lower to a representation place");
+        };
+        let resource = lowered_place(&program, *base);
+        let LoweredPlaceKind::Resource { resource: checked } = &resource.kind else {
+            panic!("the representation base should be a resource place");
+        };
+        assert_eq!(resource.value_type, checked.value_type);
+        let Some(id) = nominal_type_id(&resource.value_type) else {
+            panic!("a resource type should be nominal");
+        };
+        assert_eq!(
+            program.types.get(id).map(|info| info.name.as_str()),
+            Some("Counter")
+        );
+    }
+
+    #[test]
+    fn module_items_record_binding_assignment_and_statement_metadata() {
+        let program = snapshot(concat!(
+            "const answer: I32 = 42\n",
+            "let signal count: I32 = 0\n",
+            "let doubled: I32 = count + count\n",
+            "def generic: <T> move T -> T = move value => value\n",
+            "let mut mutable: I32 = 1\n",
+            "mutable = 2\n",
+            "count = 1\n",
+            "type Handle = ctor I32\n",
+            "impl Drop Handle { def drop = Handle value => () }\n",
+            "def discard = () => {\n",
+            "  let owned: Handle = Handle 1\n",
+            "  owned\n",
+            "  ()\n",
+            "}\n",
+        ));
+        let (entry_id, _) = entry_module(&program);
+        let initializer = program
+            .initializers
+            .get(program.modules.get(entry_id).unwrap().initializer)
+            .expect("entry initializer");
+        let items = program
+            .blocks
+            .get(initializer.body)
+            .expect("initializer body")
+            .items
+            .iter()
+            .map(|item| program.items.get(*item).expect("item"))
+            .collect::<Vec<_>>();
+
+        let LoweredItemKind::Binding(binding) = &items[0].kind else {
+            panic!("the const binding should lower");
+        };
+        assert!(binding.compile_time_only);
+        assert!(binding.symbol.is_some());
+        assert!(binding.value.is_some());
+        assert!(
+            binding
+                .symbol
+                .is_none_or(|symbol| program.symbols.get(symbol).is_none()),
+            "compile-time-only bindings stay outside the runtime symbol catalog"
+        );
+
+        let LoweredItemKind::Binding(binding) = &items[1].kind else {
+            panic!("the signal binding should lower");
+        };
+        assert!(binding.signal && !binding.derived);
+        assert!(!binding.cell, "module bindings use global storage");
+        assert!(binding.value.is_some());
+        let signal_symbol = binding.symbol.expect("the signal binding symbol");
+
+        let LoweredItemKind::Binding(binding) = &items[2].kind else {
+            panic!("the derived binding should lower");
+        };
+        assert!(binding.derived && !binding.signal);
+
+        let LoweredItemKind::Binding(binding) = &items[3].kind else {
+            panic!("the generic binding should lower");
+        };
+        assert!(binding.generic);
+        assert!(binding.value.is_some());
+
+        let LoweredItemKind::Binding(binding) = &items[4].kind else {
+            panic!("the mutable binding should lower");
+        };
+        assert!(!binding.cell);
+
+        let LoweredItemKind::Assignment(assignment) = &items[5].kind else {
+            panic!("the mutable global assignment should lower");
+        };
+        assert!(assignment.mutate_index.is_none());
+        assert!(assignment.initialization_symbol.is_some());
+        assert!(!assignment.signal && !assignment.drop_previous);
+
+        let LoweredItemKind::Assignment(assignment) = &items[6].kind else {
+            panic!("the signal assignment should lower");
+        };
+        assert!(assignment.signal);
+        assert_eq!(assignment.initialization_symbol, Some(signal_symbol));
+
+        let (_, discard) = lowered_function(&program, "discard");
+        let items = body_items(&program, discard);
+        let LoweredItemKind::Expression(statement) = &items[1].kind else {
+            panic!("the discarded handle should lower to a statement");
+        };
+        assert!(statement.drop_result);
+        assert!(matches!(
+            program
+                .expressions
+                .get(statement.expression)
+                .expect("statement expression")
+                .value_type,
+            CheckedType::Distinct { .. }
+        ));
+    }
+
+    #[test]
+    fn function_bodies_lower_into_blocks_with_separate_results() {
+        let module = checked_program(concat!(
+            "def expression_body = () => 42\n",
+            "def block_body = () => { let value: I32 = 1; value }\n",
+            "def early = () => { return 1; 0 }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let (_, expression_body) = lowered_function(&program, "expression_body");
+        let block = body_block(&program, expression_body);
+        assert!(block.items.is_empty());
+        let result = block.result.expect("the body expression is the result");
+        assert_eq!(
+            program.expressions.get(result).unwrap().value_type,
+            CheckedType::I32
+        );
+
+        let (_, block_body) = lowered_function(&program, "block_body");
+        let block = body_block(&program, block_body);
+        assert_eq!(block.items.len(), 1);
+        assert!(matches!(
+            program.items.get(block.items[0]).unwrap().kind,
+            LoweredItemKind::Binding(_)
+        ));
+        let result = block.result.expect("the tail expression is the result");
+        assert!(program.expressions.contains(result));
+        assert!(
+            !block.items.iter().any(|item| matches!(
+                &program.items.get(*item).unwrap().kind,
+                LoweredItemKind::Expression(statement) if statement.expression == result
+            )),
+            "a block result must not also be an item"
+        );
+
+        let (_, early) = lowered_function(&program, "early");
+        let block = body_block(&program, early);
+        assert_eq!(block.items.len(), 1);
+        let LoweredItemKind::Return(item) = &program.items.get(block.items[0]).unwrap().kind else {
+            panic!("`return` should lower to a return item");
+        };
+        assert!(program.expressions.contains(item.value));
+        let result = block
+            .result
+            .expect("the unreachable tail is still the result");
+        assert_eq!(
+            program.expressions.get(result).unwrap().value_type,
+            CheckedType::I32
+        );
+    }
+
+    #[test]
+    fn lowering_rejects_compile_time_only_runtime_nodes() {
+        let module = checked_program("let answer: I32 = 1\n");
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+
+        let splice = Item::RepeatedItemSplice(staple_syntax::RepeatedItemSplice {
+            syntax: staple_syntax::Syntax::compiler(),
+            name: "items".to_owned(),
+        });
+        let diagnostic = program
+            .lower_item(&module, &splice)
+            .expect_err("a repeated item splice should be rejected");
+        assert!(diagnostic.message.contains("repeated item splice"));
+
+        let splice = Item::VisibilitySplice(staple_syntax::VisibilitySplice {
+            syntax: staple_syntax::Syntax::compiler(),
+            name: "item".to_owned(),
+            item: Box::new(Item::Expression(Expression::Integer(
+                staple_syntax::IntegerExpression {
+                    syntax: staple_syntax::Syntax::compiler(),
+                    literal: "1".to_owned(),
+                },
+            ))),
+        });
+        let diagnostic = program
+            .lower_item(&module, &splice)
+            .expect_err("a visibility splice should be rejected");
+        assert!(diagnostic.message.contains("visibility splice"));
+
+        let source = staple_syntax::parse("1 + 2").expect("binary source should parse");
+        let Some(Item::Expression(expression)) = source.items.first() else {
+            panic!("`1 + 2` should parse to an expression item");
+        };
+        let diagnostic = reject_compile_time_expression(expression)
+            .expect_err("an unresolved binary expression should be rejected");
+        assert!(diagnostic.message.contains("unresolved `+`"));
+
+        let source = staple_syntax::parse("-1").expect("unary source should parse");
+        let Some(Item::Expression(expression)) = source.items.first() else {
+            panic!("`-1` should parse to an expression item");
+        };
+        let diagnostic = reject_compile_time_expression(expression)
+            .expect_err("an unresolved unary expression should be rejected");
+        assert!(diagnostic.message.contains("unresolved `-`"));
+    }
+
+    #[test]
+    fn validator_rejects_dangling_pattern_place_and_item_references() {
+        let module = checked_program(concat!(
+            "def places = (mut value: I32) => { value = value + 1; value }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        program.places.values[0].kind = LoweredPlaceKind::ProductElement {
+            base: PlaceId::from_index(999_999),
+            index: 0,
+            slice: false,
+        };
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("dangling place reference")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        program.patterns.values[0].kind = LoweredPatternKind::At {
+            binding: PatternId::from_index(999_999),
+            pattern: PatternId::from_index(999_998),
+        };
+        let diagnostics = program.validate();
+        assert_eq!(
+            diagnostics
+                .iter()
+                .filter(|diagnostic| diagnostic.message.contains("at pattern"))
+                .count(),
+            2,
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let (item_id, value) = program
+            .items
+            .iter()
+            .find_map(|(id, item)| match &item.kind {
+                LoweredItemKind::Assignment(assignment) => Some((id, assignment.value)),
+                _ => None,
+            })
+            .expect("the assignment should lower");
+        program.items.values[item_id.index()].kind =
+            LoweredItemKind::Assignment(LoweredAssignmentItem {
+                target: PlaceId::from_index(999_999),
+                value,
+                mutate_index: None,
+                initialization_symbol: None,
+                drop_previous: false,
+                signal: false,
+            });
+        let diagnostics = program.validate();
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("dangling place reference")),
+            "unexpected diagnostics: {diagnostics:?}"
+        );
+    }
+
+    #[test]
+    fn stage_2_3_arenas_are_stable_across_repeated_lowering() {
+        let module = checked_program(concat!(
+            "pub type Wrapper = pub ctor (value: I32)\n",
+            "pub type Ok T = pub ctor T\n",
+            "pub type IOError = pub ctor String\n",
+            "def read: () -> Ok I32 | IOError = () => Ok(42)\n",
+            "let signal count: I32 = 0\n",
+            "let doubled: I32 = count + count\n",
+            "count = 1\n",
+            "def places = (mut pair: (I32, I32), mut values: (I32; 2)) => {\n",
+            "  pair.0 = 1\n",
+            "  values[0] = 2\n",
+            "}\n",
+            "def patterns = () => {\n",
+            "  let (first, second) = (1, 2)\n",
+            "  let Ok(value)? = read()\n",
+            "  let Wrapper inner = Wrapper (value: first + second + value)\n",
+            "  inner\n",
+            "}\n",
+        ));
+        let mut first = LoweredProgram::default();
+        let mut second = LoweredProgram::default();
+        let diagnostics = first.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(first.validate().is_empty());
+        assert!(second.snapshot(&module).is_empty());
+        assert!(second.validate().is_empty());
+
+        let first_snapshot = normalized_program_snapshot(&first);
+        assert!(!first_snapshot.is_empty());
+        assert_eq!(first_snapshot, normalized_program_snapshot(&second));
     }
 }

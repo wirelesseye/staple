@@ -5792,6 +5792,12 @@ impl TypeChecker {
                         self.check_expression(module, &assignment.value);
                         return CheckedType::empty_product();
                     };
+                    // An indexed assignment target is a checked place whose
+                    // element type is the resolved `MutateIndex` output.
+                    // Recording it keeps every runtime expression typed for
+                    // lowering, which never reconstructs types from syntax.
+                    self.expression_types
+                        .insert(assignment.target.syntax().id, arguments[2].clone());
                     if let Expression::Integer(literal) = index.index.as_ref()
                         && literal
                             .literal
@@ -6095,6 +6101,10 @@ impl TypeChecker {
         let Pattern::Nominal(pattern) = root else {
             return;
         };
+        // The nominal root of a propagating binding is a runtime pattern;
+        // record its checked source type for lowering.
+        self.pattern_types
+            .insert(pattern.syntax.id, value_type.clone());
         let CheckedType::Sum(sum) = value_type else {
             if *value_type != CheckedType::Error {
                 self.diagnostics.push(Diagnostic::new(

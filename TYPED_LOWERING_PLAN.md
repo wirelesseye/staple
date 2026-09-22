@@ -17,7 +17,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - The initial validator rejects functions or implicit thunks that have no checked function type.
 - All CLI and compiler code-generation tests now pass through `Lowerer`.
 - `cargo check --workspace` and `cargo test --workspace` pass. The workspace test run covers 937 tests.
-- **Stage 2 is in progress.** Stage 2.1 and all of Stage 2.2 are complete. Lowering now owns validated declaration catalogs for modules, initializer roots, functions, symbols, types, traits, trait methods, trait implementations, and standard/runtime semantic IDs, with deterministic validation and transition comparisons. Stage 2.3 (lower patterns, places, and runtime items) is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
+- **Stage 2 is in progress.** Stage 2.1, all of Stage 2.2, and Stage 2.3 are complete. Lowering now owns validated declaration catalogs plus lowered patterns, assignment places, runtime items, function bodies, and module initializer bodies, with deterministic validation and transition comparisons. Stage 2.4 (lower ordinary expressions and control flow) is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
 - The detailed Stage 2 implementation sequence is maintained in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
 
 ## Public Interfaces
@@ -43,7 +43,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - Changed all public `CodeGenerator` entry points to accept `&LoweredModule`; direct public emission from `TypedModule` is no longer available.
 - Kept the old backend reachable only through a private transitional `LoweredModule::typed` bridge. Removing this bridge requires the explicit arenas and metadata introduced in Stage 2.
 
-### Stage 2 - Lower Existing Typed Programs Completely (In Progress: 2.1 and 2.2 Done)
+### Stage 2 - Lower Existing Typed Programs Completely (In Progress: 2.1-2.3 Done)
 
 - Add owned, arena-backed lowered modules, expressions, patterns, initializers, callable targets, function templates, trait evidence, closure construction, ownership facts, and helper requirements alongside the temporary legacy backend payload.
 - Preserve source spans and syntax IDs on lowered nodes for diagnostics.
@@ -76,6 +76,11 @@ Progress:
 - Stage 2.2 Step 7 populated type-checker-selected standard/runtime semantic IDs, canonical IO/reactive resources, the string representation, and the entry-reactive requirement. Absent subsystems stay `None`; present IDs are validated against the trait/type catalogs without name-based rediscovery.
 - Stage 2.2 Step 8 completed catalog validation (unique semantic IDs, lookup agreement, module parents and one-initializer-per-module, function/symbol/type/trait cross-references, semantic-ID families) and added normalized repeated-lowering snapshots plus `TypedModule` transition comparisons. Stage 2.2 is complete. Stage 2.3 begins lowering patterns, places, and runtime items into the existing arenas.
 - The private legacy `TypedModule` payload is now boxed inside `LoweredModule`, reducing transitional stack-frame pressure without changing the public lowering boundary or backend behavior.
+- Stage 2.3 expanded the lowered arenas: patterns now cover wildcard, binding, product, nominal, literal, and at forms with checked types and bound symbols; a new place arena normalizes assignment targets into symbol storage, captured cell, temporary, resource, dereference, product element, representation, and `MutateIndex`-dispatched indexed access.
+- Runtime items replace the Stage 2.2 source roots: module initializers own their ordered items, every function template records its parameter pattern and lowered body block, and items carry binding, pattern-binding, assignment, return, break, continue, and expression-statement metadata (initialization, propagation, `MutateIndex` dispatch, previous-value drop, and signal writeback).
+- Stage 2.3 allocates expression headers with checked type/effects/coercion/moved symbols for runtime-item payloads and place bases, lowering block expressions into item sequences plus a tail result; `Unlowered` kinds mark the families Stage 2.4 replaces. Compile-time-only source items are omitted, while unexpanded splices, operator expressions, and quote/splice nodes become lowering diagnostics.
+- Type checking now records `MutateIndex` output types on indexed assignment targets and propagating nominal root pattern types; compiler-synthesized implicit-thunk parameters fall back to the checked signature parameter and body origin, and diverged expressions lower as unreachable `Never` values.
+- Stage 2.3 validation checks every new pattern, place, item, and function-parameter-pattern reference, and repeated-lowering snapshots now include expressions, patterns, places, blocks, and items.
 
 > **Complex stage:** The AST and backend support many specialized constructs, including defaults, reactive bindings, structural indexing, ownership cleanup, and coroutines. This stage may need separate breakdown plans by expression family and runtime subsystem during implementation.
 
@@ -144,7 +149,8 @@ Progress:
 - Existing CLI compile/run, object emission, LLVM verification, module, ownership, trait, reactive, and coroutine coverage now exercises the lowering boundary.
 - Stage 2.1 focused tests cover empty deterministic arenas, dense insertion-ordered typed IDs, and dangling child detection. `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check` pass after the schema addition.
 - After Stage 2.2 Step 2, `cargo test --workspace` passes 943 tests, including the default-stack regression for block-scoped module initialization.
-- Stage 2.2 Steps 3-8 added focused lowering coverage for module/initializer catalogs, function templates and thunks, symbol storage classes, compact type/trait metadata, subsystem semantic IDs, validation, and repeated-lowering determinism. The complete `cargo test --workspace` regression passes 972 tests after Stage 2.2 Step 8.
+- Stage 2.2 Steps 3-8 added focused lowering coverage for module/initializer catalogs, function templates and thunks, symbol storage classes, compact type/trait metadata, subsystem semantic IDs, validation, and repeated-lowering determinism.
+- Stage 2.3 added focused coverage for every function parameter pattern form, pattern-binding items (including at patterns and checked propagation), all assignment place operations, captured-cell and resource places, module binding/assignment/statement metadata, function body/result normalization, compile-time-only rejection, dangling pattern/place/item validation, and deterministic repeated lowering over the expanded arenas. The complete `cargo test --workspace` regression passes 982 tests after Stage 2.3.
 
 ### Remaining Verification
 

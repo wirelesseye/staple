@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and all of Stage 2.2 are complete. Stage 2.3 (lower patterns, places, and runtime items) is next.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1, all of Stage 2.2, and Stage 2.3 are complete. Stage 2.4 (lower ordinary expressions and control flow) is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -104,7 +104,7 @@ Progress:
 
 > **Complexity note:** The metadata currently lives across resolver, type-checker, ownership, reactive, and coroutine side tables. This substage may need a focused inventory plan before implementation begins.
 
-## Stage 2.3 - Lower Patterns, Places, and Runtime Items
+## Stage 2.3 - Lower Patterns, Places, and Runtime Items (Done)
 
 - Lower wildcard, binding, product, nominal, literal, reference/slice, and at-pattern forms with checked types and bound symbols.
 - Normalize assignment targets into explicit place operations: symbol storage, dereference, product element, representation access, slice/index access, and captured cell.
@@ -113,6 +113,21 @@ Progress:
 - Reject any macro, import, declaration, visibility splice, unresolved unary/binary node, or other compile-time-only item that unexpectedly survives into a runtime block.
 
 **Gate:** All runtime items and patterns can be reconstructed from lowered arenas without consulting their source AST nodes.
+
+Completed:
+
+- Added a `PlaceId` arena with `LoweredPlace`/`LoweredPlaceKind` and expanded `LoweredPatternKind` to wildcard, binding, product, nominal, literal, and at forms. Every pattern carries its checked type, bound symbols, singleton targets, and typed child pattern IDs.
+- Assignment targets normalize to explicit place trees: symbol storage, captured cell, temporary (a non-place indexed base), resource, dereference across `Ref` payloads, product element (including bounds-checked `Slice` elements), representation, and `MutateIndex`-dispatched indexed access.
+- Replaced the Stage 2.2 `RuntimeItemSource` roots with lowered items. Module initializers now own their ordered runtime items in their body block, and every function template records its lowered parameter pattern and body block.
+- Extended `LoweredItemKind` with binding, pattern-binding, assignment, return, break, continue, and expression-statement payloads. Binding items record compile-time-only/generic/derived/signal/cell/initialization facts; pattern bindings record checked propagation metadata; assignment items record the selected `MutateIndex` dispatch, initialization-state symbol, previous-value drop, and signal writeback; expression statements record discard-drop behavior.
+- Stage 2.3 allocates expression headers (origin, checked type, effects, coercion, moved symbols) for runtime-item payloads and place bases and lowers block expressions into item sequences plus a tail result. `LoweredExpressionKind::Unlowered` marks the families Stage 2.4 replaces; the expression arena is memoized by syntax ID so later stages reuse the same node.
+- Compile-time-only source items (declarations, imports, modifiers, and expanded item-producing macro markers) are omitted exactly as resolution and code generation treat them. Unexpanded visibility/repeated item splices, unresolved unary/binary operator expressions, and unexpanded quote/splice/syntax-argument expressions are lowering diagnostics instead of backend panics.
+- Type checking now records the resolved `MutateIndex` output type on indexed assignment targets and the checked type of a propagating binding's nominal root; compiler-synthesized implicit-thunk parameter patterns fall back to the checked signature parameter and the thunk body origin.
+- Expressions whose checking diverged record no type; lowering treats them as unreachable `Never` values, matching the checker's divergence handling.
+- Validation now checks every new pattern, place, item, and function-parameter-pattern reference. Repeated-lowering snapshots include expressions, patterns, places, blocks, and items.
+- Break/continue item kinds are implemented but populate once loop-body blocks lower in Stage 2.4, since loop bodies are expressions; match-arm patterns and `CheckedMatch` metadata likewise arrive with match-expression lowering in Stage 2.4.
+- Added focused coverage for every parameter pattern form, pattern-binding items (including at and propagation), all place operations, captured-cell and resource places, module binding/assignment/statement metadata, function body/result normalization, compile-time-only rejection, dangling-reference validation, and deterministic repeated lowering.
+- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (982 tests), and `git diff --check`.
 
 ## Stage 2.4 - Lower Ordinary Expressions and Control Flow
 
