@@ -17,7 +17,8 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - The initial validator rejects functions or implicit thunks that have no checked function type.
 - All CLI and compiler code-generation tests now pass through `Lowerer`.
 - `cargo check --workspace` and `cargo test --workspace` pass. The workspace test run covers 937 tests.
-- **Stages 2-6 remain.** Stage 2 must replace the transitional payload with explicit lowered arenas before the backend can become independent of the typed AST and side tables.
+- **Stages 2-6 remain.** Stage 2 will add complete explicit lowered arenas alongside the temporary legacy payload; Stage 5 removes that payload after migrating the backend.
+- The detailed Stage 2 implementation sequence is maintained in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
 
 ## Public Interfaces
 
@@ -42,22 +43,23 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - Changed all public `CodeGenerator` entry points to accept `&LoweredModule`; direct public emission from `TypedModule` is no longer available.
 - Kept the old backend reachable only through a private transitional `LoweredModule::typed` bridge. Removing this bridge requires the explicit arenas and metadata introduced in Stage 2.
 
-### Stage 2 - Lower Existing Typed Programs Completely (Next)
+### Stage 2 - Lower Existing Typed Programs Completely (Next; Breakdown Ready)
 
-- Replace the cloned `TypedModule` payload with owned, arena-backed lowered modules, expressions, patterns, initializers, callable targets, function instances, trait evidence, closure construction, ownership facts, and helper requirements.
+- Add owned, arena-backed lowered modules, expressions, patterns, initializers, callable targets, function templates, trait evidence, closure construction, ownership facts, and helper requirements alongside the temporary legacy backend payload.
 - Preserve source spans and syntax IDs on lowered nodes for diagnostics.
 - Lower every current expression, pattern, binding, initializer, implicit thunk, and coroutine plan.
 - Record concrete type/effect information, coercions, accesses, selected symbols, storage requirements, ownership operations, and ordered resource arguments directly on lowered nodes.
 - Represent calls explicitly as:
-  - direct function-instance calls;
+  - direct known-function calls, with instances assigned in Stage 3;
   - indirect concrete-closure calls;
   - external calls;
   - intrinsics;
   - concrete trait implementation calls;
   - structural trait calls.
-- Represent closure creation with its code target, capture order, capture ownership, environment inputs, and required concrete adapter.
+- Represent closure creation with its function target, capture order, capture ownership, environment inputs, and required adapter kind; Stage 3 assigns concrete code instances.
 - Carry enough cleanup and ownership metadata for the backend to preserve moves, borrows, drops, early returns, propagation, and cancellation without querying `TypedModule`.
 - Expand the validator to cover dangling arena references, missing or unresolved targets, incomplete evidence, and invalid instance references.
+- Follow the detailed sequence and gates in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
 
 > **Complex stage:** The AST and backend support many specialized constructs, including defaults, reactive bindings, structural indexing, ownership cleanup, and coroutines. This stage may need separate breakdown plans by expression family and runtime subsystem during implementation.
 
