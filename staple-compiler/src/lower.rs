@@ -404,12 +404,12 @@ fn invalid_reference(origin: &Origin, owner: &str, target: &str, index: usize) -
 #[derive(Debug, Clone)]
 pub struct LoweredModule {
     program: LoweredProgram,
-    typed: TypedModule,
+    typed: Box<TypedModule>,
 }
 
 impl LoweredModule {
     pub(crate) fn typed(&self) -> &TypedModule {
-        &self.typed
+        self.typed.as_ref()
     }
 }
 
@@ -429,7 +429,7 @@ impl Lowerer {
         if diagnostics.is_empty() {
             Ok(LoweredModule {
                 program,
-                typed: module.clone(),
+                typed: Box::new(module.clone()),
             })
         } else {
             Err(diagnostics)
@@ -458,6 +458,25 @@ fn validate_checked_module(module: &TypedModule) -> Vec<Diagnostic> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
+
+    use crate::{NameResolver, ProgramLoader, TypeChecker};
+
+    fn checked_program(source: &str) -> TypedModule {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler crate should have a workspace parent");
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("test source should load");
+        let resolved = NameResolver::new()
+            .resolve_program(program)
+            .expect("test source should resolve");
+        TypeChecker::new()
+            .check(resolved)
+            .expect("test source should type check")
+    }
 
     #[test]
     fn empty_program_has_valid_deterministic_arenas() {
@@ -533,6 +552,79 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("instead of ModuleId(11)"))
         );
+    }
+
+    #[test]
+    fn checked_inventory_apis_are_complete_and_semantically_ordered() {
+        let module = checked_program("let answer = 42\n");
+        let resolved = module.resolved();
+
+        let symbol_ids = resolved
+            .symbols_in_id_order()
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect::<Vec<_>>();
+        assert!(symbol_ids.windows(2).all(|ids| ids[0] < ids[1]));
+        let parameter_ids = resolved
+            .type_parameters_in_id_order()
+            .into_iter()
+            .map(|parameter| parameter.id.0)
+            .collect::<Vec<_>>();
+        assert!(parameter_ids.windows(2).all(|ids| ids[0] < ids[1]));
+        let type_ids = resolved
+            .types_in_id_order()
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect::<Vec<_>>();
+        assert!(type_ids.windows(2).all(|ids| ids[0] < ids[1]));
+        let trait_ids = resolved
+            .traits_in_id_order()
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect::<Vec<_>>();
+        assert!(trait_ids.windows(2).all(|ids| ids[0] < ids[1]));
+        let method_ids = resolved
+            .trait_methods_in_id_order()
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect::<Vec<_>>();
+        assert!(method_ids.windows(2).all(|ids| ids[0] < ids[1]));
+
+        let thunk_ids = module
+            .implicit_thunks_in_id_order()
+            .into_iter()
+            .map(|function| function.id.0)
+            .collect::<Vec<_>>();
+        assert!(thunk_ids.windows(2).all(|ids| ids[0] < ids[1]));
+        let evaluator_symbols = module
+            .derived_evaluators_in_symbol_order()
+            .into_iter()
+            .map(|(symbol, _)| symbol.0)
+            .collect::<Vec<_>>();
+        assert!(
+            evaluator_symbols
+                .windows(2)
+                .all(|symbols| symbols[0] < symbols[1])
+        );
+        let checked_method_ids = module
+            .trait_method_types_in_id_order()
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect::<Vec<_>>();
+        assert!(checked_method_ids.windows(2).all(|ids| ids[0] < ids[1]));
+        let checked_trait_ids = module
+            .trait_parameter_arguments_in_id_order()
+            .into_iter()
+            .map(|(id, _)| id.0)
+            .collect::<Vec<_>>();
+        assert!(checked_trait_ids.windows(2).all(|ids| ids[0] < ids[1]));
+        for (trait_id, _) in module.trait_parameter_arguments_in_id_order() {
+            let _ = module.trait_functional_dependencies(trait_id);
+        }
+        let _ = module.checked_trait_implementations();
+        let semantic_ids = module.semantic_ids();
+        assert!(semantic_ids.copy_trait.is_some());
+        assert!(semantic_ids.io_type.is_some());
     }
 
     #[test]

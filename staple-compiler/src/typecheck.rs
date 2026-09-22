@@ -91,9 +91,9 @@ pub enum StructuralTraitMethod {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct CheckedFunctionalDependency {
-    determinants: Vec<TypeParameterId>,
-    dependent: TypeParameterId,
+pub(crate) struct CheckedFunctionalDependency {
+    pub determinants: Vec<TypeParameterId>,
+    pub dependent: TypeParameterId,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -159,14 +159,14 @@ struct LoopCheckContext {
 }
 
 #[derive(Debug, Clone)]
-struct CheckedTraitImplementation {
-    span: Span,
-    trait_id: TraitId,
-    parameters: HashSet<TypeParameterId>,
-    arguments: Vec<CheckedType>,
-    bounds: Vec<CheckedTraitBound>,
-    negative: bool,
-    methods: HashMap<TraitMethodId, FunctionId>,
+pub(crate) struct CheckedTraitImplementation {
+    pub span: Span,
+    pub trait_id: TraitId,
+    pub parameters: HashSet<TypeParameterId>,
+    pub arguments: Vec<CheckedType>,
+    pub bounds: Vec<CheckedTraitBound>,
+    pub negative: bool,
+    pub methods: HashMap<TraitMethodId, FunctionId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -965,6 +965,33 @@ fn format_type_application(
     format_type_argument(formatter, argument)
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+pub(crate) struct CheckedSemanticIds {
+    pub natural_trait: Option<TraitId>,
+    pub sized_trait: Option<TraitId>,
+    pub copy_trait: Option<TraitId>,
+    pub drop_trait: Option<TraitId>,
+    pub default_trait: Option<TraitId>,
+    pub debug_trait: Option<TraitId>,
+    pub display_trait: Option<TraitId>,
+    pub index_trait: Option<TraitId>,
+    pub mutate_index_trait: Option<TraitId>,
+    pub into_iterator_trait: Option<TraitId>,
+    pub iterator_trait: Option<TraitId>,
+    pub io_type: Option<TypeId>,
+    pub reactive_type: Option<TypeId>,
+    pub coroutine_type: Option<TypeId>,
+    pub task_type: Option<TypeId>,
+    pub completed_type: Option<TypeId>,
+    pub cancelled_type: Option<TypeId>,
+    pub tasks_type: Option<TypeId>,
+    pub scheduler_type: Option<TypeId>,
+    pub wait_type: Option<TypeId>,
+    pub resolver_type: Option<TypeId>,
+    pub completion_token_type: Option<TypeId>,
+}
+
 #[derive(Debug, Clone)]
 pub struct TypedModule {
     resolved: ResolvedModule,
@@ -1075,6 +1102,90 @@ impl TypedModule {
 
     pub(crate) fn implicit_thunks(&self) -> impl Iterator<Item = &ResolvedFunction> {
         self.implicit_thunks.values()
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn implicit_thunks_in_id_order(&self) -> Vec<&ResolvedFunction> {
+        let mut thunks = self.implicit_thunks.values().collect::<Vec<_>>();
+        thunks.sort_by_key(|function| function.id.0);
+        thunks
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn derived_evaluators_in_symbol_order(&self) -> Vec<(SymbolId, FunctionId)> {
+        let mut evaluators = self
+            .derived_evaluators
+            .iter()
+            .filter_map(|(symbol, syntax)| Some((*symbol, self.implicit_thunks.get(syntax)?.id)))
+            .collect::<Vec<_>>();
+        evaluators.sort_by_key(|(symbol, _)| symbol.0);
+        evaluators
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn trait_method_types_in_id_order(&self) -> Vec<(TraitMethodId, &CheckedType)> {
+        let mut methods = self
+            .trait_method_types
+            .iter()
+            .map(|(id, value_type)| (*id, value_type))
+            .collect::<Vec<_>>();
+        methods.sort_by_key(|(id, _)| id.0);
+        methods
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn trait_parameter_arguments_in_id_order(&self) -> Vec<(TraitId, &[CheckedType])> {
+        let mut traits = self
+            .trait_parameter_arguments
+            .iter()
+            .map(|(id, arguments)| (*id, arguments.as_slice()))
+            .collect::<Vec<_>>();
+        traits.sort_by_key(|(id, _)| id.0);
+        traits
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn trait_functional_dependencies(
+        &self,
+        trait_id: TraitId,
+    ) -> &[CheckedFunctionalDependency] {
+        self.trait_functional_dependencies
+            .get(&trait_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn checked_trait_implementations(&self) -> &[CheckedTraitImplementation] {
+        &self.trait_implementations
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn semantic_ids(&self) -> CheckedSemanticIds {
+        CheckedSemanticIds {
+            natural_trait: self.resolved.standard_trait("Natural"),
+            sized_trait: self.resolved.standard_trait("Sized"),
+            copy_trait: self.copy_trait,
+            drop_trait: self.drop_trait,
+            default_trait: self.resolved.standard_trait("Default"),
+            debug_trait: self.debug_trait,
+            display_trait: self.resolved.standard_trait("Display"),
+            index_trait: self.index_trait,
+            mutate_index_trait: self.mutate_index_trait,
+            into_iterator_trait: self.into_iterator_trait,
+            iterator_trait: self.iterator_trait,
+            io_type: self.io_type,
+            reactive_type: self.reactive_type,
+            coroutine_type: self.coroutine_type,
+            task_type: self.task_type,
+            completed_type: self.completed_type,
+            cancelled_type: self.cancelled_type,
+            tasks_type: self.tasks_type,
+            scheduler_type: self.scheduler_type,
+            wait_type: self.wait_type,
+            resolver_type: self.resolver_type,
+            completion_token_type: self.completion_token_type,
+        }
     }
 
     pub(crate) fn implicit_thunk_for(&self, syntax: SyntaxId) -> Option<&ResolvedFunction> {

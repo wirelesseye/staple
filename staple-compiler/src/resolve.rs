@@ -343,6 +343,16 @@ pub struct ResolvedFunction {
     pub body: Expression,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+pub(crate) struct ResolvedTypeParameterInfo {
+    pub id: TypeParameterId,
+    pub declaration: SyntaxId,
+    pub module: ModuleId,
+    pub sized: bool,
+    pub effect: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedModule {
     program: Program,
@@ -426,6 +436,71 @@ impl ResolvedModule {
 
     pub fn functions(&self) -> &[ResolvedFunction] {
         &self.functions
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn symbols_in_id_order(&self) -> Vec<(SymbolId, SyntaxId)> {
+        let mut symbols = self
+            .symbol_declarations
+            .iter()
+            .map(|(id, syntax)| (*id, *syntax))
+            .collect::<Vec<_>>();
+        symbols.sort_by_key(|(id, _)| id.0);
+        symbols
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn type_parameters_in_id_order(&self) -> Vec<ResolvedTypeParameterInfo> {
+        let mut parameters = self
+            .type_parameter_declarations
+            .iter()
+            .filter_map(|(id, declaration)| {
+                Some(ResolvedTypeParameterInfo {
+                    id: *id,
+                    declaration: *declaration,
+                    module: *self.type_parameter_modules.get(id)?,
+                    sized: self.type_parameter_is_sized(*id),
+                    effect: self.is_effect_parameter(*id),
+                })
+            })
+            .collect::<Vec<_>>();
+        parameters.sort_by_key(|parameter| parameter.id.0);
+        parameters
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn types_in_id_order(&self) -> Vec<(TypeId, &TypeDeclaration)> {
+        let mut types = self
+            .type_declarations
+            .iter()
+            .map(|(id, declaration)| (*id, declaration))
+            .collect::<Vec<_>>();
+        types.sort_by_key(|(id, _)| id.0);
+        types
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn traits_in_id_order(&self) -> Vec<(TraitId, &ResolvedTrait)> {
+        let mut traits = self
+            .traits
+            .iter()
+            .map(|(id, trait_)| (*id, trait_))
+            .collect::<Vec<_>>();
+        traits.sort_by_key(|(id, _)| id.0);
+        traits
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn trait_methods_in_id_order(
+        &self,
+    ) -> Vec<(TraitMethodId, &staple_syntax::TraitMember)> {
+        let mut methods = self
+            .trait_methods
+            .iter()
+            .map(|(id, method)| (*id, method))
+            .collect::<Vec<_>>();
+        methods.sort_by_key(|(id, _)| id.0);
+        methods
     }
 
     pub fn symbol_for(&self, syntax_id: SyntaxId) -> Option<SymbolId> {

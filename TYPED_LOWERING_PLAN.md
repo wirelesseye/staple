@@ -17,7 +17,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - The initial validator rejects functions or implicit thunks that have no checked function type.
 - All CLI and compiler code-generation tests now pass through `Lowerer`.
 - `cargo check --workspace` and `cargo test --workspace` pass. The workspace test run covers 937 tests.
-- **Stage 2 is in progress.** Stage 2.1 is complete, and Stage 2.2 Step 1 has established insertion-ordered semantic catalogs with typed IDs, lookup indexes, duplicate rejection, and bidirectional consistency validation. Stage 2.2 Step 2 is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
+- **Stage 2 is in progress.** Stage 2.1 and Stage 2.2 Steps 1-2 are complete. Lowering now has insertion-ordered semantic catalogs plus deterministic resolver/type-checker inventory APIs. Stage 2.2 Step 3 is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
 - The detailed Stage 2 implementation sequence is maintained in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
 
 ## Public Interfaces
@@ -68,6 +68,8 @@ Progress:
 - `LoweredModule` now owns the explicit `LoweredProgram` alongside the private Stage 5 backend bridge.
 - Added deterministic-arena and dangling-reference validator tests. Stage 2.2 will populate declaration catalogs and metadata.
 - Stage 2.2 Step 1 added ordered module, function, symbol, type, trait, trait-method, and trait-implementation catalog foundations. Semantic IDs remain distinct from arena IDs, duplicate insertions diagnose instead of overwrite, and lookup maps are validated against their ordered entries.
+- Stage 2.2 Step 2 added narrow semantic-ID-ordered inventories for symbols, type parameters, types, traits, trait methods, implicit thunks, derived evaluators, checked trait metadata, and the selected standard/runtime semantic IDs. Compact non-expanding type representation templates remain part of Step 6; retaining fully expanded `CheckedType` representations was rejected because recursive standard-library metadata overflowed ordinary test-thread stacks when cloned or dropped.
+- The private legacy `TypedModule` payload is now boxed inside `LoweredModule`, reducing transitional stack-frame pressure without changing the public lowering boundary or backend behavior.
 
 > **Complex stage:** The AST and backend support many specialized constructs, including defaults, reactive bindings, structural indexing, ownership cleanup, and coroutines. This stage may need separate breakdown plans by expression family and runtime subsystem during implementation.
 
@@ -135,6 +137,7 @@ Progress:
 - `cargo test --workspace` (937 tests passing)
 - Existing CLI compile/run, object emission, LLVM verification, module, ownership, trait, reactive, and coroutine coverage now exercises the lowering boundary.
 - Stage 2.1 focused tests cover empty deterministic arenas, dense insertion-ordered typed IDs, and dangling child detection. `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check` pass after the schema addition.
+- After Stage 2.2 Step 2, `cargo test --workspace` passes 943 tests, including the default-stack regression for block-scoped module initialization.
 
 ### Remaining Verification
 

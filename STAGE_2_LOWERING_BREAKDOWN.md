@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 is complete and Stage 2.2 Step 1 is complete. Stage 2.2 Step 2 is next.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and Stage 2.2 Steps 1-2 are complete. Stage 2.2 Step 3 is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -42,7 +42,7 @@ Completed:
 - Added unit coverage for empty arena validity, dense deterministic ID allocation, and dangling-reference diagnostics.
 - Verified with `cargo fmt --all -- --check`, focused lowering tests, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check`.
 
-## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Step 1 Done)
+## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Steps 1-2 Done)
 
 The focused implementation sequence is maintained in [STAGE_2_2_METADATA_CATALOG_PLAN.md](STAGE_2_2_METADATA_CATALOG_PLAN.md).
 
@@ -61,6 +61,12 @@ Progress:
 - Semantic IDs are indexed separately from arena positions; duplicate insertion returns a source-based diagnostic without overwriting the first entry.
 - Validation now checks every semantic lookup against ordered entries in both directions and diagnoses stale, mismatched, or dangling indexes.
 - Focused tests cover insertion order, duplicate rejection, retained original values, and bidirectional lookup disagreement. `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, and `git diff --check` pass.
+- Step 2 added sorted resolver inventories for symbols, type parameters, types, traits, and trait methods without exposing their backing maps.
+- Added deterministic checked inventories for implicit thunks, derived evaluators, method signatures, trait parameter templates, functional dependencies, and implementations.
+- Type checking now retains all selected standard/runtime semantic IDs required by later lowering. Compact checked type-representation templates remain assigned to Step 6 after transition testing showed that retaining fully expanded representation trees is unsafe for recursive standard-library metadata.
+- Focused coverage verifies completeness and strict semantic-ID ordering against a checked standard-library program.
+- Boxed the private legacy `TypedModule` bridge to keep the growing lowered owner off constrained test-thread stack frames; the isolated block-scoped module regression and full workspace suite pass at the default stack size.
+- Verified Step 2 with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (943 tests), and `git diff --check`.
 
 > **Complexity note:** The metadata currently lives across resolver, type-checker, ownership, reactive, and coroutine side tables. This substage may need a focused inventory plan before implementation begins.
 

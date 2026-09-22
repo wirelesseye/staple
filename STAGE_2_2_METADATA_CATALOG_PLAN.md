@@ -78,18 +78,29 @@ Completed:
 - Extended `LoweredProgram` with all Step 1 catalogs while retaining the Stage 2.1 node arenas.
 - Verified with formatting, workspace checking, five focused lowering tests, and `git diff --check`.
 
-### Step 2 - Add Deterministic Typed-Module Inventory APIs
+### Step 2 - Add Deterministic Typed-Module Inventory APIs (Done)
 
 Add narrow `pub(crate)` inventory methods rather than exposing whole side tables:
 
 - `ResolvedModule`: symbols in ascending `SymbolId`, type parameters in ascending ID, types in ascending `TypeId`, traits in ascending `TraitId`, and trait methods in ascending `TraitMethodId`.
 - `TypedModule`: implicit thunks in ascending `FunctionId`, checked trait implementations in declaration order, derived evaluator relationships, standard trait/type IDs, and owned checked type/trait templates.
 - Preserve current source order for declared functions; merge implicit thunks by stable `FunctionId` ordering after declared functions unless their recorded source owner provides a stricter order.
-- Add checked metadata during type checking where it is currently temporary, especially canonical type representation templates and checked trait implementation records. Do not reconstruct these from source `Type` syntax in lowering.
+- Add checked metadata during type checking where it is currently temporary. Preserve checked trait implementation records now; define compact, non-expanding canonical type-representation templates with the type catalog in Step 6 rather than retaining recursively expanded `CheckedType` trees. Do not reconstruct semantic decisions from source `Type` syntax in lowering.
 
 Gate: repeated inventory calls produce identical sequences, and tests deliberately insert metadata through differently ordered hash maps without changing output.
 
 After this step, update both plan files.
+
+Completed:
+
+- Added narrow resolver inventories ordered by `SymbolId`, `TypeParameterId`, `TypeId`, `TraitId`, and `TraitMethodId`.
+- Added stable type-checker inventories for implicit thunks, derived evaluators, checked trait method/parameter/dependency metadata, and checked implementations.
+- Retained the type checker's selected standard trait and runtime type IDs in one compiler-facing semantic-ID snapshot.
+- Kept declaration-ordered vectors authoritative where source order matters and sorted all map-backed inventories before returning them.
+- Added focused coverage that checks inventory completeness and strict semantic-ID ordering on a successfully checked standard-library program.
+- Confirmed through transition testing that eagerly retaining expanded `CheckedType` representations overflows normal stacks for recursive standard-library metadata; Step 6 will introduce compact templates that preserve named type references instead.
+- Boxed the private legacy `TypedModule` payload in `LoweredModule` after the larger transitional owner exposed stack pressure in block-scoped module compilation; this is representation-private and leaves backend behavior unchanged.
+- Verified the default-stack regression directly and passed the complete workspace suite (943 tests), workspace check, formatting check, and diff check.
 
 ### Step 3 - Snapshot Modules and Initializer Roots
 
