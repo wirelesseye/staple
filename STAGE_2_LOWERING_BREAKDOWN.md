@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** Not started. Stage 1 is complete in commit `83b4872`.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 is complete and Stage 2.2 is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -20,7 +20,7 @@ Stage 2 is complete when every accepted program produces validated lowered arena
 - Source-only declarations such as imports, macro definitions, and type syntax are omitted unless runtime metadata or initialization ordering needs a normalized representation.
 - Arena iteration and all declaration catalogs preserve deterministic program/source order.
 
-## Stage 2.1 - Establish the Arena and Core Schema
+## Stage 2.1 - Establish the Arena and Core Schema (Done)
 
 Define the foundational representation before lowering individual constructs.
 
@@ -32,6 +32,15 @@ Define the foundational representation before lowering individual constructs.
 - Extend `LoweredModule` with the new program representation while retaining the private `TypedModule` bridge.
 
 **Gate:** An empty or declaration-only checked program lowers into valid deterministic arenas, and the validator can walk every arena and reference.
+
+Completed:
+
+- Added distinct typed IDs and deterministic append-only arenas for expressions, patterns, blocks, runtime items, function templates, and module initializers.
+- Added `Origin`, the foundational lowered node types, and `LoweredProgram`; expression nodes reserve explicit checked type, effect, coercion, and moved-symbol facts.
+- Extended `LoweredModule` to own `LoweredProgram` while preserving the private typed-module backend bridge.
+- Added a structural arena validator for every currently defined child relationship.
+- Added unit coverage for empty arena validity, dense deterministic ID allocation, and dangling-reference diagnostics.
+- Verified with `cargo fmt --all -- --check`, focused lowering tests, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check`.
 
 ## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata
 

@@ -17,7 +17,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - The initial validator rejects functions or implicit thunks that have no checked function type.
 - All CLI and compiler code-generation tests now pass through `Lowerer`.
 - `cargo check --workspace` and `cargo test --workspace` pass. The workspace test run covers 937 tests.
-- **Stages 2-6 remain.** Stage 2 will add complete explicit lowered arenas alongside the temporary legacy payload; Stage 5 removes that payload after migrating the backend.
+- **Stage 2 is in progress.** Stage 2.1 is complete: `LoweredModule` now owns a foundational `LoweredProgram` with deterministic typed arenas, source origins, core lowered node schemas, and dangling-reference validation. Stage 2.2 is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
 - The detailed Stage 2 implementation sequence is maintained in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
 
 ## Public Interfaces
@@ -43,7 +43,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - Changed all public `CodeGenerator` entry points to accept `&LoweredModule`; direct public emission from `TypedModule` is no longer available.
 - Kept the old backend reachable only through a private transitional `LoweredModule::typed` bridge. Removing this bridge requires the explicit arenas and metadata introduced in Stage 2.
 
-### Stage 2 - Lower Existing Typed Programs Completely (Next; Breakdown Ready)
+### Stage 2 - Lower Existing Typed Programs Completely (In Progress: 2.1 Done)
 
 - Add owned, arena-backed lowered modules, expressions, patterns, initializers, callable targets, function templates, trait evidence, closure construction, ownership facts, and helper requirements alongside the temporary legacy backend payload.
 - Preserve source spans and syntax IDs on lowered nodes for diagnostics.
@@ -60,6 +60,13 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - Carry enough cleanup and ownership metadata for the backend to preserve moves, borrows, drops, early returns, propagation, and cancellation without querying `TypedModule`.
 - Expand the validator to cover dangling arena references, missing or unresolved targets, incomplete evidence, and invalid instance references.
 - Follow the detailed sequence and gates in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
+
+Progress:
+
+- Stage 2.1 established typed IDs and append-only arenas for expressions, patterns, blocks, runtime items, function templates, and module initializers.
+- Added `Origin` and the foundational lowered node/program schemas, with checked type/effect/coercion and moved-symbol slots on expressions.
+- `LoweredModule` now owns the explicit `LoweredProgram` alongside the private Stage 5 backend bridge.
+- Added deterministic-arena and dangling-reference validator tests. Stage 2.2 will populate declaration catalogs and metadata.
 
 > **Complex stage:** The AST and backend support many specialized constructs, including defaults, reactive bindings, structural indexing, ownership cleanup, and coroutines. This stage may need separate breakdown plans by expression family and runtime subsystem during implementation.
 
@@ -126,6 +133,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - `cargo check --workspace`
 - `cargo test --workspace` (937 tests passing)
 - Existing CLI compile/run, object emission, LLVM verification, module, ownership, trait, reactive, and coroutine coverage now exercises the lowering boundary.
+- Stage 2.1 focused tests cover empty deterministic arenas, dense insertion-ordered typed IDs, and dangling child detection. `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check` pass after the schema addition.
 
 ### Remaining Verification
 
