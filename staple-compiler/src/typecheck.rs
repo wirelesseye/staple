@@ -9947,6 +9947,25 @@ impl TypeChecker {
                         if !unifies {
                             return None;
                         }
+                        let bounds_hold = implementation.bounds.iter().all(|bound| {
+                            let bound_arguments = bound
+                                .arguments
+                                .iter()
+                                .cloned()
+                                .map(|argument| substitute_type(argument, &substitutions))
+                                .collect::<Vec<_>>();
+                            // A bound that still mentions a type parameter or
+                            // an unresolved position cannot be decided here;
+                            // it is re-checked once the call is concrete.
+                            bound_arguments.iter().any(|argument| {
+                                contains_type_parameter(argument)
+                                    || contains_inferred_type(argument)
+                            }) || self
+                                .trait_obligation_available_exact(bound.trait_id, &bound_arguments)
+                        });
+                        if !bounds_hold {
+                            return None;
+                        }
                         Some(
                             implementation
                                 .arguments

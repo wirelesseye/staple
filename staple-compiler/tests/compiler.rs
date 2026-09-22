@@ -4835,6 +4835,32 @@ fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_t
 }
 
 #[test]
+fn rejects_inferred_trait_obligations_whose_impl_bounds_do_not_hold() {
+    // Regression test: when a trait obligation had an inferred argument
+    // position, candidate implementations were selected by unifying their
+    // headers without checking their `where` bounds, so a `Copy`-gated impl
+    // could be chosen for a move-only argument. Code generation then failed
+    // with a confusing error located in the standard library.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.CString\n",
+            "trait Make T U where T ~> U { make: T -> U }\n",
+            "type Box T = ctor (value: T)\n",
+            "impl<T where Copy T> Make (Box T) T { def make = Box (value) => value }\n",
+            "def inferred: Box CString -> () = box => {\n",
+            "    let value = Make.make box\n",
+            "    ()\n",
+            "}\n",
+        )))
+        .expect_err_diagnostics("an inferred trait obligation must check its impl's bounds");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("no trait implementation") })
+    );
+}
+
+#[test]
 fn list_supports_bracket_indexing_mutation_and_iteration() {
     let module = type_check(concat!(
         "def exercise: () -> () = () => {\n",
