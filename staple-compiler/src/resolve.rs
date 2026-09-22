@@ -343,6 +343,21 @@ pub struct ResolvedFunction {
     pub body: Expression,
 }
 
+/// A resolver-owned symbol declaration record, ordered by `SymbolId`.
+///
+/// `module_symbol` distinguishes a module-level symbol (whose owner entry is
+/// `None`) from a macro quote placeholder, which has no owner entry at all.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+pub(crate) struct ResolvedSymbolInfo {
+    pub id: SymbolId,
+    pub declaration: SyntaxId,
+    pub span: Span,
+    pub module: ModuleId,
+    pub owner: Option<FunctionId>,
+    pub module_symbol: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
 pub(crate) struct ResolvedTypeParameterInfo {
@@ -409,6 +424,7 @@ pub struct ResolvedModule {
     symbol_owners: HashMap<SymbolId, Option<FunctionId>>,
     symbol_modules: HashMap<SymbolId, ModuleId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
+    symbol_declaration_spans: HashMap<SymbolId, Span>,
     trait_modules: HashMap<TraitId, ModuleId>,
     import_definitions: HashMap<(SyntaxId, String), Vec<DefinitionId>>,
     visible_module_definitions: Vec<HashMap<String, Vec<DefinitionId>>>,
@@ -439,13 +455,22 @@ impl ResolvedModule {
     }
 
     #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
-    pub(crate) fn symbols_in_id_order(&self) -> Vec<(SymbolId, SyntaxId)> {
+    pub(crate) fn symbols_in_id_order(&self) -> Vec<ResolvedSymbolInfo> {
         let mut symbols = self
             .symbol_declarations
             .iter()
-            .map(|(id, syntax)| (*id, *syntax))
+            .filter_map(|(id, declaration)| {
+                Some(ResolvedSymbolInfo {
+                    id: *id,
+                    declaration: *declaration,
+                    span: self.symbol_declaration_spans.get(id)?.clone(),
+                    module: *self.symbol_modules.get(id)?,
+                    owner: self.symbol_owners.get(id).copied().flatten(),
+                    module_symbol: self.symbol_owners.get(id) == Some(&None),
+                })
+            })
             .collect::<Vec<_>>();
-        symbols.sort_by_key(|(id, _)| id.0);
+        symbols.sort_by_key(|symbol| symbol.id.0);
         symbols
     }
 
@@ -1198,6 +1223,7 @@ pub struct NameResolver {
     module_symbol_prefixes: Vec<String>,
     declared_symbols: HashMap<SyntaxId, SymbolId>,
     symbol_declarations: HashMap<SymbolId, SyntaxId>,
+    symbol_declaration_spans: HashMap<SymbolId, Span>,
     module_values: Vec<HashMap<String, SymbolId>>,
     definition_context_values: Vec<HashMap<String, SymbolId>>,
     definition_context_types: Vec<HashMap<String, TypeId>>,
@@ -1547,6 +1573,7 @@ impl NameResolver {
             symbol_owners: self.symbol_owners,
             symbol_modules: self.symbol_modules,
             symbol_declarations: self.symbol_declarations,
+            symbol_declaration_spans: self.symbol_declaration_spans,
             import_definitions: self.import_definitions,
             visible_module_definitions: self.visible_module_definitions,
             exported_module_definitions,
@@ -2426,6 +2453,11 @@ impl NameResolver {
             let symbol = SymbolId(self.next_symbol_id);
             self.next_symbol_id += 1;
             self.symbol_owners.insert(symbol, None);
+            self.symbol_modules.insert(symbol, module);
+            self.symbol_declarations
+                .insert(symbol, declaration.syntax.id);
+            self.symbol_declaration_spans
+                .insert(symbol, declaration.syntax.span.clone());
             self.type_constructor_symbols.insert(id, symbol);
             if top_level {
                 self.module_values[module.0].insert(declaration.name.clone(), symbol);
@@ -2607,6 +2639,8 @@ impl NameResolver {
         self.next_symbol_id += 1;
         self.declared_symbols.insert(binding.syntax.id, symbol);
         self.symbol_declarations.insert(symbol, binding.syntax.id);
+        self.symbol_declaration_spans
+            .insert(symbol, binding.syntax.span.clone());
         self.binding_type_parameters
             .insert(binding.syntax.id, binding.type_parameters.clone());
         self.binding_trait_bounds
@@ -2671,6 +2705,8 @@ impl NameResolver {
                 self.next_symbol_id += 1;
                 self.declared_symbols.insert(binding.syntax.id, symbol);
                 self.symbol_declarations.insert(symbol, binding.syntax.id);
+                self.symbol_declaration_spans
+                    .insert(symbol, binding.syntax.span.clone());
                 self.symbols.insert(binding.syntax.id, symbol);
                 self.symbol_owners.insert(symbol, None);
                 self.symbol_modules.insert(symbol, self.current_module);
@@ -2685,6 +2721,8 @@ impl NameResolver {
                 self.next_symbol_id += 1;
                 self.declared_symbols.insert(binding.syntax.id, symbol);
                 self.symbol_declarations.insert(symbol, binding.syntax.id);
+                self.symbol_declaration_spans
+                    .insert(symbol, binding.syntax.span.clone());
                 self.symbols.insert(binding.syntax.id, symbol);
                 self.symbol_owners.insert(symbol, None);
                 self.symbol_modules.insert(symbol, self.current_module);
@@ -4005,6 +4043,8 @@ impl NameResolver {
                 self.next_symbol_id += 1;
                 self.symbols.insert(binding.syntax.id, symbol);
                 self.symbol_declarations.insert(symbol, binding.syntax.id);
+                self.symbol_declaration_spans
+                    .insert(symbol, binding.syntax.span.clone());
                 self.symbol_modules.insert(symbol, self.current_module);
                 scope.insert(binding.name.clone(), symbol);
             }
@@ -4161,6 +4201,8 @@ impl NameResolver {
                 self.next_symbol_id += 1;
                 self.symbols.insert(binding.syntax.id, symbol);
                 self.symbol_declarations.insert(symbol, binding.syntax.id);
+                self.symbol_declaration_spans
+                    .insert(symbol, binding.syntax.span.clone());
                 self.symbol_modules.insert(symbol, self.current_module);
                 scopes
                     .last_mut()
@@ -4997,6 +5039,7 @@ impl NameResolver {
                         self.symbols.remove(&binding.syntax.id);
                         self.symbol_modules.remove(&pattern_symbol);
                         self.symbol_declarations.remove(&pattern_symbol);
+                        self.symbol_declaration_spans.remove(&pattern_symbol);
                         self.mutable_symbols.remove(&pattern_symbol);
                     }
                 } else {
@@ -5312,6 +5355,8 @@ impl NameResolver {
                     .insert(symbol, self.function_stack.last().copied());
                 self.symbol_modules.insert(symbol, self.current_module);
                 self.symbol_declarations.insert(symbol, binding.syntax.id);
+                self.symbol_declaration_spans
+                    .insert(symbol, binding.syntax.span.clone());
                 symbol
             });
         let overloadable = binding.kind == BindingKind::Def || binding.external;
@@ -5381,6 +5426,7 @@ impl NameResolver {
             .insert(symbol, self.function_stack.last().copied());
         self.symbol_modules.insert(symbol, self.current_module);
         self.symbol_declarations.insert(symbol, syntax);
+        self.symbol_declaration_spans.insert(symbol, span.clone());
         self.declare_symbol(name, syntax, span, symbol, shadow);
     }
 

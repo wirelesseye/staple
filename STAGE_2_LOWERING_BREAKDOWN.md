@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and Stage 2.2 Steps 1-4 are complete. Stage 2.2 Step 5 is next.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and Stage 2.2 Steps 1-5 are complete. Stage 2.2 Step 6 is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -42,7 +42,7 @@ Completed:
 - Added unit coverage for empty arena validity, dense deterministic ID allocation, and dangling-reference diagnostics.
 - Verified with `cargo fmt --all -- --check`, focused lowering tests, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check`.
 
-## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Steps 1-4 Done)
+## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Steps 1-5 Done)
 
 The focused implementation sequence is maintained in [STAGE_2_2_METADATA_CATALOG_PLAN.md](STAGE_2_2_METADATA_CATALOG_PLAN.md).
 
@@ -78,6 +78,13 @@ Progress:
 - Coroutine body blocks now record their module during resolution so thunk bodies resolve their owning module.
 - Added focused coverage for catalog order and uniqueness, checked signature/bounds/parameters, capture ownership facts, derived and coroutine classification, and effectful callback classification.
 - Verified Step 4 with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (956 tests), and `git diff --check`.
+- Step 5 added `LoweredSymbol` and `SymbolStorage` with the documented storage precedence: external, function/constructor/singleton binding, derived binding, signal, captured mutable cell, global storage, mutable cell, immutable value.
+- The resolver symbol inventory now carries declaration syntax, source span, module, owner, and a module-symbol flag; constructors and singletons record declarations too.
+- Compile-time-only symbols (consts and compiler-owned syntax constructors) stay out of the catalog; every other declared runtime symbol is inserted in ascending `SymbolId`, with referenced parameters/captures supplemented.
+- Mutation, moves, initialization checking, derivation, signal behavior, and captured-cell use remain independent flags, and optional function/constructor/singleton/intrinsic/external identities are recorded.
+- Validation covers function parameter, capture, and binding symbol references plus top-level runtime initializer binding symbols.
+- Added focused coverage for globals, locals, mutable parameters, captured cells, borrowed captures, functions, externs, intrinsics, signals, derived bindings, constructors, singletons, and macro quote exclusion.
+- Verified Step 5 with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (962 tests), and `git diff --check`.
 
 > **Complexity note:** The metadata currently lives across resolver, type-checker, ownership, reactive, and coroutine side tables. This substage may need a focused inventory plan before implementation begins.
 

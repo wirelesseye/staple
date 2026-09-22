@@ -150,7 +150,7 @@ Completed:
 - Added focused tests for catalog order and uniqueness, checked signatures/bounds/parameters, capture ownership facts, derived/coroutine classification, and effectful callback classification.
 - Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (956 tests), and `git diff --check`.
 
-### Step 5 - Snapshot Symbols and Storage Classification
+### Step 5 - Snapshot Symbols and Storage Classification (Done)
 
 - Enumerate declared runtime symbols deterministically from resolver-owned declaration records, supplementing compiler-created symbols referenced by functions, captures, constructors, singleton values, intrinsics, and implicit thunks.
 - Copy declaration origin, module, owner, and declared checked type. Missing types are diagnostics except for explicitly compile-time-only symbols, which must not enter this catalog.
@@ -169,6 +169,16 @@ Completed:
 Gate: fixtures covering globals, locals, mutable parameters, owned and borrowed captures, functions, externs, signals, derived bindings, constructors, and singleton values receive the expected unique classification.
 
 After this step, update both plan files.
+
+Completed:
+
+- Added `LoweredSymbol` and the primary `SymbolStorage` classification (immutable value, mutable cell, global storage, function binding, derived binding, signal, captured cell, external symbol).
+- Extended the resolver's symbol inventory with declaration syntax, source span, module, owner, and a module-symbol flag; declaration spans are now recorded for every allocation, including constructors and singletons.
+- Enumerated declared runtime symbols in ascending `SymbolId`, skipping compile-time-only `const` bindings and compiler-owned syntax constructors, and supplemented referenced parameter/capture symbols.
+- Implemented the documented storage precedence and kept initialization checking, derivation, signal behavior, parameter mutation/move, and captured-cell use as independent flags with optional function, constructor, singleton, intrinsic, and external target identities.
+- Function parameter, capture, and binding symbols are validated against the catalog, and top-level runtime initializer binding symbols are checked after catalog construction.
+- Added focused tests for catalog coverage and ordering, globals/locals/mutable parameters, captured cells and borrowed captures, functions/signals/derived bindings/constructors/singletons, extern and intrinsic symbols, and macro quote exclusion.
+- Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (962 tests), and `git diff --check`.
 
 ### Step 6 - Snapshot Type and Trait Metadata
 

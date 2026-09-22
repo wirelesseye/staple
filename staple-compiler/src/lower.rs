@@ -351,10 +351,40 @@ pub(crate) struct LoweredModuleInfo {
     pub initializer: InitializerId,
 }
 
+/// The primary storage category of a symbol. Independent facts (mutation,
+/// moves, initialization checking, capture-cell use) stay in explicit
+/// `LoweredSymbol` flags rather than overloading this enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SymbolStorage {
+    ImmutableValue,
+    MutableCell,
+    GlobalStorage,
+    FunctionBinding,
+    DerivedBinding,
+    Signal,
+    CapturedCell,
+    ExternalSymbol,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredSymbol {
     pub origin: Origin,
     pub semantic_id: SymbolId,
+    pub module: ModuleId,
+    pub owner: Option<FunctionId>,
+    pub value_type: CheckedType,
+    pub storage: SymbolStorage,
+    pub requires_initialization_check: bool,
+    pub derived: bool,
+    pub signal: bool,
+    pub mutated_parameter: bool,
+    pub move_parameter: bool,
+    pub captured_cell: bool,
+    pub function: Option<FunctionId>,
+    pub constructor: Option<TypeId>,
+    pub singleton: Option<TypeId>,
+    pub intrinsic: Option<crate::IntrinsicFunction>,
+    pub external: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -403,7 +433,139 @@ impl LoweredProgram {
     fn snapshot(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
         let mut diagnostics = self.snapshot_modules(module);
         diagnostics.extend(self.snapshot_functions(module));
+        diagnostics.extend(self.snapshot_symbols(module));
         diagnostics
+    }
+
+    /// Enumerates resolver-declared runtime symbols in ascending `SymbolId`,
+    /// supplementing any referenced but undeclared symbol with a compiler
+    /// origin. Compile-time-only consts and macro quote placeholders stay out
+    /// of the catalog.
+    fn snapshot_symbols(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
+        let resolved = module.resolved();
+        let mut diagnostics = Vec::new();
+        let declared = resolved.symbols_in_id_order();
+        let origins = declared
+            .iter()
+            .map(|info| {
+                (
+                    info.id,
+                    Origin {
+                        syntax: info.declaration,
+                        span: info.span.clone(),
+                    },
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        let mut captured = HashSet::new();
+        let mut referenced = HashSet::new();
+        for function in module
+            .functions()
+            .iter()
+            .chain(module.implicit_thunks_in_id_order())
+        {
+            captured.extend(function.captures.iter().copied());
+            referenced.extend(pattern_symbols(resolved, &function.pattern));
+            referenced.extend(function.captures.iter().copied());
+        }
+        for info in &declared {
+            if compile_time_only_symbol(module, info.id)
+                || (!info.module_symbol && info.owner.is_none())
+            {
+                continue;
+            }
+            referenced.remove(&info.id);
+            let origin = origins[&info.id].clone();
+            if let Some(diagnostic) =
+                self.snapshot_symbol(module, info.id, origin, info.module, info.owner, &captured)
+            {
+                diagnostics.push(diagnostic);
+            }
+        }
+        for symbol in referenced {
+            if self.symbols.get(symbol).is_some() || compile_time_only_symbol(module, symbol) {
+                continue;
+            }
+            let Some(module_id) = resolved.symbol_module(symbol) else {
+                diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!("referenced lowered symbol {symbol:?} has no owning module"),
+                ));
+                continue;
+            };
+            let origin = origins
+                .get(&symbol)
+                .cloned()
+                .unwrap_or_else(Origin::compiler);
+            if let Some(diagnostic) =
+                self.snapshot_symbol(module, symbol, origin, module_id, None, &captured)
+            {
+                diagnostics.push(diagnostic);
+            }
+        }
+        diagnostics.extend(initializer_symbol_diagnostics(
+            module,
+            &origins,
+            &self.symbols,
+        ));
+        diagnostics
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn snapshot_symbol(
+        &mut self,
+        module: &TypedModule,
+        symbol: SymbolId,
+        origin: Origin,
+        module_id: ModuleId,
+        owner: Option<FunctionId>,
+        captured: &HashSet<SymbolId>,
+    ) -> Option<Diagnostic> {
+        let resolved = module.resolved();
+        let Some(value_type) = module.declared_type_of_symbol(symbol) else {
+            return Some(Diagnostic::new(
+                origin.span,
+                format!("cannot lower symbol {symbol:?} without a declared checked type"),
+            ));
+        };
+        let function = module.function_for_symbol(symbol);
+        let constructor = resolved.constructor_type(symbol);
+        let singleton = resolved.singleton_type(symbol);
+        let intrinsic = resolved.intrinsic_function(symbol);
+        let external = resolved.is_external_symbol(symbol);
+        let derived = module.is_derived_symbol(symbol);
+        let signal = resolved.is_signal_symbol(symbol);
+        let mutable = module.has_mutable_storage(symbol);
+        let module_symbol = resolved.is_module_symbol(symbol);
+        let storage = symbol_storage(
+            external,
+            function.is_some() || constructor.is_some() || singleton.is_some(),
+            derived,
+            signal,
+            captured.contains(&symbol) && mutable,
+            module_symbol,
+            mutable,
+        );
+        let value = LoweredSymbol {
+            origin: origin.clone(),
+            semantic_id: symbol,
+            module: module_id,
+            owner,
+            value_type,
+            storage,
+            requires_initialization_check: resolved.requires_initialization_state(symbol),
+            derived,
+            signal,
+            mutated_parameter: module.is_mutated_parameter(symbol),
+            move_parameter: module.is_move_parameter(symbol),
+            captured_cell: capture_requires_cell(module, symbol),
+            function,
+            constructor,
+            singleton,
+            intrinsic,
+            external,
+        };
+        self.symbols.insert("symbol", symbol, origin, value).err()
     }
 
     /// Inserts declared functions in resolver order, then implicit thunks in
@@ -508,7 +670,7 @@ impl LoweredProgram {
             signature,
             bounds: module.bounds_of_function(function.id).to_vec(),
             parameter_style: function.parameter_style,
-            parameters: parameter_symbols(resolved, &function.pattern),
+            parameters: pattern_symbols(resolved, &function.pattern),
             captures,
             body_origin: origin.clone(),
             body_syntax: body_syntax.id,
@@ -634,6 +796,30 @@ impl LoweredProgram {
                     body.index(),
                 ));
             }
+            for symbol in function
+                .parameters
+                .iter()
+                .chain(function.captures.iter().map(|capture| &capture.symbol))
+            {
+                if self.symbols.get(*symbol).is_none() {
+                    diagnostics.push(invalid_reference(
+                        &function.origin,
+                        "function",
+                        "symbol",
+                        symbol.0,
+                    ));
+                }
+            }
+            if let Some(binding) = function.binding_symbol
+                && self.symbols.get(binding).is_none()
+            {
+                diagnostics.push(invalid_reference(
+                    &function.origin,
+                    "function",
+                    "symbol",
+                    binding.0,
+                ));
+            }
         }
         for (_, initializer) in self.initializers.iter() {
             if !self.blocks.contains(initializer.body) {
@@ -756,9 +942,10 @@ fn capture_requires_cell(module: &TypedModule, symbol: SymbolId) -> bool {
         || module.is_derived_symbol(symbol)
 }
 
-/// Collects parameter symbols from a resolved parameter pattern in source
-/// order, matching how destructuring patterns bind symbols.
-fn parameter_symbols(module: &ResolvedModule, pattern: &Pattern) -> Vec<SymbolId> {
+/// Collects binding symbols from a resolved pattern in source order, matching
+/// how destructuring patterns bind symbols. Used for function parameters and
+/// top-level pattern bindings.
+fn pattern_symbols(module: &ResolvedModule, pattern: &Pattern) -> Vec<SymbolId> {
     fn collect(module: &ResolvedModule, pattern: &Pattern, symbols: &mut Vec<SymbolId>) {
         match pattern {
             Pattern::Binding(binding) => {
@@ -784,6 +971,93 @@ fn parameter_symbols(module: &ResolvedModule, pattern: &Pattern) -> Vec<SymbolId
     let mut symbols = Vec::new();
     collect(module, pattern, &mut symbols);
     symbols
+}
+
+/// Compile-time-only symbols stay out of the runtime catalog: `const`
+/// bindings, and constructors of compiler-owned syntax types.
+fn compile_time_only_symbol(module: &TypedModule, symbol: SymbolId) -> bool {
+    let resolved = module.resolved();
+    resolved.is_const_symbol(symbol)
+        || resolved.constructor_type(symbol).is_some_and(|id| {
+            resolved.recursive_construction(id) == Some(crate::RecursiveConstruction::Syntax)
+        })
+}
+
+/// Primary storage classification, in documented precedence order. Facts
+/// that overlap (mutation, moves, initialization checks, capture cells) stay
+/// as independent `LoweredSymbol` flags.
+#[allow(clippy::too_many_arguments)]
+fn symbol_storage(
+    external: bool,
+    binding: bool,
+    derived: bool,
+    signal: bool,
+    captured_mutable_cell: bool,
+    module_symbol: bool,
+    mutable: bool,
+) -> SymbolStorage {
+    if external {
+        SymbolStorage::ExternalSymbol
+    } else if binding {
+        SymbolStorage::FunctionBinding
+    } else if derived {
+        SymbolStorage::DerivedBinding
+    } else if signal {
+        SymbolStorage::Signal
+    } else if captured_mutable_cell {
+        SymbolStorage::CapturedCell
+    } else if module_symbol {
+        SymbolStorage::GlobalStorage
+    } else if mutable {
+        SymbolStorage::MutableCell
+    } else {
+        SymbolStorage::ImmutableValue
+    }
+}
+
+/// Checks that every top-level runtime binding symbol reached the catalog.
+fn initializer_symbol_diagnostics(
+    module: &TypedModule,
+    origins: &HashMap<SymbolId, Origin>,
+    symbols: &Catalog<SymbolId, LoweredSymbol, LoweredSymbolId>,
+) -> Vec<Diagnostic> {
+    let resolved = module.resolved();
+    let mut diagnostics = Vec::new();
+    let mut check = |symbol: SymbolId| {
+        if compile_time_only_symbol(module, symbol) {
+            return;
+        }
+        if symbols.get(symbol).is_none() {
+            let origin = origins
+                .get(&symbol)
+                .cloned()
+                .unwrap_or_else(Origin::compiler);
+            diagnostics.push(Diagnostic::new(
+                origin.span,
+                format!(
+                    "runtime initializer symbol {symbol:?} is missing from the lowered symbol catalog"
+                ),
+            ));
+        }
+    };
+    for source in resolved.program().modules() {
+        for item in &source.syntax.items {
+            match item {
+                Item::Binding(binding) => {
+                    if let Some(symbol) = resolved.symbol_for(binding.syntax.id) {
+                        check(symbol);
+                    }
+                }
+                Item::PatternBinding(binding) => {
+                    for symbol in pattern_symbols(resolved, &binding.pattern) {
+                        check(symbol);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    diagnostics
 }
 
 fn invalid_reference(origin: &Origin, owner: &str, target: &str, index: usize) -> Diagnostic {
@@ -982,7 +1256,7 @@ mod tests {
         let symbol_ids = resolved
             .symbols_in_id_order()
             .into_iter()
-            .map(|(id, _)| id.0)
+            .map(|symbol| symbol.id.0)
             .collect::<Vec<_>>();
         assert!(symbol_ids.windows(2).all(|ids| ids[0] < ids[1]));
         let parameter_ids = resolved
@@ -1418,7 +1692,7 @@ mod tests {
         );
         assert_eq!(
             lowered.parameters,
-            parameter_symbols(module.resolved(), &source.pattern)
+            pattern_symbols(module.resolved(), &source.pattern)
         );
         assert_eq!(lowered.body_syntax, source.body.syntax().id);
         assert_eq!(lowered.body_origin.syntax, source.body.syntax().id);
@@ -1571,6 +1845,289 @@ mod tests {
             .expect("lowered implicit thunk");
         assert!(!lowered.class.resource_helper);
         assert!(lowered.signature.effects == CheckedEffectSet::default());
+    }
+
+    fn lowered_symbol(program: &LoweredProgram, symbol: SymbolId) -> &LoweredSymbol {
+        program
+            .symbols
+            .get(symbol)
+            .unwrap_or_else(|| panic!("symbol {symbol:?} should be lowered"))
+    }
+
+    #[test]
+    fn symbol_catalog_covers_declared_runtime_symbols_in_id_order() {
+        let module = checked_program(concat!(
+            "const answer: I32 = 42\n",
+            "let value: I32 = answer\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let resolved = module.resolved();
+        let const_symbol = binding_symbol(&module, "answer");
+        assert!(resolved.is_const_symbol(const_symbol));
+        assert!(program.symbols.get(const_symbol).is_none());
+        let expected = resolved
+            .symbols_in_id_order()
+            .into_iter()
+            .filter(|info| !compile_time_only_symbol(&module, info.id))
+            .filter(|info| info.module_symbol || info.owner.is_some())
+            .map(|info| info.id)
+            .collect::<Vec<_>>();
+        let actual = program
+            .symbols
+            .iter()
+            .map(|(_, key, _)| key)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert!(actual.windows(2).all(|ids| ids[0].0 < ids[1].0));
+        for (_, key, symbol) in program.symbols.iter() {
+            assert_eq!(symbol.semantic_id, key);
+            assert!(module.declared_type_of_symbol(key).is_some());
+        }
+    }
+
+    #[test]
+    fn symbol_storage_classifies_globals_locals_and_parameters() {
+        let module = checked_program(concat!(
+            "let global: I32 = 1\n",
+            "let mut mutable_global: I32 = 2\n",
+            "def update: mut I32 -> I32 = mut value: I32 => { value = value + 1; value }\n",
+            "def local_values: () -> I32 = () => {\n",
+            "  let local: I32 = 3\n",
+            "  let mut mutable_local: I32 = 4\n",
+            "  local + mutable_local\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+
+        let global = lowered_symbol(&program, binding_symbol(&module, "global"));
+        assert_eq!(global.storage, SymbolStorage::GlobalStorage);
+        assert!(!global.captured_cell && !global.mutated_parameter && !global.move_parameter);
+        let mutable_global = lowered_symbol(&program, binding_symbol(&module, "mutable_global"));
+        assert_eq!(mutable_global.storage, SymbolStorage::GlobalStorage);
+
+        let update = module
+            .functions()
+            .iter()
+            .find(|function| function.name.contains("update"))
+            .expect("update function");
+        let parameter = pattern_symbols(module.resolved(), &update.pattern)[0];
+        let lowered = lowered_symbol(&program, parameter);
+        assert_eq!(lowered.storage, SymbolStorage::MutableCell);
+        assert!(lowered.mutated_parameter);
+        assert!(module.is_mutated_parameter(parameter));
+
+        let local_values = module
+            .functions()
+            .iter()
+            .find(|function| function.name.contains("local_values"))
+            .expect("local_values function");
+        let parameters = pattern_symbols(module.resolved(), &local_values.pattern);
+        let locals = module
+            .resolved()
+            .symbols_in_id_order()
+            .into_iter()
+            .filter(|info| info.owner == Some(local_values.id))
+            .filter(|info| !parameters.contains(&info.id))
+            .collect::<Vec<_>>();
+        assert_eq!(locals.len(), 2);
+        assert_eq!(
+            lowered_symbol(&program, locals[0].id).storage,
+            SymbolStorage::ImmutableValue
+        );
+        assert_eq!(
+            lowered_symbol(&program, locals[1].id).storage,
+            SymbolStorage::MutableCell
+        );
+        assert!(module.has_mutable_storage(locals[1].id));
+    }
+
+    #[test]
+    fn symbol_storage_classifies_captured_cells_and_borrowed_captures() {
+        let module = checked_program(concat!(
+            "def counter: () -> () -> I32 = () => {\n",
+            "  let mut count: I32 = 0\n",
+            "  () => { count = count + 1; count }\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let inner = module
+            .functions()
+            .iter()
+            .find(|function| !function.captures.is_empty())
+            .expect("capturing closure");
+        let captured = inner.captures[0];
+        let lowered = lowered_symbol(&program, captured);
+        assert_eq!(lowered.storage, SymbolStorage::CapturedCell);
+        assert!(lowered.captured_cell);
+        assert!(
+            lowered.requires_initialization_check
+                == module.resolved().requires_initialization_state(captured)
+        );
+        assert_eq!(
+            lowered.captured_cell,
+            capture_requires_cell(&module, captured)
+        );
+
+        let module = checked_program(concat!(
+            "type MyString = ctor String\n",
+            "impl !Copy MyString {}\n",
+            "companion MyString {\n",
+            "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
+            "}\n",
+            "def local = (left: MyString, right: MyString) => {\n",
+            "  let append = MyString.concat left\n",
+            "  append right\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let (function, borrowed) = module
+            .functions()
+            .iter()
+            .chain(module.implicit_thunks_in_id_order())
+            .flat_map(|function| {
+                function
+                    .captures
+                    .iter()
+                    .map(move |symbol| (function, *symbol))
+            })
+            .find(|(function, symbol)| module.is_borrowed_capture(function.id, *symbol))
+            .expect("a borrowed capture");
+        assert!(!module.is_move_parameter(borrowed));
+        let lowered = lowered_symbol(&program, borrowed);
+        assert_eq!(lowered.storage, SymbolStorage::ImmutableValue);
+        assert_eq!(
+            lowered.captured_cell,
+            capture_requires_cell(&module, borrowed)
+        );
+        assert!(!lowered.captured_cell);
+        assert_eq!(lowered.owner, module.resolved().symbol_owner(borrowed));
+        assert!(lowered.owner.is_some());
+    }
+
+    #[test]
+    fn symbol_storage_classifies_functions_signals_derived_and_singletons() {
+        let module = checked_program(concat!(
+            "let signal count: I32 = 1\n",
+            "let doubled: I32 = count + count\n",
+            "def double: I32 -> I32 = value => value + value\n",
+            "type Wrapper = ctor I32\n",
+            "type Enabled\n",
+            "let enabled: Enabled = Enabled\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+
+        let count = lowered_symbol(&program, binding_symbol(&module, "count"));
+        assert_eq!(count.storage, SymbolStorage::Signal);
+        assert!(count.signal);
+        let doubled = lowered_symbol(&program, binding_symbol(&module, "doubled"));
+        assert_eq!(doubled.storage, SymbolStorage::DerivedBinding);
+        assert!(doubled.derived);
+
+        let double_symbol = binding_symbol(&module, "double");
+        let double = lowered_symbol(&program, double_symbol);
+        assert_eq!(double.storage, SymbolStorage::FunctionBinding);
+        assert_eq!(double.function, module.function_for_symbol(double_symbol));
+        assert!(double.function.is_some());
+
+        let wrapper_id = module
+            .resolved()
+            .type_declarations()
+            .iter()
+            .find_map(|(id, _)| {
+                (module.resolved().type_name(*id) == Some("Wrapper")).then_some(*id)
+            })
+            .expect("Wrapper type");
+        let (constructor, constructor_type) = module
+            .resolved()
+            .constructors()
+            .iter()
+            .find(|(_, id)| **id == wrapper_id)
+            .expect("Wrapper constructor");
+        let lowered = lowered_symbol(&program, *constructor);
+        assert_eq!(lowered.storage, SymbolStorage::FunctionBinding);
+        assert_eq!(lowered.constructor, Some(*constructor_type));
+
+        let enabled_id = module
+            .resolved()
+            .type_declarations()
+            .iter()
+            .find_map(|(id, _)| {
+                (module.resolved().type_name(*id) == Some("Enabled")).then_some(*id)
+            })
+            .expect("Enabled type");
+        let (singleton, singleton_type) = module
+            .resolved()
+            .singleton_values()
+            .iter()
+            .find(|(_, id)| **id == enabled_id)
+            .expect("Enabled singleton");
+        let lowered = lowered_symbol(&program, *singleton);
+        assert_eq!(lowered.storage, SymbolStorage::FunctionBinding);
+        assert_eq!(lowered.singleton, Some(*singleton_type));
+    }
+
+    #[test]
+    fn symbol_storage_classifies_extern_and_intrinsic_symbols() {
+        let module = checked_program(concat!(
+            "use std.cinterop.*\n",
+            "extern \"c\" {\n",
+            "  my_puts: (CPointer CChar) -> I32\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let external = module
+            .resolved()
+            .symbols_in_id_order()
+            .into_iter()
+            .find(|info| module.resolved().is_external_symbol(info.id))
+            .expect("external symbol");
+        let lowered = lowered_symbol(&program, external.id);
+        assert_eq!(lowered.storage, SymbolStorage::ExternalSymbol);
+        assert!(lowered.external);
+
+        let intrinsic = module
+            .resolved()
+            .symbols_in_id_order()
+            .into_iter()
+            .find(|info| module.resolved().intrinsic_function(info.id).is_some())
+            .expect("intrinsic symbol");
+        let lowered = lowered_symbol(&program, intrinsic.id);
+        assert_eq!(lowered.storage, SymbolStorage::GlobalStorage);
+        assert!(lowered.intrinsic.is_some());
+        assert!(!lowered.external);
+    }
+
+    #[test]
+    fn symbol_catalog_excludes_macro_quote_placeholders() {
+        let module = checked_program(concat!(
+            "use std.syntax.(Expr, parse_quote)\n",
+            "macro double: Expr -> Expr = value => parse_quote { $value + $value }\n",
+            "let answer: I32 = double 21\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let resolved = module.resolved();
+        for (_, key, _) in program.symbols.iter() {
+            let info = resolved
+                .symbols_in_id_order()
+                .into_iter()
+                .find(|info| info.id == key)
+                .expect("catalogued symbol should be declared");
+            assert!(info.module_symbol || info.owner.is_some());
+            assert!(!resolved.is_const_symbol(key));
+        }
     }
 
     #[test]
