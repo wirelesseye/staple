@@ -359,7 +359,6 @@ impl<'a> OwnershipChecker<'a> {
             }
             Expression::RepeatedProduct(value) => {
                 self.check_expression(&value.value, consume);
-                self.check_expression(&value.count, false);
                 true
             }
             Expression::Call(value) => {

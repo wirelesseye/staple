@@ -293,7 +293,6 @@ fn scan_expression(
         }
         Expression::RepeatedProduct(repeated) => {
             scan_expression(module, &repeated.value, info, diagnostics);
-            scan_expression(module, &repeated.count, info, diagnostics);
         }
         Expression::Call(call) => {
             scan_expression(module, &call.callee, info, diagnostics);
@@ -429,7 +428,6 @@ fn collect_expression<'a>(
         }
         Expression::RepeatedProduct(repeated) => {
             collect_expression(&repeated.value, out);
-            collect_expression(&repeated.count, out);
         }
         Expression::Call(call) => {
             collect_expression(&call.callee, out);

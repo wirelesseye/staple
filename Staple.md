@@ -1287,14 +1287,24 @@ let zeros: I32[3] = (0; 3) // (0, 0, 0)
 
 `(value; count)` is equivalent to a product with `count` copies of `value`;
 `(value; 0)` is `()` and `(value; 1)` is `value`, and the expanded product may
-contain at most 65,535 elements. `count` must either fold to a non-negative
-integer during compilation under the same rules as a `const` initializer or
-have a singleton type satisfying `Natural`. Singleton-typed count expressions are evaluated
-once, while their type determines the product arity. `value` is evaluated
-exactly once; when `count` is not known to be `1` its type must be `Copy`, since
-the one value is copied into every position. The `;` form takes exactly one
-value: an element name, a `...` spread, or a `.name:` designator before the `;`
-is a syntax error.
+contain at most 65,535 elements. The count uses the same grammar and rules as a
+repeated type's size: it is a compile-time type, not a value. A non-negative
+integer type literal, a type alias, or a compile-time parameter constrained by
+`Natural` may be used, for example:
+
+```staple
+type alias Count = 3
+let cells: I32[Count] = (0; Count)
+
+def repeat: <T, N where Natural N> T -> T[N] = value => (value; N)
+```
+
+A runtime value is never a valid count, even when its type is a singleton: with
+`let n: 3 = 3`, `(0; n)` is rejected. `value` is evaluated exactly once; when
+`count` is not known to be `1` its type must be `Copy`, since the one value is
+copied into every position. The `;` form takes exactly one value: an element
+name, a `...` spread, or a `.name:` designator before the `;` is a syntax
+error.
 
 Product type elements can be flattened explicitly with `...`:
 

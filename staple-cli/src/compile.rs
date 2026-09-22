@@ -3955,8 +3955,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "const n = 2\n",
-                "let cells: I32[4] = (3; n + 2)\n",
+                "let cells: I32[4] = (3; 4)\n",
                 "let total = cells.0 + cells.1 + cells.2 + cells.3\n",
                 "exit (total - 12)\n",
             ),

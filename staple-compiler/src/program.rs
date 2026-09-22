@@ -2413,7 +2413,6 @@ fn find_block_submodules_in_expression(expression: &Expression, out: &mut Vec<Su
         }
         Expression::RepeatedProduct(repeated) => {
             find_block_submodules_in_expression(&repeated.value, out);
-            find_block_submodules_in_expression(&repeated.count, out);
         }
         Expression::Call(call) => {
             find_block_submodules_in_expression(&call.callee, out);
@@ -2579,7 +2578,6 @@ fn find_block_use_declarations_in_expression(
         }
         Expression::RepeatedProduct(repeated) => {
             find_block_use_declarations_in_expression(&repeated.value, out);
-            find_block_use_declarations_in_expression(&repeated.count, out);
         }
         Expression::Call(call) => {
             find_block_use_declarations_in_expression(&call.callee, out);

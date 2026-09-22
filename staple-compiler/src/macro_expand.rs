@@ -860,7 +860,6 @@ fn desugar_expression(expression: &mut Expression, next_syntax_id: &mut usize) {
         }
         Expression::RepeatedProduct(repeated) => {
             desugar_expression(&mut repeated.value, next_syntax_id);
-            desugar_expression(&mut repeated.count, next_syntax_id);
         }
         Expression::Call(call) => {
             desugar_expression(&mut call.callee, next_syntax_id);
@@ -1986,7 +1985,7 @@ impl MacroExpander {
             Expression::RepeatedProduct(value) => {
                 let element =
                     self.check_compile_expression(module, &value.value, environment, None);
-                let count = self.check_compile_expression(module, &value.count, environment, None);
+                let count = compile_type(&value.count);
                 self.require_compile_type(
                     &count,
                     &CompileType::Integer,
@@ -2576,7 +2575,6 @@ impl MacroExpander {
             }
             Expression::RepeatedProduct(value) => {
                 self.check_quoted_expression(module, &value.value, environment);
-                self.check_quoted_expression(module, &value.count, environment);
             }
             Expression::Call(value) => {
                 self.check_quoted_expression(module, &value.callee, environment);
@@ -4250,22 +4248,6 @@ impl MacroExpander {
             }
             Expression::RepeatedProduct(mut repeated) => {
                 repeated.value = Box::new(self.expand_expression(module, *repeated.value, depth));
-                repeated.count = Box::new(self.expand_expression(module, *repeated.count, depth));
-                if !matches!(repeated.count.as_ref(), Expression::Integer(_)) {
-                    // Attempt to fold the count the same way `const` initializers
-                    // are folded. If it does not reduce to a literal, discard any
-                    // evaluation diagnostics and leave the original expression in
-                    // place; type checking reports a single clean error.
-                    let span = repeated.count.syntax().span.clone();
-                    let diagnostics_before = self.diagnostics.len();
-                    match self
-                        .eval_expression(module, &repeated.count, &mut Environment::new())
-                        .and_then(|value| self.value_to_expression(value, span))
-                    {
-                        Some(folded) => repeated.count = Box::new(folded),
-                        None => self.diagnostics.truncate(diagnostics_before),
-                    }
-                }
                 Expression::RepeatedProduct(repeated)
             }
             Expression::Call(mut call) => {
@@ -5015,11 +4997,14 @@ impl MacroExpander {
             }
             Expression::RepeatedProduct(repeated) => {
                 let value = self.eval_expression(module, &repeated.value, environment)?;
-                let count = self.eval_expression(module, &repeated.count, environment)?;
-                let Value::Integer(count) = count else {
+                let count = match repeated.count.as_ref() {
+                    Type::NumberLiteral(literal) => literal.literal.parse::<i128>().ok(),
+                    _ => None,
+                };
+                let Some(count) = count else {
                     self.diagnostics.push(Diagnostic::new(
                         repeated.count.syntax().span.clone(),
-                        "a repeated product count must be a compile-time integer",
+                        "a repeated product count must be a compile-time integer type",
                     ));
                     return None;
                 };
@@ -7006,7 +6991,7 @@ impl MacroExpander {
             }
             Expression::RepeatedProduct(repeated) => {
                 self.freshen_expression(&mut repeated.value, module, mark);
-                self.freshen_expression(&mut repeated.count, module, mark);
+                freshen_type(self, &mut repeated.count, module, mark);
             }
             Expression::Call(call) => {
                 self.freshen_expression(&mut call.callee, module, mark);
@@ -10625,7 +10610,7 @@ fn substitute_splices(
         }
         Expression::RepeatedProduct(repeated) => {
             *repeated.value = substitute_splices(&repeated.value, environment, diagnostics)?;
-            *repeated.count = substitute_splices(&repeated.count, environment, diagnostics)?;
+            substitute_type(&mut repeated.count, environment, diagnostics)?;
         }
         Expression::Call(call) => {
             *call.callee = substitute_splices(&call.callee, environment, diagnostics)?;
@@ -11742,7 +11727,6 @@ fn alpha_rename_expression(
         }
         Expression::RepeatedProduct(repeated) => {
             alpha_rename_expression(&mut repeated.value, mark, scopes);
-            alpha_rename_expression(&mut repeated.count, mark, scopes);
         }
         Expression::Call(call) => {
             alpha_rename_expression(&mut call.callee, mark, scopes);

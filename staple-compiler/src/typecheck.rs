@@ -3935,10 +3935,9 @@ impl TypeChecker {
                     })
                     .collect(),
             ),
-            Expression::RepeatedProduct(value) => union(vec![
-                self.expression_effects_now(module, &value.value, target_parameters),
-                self.expression_effects_now(module, &value.count, target_parameters),
-            ]),
+            Expression::RepeatedProduct(value) => {
+                self.expression_effects_now(module, &value.value, target_parameters)
+            }
             Expression::StringTemplate(template) => union(
                 template
                     .parts
@@ -4826,7 +4825,6 @@ impl TypeChecker {
             }),
             Expression::RepeatedProduct(value) => {
                 self.refresh_expression_function_types(module, &value.value)
-                    | self.refresh_expression_function_types(module, &value.count)
             }
             Expression::Call(value) => {
                 let mut changed = self.refresh_expression_function_types(module, &value.callee)
@@ -5033,12 +5031,6 @@ impl TypeChecker {
                 self.record_expression_effects(
                     module,
                     &value.value,
-                    target_parameters,
-                    current_module,
-                );
-                self.record_expression_effects(
-                    module,
-                    &value.count,
                     target_parameters,
                     current_module,
                 );
@@ -5682,9 +5674,7 @@ impl TypeChecker {
                     .elements
                     .iter()
                     .any(|element| contains_resource(&element.value)),
-                Expression::RepeatedProduct(value) => {
-                    contains_resource(&value.value) || contains_resource(&value.count)
-                }
+                Expression::RepeatedProduct(value) => contains_resource(&value.value),
                 _ => false,
             }
         }
@@ -6798,23 +6788,57 @@ impl TypeChecker {
                 if self.did_return {
                     return CheckedType::empty_product();
                 }
-                let literal_count = match repeated.count.as_ref() {
-                    Expression::Integer(integer) => integer.literal.parse::<usize>().ok(),
-                    _ => None,
-                };
-                let count_type = if literal_count.is_some() {
-                    literal_count.map(|count| CheckedType::NumberLiteral(count as u64))
-                } else {
-                    Some(self.check_expression(module, &repeated.count))
-                };
-                match (literal_count, count_type) {
-                    (Some(count), _) if count > MAX_PRODUCT_ARITY => {
-                        self.diagnostics.push(Diagnostic::new(
-                            repeated.syntax.span.clone(),
-                            format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                        ));
-                        CheckedType::Error
+                let (literal_count, symbolic_count) = match self
+                    .resolve_source_type_inner(module, &repeated.count)
+                {
+                    CheckedType::NumberLiteral(count) => match usize::try_from(count) {
+                        Ok(count) if count <= MAX_PRODUCT_ARITY => (Some(count), None),
+                        Ok(_) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.syntax.span.clone(),
+                                format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
+                            ));
+                            return CheckedType::Error;
+                        }
+                        Err(_) => {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.syntax.span.clone(),
+                                "product repetition count is too large",
+                            ));
+                            return CheckedType::Error;
+                        }
+                    },
+                    count_type @ CheckedType::Parameter { .. } => {
+                        let natural = self.natural_trait.is_some_and(|natural_trait| {
+                            self.trait_obligation_available(
+                                natural_trait,
+                                std::slice::from_ref(&count_type),
+                            )
+                        });
+                        if natural {
+                            (None, Some(count_type))
+                        } else {
+                            self.diagnostics.push(Diagnostic::new(
+                                repeated.count.syntax().span.clone(),
+                                format!(
+                                    "a repeated product count must satisfy `Natural`, found `{count_type}`"
+                                ),
+                            ));
+                            return CheckedType::Error;
+                        }
                     }
+                    CheckedType::Error => return CheckedType::Error,
+                    other => {
+                        self.diagnostics.push(Diagnostic::new(
+                            repeated.count.syntax().span.clone(),
+                            format!(
+                                "a repeated product count must satisfy `Natural`, found `{other}`"
+                            ),
+                        ));
+                        return CheckedType::Error;
+                    }
+                };
+                match (literal_count, symbolic_count) {
                     (Some(count), _) => {
                         let bounds = self
                             .active_function_bounds
@@ -6842,55 +6866,7 @@ impl TypeChecker {
                         }
                         repeated_product(value_type, count)
                     }
-                    (None, Some(CheckedType::NumberLiteral(count))) => {
-                        let Ok(count) = usize::try_from(count) else {
-                            self.diagnostics.push(Diagnostic::new(
-                                repeated.syntax.span.clone(),
-                                "product repetition count is too large",
-                            ));
-                            return CheckedType::Error;
-                        };
-                        if count > MAX_PRODUCT_ARITY {
-                            self.diagnostics.push(Diagnostic::new(
-                                repeated.syntax.span.clone(),
-                                format!("product arity exceeds the limit of {MAX_PRODUCT_ARITY}"),
-                            ));
-                            return CheckedType::Error;
-                        }
-                        let bounds = self
-                            .active_function_bounds
-                            .iter()
-                            .flatten()
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        if count != 1
-                            && value_type != CheckedType::Error
-                            && !is_copy_type(
-                                &value_type,
-                                self.copy_trait,
-                                self.drop_trait,
-                                self.io_type,
-                                &self.trait_implementations,
-                                &bounds,
-                            )
-                        {
-                            self.diagnostics.push(Diagnostic::new(
-                                repeated.value.syntax().span.clone(),
-                                format!(
-                                    "a repeated product with a count other than 1 requires a `Copy` element type, found `{value_type}`"
-                                ),
-                            ));
-                        }
-                        repeated_product(value_type, count)
-                    }
-                    (None, Some(count_type))
-                        if self.natural_trait.is_some_and(|natural_trait| {
-                            self.trait_obligation_available(
-                                natural_trait,
-                                std::slice::from_ref(&count_type),
-                            )
-                        }) =>
-                    {
+                    (None, Some(count_type)) => {
                         let bounds = self
                             .active_function_bounds
                             .iter()
@@ -6919,14 +6895,7 @@ impl TypeChecker {
                             count: Box::new(count_type),
                         }
                     }
-                    (_, Some(CheckedType::Error)) => CheckedType::Error,
-                    _ => {
-                        self.diagnostics.push(Diagnostic::new(
-                            repeated.count.syntax().span.clone(),
-                            "a repeated product count must be a compile-time non-negative integer or have a type satisfying `Natural`",
-                        ));
-                        CheckedType::Error
-                    }
+                    (None, None) => CheckedType::Error,
                 }
             }
             Expression::Call(call) => {
@@ -13808,7 +13777,6 @@ fn expression_reads_reactive(
             .any(|element| expression_reads_reactive(module, &element.value, derived)),
         Expression::RepeatedProduct(value) => {
             expression_reads_reactive(module, &value.value, derived)
-                || expression_reads_reactive(module, &value.count, derived)
         }
         Expression::Block(value) => value.items.iter().any(|value| item(module, value, derived)),
         Expression::Loop(value) => value
@@ -13906,7 +13874,6 @@ fn collect_value_bindings(module: &ResolvedModule) -> Vec<Binding> {
             }
             Expression::RepeatedProduct(value) => {
                 expression(&value.value, bindings);
-                expression(&value.count, bindings);
             }
             Expression::Call(value) => {
                 expression(&value.callee, bindings);
@@ -14071,7 +14038,6 @@ fn expression_mentions_symbols(
             .any(|element| expression_mentions_symbols(module, &element.value, symbols)),
         Expression::RepeatedProduct(value) => {
             expression_mentions_symbols(module, &value.value, symbols)
-                || expression_mentions_symbols(module, &value.count, symbols)
         }
         Expression::Call(value) => {
             expression_mentions_symbols(module, &value.callee, symbols)
@@ -14147,10 +14113,7 @@ fn expression_contains_assignment(expression: &Expression) -> bool {
             .elements
             .iter()
             .any(|element| expression_contains_assignment(&element.value)),
-        Expression::RepeatedProduct(value) => {
-            expression_contains_assignment(&value.value)
-                || expression_contains_assignment(&value.count)
-        }
+        Expression::RepeatedProduct(value) => expression_contains_assignment(&value.value),
         Expression::Call(value) => {
             expression_contains_assignment(&value.callee)
                 || expression_contains_assignment(&value.argument)
@@ -14338,7 +14301,6 @@ fn implicit_thunk_captures(module: &ResolvedModule, expression: &Expression) -> 
             }
             Expression::RepeatedProduct(value) => {
                 visit(module, &value.value, &declared, captures);
-                visit(module, &value.count, &declared, captures);
             }
             Expression::Call(value) => {
                 visit(module, &value.callee, &declared, captures);

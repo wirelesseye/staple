@@ -456,7 +456,7 @@ fn render_expr(program: &Program, expression: &Expression) -> String {
             format!(
                 "({}; {})",
                 render_expr(program, &repeated.value),
-                render_expr(program, &repeated.count),
+                repeated.count,
             )
         }
         Expression::Call(call) => splice(program, &call.syntax, &[&call.callee, &call.argument]),
@@ -709,9 +709,7 @@ fn expr_has_generated(expression: &Expression) -> bool {
             .elements
             .iter()
             .any(|element| expr_has_generated(&element.value)),
-        Expression::RepeatedProduct(repeated) => {
-            expr_has_generated(&repeated.value) || expr_has_generated(&repeated.count)
-        }
+        Expression::RepeatedProduct(repeated) => expr_has_generated(&repeated.value),
         Expression::Call(call) => {
             expr_has_generated(&call.callee) || expr_has_generated(&call.argument)
         }

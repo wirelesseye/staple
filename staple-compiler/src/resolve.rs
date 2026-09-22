@@ -3839,7 +3839,7 @@ impl NameResolver {
             }
             Expression::RepeatedProduct(value) => {
                 self.resolve_compile_time_expression_annotations(&value.value);
-                self.resolve_compile_time_expression_annotations(&value.count);
+                self.resolve_type_lenient(&value.count);
             }
             Expression::Call(value) => {
                 self.resolve_compile_time_expression_annotations(&value.callee);
@@ -4007,7 +4007,6 @@ impl NameResolver {
             }
             Expression::RepeatedProduct(value) => {
                 self.resolve_quoted_expression(&value.value, scopes);
-                self.resolve_quoted_expression(&value.count, scopes);
             }
             Expression::Call(value) => {
                 self.resolve_quoted_expression(&value.callee, scopes);
@@ -4470,7 +4469,7 @@ impl NameResolver {
             }
             Expression::RepeatedProduct(repeated) => {
                 self.resolve_expression(&repeated.value, None, None);
-                self.resolve_expression(&repeated.count, None, None);
+                self.resolve_repeated_count(&repeated.count);
             }
             Expression::Call(call) => {
                 if let Some(primitive) = self.resolve_primitive_macro(&call.callee) {
@@ -4678,6 +4677,32 @@ impl NameResolver {
 
     fn resolve_type(&mut self, ty: &Type) {
         self.resolve_type_with(ty, true);
+    }
+
+    /// Resolves the count of a `(value; count)` repeated product, which must
+    /// denote a compile-time type. Resolving leniently first keeps a name that
+    /// is a value from producing a generic unknown-type error; when the name
+    /// is a known value, the diagnostic says a value cannot be a count.
+    fn resolve_repeated_count(&mut self, count: &Type) {
+        if let Type::Named(named) = count {
+            self.resolve_type_lenient(count);
+            if self.type_parameters.contains_key(&named.syntax.id)
+                || self.named_types.contains_key(&named.syntax.id)
+            {
+                return;
+            }
+            if named.namespace.is_none() && self.lookup(&named.name).is_some() {
+                self.diagnostics.push(Diagnostic::new(
+                    named.syntax.span.clone(),
+                    format!(
+                        "`{}` is a value; a repeated product count must be a type satisfying `Natural`",
+                        named.name
+                    ),
+                ));
+                return;
+            }
+        }
+        self.resolve_type(count);
     }
 
     fn resolve_type_lenient(&mut self, ty: &Type) {
@@ -5889,7 +5914,6 @@ fn analyze_compile_expression(
         }
         Expression::RepeatedProduct(value) => {
             analyze_compile_expression(&value.value, scope, parameter_kind, quoted);
-            analyze_compile_expression(&value.count, scope, parameter_kind, quoted);
         }
         Expression::Call(value) => {
             analyze_compile_expression(&value.callee, scope, parameter_kind, quoted);
@@ -6212,7 +6236,6 @@ impl<'a> InitializationAnalyzer<'a> {
             }
             Expression::RepeatedProduct(repeated) => {
                 self.expression(&repeated.value, local, outer);
-                self.expression(&repeated.count, local, outer);
             }
             Expression::Call(call) => {
                 self.expression(&call.callee, local, outer);
@@ -6439,7 +6462,6 @@ fn find_block_type_declarations_in_expression<'a>(
         }
         Expression::RepeatedProduct(repeated) => {
             find_block_type_declarations_in_expression(&repeated.value, out);
-            find_block_type_declarations_in_expression(&repeated.count, out);
         }
         Expression::Call(call) => {
             find_block_type_declarations_in_expression(&call.callee, out);

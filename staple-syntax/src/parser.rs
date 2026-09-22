@@ -3662,9 +3662,11 @@ impl Grammar {
                     && self.at(TokenKind::Semicolon)
                 {
                     self.bump_token();
-                    let count = self.parse_expression()?;
-                    let close =
-                        self.expect(TokenKind::RParen, "expected `)` after repeated product");
+                    let count = self.parse_type()?;
+                    let close = self.expect(
+                        TokenKind::RParen,
+                        "expected `)` after repeated product; a repetition count must be a type",
+                    );
                     self.brace_terminates_expression = previous_brace_termination;
                     close?;
                     return Ok(Expression::RepeatedProduct(RepeatedProductExpression {

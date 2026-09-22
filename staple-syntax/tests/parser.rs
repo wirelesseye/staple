@@ -511,7 +511,7 @@ fn parses_repeated_product_values_losslessly() {
         "let zeros = (0; 3)\n",
         "let none = (unit; 0)\n",
         "let one = (value; 1)\n",
-        "let computed = (seed x; count + 1)\n",
+        "let named = (seed x; width)\n",
     );
     let root = parse(source).expect("repeated product values should parse");
     assert_eq!(root.text(), source);
@@ -523,16 +523,19 @@ fn parses_repeated_product_values_losslessly() {
         panic!("expected repeated product");
     };
     assert!(matches!(repeated.value.as_ref(), Expression::Integer(_)));
-    assert!(matches!(repeated.count.as_ref(), Expression::Integer(_)));
+    assert!(matches!(repeated.count.as_ref(), Type::NumberLiteral(_)));
 
-    let Item::Binding(computed) = &root.items[3] else {
+    let Item::Binding(named) = &root.items[3] else {
         panic!("expected binding");
     };
-    let Some(Expression::RepeatedProduct(repeated)) = &computed.value else {
+    let Some(Expression::RepeatedProduct(repeated)) = &named.value else {
         panic!("expected repeated product");
     };
     assert!(matches!(repeated.value.as_ref(), Expression::Call(_)));
-    assert!(matches!(repeated.count.as_ref(), Expression::Binary(_)));
+    assert!(matches!(
+        repeated.count.as_ref(),
+        Type::Named(named) if named.name == "width"
+    ));
 }
 
 #[test]
@@ -542,6 +545,7 @@ fn rejects_malformed_repeated_products() {
     assert!(parse("let bad = (...xs; 3)\n").is_err());
     assert!(parse("let bad = (value; )\n").is_err());
     assert!(parse("let bad = (value; 2; 3)\n").is_err());
+    assert!(parse("let bad = (value; count + 1)\n").is_err());
 }
 
 #[test]

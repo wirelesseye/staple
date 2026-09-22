@@ -732,7 +732,7 @@ impl<'a> Classifier<'a> {
             }
             Expression::RepeatedProduct(value) => {
                 self.expression(&value.value, resolved);
-                self.expression(&value.count, resolved);
+                self.ty(&value.count, resolved);
             }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {

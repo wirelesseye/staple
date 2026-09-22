@@ -1657,10 +1657,10 @@ fn number_literal_types_are_natural_usize_refinements() {
 #[test]
 fn natural_count_parameters_drive_repeated_product_values() {
     let source = concat!(
-        "def repeat: <T, N where Copy T, Natural N> T -> N -> T[N] = value => n => (value; n)\n",
+        "def repeat: <T, N where Copy T, Natural N> T -> N -> T[N] = value => n => (value; N)\n",
         "let repeated: I32[3] = repeat 7 3\n",
-        "let count: 3 = 3\n",
-        "let local: I32[3] = (9; count)\n",
+        "type alias Count = 3\n",
+        "let local: I32[3] = (9; Count)\n",
     );
     let module = type_check(source);
     let context = Context::create();
@@ -1670,7 +1670,7 @@ fn natural_count_parameters_drive_repeated_product_values() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "def invalid: <T, N where Natural N> T -> N -> T[N] = value => n => (value; n)\n",
+            "def invalid: <T, N where Natural N> T -> N -> T[N] = value => n => (value; N)\n",
         ))
         .expect_err_diagnostics("symbolic repetition requires Copy elements");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -1754,31 +1754,40 @@ fn repeated_product_values_expand_to_fixed_products() {
 }
 
 #[test]
-fn repeated_product_count_folds_compile_time_expressions() {
-    let module = type_check(concat!(
-        "const width = 2\n",
-        "let cells: I32[3] = (1; width + 1)\n",
-        "let total: I32 = cells.0 + cells.1 + cells.2\n",
-    ));
-    let Item::Binding(cells) = &module.syntax().items[1] else {
-        panic!("expected binding");
-    };
-    assert!(matches!(
-        module.type_of_expression(cells.value.as_ref().unwrap().syntax().id),
-        Some(CheckedType::Product(product)) if product.elements.len() == 3,
-    ));
+fn repeated_product_counts_must_be_types() {
+    assert!(
+        parse("let cells: I32[3] = (1; width + 1)\n").is_err(),
+        "a repetition count is a type, not an expression"
+    );
+    assert!(
+        parse("let cells: I32[3] = (1; width)\n").is_ok(),
+        "a type name is a valid repetition count"
+    );
 }
 
 #[test]
-fn repeated_product_rejects_non_constant_and_non_copy_and_oversized_counts() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve("def make: I32 -> I32[2] = size => (0; size)\n"))
-        .expect_err_diagnostics("a runtime count is not a compile-time integer");
-    assert!(diagnostics.iter().any(|diagnostic| {
-        diagnostic
-            .message
-            .contains("compile-time non-negative integer")
-    }));
+fn repeated_product_rejects_value_non_copy_and_oversized_counts() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    for source in [
+        "def make: I32 -> I32[2] = size => (0; size)\n",
+        "let n: 3 = 3\nlet local: I32[3] = (9; n)\n",
+    ] {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(root.join("stdlib"))
+            .load_source(source, root)
+            .expect("source should load");
+        let diagnostics = NameResolver::new()
+            .resolve_program(program)
+            .expect_err_diagnostics("a value cannot be a repeated product count");
+        assert!(
+            diagnostics.iter().any(|diagnostic| {
+                diagnostic
+                    .message
+                    .contains("a repeated product count must be a type satisfying `Natural`")
+            }),
+            "unexpected diagnostics: {diagnostics:?}",
+        );
+    }
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
@@ -1790,6 +1799,17 @@ fn repeated_product_rejects_non_constant_and_non_copy_and_oversized_counts() {
         diagnostic
             .message
             .contains("requires a `Copy` element type")
+    }));
+
+    let diagnostics = TypeChecker::new()
+        .check(resolve(
+            "type alias Text = String\nlet bad: I32[1] = (0; Text)\n",
+        ))
+        .expect_err_diagnostics("a non-Natural type cannot be a repetition count");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("must satisfy `Natural`, found `String`")
     }));
 
     let diagnostics = TypeChecker::new()

@@ -206,15 +206,15 @@ impl ProductExpression {
 
 /// A `(value; count)` product literal that repeats `value` `count` times.
 ///
-/// `count` is an ordinary value expression that must fold to a non-negative
-/// integer at compile time (the same evaluator used for `const` initializers).
-/// `value` is evaluated exactly once; when the count is not `1` its type must
-/// be `Copy`.
+/// `count` is a compile-time type, using the same grammar as a repeated type's
+/// size: a non-negative integer type literal, a type alias, or a compile-time
+/// parameter constrained by `Natural`. `value` is evaluated exactly once; when
+/// the count is not `1` its type must be `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepeatedProductExpression {
     pub syntax: Syntax,
     pub value: Box<Expression>,
-    pub count: Box<Expression>,
+    pub count: Box<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

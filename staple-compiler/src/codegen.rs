@@ -11256,10 +11256,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
         environment: &mut FunctionEnvironment<'context>,
         repeated: &RepeatedProductExpression,
     ) -> CodeGenerationResult<AnyValueEnum<'context>> {
-        let literal_count = || match repeated.count.as_ref() {
-            Expression::Integer(integer) => integer.literal.parse::<usize>().unwrap_or(1),
-            _ => 1,
-        };
         let count = match self
             .typed_module
             .type_of_expression(repeated.syntax.id)
@@ -11267,18 +11263,12 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             .map(|value_type| substitute_type(value_type, &self.active_type_substitutions))
         {
             Some(CheckedType::Product(product)) if !product.variadic => product.elements.len(),
-            _ => literal_count(),
+            _ => 1,
         };
 
         let value = self.compile_adapted_call_argument(environment, &repeated.value)?;
         if environment.did_return {
             return Ok(self.unit_value());
-        }
-        if !matches!(repeated.count.as_ref(), Expression::Integer(_)) {
-            let _ = self.compile_expression(environment, &repeated.count)?;
-            if environment.did_return {
-                return Ok(self.unit_value());
-            }
         }
         if count == 1 {
             return Ok(value);

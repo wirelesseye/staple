@@ -310,7 +310,6 @@ impl DeclarationCollector<'_> {
             }
             Expression::RepeatedProduct(value) => {
                 self.expression(&value.value);
-                self.expression(&value.count);
             }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {
@@ -893,7 +892,7 @@ impl Collector<'_> {
             }
             Expression::RepeatedProduct(value) => {
                 self.expression(&value.value);
-                self.expression(&value.count);
+                self.ty(&value.count);
             }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {

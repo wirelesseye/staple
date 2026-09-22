@@ -303,7 +303,6 @@ impl Collector<'_> {
             }
             Expression::RepeatedProduct(repeated) => {
                 self.collect_expression_declarations(&repeated.value);
-                self.collect_expression_declarations(&repeated.count);
             }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {
@@ -1467,7 +1466,7 @@ impl Collector<'_> {
             }
             Expression::RepeatedProduct(repeated) => {
                 self.expression(&repeated.value);
-                self.expression(&repeated.count);
+                self.ty(&repeated.count);
             }
             Expression::StringTemplate(value) => {
                 for part in &value.parts {
