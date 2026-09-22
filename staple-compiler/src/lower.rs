@@ -2740,7 +2740,7 @@ mod tests {
         let mut program = LoweredProgram::default();
         let diagnostics = program.snapshot(&module);
         assert!(diagnostics.is_empty(), "{diagnostics:?}");
-        let (function, borrowed) = module
+        let (_function, borrowed) = module
             .functions()
             .iter()
             .chain(module.implicit_thunks_in_id_order())
@@ -2905,6 +2905,7 @@ mod tests {
             "type TestInner = ctor I32\n",
             "type TestOuter = ctor (TestInner, TestInner)\n",
             "type TestAlias = alias TestOuter\n",
+            "type TestCallback{E} = alias () ->{E} ()\n",
             "type TestHidden = opaque\n",
             "type TestEnabled\n",
         ));
@@ -2970,6 +2971,20 @@ mod tests {
             alias.representation, outer.representation,
             "an alias expands to its target's compact representation"
         );
+
+        let callback = lowered_type(&program, "TestCallback");
+        let Some(CheckedType::Function(parameter_template)) = callback.parameters.first() else {
+            panic!("effect parameter should use an effect-substitution template");
+        };
+        let parameter = parameter_template
+            .effects
+            .variable
+            .as_ref()
+            .expect("effect parameter template should retain its variable");
+        let Some(CheckedType::Function(representation)) = callback.representation.as_ref() else {
+            panic!("effect-parameterized alias should retain its representation");
+        };
+        assert_eq!(representation.effects.variable.as_ref(), Some(parameter));
 
         let hidden = lowered_type(&program, "TestHidden");
         assert_eq!(hidden.kind, LoweredTypeKind::Opaque);

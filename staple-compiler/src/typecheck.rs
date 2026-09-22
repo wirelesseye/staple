@@ -3318,7 +3318,15 @@ impl TypeChecker {
         pattern: &TypeParameterPattern,
     ) -> CheckedType {
         match pattern {
-            TypeParameterPattern::Effect(_) => CheckedType::Error,
+            TypeParameterPattern::Effect(binding) => effect_substitution_type(CheckedEffectSet {
+                variable: Some(CheckedEffectVariable {
+                    id: module
+                        .type_parameter_for(binding.syntax.id)
+                        .expect("resolved effect parameter"),
+                    name: binding.name.clone(),
+                }),
+                ..CheckedEffectSet::default()
+            }),
             TypeParameterPattern::Binding(binding) => CheckedType::Parameter {
                 id: module
                     .type_parameter_for(binding.syntax.id)
