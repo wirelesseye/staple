@@ -59,6 +59,7 @@ pub struct ResolvedFunctionalDependency {
 #[derive(Debug, Clone)]
 pub struct ResolvedTraitImplementation {
     pub syntax: SyntaxId,
+    pub span: Span,
     pub trait_id: TraitId,
     pub parameters: Vec<TypeParameterId>,
     pub arguments: Vec<Type>,
@@ -3710,6 +3711,7 @@ impl NameResolver {
                     self.trait_implementations
                         .push(ResolvedTraitImplementation {
                             syntax: implementation.syntax.id,
+                            span: implementation.syntax.span.clone(),
                             trait_id,
                             parameters,
                             arguments: implementation.arguments.clone(),

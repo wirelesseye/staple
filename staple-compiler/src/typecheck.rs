@@ -231,6 +231,98 @@ fn expected_string_representation() -> CheckedType {
     CheckedType::Slice(Box::new(CheckedType::U8))
 }
 
+/// Rewrites an instantiated representation into a compact template: nominal
+/// types stop at a `Opaque` reference (id plus arguments) instead of carrying
+/// their expanded representation, and contextual defaults are dropped. The
+/// result stays proportional to the declaration's own syntax even when nested
+/// nominal types would expand exponentially.
+fn compact_type_template(value_type: CheckedType) -> CheckedType {
+    match value_type {
+        CheckedType::Distinct {
+            id,
+            name,
+            arguments,
+            ..
+        } => CheckedType::Opaque {
+            id,
+            name,
+            arguments: arguments.into_iter().map(compact_type_template).collect(),
+        },
+        CheckedType::TypeConstructor {
+            id,
+            name,
+            arguments,
+        } => CheckedType::TypeConstructor {
+            id,
+            name,
+            arguments: arguments.into_iter().map(compact_type_template).collect(),
+        },
+        CheckedType::Opaque {
+            id,
+            name,
+            arguments,
+        } => CheckedType::Opaque {
+            id,
+            name,
+            arguments: arguments.into_iter().map(compact_type_template).collect(),
+        },
+        CheckedType::Ref(inner) => CheckedType::Ref(Box::new(compact_type_template(*inner))),
+        CheckedType::Slice(inner) => CheckedType::Slice(Box::new(compact_type_template(*inner))),
+        CheckedType::Buffer(inner) => CheckedType::Buffer(Box::new(compact_type_template(*inner))),
+        CheckedType::CPointer { pointee } => CheckedType::CPointer {
+            pointee: Box::new(compact_type_template(*pointee)),
+        },
+        CheckedType::Array { element, count } => CheckedType::Array {
+            element: Box::new(compact_type_template(*element)),
+            count: Box::new(compact_type_template(*count)),
+        },
+        CheckedType::Product(product) => CheckedType::Product(CheckedProductType {
+            elements: product
+                .elements
+                .into_iter()
+                .map(|element| CheckedTypeElement {
+                    name: element.name,
+                    value_type: compact_type_template(element.value_type),
+                    default: None,
+                })
+                .collect(),
+            variadic: product.variadic,
+        }),
+        CheckedType::Sum(sum) => CheckedType::Sum(CheckedSumType {
+            alternatives: sum
+                .alternatives
+                .into_iter()
+                .map(compact_type_template)
+                .collect(),
+        }),
+        CheckedType::Function(function) => CheckedType::Function(CheckedFunctionType {
+            parameter: Box::new(compact_type_template(*function.parameter)),
+            parameter_style: function.parameter_style,
+            default: None,
+            mutations: function.mutations,
+            moves: function.moves,
+            effects: compact_effect_set(function.effects),
+            result: Box::new(compact_type_template(*function.result)),
+        }),
+        other => other,
+    }
+}
+
+fn compact_effect_set(effects: CheckedEffectSet) -> CheckedEffectSet {
+    CheckedEffectSet {
+        variable: effects.variable,
+        resources: effects
+            .resources
+            .into_iter()
+            .map(|resource| CheckedResource {
+                value_type: compact_type_template(resource.value_type),
+                mutable: resource.mutable,
+            })
+            .collect(),
+        state: effects.state,
+    }
+}
+
 fn function_outer_arity(value_type: &CheckedType) -> Option<usize> {
     let CheckedType::Function(function) = value_type else {
         return None;
@@ -995,6 +1087,9 @@ pub(crate) struct CheckedSemanticIds {
 #[derive(Debug, Clone)]
 pub struct TypedModule {
     resolved: ResolvedModule,
+    type_representations: HashMap<TypeId, CheckedType>,
+    type_parameter_templates: HashMap<TypeId, Vec<CheckedType>>,
+    trait_prerequisites: HashMap<TraitId, Vec<CheckedTraitBound>>,
     expression_types: HashMap<SyntaxId, CheckedType>,
     product_default_plans: HashMap<SyntaxId, CheckedProductDefaultPlan>,
     curried_default_plans: HashMap<SyntaxId, CheckedCurriedDefaultPlan>,
@@ -1158,6 +1253,27 @@ impl TypedModule {
     #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
     pub(crate) fn checked_trait_implementations(&self) -> &[CheckedTraitImplementation] {
         &self.trait_implementations
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn type_representation(&self, id: TypeId) -> Option<&CheckedType> {
+        self.type_representations.get(&id)
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn type_parameter_templates(&self, id: TypeId) -> &[CheckedType] {
+        self.type_parameter_templates
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
+    pub(crate) fn trait_prerequisites(&self, trait_id: TraitId) -> &[CheckedTraitBound] {
+        self.trait_prerequisites
+            .get(&trait_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     #[allow(dead_code)] // Consumed by lowering beginning in Stage 2.3.
@@ -1791,6 +1907,8 @@ pub struct TypeChecker {
     curried_default_expressions: HashSet<SyntaxId>,
     symbol_types: HashMap<SymbolId, CheckedType>,
     function_types: HashMap<FunctionId, CheckedFunctionType>,
+    type_representations: HashMap<TypeId, CheckedType>,
+    type_parameter_templates: HashMap<TypeId, Vec<CheckedType>>,
     expression_effects: HashMap<SyntaxId, CheckedEffectSet>,
     current_effect_function: Cell<Option<FunctionId>>,
     current_state_accesses: RefCell<StateAccesses>,
@@ -2044,8 +2162,16 @@ impl TypeChecker {
             return Err(self.diagnostics);
         }
 
+        // Metadata-only collection runs after the diagnostics gate so it can
+        // neither suppress nor add acceptance-changing diagnostics: its own
+        // diagnostics are discarded and no later pass observes its caches.
+        self.collect_type_representations(&module);
+
         let typed = TypedModule {
             resolved: module,
+            type_representations: self.type_representations,
+            type_parameter_templates: self.type_parameter_templates,
+            trait_prerequisites: self.trait_prerequisites,
             expression_types: self.expression_types,
             product_default_plans: self.product_default_plans,
             curried_default_plans: self.curried_default_plans,
@@ -2337,6 +2463,59 @@ impl TypeChecker {
                 }
                 self.trait_method_types.insert(*method, value_type);
             }
+        }
+    }
+
+    /// Records a compact representation template for every type declaration
+    /// that has one, with nested nominal types left as references rather than
+    /// expanded representations. Diagnostics from this metadata-only pass are
+    /// discarded: the program has already passed checking, and a declaration
+    /// whose template cannot be built simply keeps no template.
+    fn collect_type_representations(&mut self, module: &ResolvedModule) {
+        let ids = self.type_declarations.keys().copied().collect::<Vec<_>>();
+        for id in ids {
+            let declaration = self.type_declarations[&id].clone();
+            let arguments = declaration
+                .type_parameters
+                .iter()
+                .map(|pattern| self.checked_type_parameter_pattern(module, pattern))
+                .collect::<Vec<_>>();
+            self.type_parameter_templates.insert(id, arguments.clone());
+            if declaration.kind() == TypeDeclarationKind::Singleton {
+                self.type_representations
+                    .insert(id, CheckedType::empty_product());
+                continue;
+            }
+            if declaration.underlying().is_none() {
+                continue;
+            }
+            let mut declaration_bounds = Vec::new();
+            for bound in &declaration.trait_bounds {
+                if let Some(bound) = self.resolve_trait_bound(module, bound) {
+                    declaration_bounds.push(bound);
+                }
+            }
+            let declaration_bounds = self.expand_trait_bounds(declaration_bounds);
+            let mut declaration_subtype_bounds = Vec::new();
+            for bound in &declaration.subtype_bounds {
+                if let Some(bound) = self.resolve_subtype_bound(module, bound) {
+                    declaration_subtype_bounds.push(bound);
+                }
+            }
+            let diagnostics = self.diagnostics.len();
+            self.active_function_bounds.push(declaration_bounds);
+            self.active_subtype_bounds.push(declaration_subtype_bounds);
+            let instantiated = self.instantiate_type_declaration(module, id, arguments);
+            self.active_subtype_bounds.pop();
+            self.active_function_bounds.pop();
+            self.diagnostics.truncate(diagnostics);
+            let representation = match instantiated {
+                CheckedType::Distinct { representation, .. } => *representation,
+                CheckedType::Error => continue,
+                other => other,
+            };
+            self.type_representations
+                .insert(id, compact_type_template(representation));
         }
     }
 

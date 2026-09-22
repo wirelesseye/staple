@@ -180,7 +180,7 @@ Completed:
 - Added focused tests for catalog coverage and ordering, globals/locals/mutable parameters, captured cells and borrowed captures, functions/signals/derived bindings/constructors/singletons, extern and intrinsic symbols, and macro quote exclusion.
 - Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (962 tests), and `git diff --check`.
 
-### Step 6 - Snapshot Type and Trait Metadata
+### Step 6 - Snapshot Type and Trait Metadata (Done)
 
 - Insert types by ascending semantic ID while retaining source origin and module identity.
 - Store checked type parameters, builtin identity, recursive-construction strategy, declaration kind, and checked representation template.
@@ -192,6 +192,16 @@ Completed:
 Gate: generic types, opaque/distinct types, multi-parameter traits, functional dependencies, defaults, negative implementations, and structural-trait prerequisites can be inspected using lowered metadata alone.
 
 After this step, update both plan files.
+
+Completed:
+
+- Added `LoweredTypeMetadata` with declaration kind, builtin identity, recursive-construction strategy, checked parameter templates, and a compact representation template; aliases, distinct, opaque, singleton, and builtin types all carry their classification.
+- Representation templates are compact and non-expanding: nested nominal types are references (id plus arguments), contextual defaults are dropped, and singleton types record the empty product.
+- Added `LoweredTraitMetadata`, `LoweredTraitMethodMetadata`, and `LoweredTraitImplementationMetadata` with names, owning modules, checked parameter templates, prerequisites, functional dependencies, declared method order, default functions, implementation arguments/bounds, negative flag, and selected method functions.
+- Type checking now records representation templates, type parameter templates, and trait prerequisites. Template collection runs after the diagnostics gate so it can neither suppress nor add acceptance-changing diagnostics; an earlier placement perturbed the `resolved_named_types` memo and silently suppressed genuine cyclic-type diagnostics.
+- Resolver trait implementations now retain their declaration span so implementation origins are source-accurate.
+- Added focused tests for type catalog ordering and template compactness, trait parameters/dependencies/methods/defaults, and implementation arguments/bounds/negation.
+- Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (965 tests), and `git diff --check`.
 
 ### Step 7 - Snapshot Standard and Runtime Subsystem Identities
 

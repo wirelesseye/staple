@@ -15,9 +15,10 @@ use std::marker::PhantomData;
 use staple_syntax::{Diagnostic, Item, Pattern, Span, SyntaxId};
 
 use crate::{
-    CheckedCoercion, CheckedEffectSet, CheckedFunctionType, CheckedResource, CheckedTraitBound,
-    CheckedType, FunctionId, ModuleId, ResolvedFunction, ResolvedModule, SourceModule, SymbolId,
-    TraitId, TraitMethodId, TypeId, TypedModule,
+    BuiltinType, CheckedCoercion, CheckedEffectSet, CheckedFunctionType,
+    CheckedFunctionalDependency, CheckedResource, CheckedTraitBound, CheckedType, DefinitionId,
+    FunctionId, ModuleId, RecursiveConstruction, ResolvedFunction, ResolvedModule, SourceModule,
+    SymbolId, TraitId, TraitMethodId, TypeId, TypeParameterId, TypedModule,
 };
 
 macro_rules! arena_id {
@@ -387,27 +388,66 @@ pub(crate) struct LoweredSymbol {
     pub external: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredTypeKind {
+    Alias,
+    Distinct,
+    Opaque,
+    Singleton,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredTypeMetadata {
     pub origin: Origin,
     pub semantic_id: TypeId,
+    pub name: String,
+    pub module: ModuleId,
+    pub kind: LoweredTypeKind,
+    pub builtin: Option<BuiltinType>,
+    pub recursive_construction: Option<RecursiveConstruction>,
+    /// Checked parameter templates in declaration order.
+    pub parameters: Vec<CheckedType>,
+    /// Compact representation template; nested nominal types are references.
+    /// Absent for opaque types without a representation.
+    pub representation: Option<CheckedType>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredTraitMetadata {
     pub origin: Origin,
     pub semantic_id: TraitId,
+    pub name: String,
+    pub module: ModuleId,
+    pub parameters: Vec<CheckedType>,
+    pub prerequisites: Vec<CheckedTraitBound>,
+    pub functional_dependencies: Vec<CheckedFunctionalDependency>,
+    /// Declared method order.
+    pub methods: Vec<TraitMethodId>,
+    /// Default implementations, in declared method order.
+    pub default_methods: Vec<(TraitMethodId, FunctionId)>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredTraitMethodMetadata {
     pub origin: Origin,
     pub semantic_id: TraitMethodId,
+    pub name: String,
+    pub trait_id: TraitId,
+    pub value_type: CheckedType,
+    pub default_function: Option<FunctionId>,
 }
 
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredTraitImplementationMetadata {
     pub origin: Origin,
+    pub trait_id: TraitId,
+    /// Implementation-declared type parameters, ascending.
+    pub parameters: Vec<TypeParameterId>,
+    pub arguments: Vec<CheckedType>,
+    pub bounds: Vec<CheckedTraitBound>,
+    pub negative: bool,
+    /// Selected method functions, ordered by semantic method ID.
+    pub methods: Vec<(TraitMethodId, FunctionId)>,
 }
 
 /// The complete owned Stage 2 representation. Arena order is insertion order,
@@ -434,6 +474,199 @@ impl LoweredProgram {
         let mut diagnostics = self.snapshot_modules(module);
         diagnostics.extend(self.snapshot_functions(module));
         diagnostics.extend(self.snapshot_symbols(module));
+        diagnostics.extend(self.snapshot_types(module));
+        diagnostics.extend(self.snapshot_traits(module));
+        diagnostics
+    }
+
+    /// Inserts type metadata in ascending `TypeId`, retaining origin, module,
+    /// declaration kind, builtin/recursive classification, checked parameter
+    /// templates, and the compact representation template.
+    fn snapshot_types(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
+        let resolved = module.resolved();
+        let mut diagnostics = Vec::new();
+        for (id, declaration) in resolved.types_in_id_order() {
+            let origin = Origin {
+                syntax: declaration.syntax.id,
+                span: declaration.syntax.span.clone(),
+            };
+            let Some(module_id) = resolved.definition_module(DefinitionId::Type(id)) else {
+                diagnostics.push(Diagnostic::new(
+                    origin.span,
+                    format!(
+                        "cannot lower type `{}` (type id {}) without an owning module",
+                        declaration.name, id.0
+                    ),
+                ));
+                continue;
+            };
+            let kind = match declaration.kind() {
+                staple_syntax::TypeDeclarationKind::Alias => LoweredTypeKind::Alias,
+                staple_syntax::TypeDeclarationKind::Distinct => LoweredTypeKind::Distinct,
+                staple_syntax::TypeDeclarationKind::Opaque => LoweredTypeKind::Opaque,
+                staple_syntax::TypeDeclarationKind::Singleton => LoweredTypeKind::Singleton,
+            };
+            let value = LoweredTypeMetadata {
+                origin: origin.clone(),
+                semantic_id: id,
+                name: declaration.name.clone(),
+                module: module_id,
+                kind,
+                builtin: resolved.builtin_type(id),
+                recursive_construction: resolved.recursive_construction(id),
+                parameters: module.type_parameter_templates(id).to_vec(),
+                representation: module.type_representation(id).cloned(),
+            };
+            if let Err(diagnostic) = self.types.insert("type", id, origin, value) {
+                diagnostics.push(diagnostic);
+            }
+        }
+        diagnostics
+    }
+
+    /// Inserts traits and their methods by semantic ID, preserving declared
+    /// method order inside each trait, then records checked implementations in
+    /// resolver declaration order.
+    fn snapshot_traits(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
+        let resolved = module.resolved();
+        let mut diagnostics = Vec::new();
+        let parameter_arguments = module
+            .trait_parameter_arguments_in_id_order()
+            .into_iter()
+            .map(|(id, arguments)| (id, arguments.to_vec()))
+            .collect::<HashMap<_, _>>();
+        let method_types = module
+            .trait_method_types_in_id_order()
+            .into_iter()
+            .map(|(id, value_type)| (id, value_type.clone()))
+            .collect::<HashMap<_, _>>();
+        let method_origins = resolved
+            .trait_methods_in_id_order()
+            .into_iter()
+            .map(|(id, member)| {
+                (
+                    id,
+                    (
+                        Origin {
+                            syntax: member.syntax.id,
+                            span: member.syntax.span.clone(),
+                        },
+                        member.name.clone(),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+        for (trait_id, trait_) in resolved.traits_in_id_order() {
+            let origin = Origin {
+                syntax: trait_.declaration.syntax.id,
+                span: trait_.declaration.syntax.span.clone(),
+            };
+            let Some(module_id) = resolved.definition_module(DefinitionId::Trait(trait_id)) else {
+                diagnostics.push(Diagnostic::new(
+                    origin.span,
+                    format!(
+                        "cannot lower trait `{}` (trait id {}) without an owning module",
+                        trait_.declaration.name, trait_id.0
+                    ),
+                ));
+                continue;
+            };
+            let default_methods = trait_
+                .methods
+                .iter()
+                .filter_map(|method| {
+                    trait_
+                        .default_methods
+                        .get(method)
+                        .map(|function| (*method, *function))
+                })
+                .collect();
+            let value = LoweredTraitMetadata {
+                origin: origin.clone(),
+                semantic_id: trait_id,
+                name: trait_.declaration.name.clone(),
+                module: module_id,
+                parameters: parameter_arguments
+                    .get(&trait_id)
+                    .cloned()
+                    .unwrap_or_default(),
+                prerequisites: module.trait_prerequisites(trait_id).to_vec(),
+                functional_dependencies: module.trait_functional_dependencies(trait_id).to_vec(),
+                methods: trait_.methods.clone(),
+                default_methods,
+            };
+            if let Err(diagnostic) = self.traits.insert("trait", trait_id, origin, value) {
+                diagnostics.push(diagnostic);
+            }
+            for method in &trait_.methods {
+                let Some((origin, name)) = method_origins.get(method).cloned() else {
+                    diagnostics.push(Diagnostic::new(
+                        Span::Compiler,
+                        format!(
+                            "cannot lower trait method {method:?} without a declaration origin"
+                        ),
+                    ));
+                    continue;
+                };
+                let Some(value_type) = method_types.get(method).cloned() else {
+                    diagnostics.push(Diagnostic::new(
+                        origin.span,
+                        format!("cannot lower trait method {method:?} without a checked type"),
+                    ));
+                    continue;
+                };
+                let value = LoweredTraitMethodMetadata {
+                    origin: origin.clone(),
+                    semantic_id: *method,
+                    name,
+                    trait_id,
+                    value_type,
+                    default_function: trait_.default_methods.get(method).copied(),
+                };
+                if let Err(diagnostic) =
+                    self.trait_methods
+                        .insert("trait method", *method, origin, value)
+                {
+                    diagnostics.push(diagnostic);
+                }
+            }
+        }
+
+        let resolved_implementations = resolved.trait_implementations();
+        let checked_implementations = module.checked_trait_implementations();
+        if resolved_implementations.len() != checked_implementations.len() {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!(
+                    "lowered trait implementation count {} does not match resolver count {}",
+                    checked_implementations.len(),
+                    resolved_implementations.len()
+                ),
+            ));
+        }
+        for (declared, checked) in resolved_implementations.iter().zip(checked_implementations) {
+            let mut parameters = checked.parameters.iter().copied().collect::<Vec<_>>();
+            parameters.sort_by_key(|parameter| parameter.0);
+            let mut methods = checked
+                .methods
+                .iter()
+                .map(|(method, function)| (*method, *function))
+                .collect::<Vec<_>>();
+            methods.sort_by_key(|(method, _)| method.0);
+            self.trait_implementations
+                .push(LoweredTraitImplementationMetadata {
+                    origin: Origin {
+                        syntax: declared.syntax,
+                        span: declared.span.clone(),
+                    },
+                    trait_id: checked.trait_id,
+                    parameters,
+                    arguments: checked.arguments.clone(),
+                    bounds: checked.bounds.clone(),
+                    negative: checked.negative,
+                    methods,
+                });
+        }
         diagnostics
     }
 
@@ -2128,6 +2361,208 @@ mod tests {
             assert!(info.module_symbol || info.owner.is_some());
             assert!(!resolved.is_const_symbol(key));
         }
+    }
+
+    fn lowered_type<'a>(program: &'a LoweredProgram, name: &str) -> &'a LoweredTypeMetadata {
+        program
+            .types
+            .iter()
+            .find_map(|(_, _, info)| (info.name == name).then_some(info))
+            .unwrap_or_else(|| panic!("`{name}` should be lowered"))
+    }
+
+    fn lowered_trait<'a>(program: &'a LoweredProgram, name: &str) -> &'a LoweredTraitMetadata {
+        program
+            .traits
+            .iter()
+            .find_map(|(_, _, info)| (info.name == name).then_some(info))
+            .unwrap_or_else(|| panic!("`{name}` should be lowered"))
+    }
+
+    #[test]
+    fn type_catalog_matches_resolver_order_and_keeps_compact_templates() {
+        let module = checked_program(concat!(
+            "type TestPair T = ctor (T, T)\n",
+            "type TestInner = ctor I32\n",
+            "type TestOuter = ctor (TestInner, TestInner)\n",
+            "type TestAlias = alias TestOuter\n",
+            "type TestHidden = opaque\n",
+            "type TestEnabled\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+
+        let expected = module
+            .resolved()
+            .types_in_id_order()
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        let actual = program
+            .types
+            .iter()
+            .map(|(_, key, _)| key)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert!(actual.windows(2).all(|ids| ids[0].0 < ids[1].0));
+
+        let pair = lowered_type(&program, "TestPair");
+        assert_eq!(pair.kind, LoweredTypeKind::Distinct);
+        assert_eq!(pair.parameters.len(), 1);
+        assert!(matches!(pair.parameters[0], CheckedType::Parameter { .. }));
+        let Some(CheckedType::Product(product)) = pair.representation.as_ref() else {
+            panic!("TestPair representation should be a product");
+        };
+        assert_eq!(product.elements.len(), 2);
+        assert!(
+            product
+                .elements
+                .iter()
+                .all(|element| matches!(element.value_type, CheckedType::Parameter { .. }))
+        );
+
+        let inner = lowered_type(&program, "TestInner");
+        assert_eq!(inner.kind, LoweredTypeKind::Distinct);
+        assert_eq!(
+            Some(inner.module),
+            module
+                .resolved()
+                .definition_module(DefinitionId::Type(inner.semantic_id))
+        );
+        assert!(inner.parameters.is_empty());
+
+        let outer = lowered_type(&program, "TestOuter");
+        let Some(CheckedType::Product(product)) = outer.representation.as_ref() else {
+            panic!("TestOuter representation should be a product");
+        };
+        assert_eq!(product.elements.len(), 2);
+        for element in &product.elements {
+            assert!(
+                matches!(&element.value_type, CheckedType::Opaque { id, .. } if *id == inner.semantic_id),
+                "nested nominal representations should stay compact references"
+            );
+        }
+
+        let alias = lowered_type(&program, "TestAlias");
+        assert_eq!(alias.kind, LoweredTypeKind::Alias);
+        assert_eq!(
+            alias.representation, outer.representation,
+            "an alias expands to its target's compact representation"
+        );
+
+        let hidden = lowered_type(&program, "TestHidden");
+        assert_eq!(hidden.kind, LoweredTypeKind::Opaque);
+        assert!(hidden.representation.is_none());
+
+        let enabled = lowered_type(&program, "TestEnabled");
+        assert_eq!(enabled.kind, LoweredTypeKind::Singleton);
+        assert_eq!(enabled.representation, Some(CheckedType::empty_product()));
+    }
+
+    #[test]
+    fn trait_catalog_preserves_parameters_dependencies_methods_and_defaults() {
+        let module = checked_program(concat!(
+            "trait TestBase T { test_base: T -> T }\n",
+            "trait TestConvert Target Position Output where {Target, Position} ~> Output {\n",
+            "  test_convert: (Target, Position) -> Output\n",
+            "}\n",
+            "trait TestOrdered T where TestBase T {\n",
+            "  test_first: T -> Bool\n",
+            "  test_second: T -> Bool = value => test_first value\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let convert = lowered_trait(&program, "TestConvert");
+        assert_eq!(convert.parameters.len(), 3);
+        assert_eq!(convert.functional_dependencies.len(), 1);
+        let dependency = &convert.functional_dependencies[0];
+        assert_eq!(dependency.determinants.len(), 2);
+        assert_eq!(convert.methods.len(), 1);
+        let method = program
+            .trait_methods
+            .get(convert.methods[0])
+            .expect("converted method");
+        assert_eq!(method.name, "test_convert");
+        assert_eq!(method.trait_id, convert.semantic_id);
+        assert!(method.default_function.is_none());
+
+        let ordered = lowered_trait(&program, "TestOrdered");
+        assert!(!ordered.prerequisites.is_empty());
+        assert_eq!(ordered.methods.len(), 2);
+        assert_eq!(ordered.default_methods.len(), 1);
+        assert_eq!(ordered.default_methods[0].0, ordered.methods[1]);
+        let names = ordered
+            .methods
+            .iter()
+            .map(|id| {
+                program
+                    .trait_methods
+                    .get(*id)
+                    .expect("ordered method")
+                    .name
+                    .as_str()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["test_first", "test_second"]);
+        let second = program
+            .trait_methods
+            .get(ordered.methods[1])
+            .expect("second method");
+        assert_eq!(second.name, "test_second");
+        assert_eq!(second.default_function, Some(ordered.default_methods[0].1));
+        assert!(
+            program
+                .functions
+                .get(ordered.default_methods[0].1)
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn trait_implementation_catalog_records_arguments_bounds_and_negation() {
+        let module = checked_program(concat!(
+            "trait TestEq T { test_eq: (T, T) -> Bool }\n",
+            "impl TestEq I32 { def test_eq = (left, right) => left == right }\n",
+            "type TestHandle = ctor I32\n",
+            "impl !Copy TestHandle {}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+
+        let eq = lowered_trait(&program, "TestEq");
+        let implementation = program
+            .trait_implementations
+            .iter()
+            .map(|(_, value)| value)
+            .find(|implementation| implementation.trait_id == eq.semantic_id)
+            .expect("TestEq implementation");
+        assert_eq!(implementation.arguments, vec![CheckedType::I32]);
+        assert!(!implementation.negative);
+        assert!(implementation.bounds.is_empty());
+        assert_eq!(implementation.methods.len(), 1);
+        assert_eq!(implementation.methods[0].0, eq.methods[0]);
+        assert!(program.functions.get(implementation.methods[0].1).is_some());
+
+        let copy_trait = module.semantic_ids().copy_trait.expect("Copy trait");
+        let negative = program
+            .trait_implementations
+            .iter()
+            .map(|(_, value)| value)
+            .find(|implementation| implementation.negative)
+            .expect("negative implementation");
+        assert_eq!(negative.trait_id, copy_trait);
+        assert_eq!(negative.arguments.len(), 1);
+        assert!(matches!(
+            negative.arguments[0],
+            CheckedType::Distinct { .. }
+        ));
+        assert!(negative.methods.is_empty());
     }
 
     #[test]
