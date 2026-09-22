@@ -12,11 +12,11 @@ use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use staple_syntax::{Diagnostic, Span, SyntaxId};
+use staple_syntax::{Diagnostic, Item, Span, SyntaxId};
 
 use crate::{
-    CheckedCoercion, CheckedEffectSet, CheckedType, FunctionId, ModuleId, SymbolId, TraitId,
-    TraitMethodId, TypeId, TypedModule,
+    CheckedCoercion, CheckedEffectSet, CheckedResource, CheckedType, FunctionId, ModuleId,
+    SourceModule, SymbolId, TraitId, TraitMethodId, TypeId, TypedModule,
 };
 
 macro_rules! arena_id {
@@ -255,10 +255,49 @@ pub(crate) struct LoweredFunction {
     pub body: Option<BlockId>,
 }
 
+/// A top-level source item that belongs to a module initializer at runtime.
+///
+/// The source item itself is deliberately not cloned: Stage 2.2 records the
+/// ordered roots while their lowered bodies remain empty until Stage 2.3.
+#[derive(Debug, Clone)]
+pub(crate) struct RuntimeItemSource {
+    pub origin: Origin,
+    pub category: RuntimeItemCategory,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RuntimeItemCategory {
+    Binding,
+    PatternBinding,
+    Assignment,
+    Return,
+    Break,
+    Continue,
+    Expression,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoweredEntryResourceKind {
+    Io,
+    Reactive,
+}
+
+/// An IO or reactive resource the executable entry installs before it runs
+/// its initializer items. Recorded as initializer metadata rather than as
+/// synthetic runtime AST nodes.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredEntryResource {
+    pub kind: LoweredEntryResourceKind,
+    pub resource: CheckedResource,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredInitializer {
     pub origin: Origin,
     pub module: ModuleId,
+    pub executable_entry: bool,
+    pub resources: Vec<LoweredEntryResource>,
+    pub runtime_items: Vec<RuntimeItemSource>,
     pub body: BlockId,
 }
 
@@ -266,6 +305,12 @@ pub(crate) struct LoweredInitializer {
 pub(crate) struct LoweredModuleInfo {
     pub origin: Origin,
     pub semantic_id: ModuleId,
+    pub qualified_name: String,
+    pub parent: Option<ModuleId>,
+    pub companion: bool,
+    pub initialization_index: usize,
+    pub executable_entry: bool,
+    pub initializer: InitializerId,
 }
 
 #[derive(Debug, Clone)]
@@ -316,6 +361,63 @@ pub(crate) struct LoweredProgram {
 }
 
 impl LoweredProgram {
+    /// Copies deterministic declaration metadata out of checked compiler state.
+    fn snapshot(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
+        self.snapshot_modules(module)
+    }
+
+    fn snapshot_modules(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
+        let resolved = module.resolved();
+        let program = resolved.program();
+        let sources = program.modules();
+        let executable_entry = program.executable_entry();
+        let mut diagnostics =
+            validate_initialization_order(sources, program.initialization_order());
+        let mut seen = vec![false; sources.len()];
+        for (index, module_id) in program.initialization_order().iter().copied().enumerate() {
+            if module_id.0 >= sources.len() {
+                continue;
+            }
+            let source = &sources[module_id.0];
+            let origin = module_origin(source);
+            if std::mem::replace(&mut seen[module_id.0], true) {
+                continue;
+            }
+            let is_entry = executable_entry == Some(module_id);
+            let body = self.blocks.push(LoweredBlock {
+                origin: origin.clone(),
+                items: Vec::new(),
+                result: None,
+            });
+            let initializer = self.initializers.push(LoweredInitializer {
+                origin: origin.clone(),
+                module: module_id,
+                executable_entry: is_entry,
+                resources: if is_entry {
+                    entry_resources(module)
+                } else {
+                    Vec::new()
+                },
+                runtime_items: runtime_item_sources(&source.syntax.items),
+                body,
+            });
+            let info = LoweredModuleInfo {
+                origin: origin.clone(),
+                semantic_id: module_id,
+                qualified_name: source.qualified_name.clone(),
+                parent: source.parent,
+                companion: source.companion,
+                initialization_index: index,
+                executable_entry: is_entry,
+                initializer,
+            };
+            if let Err(diagnostic) = self.modules.insert("module", module_id, origin, info) {
+                diagnostics.push(diagnostic);
+            }
+        }
+        diagnostics
+    }
+
     fn validate(&self) -> Vec<Diagnostic> {
         let mut diagnostics = self.modules.validate("module");
         diagnostics.extend(self.functions.validate("function"));
@@ -390,6 +492,107 @@ impl LoweredProgram {
     }
 }
 
+/// Checks that the initialization order lists every loaded module exactly
+/// once, diagnosing unknown, duplicate, and missing entries.
+fn validate_initialization_order(sources: &[SourceModule], order: &[ModuleId]) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    let mut seen = vec![false; sources.len()];
+    for module_id in order {
+        if module_id.0 >= sources.len() {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!(
+                    "initialization order references unknown module id {}",
+                    module_id.0
+                ),
+            ));
+            continue;
+        }
+        let source = &sources[module_id.0];
+        if std::mem::replace(&mut seen[module_id.0], true) {
+            diagnostics.push(Diagnostic::new(
+                module_origin(source).span,
+                format!(
+                    "module `{}` appears more than once in initialization order",
+                    source.qualified_name
+                ),
+            ));
+        }
+    }
+    for (index, was_seen) in seen.iter().enumerate() {
+        if !was_seen {
+            let source = &sources[index];
+            diagnostics.push(Diagnostic::new(
+                module_origin(source).span,
+                format!(
+                    "module `{}` is missing from initialization order",
+                    source.qualified_name
+                ),
+            ));
+        }
+    }
+    diagnostics
+}
+
+/// A module's declaration syntax when it has one; file-backed modules without
+/// a `mod` declaration use their module syntax origin instead.
+fn module_origin(module: &SourceModule) -> Origin {
+    let syntax = module
+        .syntax
+        .declaration_syntax
+        .as_ref()
+        .unwrap_or(&module.syntax.syntax);
+    Origin {
+        syntax: syntax.id,
+        span: syntax.span.clone(),
+    }
+}
+
+fn runtime_item_sources(items: &[Item]) -> Vec<RuntimeItemSource> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let category = match item {
+                Item::Binding(_) => RuntimeItemCategory::Binding,
+                Item::PatternBinding(_) => RuntimeItemCategory::PatternBinding,
+                Item::Assignment(_) => RuntimeItemCategory::Assignment,
+                Item::Return(_) => RuntimeItemCategory::Return,
+                Item::Break(_) => RuntimeItemCategory::Break,
+                Item::Continue(_) => RuntimeItemCategory::Continue,
+                Item::Expression(_) => RuntimeItemCategory::Expression,
+                _ => return None,
+            };
+            let syntax = item.syntax();
+            Some(RuntimeItemSource {
+                origin: Origin {
+                    syntax: syntax.id,
+                    span: syntax.span.clone(),
+                },
+                category,
+            })
+        })
+        .collect()
+}
+
+fn entry_resources(module: &TypedModule) -> Vec<LoweredEntryResource> {
+    let mut resources = Vec::new();
+    if let Some(resource) = module.io_resource() {
+        resources.push(LoweredEntryResource {
+            kind: LoweredEntryResourceKind::Io,
+            resource,
+        });
+    }
+    if module.entry_reactive_required()
+        && let Some(resource) = module.reactive_resource()
+    {
+        resources.push(LoweredEntryResource {
+            kind: LoweredEntryResourceKind::Reactive,
+            resource,
+        });
+    }
+    resources
+}
+
 fn invalid_reference(origin: &Origin, owner: &str, target: &str, index: usize) -> Diagnostic {
     Diagnostic::new(
         origin.span.clone(),
@@ -423,8 +626,11 @@ impl Lowerer {
     }
 
     pub fn lower(&self, module: &TypedModule) -> Result<LoweredModule, Vec<Diagnostic>> {
-        let program = LoweredProgram::default();
+        let mut program = LoweredProgram::default();
         let mut diagnostics = validate_checked_module(module);
+        if diagnostics.is_empty() {
+            diagnostics.extend(program.snapshot(module));
+        }
         diagnostics.extend(program.validate());
         if diagnostics.is_empty() {
             Ok(LoweredModule {
@@ -462,13 +668,34 @@ mod tests {
 
     use crate::{NameResolver, ProgramLoader, TypeChecker};
 
+    fn standard_library_root() -> std::path::PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler crate should have a workspace parent")
+            .join("stdlib")
+    }
+
     fn checked_program(source: &str) -> TypedModule {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("compiler crate should have a workspace parent");
         let program = ProgramLoader::new()
-            .with_standard_library_root(root.join("stdlib"))
+            .with_standard_library_root(standard_library_root())
             .load_source(source, root)
+            .expect("test source should load");
+        let resolved = NameResolver::new()
+            .resolve_program(program)
+            .expect("test source should resolve");
+        TypeChecker::new()
+            .check(resolved)
+            .expect("test source should type check")
+    }
+
+    fn checked_program_at(entry: &Path, source: &str, root: &Path) -> TypedModule {
+        let program = ProgramLoader::new()
+            .with_standard_library_root(standard_library_root())
+            .with_module_root(root)
+            .load_source_at(entry, source)
             .expect("test source should load");
         let resolved = NameResolver::new()
             .resolve_program(program)
@@ -625,6 +852,260 @@ mod tests {
         let semantic_ids = module.semantic_ids();
         assert!(semantic_ids.copy_trait.is_some());
         assert!(semantic_ids.io_type.is_some());
+    }
+
+    fn snapshot(source: &str) -> LoweredProgram {
+        let module = checked_program(source);
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        assert!(program.validate().is_empty());
+        program
+    }
+
+    fn entry_module(program: &LoweredProgram) -> (ModuleId, &LoweredModuleInfo) {
+        program
+            .modules
+            .iter()
+            .find_map(|(_, key, info)| info.executable_entry.then_some((key, info)))
+            .expect("a lowered program should have one executable entry")
+    }
+
+    fn runtime_categories(program: &LoweredProgram, module: ModuleId) -> Vec<RuntimeItemCategory> {
+        program
+            .modules
+            .get(module)
+            .and_then(|info| program.initializers.get(info.initializer))
+            .expect("module should have an initializer")
+            .runtime_items
+            .iter()
+            .map(|item| item.category)
+            .collect()
+    }
+
+    fn normalized_modules(
+        program: &LoweredProgram,
+    ) -> Vec<(
+        ModuleId,
+        String,
+        Option<ModuleId>,
+        bool,
+        usize,
+        Vec<RuntimeItemCategory>,
+    )> {
+        program
+            .modules
+            .iter()
+            .map(|(_, key, info)| {
+                (
+                    key,
+                    info.qualified_name.clone(),
+                    info.parent,
+                    info.companion,
+                    info.initialization_index,
+                    runtime_categories(program, key),
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn module_catalog_matches_initialization_order() {
+        let module = checked_program(
+            "use dependency.answer\nmod dependency { pub let answer: I32 = 42 }\nlet copy: I32 = answer\n",
+        );
+        let order = module.resolved().program().initialization_order().to_vec();
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let lowered = program
+            .modules
+            .iter()
+            .map(|(_, key, info)| (key, info))
+            .collect::<Vec<_>>();
+        assert_eq!(lowered.len(), order.len());
+        assert_eq!(
+            lowered.iter().map(|(key, _)| *key).collect::<Vec<_>>(),
+            order
+        );
+        let (entry_id, _) = entry_module(&program);
+        for (index, (key, info)) in lowered.iter().enumerate() {
+            assert_eq!(info.semantic_id, *key);
+            assert_eq!(info.initialization_index, index);
+            assert_eq!(info.executable_entry, *key == entry_id);
+            let initializer = program
+                .initializers
+                .get(info.initializer)
+                .expect("every module should have an initializer");
+            assert_eq!(initializer.module, *key);
+            assert_eq!(initializer.origin, info.origin);
+            assert_eq!(initializer.executable_entry, info.executable_entry);
+            assert!(program.blocks.contains(initializer.body));
+            if let Some(parent) = info.parent {
+                assert!(program.modules.get(parent).is_some());
+            }
+        }
+
+        let entry = program.modules.get(entry_id).expect("entry module");
+        assert!(entry.parent.is_none());
+        let sources = module.resolved().program();
+        assert_eq!(
+            entry.origin.syntax,
+            sources.module(entry_id).syntax.syntax.id,
+            "the entry module has no declaration node"
+        );
+        assert_eq!(
+            entry.initialization_index,
+            order.len() - 1,
+            "the imported dependency initializes first"
+        );
+    }
+
+    #[test]
+    fn declaration_only_modules_have_empty_initializer_roots() {
+        let program = snapshot("type Wrapper = alias I32\n");
+        let (entry_id, _) = entry_module(&program);
+        assert!(runtime_categories(&program, entry_id).is_empty());
+    }
+
+    #[test]
+    fn runtime_item_sources_follow_source_order_and_category() {
+        let program = snapshot("let first: I32 = 1\nlet second: I32 = first\nfirst == second\n");
+        let (entry_id, _) = entry_module(&program);
+        assert_eq!(
+            runtime_categories(&program, entry_id),
+            vec![
+                RuntimeItemCategory::Binding,
+                RuntimeItemCategory::Binding,
+                RuntimeItemCategory::Expression
+            ]
+        );
+    }
+
+    #[test]
+    fn companion_modules_keep_parent_and_companion_metadata() {
+        let program =
+            snapshot("pub type User = alias I32\ncompanion User { pub let id: I32 = 42 }\n");
+        let (entry_id, _) = entry_module(&program);
+        let companion = program
+            .modules
+            .iter()
+            .find(|(_, _, info)| info.companion && info.parent == Some(entry_id))
+            .expect("the companion module should be lowered");
+        assert_eq!(companion.2.parent, Some(entry_id));
+        assert_eq!(
+            runtime_categories(&program, companion.1),
+            vec![RuntimeItemCategory::Binding]
+        );
+    }
+
+    #[test]
+    fn entry_initializer_records_the_io_resource() {
+        let program = snapshot("let answer: I32 = 42\n");
+        let (entry_id, _) = entry_module(&program);
+        let entry = program
+            .initializers
+            .get(program.modules.get(entry_id).unwrap().initializer)
+            .expect("entry initializer");
+        assert!(entry.executable_entry);
+        assert_eq!(entry.resources.len(), 1);
+        assert_eq!(entry.resources[0].kind, LoweredEntryResourceKind::Io);
+        assert!(matches!(
+            entry.resources[0].resource.value_type,
+            CheckedType::Opaque { .. }
+        ));
+        let dependency = program
+            .initializers
+            .iter()
+            .find(|(_, initializer)| initializer.module != entry_id)
+            .map(|(_, initializer)| initializer);
+        assert!(dependency.is_none() || dependency.unwrap().resources.is_empty());
+    }
+
+    #[test]
+    fn file_modules_with_declarations_use_their_declaration_origin() {
+        let root =
+            std::env::temp_dir().join(format!("staple-lower-module-origin-{}", std::process::id()));
+        std::fs::create_dir_all(&root).expect("temp root");
+        std::fs::write(
+            root.join("tools.sta"),
+            "pub mod\npub let answer: I32 = 42\n",
+        )
+        .expect("write module");
+        let entry = root.join("main.sta");
+        let module =
+            checked_program_at(&entry, "use tools.answer\nlet copy: I32 = answer\n", &root);
+        let tools_id = module
+            .resolved()
+            .program()
+            .modules()
+            .iter()
+            .find(|source| source.path.ends_with("tools.sta"))
+            .map(|source| source.id)
+            .expect("the file module should be loaded");
+        let declaration = module
+            .resolved()
+            .program()
+            .module(tools_id)
+            .syntax
+            .declaration_syntax
+            .clone()
+            .expect("the file module declares itself");
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let tools = program.modules.get(tools_id).expect("lowered file module");
+        assert_eq!(tools.origin.syntax, declaration.id);
+        assert_eq!(
+            runtime_categories(&program, tools_id),
+            vec![RuntimeItemCategory::Binding]
+        );
+        std::fs::remove_dir_all(root).expect("clean temp root");
+    }
+
+    #[test]
+    fn module_catalog_is_stable_across_repeated_lowering() {
+        let module = checked_program(
+            "mod dependency { pub let answer: I32 = 42 }\nlet copy: I32 = dependency.answer\n",
+        );
+        let mut first = LoweredProgram::default();
+        let mut second = LoweredProgram::default();
+        assert!(first.snapshot(&module).is_empty());
+        assert!(second.snapshot(&module).is_empty());
+        assert_eq!(normalized_modules(&first), normalized_modules(&second));
+    }
+
+    #[test]
+    fn initialization_order_diagnostics_report_unknown_duplicate_and_missing_modules() {
+        let source = |id: usize| SourceModule {
+            id: ModuleId(id),
+            path: std::path::PathBuf::from(format!("module{id}.sta")),
+            syntax: staple_syntax::parse("").expect("empty module should parse"),
+            parent: None,
+            name: None,
+            visibility: staple_syntax::Visibility::Public,
+            qualified_name: format!("module{id}"),
+            companion: false,
+        };
+        let sources = vec![source(0), source(1)];
+        let diagnostics =
+            validate_initialization_order(&sources, &[ModuleId(0), ModuleId(0), ModuleId(7)]);
+        assert_eq!(diagnostics.len(), 3);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("unknown module id 7"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("appears more than once"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("`module1` is missing"))
+        );
     }
 
     #[test]

@@ -102,7 +102,7 @@ Completed:
 - Boxed the private legacy `TypedModule` payload in `LoweredModule` after the larger transitional owner exposed stack pressure in block-scoped module compilation; this is representation-private and leaves backend behavior unchanged.
 - Verified the default-stack regression directly and passed the complete workspace suite (943 tests), workspace check, formatting check, and diff check.
 
-### Step 3 - Snapshot Modules and Initializer Roots
+### Step 3 - Snapshot Modules and Initializer Roots (Done)
 
 - Traverse `Program::initialization_order()` and create one `LoweredModuleInfo` per module.
 - Validate that initialization order contains each loaded module exactly once; diagnose missing, duplicate, or unknown IDs.
@@ -114,6 +114,16 @@ Completed:
 Gate: single-module, multi-module, dependency, companion, and declaration-only programs produce stable module and initializer catalogs matching current initialization order.
 
 After this step, update both plan files.
+
+Completed:
+
+- Traversed `Program::initialization_order()` and inserted one `LoweredModuleInfo` per module, preserving semantic `ModuleId`, qualified name, parent, companion flag, initialization index, executable-entry flag, and the module's `InitializerId`.
+- Added `validate_initialization_order`, which diagnoses unknown, duplicate, and missing module IDs against the loaded module table before catalogs are built.
+- Module origins use the declaration syntax when one exists and the module syntax origin for file modules without a `mod` declaration.
+- Allocated one empty `LoweredBlock` and one `LoweredInitializer` per module; initializers record `RuntimeItemSource` entries for `Binding`, `PatternBinding`, `Assignment`, `Return`, `Break`, `Continue`, and `Expression` items in exact source order without cloning AST nodes.
+- Entry initializers record IO and reactive `CheckedResource` requirements as metadata (`LoweredEntryResource`) instead of synthetic runtime AST nodes.
+- Added focused tests covering multi-module initialization order, declaration-only modules, source-order runtime categories, companion parentage, file-module declaration origins, entry IO metadata, repeated-lowering stability, and the unknown/duplicate/missing order diagnostics.
+- Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (951 tests), and `git diff --check`.
 
 ### Step 4 - Snapshot Function Templates and Implicit Thunks
 
