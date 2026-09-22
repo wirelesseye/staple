@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 is complete and Stage 2.2 is next.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 is complete and Stage 2.2 Step 1 is complete. Stage 2.2 Step 2 is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -42,7 +42,9 @@ Completed:
 - Added unit coverage for empty arena validity, dense deterministic ID allocation, and dangling-reference diagnostics.
 - Verified with `cargo fmt --all -- --check`, focused lowering tests, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check`.
 
-## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata
+## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Step 1 Done)
+
+The focused implementation sequence is maintained in [STAGE_2_2_METADATA_CATALOG_PLAN.md](STAGE_2_2_METADATA_CATALOG_PLAN.md).
 
 - Lower source modules in initialization order while retaining their semantic `ModuleId` and qualified identity.
 - Create one function template entry for every resolved function and implicit thunk, including checked signature, bounds, captures, parameter style, parameter symbols, source body reference, and compiler/intrinsic classification.
@@ -52,6 +54,13 @@ Completed:
 - Preserve coroutine, reactive, resource, and standard-library semantic IDs needed by later substages.
 
 **Gate:** Every runtime function, implicit thunk, symbol, and module initializer has exactly one lowered catalog entry, with duplicate/missing-ID validation.
+
+Progress:
+
+- Step 1 added typed catalog IDs and insertion-ordered catalogs for modules, functions, symbols, types, traits, and trait methods, plus an ordered trait-implementation arena.
+- Semantic IDs are indexed separately from arena positions; duplicate insertion returns a source-based diagnostic without overwriting the first entry.
+- Validation now checks every semantic lookup against ordered entries in both directions and diagnoses stale, mismatched, or dangling indexes.
+- Focused tests cover insertion order, duplicate rejection, retained original values, and bidirectional lookup disagreement. `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, and `git diff --check` pass.
 
 > **Complexity note:** The metadata currently lives across resolver, type-checker, ownership, reactive, and coroutine side tables. This substage may need a focused inventory plan before implementation begins.
 

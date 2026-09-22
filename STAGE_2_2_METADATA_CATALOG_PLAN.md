@@ -57,7 +57,7 @@ Catalogs should use insertion-ordered vectors plus semantic-ID-to-arena-ID looku
 
 ## Implementation Sequence
 
-### Step 1 - Finalize Catalog Invariants and Keys
+### Step 1 - Finalize Catalog Invariants and Keys (Done)
 
 - Extend `LoweredProgram` with module, symbol, type, trait, trait-method, and trait-implementation catalogs.
 - Add lookup maps from semantic IDs to arena/catalog IDs.
@@ -68,6 +68,15 @@ Catalogs should use insertion-ordered vectors plus semantic-ID-to-arena-ID looku
 Gate: empty catalogs validate, duplicate semantic IDs are rejected, and lookup maps agree with ordered catalog entries.
 
 After this step, update `TYPED_LOWERING_PLAN.md` with general progress and `STAGE_2_LOWERING_BREAKDOWN.md` with the completed details.
+
+Completed:
+
+- Added distinct typed catalog IDs for modules, functions, symbols, types, traits, trait methods, and trait implementations.
+- Added a reusable insertion-ordered `Catalog` whose semantic lookup map is not used for traversal.
+- Added duplicate-ID diagnostics that preserve the first catalog entry.
+- Added bidirectional validation for ordered entries and lookup indexes, including dangling and mismatched map entries.
+- Extended `LoweredProgram` with all Step 1 catalogs while retaining the Stage 2.1 node arenas.
+- Verified with formatting, workspace checking, five focused lowering tests, and `git diff --check`.
 
 ### Step 2 - Add Deterministic Typed-Module Inventory APIs
 

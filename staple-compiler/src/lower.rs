@@ -7,12 +7,16 @@
 
 #![allow(dead_code)] // Stage 2 populates and consumes this schema incrementally.
 
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::hash::Hash;
 use std::marker::PhantomData;
 
 use staple_syntax::{Diagnostic, Span, SyntaxId};
 
 use crate::{
-    CheckedCoercion, CheckedEffectSet, CheckedType, FunctionId, ModuleId, SymbolId, TypedModule,
+    CheckedCoercion, CheckedEffectSet, CheckedType, FunctionId, ModuleId, SymbolId, TraitId,
+    TraitMethodId, TypeId, TypedModule,
 };
 
 macro_rules! arena_id {
@@ -43,6 +47,12 @@ arena_id!(BlockId);
 arena_id!(ItemId);
 arena_id!(LoweredFunctionId);
 arena_id!(InitializerId);
+arena_id!(LoweredModuleId);
+arena_id!(LoweredSymbolId);
+arena_id!(LoweredTypeId);
+arena_id!(LoweredTraitId);
+arena_id!(LoweredTraitMethodId);
+arena_id!(LoweredTraitImplementationId);
 
 /// Deterministic, append-only storage whose handles cannot be mixed with
 /// handles from another lowered-node family.
@@ -72,11 +82,107 @@ impl<T, I: ArenaId> Arena<T, I> {
         id.index() < self.values.len()
     }
 
+    fn get(&self, id: I) -> Option<&T> {
+        self.values.get(id.index())
+    }
+
     fn iter(&self) -> impl Iterator<Item = (I, &T)> {
         self.values
             .iter()
             .enumerate()
             .map(|(index, value)| (I::from_index(index), value))
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CatalogEntry<K, T> {
+    key: K,
+    origin: Origin,
+    value: T,
+}
+
+/// An insertion-ordered semantic catalog with a separate lookup index.
+///
+/// The ordered arena is authoritative for traversal. The map is deliberately
+/// validated in both directions so later phases cannot observe a stale or
+/// overwritten semantic-ID lookup.
+#[derive(Debug, Clone)]
+struct Catalog<K, T, I> {
+    entries: Arena<CatalogEntry<K, T>, I>,
+    by_key: HashMap<K, I>,
+}
+
+impl<K, T, I> Default for Catalog<K, T, I> {
+    fn default() -> Self {
+        Self {
+            entries: Arena::default(),
+            by_key: HashMap::new(),
+        }
+    }
+}
+
+impl<K, T, I> Catalog<K, T, I>
+where
+    K: Copy + Debug + Eq + Hash,
+    I: ArenaId + Eq,
+{
+    fn insert(&mut self, kind: &str, key: K, origin: Origin, value: T) -> Result<I, Diagnostic> {
+        if self.by_key.contains_key(&key) {
+            return Err(Diagnostic::new(
+                origin.span,
+                format!("duplicate lowered {kind} semantic id {key:?}"),
+            ));
+        }
+        let id = self.entries.push(CatalogEntry { key, origin, value });
+        self.by_key.insert(key, id);
+        Ok(id)
+    }
+
+    fn get(&self, key: K) -> Option<&T> {
+        self.by_key
+            .get(&key)
+            .and_then(|id| self.entries.get(*id))
+            .map(|entry| &entry.value)
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (I, K, &T)> {
+        self.entries
+            .iter()
+            .map(|(id, entry)| (id, entry.key, &entry.value))
+    }
+
+    fn validate(&self, kind: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        for (id, entry) in self.entries.iter() {
+            if self.by_key.get(&entry.key) != Some(&id) {
+                diagnostics.push(Diagnostic::new(
+                    entry.origin.span.clone(),
+                    format!(
+                        "lowered {kind} catalog lookup disagrees for semantic id {:?}",
+                        entry.key
+                    ),
+                ));
+            }
+        }
+        for (key, id) in &self.by_key {
+            let Some(entry) = self.entries.get(*id) else {
+                diagnostics.push(Diagnostic::new(
+                    Span::Compiler,
+                    format!("lowered {kind} catalog has dangling lookup for semantic id {key:?}"),
+                ));
+                continue;
+            };
+            if entry.key != *key {
+                diagnostics.push(Diagnostic::new(
+                    entry.origin.span.clone(),
+                    format!(
+                        "lowered {kind} catalog lookup points to semantic id {:?} instead of {key:?}",
+                        entry.key
+                    ),
+                ));
+            }
+        }
+        diagnostics
     }
 }
 
@@ -156,21 +262,67 @@ pub(crate) struct LoweredInitializer {
     pub body: BlockId,
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredModuleInfo {
+    pub origin: Origin,
+    pub semantic_id: ModuleId,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredSymbol {
+    pub origin: Origin,
+    pub semantic_id: SymbolId,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredTypeMetadata {
+    pub origin: Origin,
+    pub semantic_id: TypeId,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredTraitMetadata {
+    pub origin: Origin,
+    pub semantic_id: TraitId,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredTraitMethodMetadata {
+    pub origin: Origin,
+    pub semantic_id: TraitMethodId,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredTraitImplementationMetadata {
+    pub origin: Origin,
+}
+
 /// The complete owned Stage 2 representation. Arena order is insertion order,
 /// which lowering defines to be deterministic program/source order.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct LoweredProgram {
+    modules: Catalog<ModuleId, LoweredModuleInfo, LoweredModuleId>,
     expressions: Arena<LoweredExpression, ExpressionId>,
     patterns: Arena<LoweredPattern, PatternId>,
     blocks: Arena<LoweredBlock, BlockId>,
     items: Arena<LoweredItem, ItemId>,
-    functions: Arena<LoweredFunction, LoweredFunctionId>,
+    functions: Catalog<FunctionId, LoweredFunction, LoweredFunctionId>,
+    symbols: Catalog<SymbolId, LoweredSymbol, LoweredSymbolId>,
+    types: Catalog<TypeId, LoweredTypeMetadata, LoweredTypeId>,
+    traits: Catalog<TraitId, LoweredTraitMetadata, LoweredTraitId>,
+    trait_methods: Catalog<TraitMethodId, LoweredTraitMethodMetadata, LoweredTraitMethodId>,
+    trait_implementations: Arena<LoweredTraitImplementationMetadata, LoweredTraitImplementationId>,
     initializers: Arena<LoweredInitializer, InitializerId>,
 }
 
 impl LoweredProgram {
     fn validate(&self) -> Vec<Diagnostic> {
-        let mut diagnostics = Vec::new();
+        let mut diagnostics = self.modules.validate("module");
+        diagnostics.extend(self.functions.validate("function"));
+        diagnostics.extend(self.symbols.validate("symbol"));
+        diagnostics.extend(self.types.validate("type"));
+        diagnostics.extend(self.traits.validate("trait"));
+        diagnostics.extend(self.trait_methods.validate("trait method"));
         for (_, expression) in self.expressions.iter() {
             match expression.kind {
                 LoweredExpressionKind::Block(id) if !self.blocks.contains(id) => diagnostics.push(
@@ -212,7 +364,7 @@ impl LoweredProgram {
                 diagnostics.push(invalid_reference(&item.origin, "item", kind, index));
             }
         }
-        for (_, function) in self.functions.iter() {
+        for (_, _, function) in self.functions.iter() {
             if let Some(body) = function.body
                 && !self.blocks.contains(body)
             {
@@ -336,6 +488,50 @@ mod tests {
                 .map(|(id, _)| id.index())
                 .collect::<Vec<_>>(),
             vec![0, 1]
+        );
+    }
+
+    #[test]
+    fn catalog_rejects_duplicate_semantic_ids_without_overwriting() {
+        let mut catalog = Catalog::<ModuleId, &'static str, LoweredModuleId>::default();
+        let id = catalog
+            .insert("module", ModuleId(7), Origin::compiler(), "first")
+            .expect("first semantic ID should be accepted");
+        let diagnostic = catalog
+            .insert("module", ModuleId(7), Origin::compiler(), "second")
+            .expect_err("duplicate semantic ID should be rejected");
+        assert_eq!(id.index(), 0);
+        assert_eq!(catalog.get(ModuleId(7)), Some(&"first"));
+        assert!(diagnostic.message.contains("duplicate lowered module"));
+        assert_eq!(catalog.iter().count(), 1);
+    }
+
+    #[test]
+    fn catalog_validator_checks_lookup_and_ordered_entries_both_ways() {
+        let mut catalog = Catalog::<ModuleId, (), LoweredModuleId>::default();
+        let first = catalog
+            .insert("module", ModuleId(2), Origin::compiler(), ())
+            .expect("first insertion");
+        let second = catalog
+            .insert("module", ModuleId(9), Origin::compiler(), ())
+            .expect("second insertion");
+        assert_eq!(
+            catalog.iter().map(|(_, key, _)| key).collect::<Vec<_>>(),
+            vec![ModuleId(2), ModuleId(9)]
+        );
+
+        catalog.by_key.insert(ModuleId(2), second);
+        catalog.by_key.insert(ModuleId(11), first);
+        let diagnostics = catalog.validate("module");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("lookup disagrees for semantic id ModuleId(2)")
+        }));
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("instead of ModuleId(11)"))
         );
     }
 
