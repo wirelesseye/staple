@@ -109,20 +109,14 @@ pub macro @derive_debug: Item -> Sequence Item = item => match item {
 def grow_formatter: mut Formatter -> () = mut formatter => {
     let Formatter(mut source) = formatter
     let old_capacity = Buffer.capacity source
-    let new_capacity: USize = match old_capacity == 0 {
-        True() => 16,
-        False() => old_capacity * 2,
-    }
+    let new_capacity: USize = if (old_capacity == 0) { 16 } else { old_capacity * 2 }
     let mut destination: Buffer U8 = Buffer.with_capacity new_capacity
     Buffer.transfer source destination
     formatter = Formatter destination
 }
 
 def write_byte: mut Formatter -> U8 -> () = mut formatter => byte => {
-    match formatter.*^length == formatter.*^capacity {
-        True() => grow_formatter formatter,
-        False() => (),
-    }
+    if (formatter.*^length == formatter.*^capacity) { grow_formatter formatter }
     formatter.*^push byte
 }
 

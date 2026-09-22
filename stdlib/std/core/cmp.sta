@@ -20,10 +20,7 @@ pub trait Eq T {
     /// Returns whether two values are equal.
     eq: (T, T) -> Bool
     /// Returns whether two values are unequal.
-    ne: (T, T) -> Bool = (left, right) => match (eq (left, right)) {
-        True() => False,
-        False() => True,
-    }
+    ne: (T, T) -> Bool = (left, right) => if (eq (left, right)) { False } else { True }
 }
 
 /// Provides comparisons that may be unordered.

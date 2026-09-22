@@ -30,18 +30,19 @@ pub def range_inclusive : <T where Copy T> T -> T -> RangeInclusive T = start =>
 )
 
 impl Iterator (Range I8) I8 {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -50,37 +51,33 @@ impl IntoIterator (Range I8) (Range I8) {
 }
 
 impl Iterator (RangeInclusive I8) I8 {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
@@ -89,18 +86,19 @@ impl IntoIterator (RangeInclusive I8) (RangeInclusive I8) {
 }
 
 impl Iterator (Range I16) I16 {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -109,37 +107,33 @@ impl IntoIterator (Range I16) (Range I16) {
 }
 
 impl Iterator (RangeInclusive I16) I16 {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
@@ -148,18 +142,19 @@ impl IntoIterator (RangeInclusive I16) (RangeInclusive I16) {
 }
 
 impl Iterator (Range I32) I32 {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -168,37 +163,33 @@ impl IntoIterator (Range I32) (Range I32) {
 }
 
 impl Iterator (RangeInclusive I32) I32 {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
@@ -207,18 +198,19 @@ impl IntoIterator (RangeInclusive I32) (RangeInclusive I32) {
 }
 
 impl Iterator (Range I64) I64 {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -227,37 +219,33 @@ impl IntoIterator (Range I64) (Range I64) {
 }
 
 impl Iterator (RangeInclusive I64) I64 {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
@@ -266,18 +254,19 @@ impl IntoIterator (RangeInclusive I64) (RangeInclusive I64) {
 }
 
 impl Iterator (Range U8) U8 {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -286,37 +275,33 @@ impl IntoIterator (Range U8) (Range U8) {
 }
 
 impl Iterator (RangeInclusive U8) U8 {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
@@ -325,18 +310,19 @@ impl IntoIterator (RangeInclusive U8) (RangeInclusive U8) {
 }
 
 impl Iterator (Range U16) U16 {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -345,37 +331,33 @@ impl IntoIterator (Range U16) (Range U16) {
 }
 
 impl Iterator (RangeInclusive U16) U16 {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
@@ -384,18 +366,19 @@ impl IntoIterator (RangeInclusive U16) (RangeInclusive U16) {
 }
 
 impl Iterator (Range U32) U32 {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -404,37 +387,33 @@ impl IntoIterator (Range U32) (Range U32) {
 }
 
 impl Iterator (RangeInclusive U32) U32 {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
@@ -443,18 +422,19 @@ impl IntoIterator (RangeInclusive U32) (RangeInclusive U32) {
 }
 
 impl Iterator (Range U64) U64 {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -463,37 +443,33 @@ impl IntoIterator (Range U64) (Range U64) {
 }
 
 impl Iterator (RangeInclusive U64) U64 {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
@@ -502,18 +478,19 @@ impl IntoIterator (RangeInclusive U64) (RangeInclusive U64) {
 }
 
 impl Iterator (Range ISize) ISize {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -522,37 +499,33 @@ impl IntoIterator (Range ISize) (Range ISize) {
 }
 
 impl Iterator (RangeInclusive ISize) ISize {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
@@ -561,18 +534,19 @@ impl IntoIterator (RangeInclusive ISize) (RangeInclusive ISize) {
 }
 
 impl Iterator (Range USize) USize {
-    def next = Range (current, end) => match current < end {
-        True() => Yield (
+    def next = Range (current, end) => if (current < end) {
+        Yield (
             current,
             Range (
                 current: current + 1,
                 end: end,
             ),
-        ),
-        False() => Done (Range (
+        )
+    } else {
+        Done (Range (
             current: current,
             end: end,
-        )),
+        ))
     }
 }
 
@@ -581,37 +555,33 @@ impl IntoIterator (Range USize) (Range USize) {
 }
 
 impl Iterator (RangeInclusive USize) USize {
-    def next = RangeInclusive (current, end, finished) => match finished {
-        True() => Done (RangeInclusive (
+    def next = RangeInclusive (current, end, finished) => when {
+        finished => Done (RangeInclusive (
             current: current,
             end: end,
             finished: True satisfies Bool,
         )),
-        False() => match current < end {
-            True() => Yield (
-                current,
-                RangeInclusive (
-                    current: current + 1,
-                    end: end,
-                    finished: False satisfies Bool,
-                ),
+        current < end => Yield (
+            current,
+            RangeInclusive (
+                current: current + 1,
+                end: end,
+                finished: False satisfies Bool,
             ),
-            False() => match current == end {
-                True() => Yield (
-                    current,
-                    RangeInclusive (
-                        current: current,
-                        end: end,
-                        finished: True satisfies Bool,
-                    ),
-                ),
-                False() => Done (RangeInclusive (
-                    current: current,
-                    end: end,
-                    finished: True satisfies Bool,
-                )),
-            },
-        },
+        ),
+        current == end => Yield (
+            current,
+            RangeInclusive (
+                current: current,
+                end: end,
+                finished: True satisfies Bool,
+            ),
+        ),
+        else => Done (RangeInclusive (
+            current: current,
+            end: end,
+            finished: True satisfies Bool,
+        )),
     }
 }
 
