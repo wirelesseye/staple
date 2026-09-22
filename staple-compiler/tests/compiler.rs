@@ -3093,6 +3093,51 @@ fn iterates_slices_through_the_standard_library_implementations() {
 }
 
 #[test]
+fn compares_slices_and_strings_through_the_standard_library_eq_implementations() {
+    let module = type_check(concat!(
+        "use std.slice.Slice\n",
+        "let first: Ref (I32; 3) = Ref (1, 2, 3)\n",
+        "let same: Ref (I32; 3) = Ref (1, 2, 3)\n",
+        "let different: Ref (I32; 3) = Ref (1, 2, 4)\n",
+        "let shorter: Ref (I32; 2) = Ref (1, 2)\n",
+        "let left: Slice I32 = first\n",
+        "let right: Slice I32 = same\n",
+        "let other: Slice I32 = different\n",
+        "let short: Slice I32 = shorter\n",
+        "let same_values: Bool = left == right\n",
+        "let different_values: Bool = left != other\n",
+        "let different_lengths: Bool = left != short\n",
+        "def generic_equal: <T where Eq T> (Slice T, Slice T) -> Bool = (x, y) => x == y\n",
+        "let generic: Bool = generic_equal (left, right)\n",
+        "let first_text: String = \"staple\"\n",
+        "let second_text: String = \"staple\"\n",
+        "let other_text: String = \"staples\"\n",
+        "let same_text: Bool = first_text == second_text\n",
+        "let different_text: Bool = first_text != other_text\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("slice and string equality should use the standard-library implementations");
+}
+
+#[test]
+fn rejects_slice_equality_when_the_element_is_not_eq() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.slice.Slice\n",
+            "use std.cinterop.CString\n",
+            "def invalid: (Slice CString, Slice CString) -> Bool = (left, right) => left == right\n",
+        )))
+        .expect_err_diagnostics("a slice of a non-Eq element must not be comparable");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
+    );
+}
+
+#[test]
 fn rejects_slice_iteration_for_non_copy_elements() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(

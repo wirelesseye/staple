@@ -3313,6 +3313,78 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_slice_and_string_equality() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-equality-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-equality-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.slice.Slice\n",
+                "extern \"c\" { exit: I32 -> () }\n",
+                "def run = () => {\n",
+                "let first: Ref (I32; 3) = Ref (1, 2, 3)\n",
+                "let same: Ref (I32; 3) = Ref (1, 2, 3)\n",
+                "let different: Ref (I32; 3) = Ref (1, 2, 4)\n",
+                "let shorter: Ref (I32; 2) = Ref (1, 2)\n",
+                "let left: Slice I32 = first\n",
+                "let right: Slice I32 = same\n",
+                "let other: Slice I32 = different\n",
+                "let short: Slice I32 = shorter\n",
+                "let first_text: String = \"staple\"\n",
+                "let second_text: String = \"staple\"\n",
+                "let other_text: String = \"staples\"\n",
+                "let empty: String = \"\"\n",
+                "match left == right {\n",
+                "  True() => match left != other {\n",
+                "    True() => match left != short {\n",
+                "      True() => match first_text == second_text {\n",
+                "        True() => match first_text != other_text {\n",
+                "          True() => match empty == empty {\n",
+                "            True() => exit 0,\n",
+                "            False() => exit 6,\n",
+                "          },\n",
+                "          False() => exit 5,\n",
+                "        },\n",
+                "        False() => exit 4,\n",
+                "      },\n",
+                "      False() => exit 3,\n",
+                "    },\n",
+                "    False() => exit 2,\n",
+                "  },\n",
+                "  False() => exit 1,\n",
+                "}\n",
+                "}\nrun ()\n",
+            ),
+        )
+        .expect("temporary equality source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("equality executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("equality executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(status.success(), "equality executable exited with {status}");
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_mutable_bindings_captures_and_refs() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

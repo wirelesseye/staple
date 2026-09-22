@@ -3025,7 +3025,9 @@ library declares it as a nominal type with the private representation
 has no capacity field or separate descriptor allocation. Copying a `String`
 copies those two words and keeps the managed byte storage shared.
 Two strings can be concatenated with `+`; this dispatches through the standard
-`Add String` implementation and returns a newly allocated `String`.
+`Add String` implementation and returns a newly allocated `String`. The
+standard library implements `Eq String`, comparing the two UTF-8 byte
+sequences.
 
 `Ref T` is a garbage-collected reference to a value of type `T`. Its standard
 declaration is `pub type Ref T where ?Sized T = pub ctor T`, so its payload may be
@@ -3092,8 +3094,10 @@ perform runtime bounds checks.
 trapping when out of bounds; it is the primitive behind the standard library's
 `Index`/`MutateIndex` implementations for slices. Where `Copy T`, the standard
 library also implements `IntoIterator`/`Iterator` for `Slice T` through
-`SliceIter T`, so `for item in slice` yields owned copies. A slice is a
-copyable view, so it stays usable — and iterable again — after a loop. A
+`SliceIter T`, so `for item in slice` yields owned copies. Where `Eq T`, the
+standard library also implements `Eq (Slice T)`: slices of different lengths
+are unequal, and equal-length slices are compared element by element. A slice
+is a copyable view, so it stays usable — and iterable again — after a loop. A
 `Slice T` is a sized view value, not a product: it cannot be spread or
 destructured, and it cannot cross a foreign ABI.
 
