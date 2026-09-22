@@ -132,6 +132,8 @@ Completed:
 
 ## Stage 2.4 - Lower Ordinary Expressions and Control Flow
 
+The focused implementation sequence is maintained in [STAGE_2_4_EXPRESSION_CONTROL_FLOW_PLAN.md](STAGE_2_4_EXPRESSION_CONTROL_FLOW_PLAN.md).
+
 Lower expression families in dependency order:
 
 1. Literals, names, resources, and representation/product access.
