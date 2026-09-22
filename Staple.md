@@ -2035,6 +2035,17 @@ aliased pair `type Pair (A, B) = alias (A, B)` — directly in the pattern,
 since `move`/`mut` on the aliased type is necessarily a whole-parameter
 marker rather than one over individual elements.
 
+A top-level nominal destructure — `Box value => ...` — has no parameter
+position that can carry a `mut` or `move` marker, so it is an ordinary
+borrow: its non-`Copy` fields are borrowed too, and moving one out is an
+error. To take ownership of a nominal parameter's fields, bind the whole
+parameter `move` and destructure it in the body, since a `match` subject is
+consumed:
+
+```staple
+def unbox: <T> move Box T -> T = move box => match box { Box value => value }
+```
+
 `move` is always legal on a `Copy` parameter, where it is a no-op: copying
 and moving a `Copy` value are indistinguishable, so `move T` and plain `T`
 behave identically for `Copy` types. It matters only for non-`Copy` types,

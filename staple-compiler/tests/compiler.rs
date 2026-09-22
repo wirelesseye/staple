@@ -9616,7 +9616,7 @@ fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer
 fn destructures_contextually_typed_generic_nominal_patterns() {
     let module = type_check(concat!(
         "type Box T = ctor (value: T)\n",
-        "def unbox: <T> Box T -> T = Box (value) => value\n",
+        "def unbox: <T> move Box T -> T = move box => match box { Box (value) => value }\n",
         "let answer: I32 = unbox (Box (value: 42))\n",
         "let text: String = unbox (Box (value: \"hello\"))\n",
     ));

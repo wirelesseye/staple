@@ -2616,7 +2616,7 @@ mod tests {
 
     #[test]
     fn generic_def_and_type_signatures_use_the_new_syntax() {
-        let source = "pub type Box T = pub ctor (value: T)\ndef unbox: <T> Box T -> T = Box value => value\n";
+        let source = "pub type Box T = pub ctor (value: T)\ndef unbox: <T> move Box T -> T = move box => match box { Box value => value }\n";
         let path = std::env::temp_dir().join("staple-hover-generic-signatures.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -2634,7 +2634,7 @@ mod tests {
 
         for (name, signature) in [
             ("Box", "type Box T = pub ctor (value: T)"),
-            ("unbox", "def unbox: <T> Box T -> T"),
+            ("unbox", "def unbox: <T> move Box T -> T"),
         ] {
             assert!(
                 entries.iter().any(|entry| {
@@ -2649,7 +2649,7 @@ mod tests {
     fn generic_function_use_site_leads_with_the_declared_type() {
         let source = concat!(
             "pub type Box T = pub ctor (value: T)\n",
-            "def unbox: <T> Box T -> T = Box value => value\n",
+            "def unbox: <T> move Box T -> T = move box => match box { Box value => value }\n",
             "unbox (Box (value: 1))\n",
         );
         let path = std::env::temp_dir().join("staple-hover-generic-use-site.sta");
@@ -2672,7 +2672,7 @@ mod tests {
         assert!(
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "unbox"
-                    && entry.signature == "def unbox: <T> Box T -> T"
+                    && entry.signature == "def unbox: <T> move Box T -> T"
                     && entry.instantiation.is_none()
             }),
             "declaration hover missing: {entries:?}"
@@ -2682,8 +2682,8 @@ mod tests {
         assert!(
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "unbox"
-                    && entry.signature == "def unbox: <T> Box T -> T"
-                    && entry.instantiation.as_deref() == Some("unbox: Box I32 -> I32")
+                    && entry.signature == "def unbox: <T> move Box T -> T"
+                    && entry.instantiation.as_deref() == Some("unbox: move Box I32 -> I32")
             }),
             "use-site hover missing: {entries:?}"
         );

@@ -860,11 +860,11 @@ impl<'a> OwnershipChecker<'a> {
     /// and `move` markers can address). A position freezes when it is
     /// `drop_method`'s `self` (existing, always frozen) or when it is an
     /// ordinary, non-`Copy` position that isn't covered by a `mut` marker
-    /// (a mutable borrow) or a `move` marker (ownership transfer). Any other
-    /// pattern shape at a position (e.g. a `Nominal` destructured directly at
-    /// the parameter level) has no representable symbol to grant `mut`/`move`
-    /// to, so it keeps today's behavior — that's `bind_pattern`'s existing
-    /// recursive freeze propagation, unaffected by the new default.
+    /// (a mutable borrow) or a `move` marker (ownership transfer). A
+    /// top-level nominal destructure has no parameter symbol to carry a
+    /// `mut`/`move` marker, so its fields freeze as well; to take ownership
+    /// of them, bind the whole parameter `move` and destructure it in the
+    /// body.
     fn bind_function_pattern(&mut self, pattern: &Pattern, drop_method: bool) {
         if let Pattern::Product(product) = pattern {
             for element in &product.elements {
@@ -881,6 +881,7 @@ impl<'a> OwnershipChecker<'a> {
         let symbol = match pattern {
             Pattern::Binding(binding) => self.module.symbol_for(binding.syntax.id),
             Pattern::At(at) => self.module.symbol_for(at.binding.syntax.id),
+            Pattern::Nominal(_) => return true,
             _ => None,
         };
         let Some(symbol) = symbol else {
