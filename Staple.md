@@ -2879,7 +2879,7 @@ pub trait Iterator Iter Item where Iter ~> Item {
 }
 
 pub trait IntoIterator Source Iter where Source ~> Iter, Iterator Iter {
-    into_iterator: Source -> Iter
+    into_iterator: move Source -> Iter
 }
 ```
 
@@ -2887,7 +2887,11 @@ pub trait IntoIterator Source Iter where Source ~> Iter, Iterator Iter {
 `IterStep.Yield (item, iterator)` contains an item and the state used for the
 next call. `Done` and `Yield` remain inside the `IterStep` namespace. An
 `IntoIterator` implementation consumes its source and selects one default
-iterator type; wrapper types can provide alternative iteration modes.
+iterator type; wrapper types can provide alternative iteration modes. The
+`move` marker makes that consumption explicit: a non-`Copy` source such as a
+`List T` is moved into the iterator, so the binding cannot be used again,
+while a `Copy` source such as a range is copied and remains usable. Clone a
+non-`Copy` source before iterating to keep the original.
 
 `for` is a prelude macro which accepts any `IntoIterator` source:
 
@@ -3137,9 +3141,10 @@ trapping. `List.get_ref_unchecked` and `List.get_unchecked` are the
 trapping counterparts. `list[index]` and `list[index] = value` delegate to
 `Index`/`MutateIndex`, backed by `get_unchecked`/`get_ref_unchecked`, so
 bracket indexing keeps the trapping behavior it has elsewhere in the
-language; `for item in list` delegates to `IntoIterator`/`Iterator` and
-yields owned copies. Both bracket indexing and iteration therefore require
-`Copy T`, the same as `List.get`.
+language; `for item in list` consumes the list — `IntoIterator` moves its
+source — and yields owned copies. Iteration requires `Copy T`, the same as
+`List.get`; clone the list with `Clone.clone` first when it must remain
+usable.
 
 `List` is move-only like its underlying `Buffer`. Where `Clone T`, cloning a
 list clones every initialized element into independent storage and preserves

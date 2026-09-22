@@ -3164,7 +3164,7 @@ fn rejects_overlapping_structural_iterator_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "impl IntoIterator (I32; 2) ((I32; 2), USize) {\n",
-            "  def into_iterator = value => (value, 0 satisfies USize)\n",
+            "  def into_iterator = move value => (value, 0 satisfies USize)\n",
             "}\n",
         )))
         .expect_err_diagnostics("structural product IntoIterator cannot be overridden");
@@ -7465,7 +7465,7 @@ fn expands_standard_for_over_ranges_and_product_iterators() {
         "    False() => IterStep.Done (PairIterator (current, end)),\n",
         "  }\n",
         "}\n",
-        "impl IntoIterator PairIterator PairIterator { def into_iterator = iterator => iterator }\n",
+        "impl IntoIterator PairIterator PairIterator { def into_iterator = move iterator => iterator }\n",
         "def run = () => {\n",
         "  let mut total = 0\n",
         "  for value in (0 ..= 4) {\n",
