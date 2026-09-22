@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use inkwell::context::Context;
-use staple_compiler::{CodeGenerator, NameResolver, ProgramLoader, TypeChecker};
+use staple_compiler::{CodeGenerator, Lowerer, NameResolver, ProgramLoader, TypeChecker};
 use staple_syntax::Item;
 
 struct Fixture {
@@ -60,9 +60,10 @@ impl Fixture {
         let typed = TypeChecker::new()
             .check(resolved)
             .map_err(format_diagnostics)?;
+        let lowered = Lowerer::new().lower(&typed).map_err(format_diagnostics)?;
         let context = Context::create();
         CodeGenerator::new(&context)
-            .compile_module(&typed)
+            .compile_module(&lowered)
             .map_err(format_diagnostics)
     }
 

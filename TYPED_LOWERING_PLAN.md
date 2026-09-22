@@ -10,6 +10,15 @@ resolve -> type check/ownership -> lower and specialize -> LLVM
 
 LLVM generation will consume lowered IR and will no longer infer types, select trait implementations, or discover generic instances. This update does not add polymorphic values, erased dictionaries, runtime descriptors, or ABI changes.
 
+## Current Status
+
+- **Stage 1 is complete.** The public lowering boundary exists, compilation modes invoke it, and code generation accepts only `LoweredModule`.
+- `LoweredModule` is currently an opaque owner of a cloned `TypedModule`. `CodeGenerator` crosses a private, explicitly transitional bridge to the existing backend implementation.
+- The initial validator rejects functions or implicit thunks that have no checked function type.
+- All CLI and compiler code-generation tests now pass through `Lowerer`.
+- `cargo check --workspace` and `cargo test --workspace` pass. The workspace test run covers 937 tests.
+- **Stages 2-6 remain.** Stage 2 must replace the transitional payload with explicit lowered arenas before the backend can become independent of the typed AST and side tables.
+
 ## Public Interfaces
 
 - Add an owned, opaque `LoweredModule` and public entry point:
@@ -25,16 +34,18 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 
 ## Implementation Stages
 
-### Stage 1 - Define the Lowered IR and Pipeline Boundary
+### Stage 1 - Define the Lowering Pipeline Boundary (Done)
 
-- Add `lower.rs` with arena-backed lowered modules, expressions, patterns, initializers, callable targets, function instances, trait evidence, closure construction, ownership facts, and helper requirements.
-- Preserve source spans and syntax IDs for diagnostics.
-- Make `LoweredModule` own all semantic information required by LLVM generation; it must not retain a dependency on the source AST.
-- Update the CLI and test helpers to construct a `LoweredModule`, initially allowing code generation migration to proceed construct by construct within the branch.
-- Add an IR validator for dangling arena references, missing types, unresolved targets, incomplete evidence, and invalid instance references.
+- Added `lower.rs` with public `Lowerer` and opaque, owned `LoweredModule` types.
+- Added the `Lowerer::new().lower(&TypedModule) -> Result<LoweredModule, Vec<Diagnostic>>` boundary and initial checked-function validation.
+- Updated CLI compilation and all code-generation test entry points to lower successfully checked modules first. CLI `check` mode still stops after type checking.
+- Changed all public `CodeGenerator` entry points to accept `&LoweredModule`; direct public emission from `TypedModule` is no longer available.
+- Kept the old backend reachable only through a private transitional `LoweredModule::typed` bridge. Removing this bridge requires the explicit arenas and metadata introduced in Stage 2.
 
-### Stage 2 - Lower Existing Typed Programs Completely
+### Stage 2 - Lower Existing Typed Programs Completely (Next)
 
+- Replace the cloned `TypedModule` payload with owned, arena-backed lowered modules, expressions, patterns, initializers, callable targets, function instances, trait evidence, closure construction, ownership facts, and helper requirements.
+- Preserve source spans and syntax IDs on lowered nodes for diagnostics.
 - Lower every current expression, pattern, binding, initializer, implicit thunk, and coroutine plan.
 - Record concrete type/effect information, coercions, accesses, selected symbols, storage requirements, ownership operations, and ordered resource arguments directly on lowered nodes.
 - Represent calls explicitly as:
@@ -46,10 +57,11 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
   - structural trait calls.
 - Represent closure creation with its code target, capture order, capture ownership, environment inputs, and required concrete adapter.
 - Carry enough cleanup and ownership metadata for the backend to preserve moves, borrows, drops, early returns, propagation, and cancellation without querying `TypedModule`.
+- Expand the validator to cover dangling arena references, missing or unresolved targets, incomplete evidence, and invalid instance references.
 
 > **Complex stage:** The AST and backend support many specialized constructs, including defaults, reactive bindings, structural indexing, ownership cleanup, and coroutines. This stage may need separate breakdown plans by expression family and runtime subsystem during implementation.
 
-### Stage 3 - Add Structural Instance Keys and the Specialization Worklist
+### Stage 3 - Add Structural Instance Keys and the Specialization Worklist (Remaining)
 
 - Keep generic definitions as lowering-time templates and emit fully substituted `LoweredFunctionInstance` bodies.
 - Define `InstanceKey` from:
@@ -65,7 +77,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 
 > **Complex stage:** Nested generic closures, captured outer parameters, result-only parameters, effects, trait prerequisites, and recursive references can affect instance identity. This stage may require its own breakdown plan covering key construction, free-parameter collection, and worklist convergence.
 
-### Stage 4 - Record Compiler-Generated Artifacts Before LLVM
+### Stage 4 - Record Compiler-Generated Artifacts Before LLVM (Remaining)
 
 - Add all implicit artifacts to the lowered catalog before emission:
   - constructor and concrete closure adapters;
@@ -80,11 +92,12 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 
 > **Complex stage:** Some dependencies are currently discovered deep inside LLVM emission, especially formatting, structural traits, cleanup, and coroutines. This stage may need subsystem-specific breakdown plans to identify and relocate every hidden discovery path.
 
-### Stage 5 - Migrate LLVM Generation to Lowered IR
+### Stage 5 - Migrate LLVM Generation to Lowered IR (Remaining)
 
 - Predeclare all functions, adapters, and helpers from the lowered catalog.
 - Emit bodies in deterministic instance order.
 - Replace AST traversal and `TypedModule` side-table queries with lowered-node traversal.
+- Remove the private transitional `LoweredModule::typed` bridge once its final consumer has migrated.
 - Remove:
   - the LLVM-time specialization queue;
   - active type substitutions;
@@ -97,7 +110,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 
 > **Complex stage:** This is the largest mechanical migration and touches most of the backend. It may require breakdown plans organized around functions/closures, aggregates/control flow, ownership, traits/effects, reactive code, and coroutines.
 
-### Stage 6 - Remove Transitional Code and Document the Boundary
+### Stage 6 - Remove Transitional Code and Document the Boundary (Remaining)
 
 - Remove obsolete `TypedModule` accessors used only by the old backend path while retaining APIs needed by diagnostics, tooling, and lowering.
 - Add module-level documentation describing phase responsibilities and invariants.
@@ -105,6 +118,14 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - Verify that concrete closure, resource, coroutine, FFI, and ownership ABIs are unchanged.
 
 ## Test Plan
+
+### Completed Verification
+
+- `cargo check --workspace`
+- `cargo test --workspace` (937 tests passing)
+- Existing CLI compile/run, object emission, LLVM verification, module, ownership, trait, reactive, and coroutine coverage now exercises the lowering boundary.
+
+### Remaining Verification
 
 - Add lowering tests proving:
   - repeated concrete uses deduplicate;

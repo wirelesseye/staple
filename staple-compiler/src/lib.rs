@@ -1,6 +1,7 @@
 mod codegen;
 mod coroutine_lower;
 mod expansion_render;
+mod lower;
 mod macro_expand;
 mod ownership;
 mod program;
@@ -9,6 +10,7 @@ mod typecheck;
 
 pub use codegen::*;
 pub use expansion_render::render_expanded_module;
+pub use lower::*;
 pub use macro_expand::expand_macros;
 pub use program::*;
 pub use resolve::*;

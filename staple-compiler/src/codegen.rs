@@ -22,8 +22,9 @@ use crate::typecheck::{
 use crate::{
     CheckedEffectSet, CheckedFunctionType, CheckedMutation, CheckedProductType, CheckedResource,
     CheckedStateEffect, CheckedType, CheckedTypeElement, FloatType, FunctionId,
-    IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction, ModuleId,
-    NumericType, ResolvedFunction, ResolvedModule, SymbolId, TypeParameterId, TypedModule,
+    IntegerBinaryOperation, IntegerCompareOperation, IntegerType, IntrinsicFunction, LoweredModule,
+    ModuleId, NumericType, ResolvedFunction, ResolvedModule, SymbolId, TypeParameterId,
+    TypedModule,
 };
 use staple_syntax::{
     CallExpression, Diagnostic, Expression, Item, Pattern, PatternBindingKind, ProductExpression,
@@ -323,18 +324,18 @@ impl<'context> CodeGenerator<'context> {
         Self { context }
     }
 
-    pub fn compile_module(&self, module: &TypedModule) -> Result<String, Vec<Diagnostic>> {
+    pub fn compile_module(&self, module: &LoweredModule) -> Result<String, Vec<Diagnostic>> {
         self.compile_module_for_target(module, None)
     }
 
     pub fn compile_module_for_target(
         &self,
-        module: &TypedModule,
+        module: &LoweredModule,
         target: Option<&str>,
     ) -> Result<String, Vec<Diagnostic>> {
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        ModuleEmitter::new(self.context, module, &target_machine)
+        ModuleEmitter::new(self.context, module.typed(), &target_machine)
             .compile(&target_machine)
             .map(|module| module.print_to_string().to_string())
             .map_err(|diagnostic| vec![diagnostic])
@@ -342,7 +343,7 @@ impl<'context> CodeGenerator<'context> {
 
     pub fn emit_object(
         &self,
-        module: &TypedModule,
+        module: &LoweredModule,
         path: &Path,
         target: Option<&str>,
     ) -> Result<(), Vec<Diagnostic>> {
@@ -354,7 +355,7 @@ impl<'context> CodeGenerator<'context> {
         }
         let target_machine =
             create_target_machine(target).map_err(|diagnostic| vec![diagnostic])?;
-        let llvm_module = ModuleEmitter::new(self.context, module, &target_machine)
+        let llvm_module = ModuleEmitter::new(self.context, module.typed(), &target_machine)
             .compile(&target_machine)
             .map_err(|diagnostic| vec![diagnostic])?;
         target_machine

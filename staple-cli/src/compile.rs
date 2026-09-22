@@ -5,8 +5,8 @@ use std::process::{Command, ExitCode, ExitStatus};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use staple_compiler::{
-    CodeGenerator, NameResolver, Program, ProgramLoader, TypeChecker, TypedModule, expand_macros,
-    render_expanded_module,
+    CodeGenerator, Lowerer, NameResolver, Program, ProgramLoader, TypeChecker, TypedModule,
+    expand_macros, render_expanded_module,
 };
 use staple_syntax::{Diagnostic, format_source};
 
@@ -131,13 +131,14 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     if options.mode == Mode::Check {
         return Ok(Outcome::Completed(None));
     }
+    let lowered = Lowerer::new().lower(&module).map_err(format_diagnostics)?;
     let context = inkwell::context::Context::create();
     let generator = CodeGenerator::new(&context);
 
     if options.mode == Mode::Run {
         let object = TemporaryArtifact::new("object", "o");
         generator
-            .emit_object(&module, object.path(), None)
+            .emit_object(&lowered, object.path(), None)
             .map_err(format_diagnostics)?;
         let executable = TemporaryArtifact::new("executable", executable_extension());
         link_executable(object.path(), executable.path(), &options)?;
@@ -156,7 +157,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
     match options.emit {
         EmitKind::Llvm => {
             let llvm = generator
-                .compile_module_for_target(&module, options.target.as_deref())
+                .compile_module_for_target(&lowered, options.target.as_deref())
                 .map_err(format_diagnostics)?;
             if let Some(output) = options.output {
                 std::fs::write(&output, llvm)
@@ -169,7 +170,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
         EmitKind::Object => {
             let output = artifact_output(&options, "o")?;
             generator
-                .emit_object(&module, &output, options.target.as_deref())
+                .emit_object(&lowered, &output, options.target.as_deref())
                 .map_err(format_diagnostics)?;
             Ok(Outcome::Completed(None))
         }
@@ -177,7 +178,7 @@ pub fn run(arguments: impl IntoIterator<Item = OsString>) -> Result<Outcome, Str
             let output = artifact_output(&options, executable_extension())?;
             let object = TemporaryArtifact::new("object", "o");
             generator
-                .emit_object(&module, object.path(), options.target.as_deref())
+                .emit_object(&lowered, object.path(), options.target.as_deref())
                 .map_err(format_diagnostics)?;
             link_executable(object.path(), &output, &options)?;
             Ok(Outcome::Completed(None))
@@ -1444,7 +1445,11 @@ mod tests {
         .expect("example should compile");
         let context = inkwell::context::Context::create();
         let llvm = staple_compiler::CodeGenerator::new(&context)
-            .compile_module(&module)
+            .compile_module(
+                &staple_compiler::Lowerer::new()
+                    .lower(&module)
+                    .expect("checked module should lower"),
+            )
             .expect("LLVM generation should succeed");
 
         assert!(llvm.contains("define i32 @main()"));
@@ -1482,7 +1487,11 @@ mod tests {
         .expect("example should compile");
         let context = inkwell::context::Context::create();
         let llvm = staple_compiler::CodeGenerator::new(&context)
-            .compile_module(&module)
+            .compile_module(
+                &staple_compiler::Lowerer::new()
+                    .lower(&module)
+                    .expect("checked module should lower"),
+            )
             .expect("LLVM generation should succeed");
 
         let initializers = extract_module_initializer_bodies(&llvm);
@@ -1499,7 +1508,11 @@ mod tests {
         .expect("top-level reactive source should compile");
         let context = inkwell::context::Context::create();
         let llvm = staple_compiler::CodeGenerator::new(&context)
-            .compile_module(&module)
+            .compile_module(
+                &staple_compiler::Lowerer::new()
+                    .lower(&module)
+                    .expect("checked module should lower"),
+            )
             .expect("LLVM generation should succeed");
 
         let initializers = extract_module_initializer_bodies(&llvm);
