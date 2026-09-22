@@ -3143,7 +3143,7 @@ fn compares_slices_and_strings_through_the_standard_library_eq_implementations()
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&module)
+        .compile_module(&lower(&module))
         .expect("slice and string equality should use the standard-library implementations");
 }
 
