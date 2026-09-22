@@ -17,7 +17,7 @@ pub enum Type {
     Function(FunctionType),
     Application(TypeApplication),
     EffectApplication(EffectApplication),
-    Repeated(RepeatedType),
+    Array(ArrayType),
     Splice(SpliceExpression),
 }
 
@@ -33,7 +33,7 @@ impl Type {
             Self::Function(ty) => &ty.syntax,
             Self::Application(ty) => &ty.syntax,
             Self::EffectApplication(ty) => &ty.syntax,
-            Self::Repeated(ty) => &ty.syntax,
+            Self::Array(ty) => &ty.syntax,
             Self::Splice(ty) => &ty.syntax,
         }
     }
@@ -117,10 +117,7 @@ impl fmt::Display for Type {
                     format_effect_set(&application.effects)
                 )
             }
-            Self::Repeated(repeated) => match &repeated.count {
-                Some(count) => write!(formatter, "{}[{count}]", repeated.element),
-                None => write!(formatter, "{}[]", repeated.element),
-            },
+            Self::Array(array) => write!(formatter, "({}; {})", array.element, array.count),
             Self::Splice(splice) => {
                 write!(formatter, "${}", splice.name)?;
                 if splice.repeated {
@@ -360,12 +357,16 @@ pub struct TypeElement {
     pub moved: bool,
 }
 
+/// A homogeneous product type, also called an array type: `(element; count)`.
+///
+/// `count` is a compile-time type that must resolve to a non-negative integer
+/// singleton or a compile-time parameter bounded by `Natural`. `(T; 0)` and
+/// `(T; 1)` normalize to `()` and `T` respectively.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RepeatedType {
+pub struct ArrayType {
     pub syntax: Syntax,
     pub element: Box<Type>,
-    /// `None` denotes an erased length (`T[]`).
-    pub count: Option<Box<Type>>,
+    pub count: Box<Type>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

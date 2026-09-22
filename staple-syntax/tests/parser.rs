@@ -494,7 +494,7 @@ fn parses_string_literal_types_and_patterns_losslessly() {
 fn parses_number_literal_types_and_dependent_product_sizes_losslessly() {
     let source = concat!(
         "type alias Three = 3\n",
-        "type alias Vector T N where Natural N = T[N]\n",
+        "type alias Vector T N where Natural N = (T; N)\n",
         "let values: Vector I32 Three = (1, 2, 3)\n",
     );
     let root = parse(source).expect("number literal types should parse");
@@ -2302,13 +2302,13 @@ fn parses_sum_types_and_propagating_patterns_losslessly() {
 }
 
 #[test]
-fn parses_repeated_spread_erased_and_variable_index_syntax() {
+fn parses_array_spread_and_variable_index_syntax() {
     let source = concat!(
-        "def fixed: Ref I32[3]\n",
-        "def erased: Ref I32[]\n",
-        "def mixed: (String, ...I32[3], ...(I32, I32))\n",
+        "def fixed: Ref (I32; 3)\n",
+        "def slices: Slice I32\n",
+        "def mixed: (String, ...(I32; 3), ...(I32, I32))\n",
         "let expanded = (prefix: \"value\", ...mixed, suffix: 1)\n",
-        "let value = erased[index].0\n",
+        "let value = slices[index].0\n",
     );
     let module = parse(source).expect("product extensions should parse");
     assert_eq!(module.text(), source);

@@ -2568,29 +2568,16 @@ impl Grammar {
     fn parse_type_postfix(&mut self) -> Result<Type, ParseError> {
         let start = self.position;
         let mut ty = self.parse_type_atom()?;
-        loop {
-            if self.at(TokenKind::LBrace) && !self.has_trivia_before_next_token() {
-                let effects = self.parse_effect_set()?;
-                ty = Type::EffectApplication(crate::EffectApplication {
-                    syntax: self.syntax(start),
-                    callee: Box::new(ty),
-                    effects,
-                });
-            } else if self.eat(TokenKind::LBracket) {
-                let count = if self.at(TokenKind::RBracket) {
-                    None
-                } else {
-                    Some(Box::new(self.parse_type()?))
-                };
-                self.expect(TokenKind::RBracket, "expected `]` after product repetition")?;
-                ty = Type::Repeated(crate::RepeatedType {
-                    syntax: self.syntax(start),
-                    element: Box::new(ty),
-                    count,
-                });
-            } else {
-                break;
-            }
+        while self.at(TokenKind::LBrace) && !self.has_trivia_before_next_token() {
+            let effects = self.parse_effect_set()?;
+            ty = Type::EffectApplication(crate::EffectApplication {
+                syntax: self.syntax(start),
+                callee: Box::new(ty),
+                effects,
+            });
+        }
+        if self.at(TokenKind::LBracket) {
+            return Err(self.error("array types are written `(T; N)`, not `T[N]`"));
         }
         Ok(ty)
     }
@@ -2725,6 +2712,24 @@ impl Grammar {
                         }
                     } else {
                         let ty = self.parse_type()?;
+                        if elements.is_empty()
+                            && name.is_none()
+                            && !mutable
+                            && !moved
+                            && self.at(TokenKind::Semicolon)
+                        {
+                            self.bump_token();
+                            if self.at(TokenKind::RParen) {
+                                return Err(self.error("an array type must have a size"));
+                            }
+                            let count = self.parse_type()?;
+                            self.expect(TokenKind::RParen, "expected `)` after array type")?;
+                            return Ok(Type::Array(crate::ArrayType {
+                                syntax: self.syntax(start),
+                                element: Box::new(ty),
+                                count: Box::new(count),
+                            }));
+                        }
                         let default = if self.eat(TokenKind::Equals) {
                             if name.is_none() {
                                 return Err(self
@@ -3665,7 +3670,7 @@ impl Grammar {
                     let count = self.parse_type()?;
                     let close = self.expect(
                         TokenKind::RParen,
-                        "expected `)` after repeated product; a repetition count must be a type",
+                        "expected `)` after repeated product; an array length must be a type",
                     );
                     self.brace_terminates_expression = previous_brace_termination;
                     close?;
@@ -4068,7 +4073,7 @@ fn contains_mutable_type_element(ty: &Type) -> bool {
                     .iter()
                     .any(|resource| contains_mutable_type_element(&resource.value_type))
         }
-        Type::Repeated(repeated) => contains_mutable_type_element(&repeated.element),
+        Type::Array(array) => contains_mutable_type_element(&array.element),
         _ => false,
     }
 }
@@ -4096,7 +4101,7 @@ fn contains_move_type_element(ty: &Type) -> bool {
                     .iter()
                     .any(|resource| contains_move_type_element(&resource.value_type))
         }
-        Type::Repeated(repeated) => contains_move_type_element(&repeated.element),
+        Type::Array(array) => contains_move_type_element(&array.element),
         _ => false,
     }
 }

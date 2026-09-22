@@ -1121,11 +1121,9 @@ impl<'a> Classifier<'a> {
                     self.ty(&resource.value_type, resolved);
                 }
             }
-            Type::Repeated(value) => {
+            Type::Array(value) => {
                 self.ty(&value.element, resolved);
-                if let Some(count) = &value.count {
-                    self.ty(count, resolved);
-                }
+                self.ty(&value.count, resolved);
             }
             Type::Inferred(_)
             | Type::NumberLiteral(_)

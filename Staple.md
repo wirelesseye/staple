@@ -1263,40 +1263,47 @@ compile time, so accessing an absent name or an index outside the product's
 fixed bounds is always rejected at compile time, never deferred to a runtime
 check.
 
-Fixed homogeneous products may be written with repetition syntax. `T[N]` is
-exactly equivalent to a product containing `N` copies of `T`, rather than a
-distinct array type. In particular, `T[0]` is `()` and `T[1]` is `T`. A fully
-expanded product may contain at most 65,535 elements.
+A homogeneous product type — one whose elements all have the same type — is
+also called an *array type*, and is written with repetition syntax `(T; N)`:
 
-The size is a compile-time type. Non-negative integer type literals such as
+```staple
+let zeros: (I32; 3) = (0, 0, 0)
+```
+
+`(T; N)` is exactly equivalent to a product containing `N` copies of `T`,
+rather than a distinct array type. In particular, `(T; 0)` is `()` and `(T; 1)`
+is `T`. A fully expanded array may contain at most 65,535 elements. The length
+is mandatory: there is no unsized array spelling.
+
+The length is a compile-time type. Non-negative integer type literals such as
 `0`, `3`, and `42` are singleton subtypes of `USize` and automatically satisfy
 the sealed prelude trait `Natural`. An alias or a parameter constrained by that
-trait may be used as a size, for example
-`type alias Vector T N where Natural N = T[N]`. The size must resolve to one
+trait may be used as a length, for example
+`type alias Vector T N where Natural N = (T; N)`. The length must resolve to one
 singleton literal before code generation. Number literal types use the `USize`
 runtime representation, so an exact value annotation such as `let three: 3 = 3`
 is valid and widens to `USize`; an unconstrained `let three = 3` still infers
 `I32`.
 
-A product *value* whose elements are all the same may be written with the
+An array *value* whose elements are all the same may be written with the
 repetition form `(value; count)`:
 
 ```staple
-let zeros: I32[3] = (0; 3) // (0, 0, 0)
+let zeros: (I32; 3) = (0; 3) // (0, 0, 0)
 ```
 
 `(value; count)` is equivalent to a product with `count` copies of `value`;
 `(value; 0)` is `()` and `(value; 1)` is `value`, and the expanded product may
-contain at most 65,535 elements. The count uses the same grammar and rules as a
-repeated type's size: it is a compile-time type, not a value. A non-negative
+contain at most 65,535 elements. The count uses the same grammar and rules as an
+array type's length: it is a compile-time type, not a value. A non-negative
 integer type literal, a type alias, or a compile-time parameter constrained by
 `Natural` may be used, for example:
 
 ```staple
 type alias Count = 3
-let cells: I32[Count] = (0; Count)
+let cells: (I32; Count) = (0; Count)
 
-def repeat: <T, N where Natural N> T -> T[N] = value => (value; N)
+def repeat: <T, N where Natural N> T -> (T; N) = value => (value; N)
 ```
 
 A runtime value is never a valid count, even when its type is a singleton: with
@@ -1309,11 +1316,11 @@ error.
 Product type elements can be flattened explicitly with `...`:
 
 ```staple
-let values: (String, ...I32[3])
+let values: (String, ...(I32; 3))
 // Equivalent to (String, I32, I32, I32)
 ```
 
-A spread operand must be a fixed product. Explicit `...T[0]` and `...T[1]`
+A spread operand must be a fixed product. Explicit `...(T; 0)` and `...(T; 1)`
 contribute zero and one elements respectively. A bare trailing `...` retains
 its separate meaning in a C-variadic function parameter type.
 
@@ -1373,7 +1380,7 @@ position determining the output. User-defined implementations may use any
 position type. The compiler derives `Index P USize Output` for every non-empty
 fixed product whose elements are all `Copy`; `Output` is the duplicate-free sum
 of its element types. Thus indexing `(I32, String, I32)` produces
-`I32 | String`, while indexing `I32[N]` produces `I32`. The standard library
+`I32 | String`, while indexing `(I32; N)` produces `I32`. The standard library
 implements `Index (Slice T) USize T` when `T` is `Copy`, backed by
 `Slice.get_ref`, so a `Slice T` is indexed like a fixed product of `T`. Known
 bad fixed-product indices are rejected and dynamic out-of-bounds indices trap.
@@ -1393,7 +1400,7 @@ target[index] = replacement
 // Equivalent to MutateIndex.mutate_index (target, index, replacement)
 ```
 
-The compiler derives `MutateIndex` for non-empty homogeneous fixed products, by
+The compiler derives `MutateIndex` for non-empty arrays, by
 value. The standard library implements `MutateIndex (Slice T) USize T` for
 every `T`, backed by `Slice.get_ref` and `Ref.replace`. The mutable `Target`
 parameter passes by address either way (see the "Mutable parameters" subsection
@@ -1420,7 +1427,7 @@ let pair: (I32, Bool) = product_default ()
 
 This applies to heterogeneous, named, nested, and empty products. In
 particular, `()` is not default-constructible unless a legal implementation is
-provided by the package that owns `Default`. Because `T[1]` is normalized to
+provided by the package that owns `Default`. Because `(T; 1)` is normalized to
 `T`, it continues to use the `Default` implementation of `T`. `Ref T` does not
 implement `Default` merely because `T` does.
 
@@ -1609,8 +1616,8 @@ compile-time parameters, since it is specialized along with the rest of the
 body at each concrete use:
 
 ```staple
-def make_list: <T where Default T> () -> T[32] = () => {
-    let list: T[32] = default ()
+def make_list: <T where Default T> () -> (T; 32) = () => {
+    let list: (T; 32) = default ()
     list
 }
 ```
@@ -3047,10 +3054,10 @@ let point = RefPoint (Ref (x: 10, y: 20))
 let RefPoint (Ref (x, y)) = point
 ```
 
-A homogeneous fixed product can be viewed as a `Slice`:
+An array can be viewed as a `Slice`:
 
 ```staple
-let fixed: Ref I32[3] = Ref (10, 20, 30)
+let fixed: Ref (I32; 3) = Ref (10, 20, 30)
 let values: Slice I32 = fixed
 let count: USize = Slice.length values
 let second = values.1
@@ -3059,13 +3066,13 @@ let third = values[index]
 ```
 
 `Slice T` is a pointer-and-length view of an allocation whose concrete length
-is still fixed. It is not a dynamic array and is not equal to any `Ref T[N]`;
+is still fixed. It is not a dynamic array and is not equal to any `Ref (T; N)`;
 a fixed reference is implicitly converted wherever a `Slice T` is expected
 (as in the `let values: Slice I32 = fixed` binding above), and the companion
-function `Slice.from_ref: <N where Natural N> Ref T[N] -> Slice T` performs the
+function `Slice.from_ref: <N where Natural N> Ref (T; N) -> Slice T` performs the
 same conversion explicitly — `Slice.from_ref fixed` — for use as a first-class
 function value or wherever an explicit spelling is clearer. As with the
-implicit conversion, a singleton `Ref T` (a `T[1]`, normalized to `T`) becomes
+implicit conversion, a singleton `Ref T` (a `(T; 1)`, normalized to `T`) becomes
 a length-1 slice, and an empty `Ref ()` becomes a length-0 slice, requiring an
 expected `Slice` type to infer its element type. Literal and variable indexing
 perform runtime bounds checks.

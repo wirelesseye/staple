@@ -204,10 +204,10 @@ impl ProductExpression {
     }
 }
 
-/// A `(value; count)` product literal that repeats `value` `count` times.
+/// An array literal `(value; count)` that repeats `value` `count` times.
 ///
-/// `count` is a compile-time type, using the same grammar as a repeated type's
-/// size: a non-negative integer type literal, a type alias, or a compile-time
+/// `count` is a compile-time type, using the same grammar as an array type's
+/// length: a non-negative integer type literal, a type alias, or a compile-time
 /// parameter constrained by `Natural`. `value` is evaluated exactly once; when
 /// the count is not `1` its type must be `Copy`.
 #[derive(Debug, Clone, PartialEq, Eq)]

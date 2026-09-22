@@ -1731,11 +1731,9 @@ impl Collector<'_> {
                     self.ty(&resource.value_type);
                 }
             }
-            Type::Repeated(repeated) => {
-                self.ty(&repeated.element);
-                if let Some(count) = &repeated.count {
-                    self.ty(count);
-                }
+            Type::Array(array) => {
+                self.ty(&array.element);
+                self.ty(&array.count);
             }
             Type::Inferred(_)
             | Type::NumberLiteral(_)

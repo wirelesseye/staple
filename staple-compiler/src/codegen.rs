@@ -2741,7 +2741,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let crate::CheckedAccess::Product {
                     index,
                     dereference,
-                    erased,
+                    slice,
                     scalar,
                 } = checked
                 else {
@@ -2761,7 +2761,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         self.compile_place_pointer(environment, &access.value)?;
                     return Ok((pointer, result_type, symbol));
                 }
-                if erased {
+                if slice {
                     let reference = self.compile_expression(environment, &access.value)?;
                     let value = if dereference.is_empty() {
                         value_as_basic(reference)
@@ -2775,7 +2775,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                     let Some(BasicValueEnum::StructValue(reference)) = value else {
                         return Err(Diagnostic::new(
                             access.syntax.span.clone(),
-                            "invalid erased Ref place",
+                            "invalid slice place",
                         ));
                     };
                     let pointer = self
@@ -3406,7 +3406,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                 let crate::CheckedAccess::Product {
                     index,
                     dereference,
-                    erased,
+                    slice,
                     scalar,
                 } = checked
                 else {
@@ -3424,7 +3424,7 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
                         access.syntax.span.clone(),
                     )?
                 };
-                if erased {
+                if slice {
                     let BasicValueEnum::StructValue(reference) = value else {
                         return Err(Diagnostic::new(
                             access.value.syntax().span.clone(),
@@ -12171,9 +12171,9 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             CheckedType::NumberLiteral(_) => {
                 Ok(self.compile_integer_type(IntegerType::USize).into())
             }
-            CheckedType::RepeatedProduct { .. } => Err(Diagnostic::new(
+            CheckedType::Array { .. } => Err(Diagnostic::new(
                 Span::Compiler,
-                "cannot generate code for a homogeneous product with an unspecialized size",
+                "cannot generate code for an array with an unspecialized length",
             )),
             CheckedType::CChar => Ok(self.context.i8_type().into()),
             CheckedType::Parameter { name, .. } => Err(Diagnostic::new(
@@ -12224,10 +12224,6 @@ impl<'module, 'context> ModuleEmitter<'module, 'context> {
             CheckedType::Slice(_) => Ok(self.slice_type().into()),
             CheckedType::Ref(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
             CheckedType::Buffer(_) => Ok(self.context.ptr_type(AddressSpace::default()).into()),
-            CheckedType::ErasedProduct(_) => Err(Diagnostic::new(
-                Span::Compiler,
-                "an erased product cannot be represented by value",
-            )),
             CheckedType::CPointer { .. } => {
                 Ok(self.context.ptr_type(AddressSpace::default()).into())
             }

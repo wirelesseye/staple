@@ -3200,25 +3200,24 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn runs_erased_product_length_and_indexing() {
+    fn runs_slice_length_and_indexing() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let source =
-            std::env::temp_dir().join(format!("staple-compiler-erased-product-{nonce}.sta"));
-        let output = std::env::temp_dir().join(format!("staple-compiler-erased-product-{nonce}"));
+        let source = std::env::temp_dir().join(format!("staple-compiler-slice-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-slice-{nonce}"));
         std::fs::write(
             &source,
             concat!(
                 "use std.slice.Slice\n",
                 "extern \"c\" { exit: I32 -> () }\n",
                 "let index: USize = 1\n",
-                "let mut product: I32[3] = (10, 20, 30)\n",
+                "let mut product: (I32; 3) = (10, 20, 30)\n",
                 "product[index] = 21\n",
-                "let fixed: Ref I32[3] = Ref product\n",
-                "let mut erased: Slice I32 = Slice.from_ref fixed\n",
-                "erased[index] = 22\n",
+                "let fixed: Ref (I32; 3) = Ref product\n",
+                "let mut slice: Slice I32 = Slice.from_ref fixed\n",
+                "slice[index] = 22\n",
                 "def score: ((I32, String, Bool), USize) -> I32 = (values, position) => match values[position] {\n",
                 "  value: I32 => value,\n",
                 "  value: String => 0,\n",
@@ -3227,11 +3226,11 @@ mod tests {
                 "}\n",
                 "let mixed: (I32, String, Bool) = (7, \"text\", False)\n",
                 "let mixed_result = (score (mixed, 0) - 7) + score (mixed, 1) + (score (mixed, 2) - 1)\n",
-                "let result = mixed_result + (erased[index] - 22) + (fixed[index] - 22) + (product[index] - 21)\n",
-                "match Slice.length erased == 3 { True() => exit result, False() => exit 1 }\n",
+                "let result = mixed_result + (slice[index] - 22) + (fixed[index] - 22) + (product[index] - 21)\n",
+                "match Slice.length slice == 3 { True() => exit result, False() => exit 1 }\n",
             ),
         )
-        .expect("temporary erased-product source should be writable");
+        .expect("temporary slice source should be writable");
         let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .unwrap()
@@ -3245,10 +3244,10 @@ mod tests {
             output.clone().into_os_string(),
             source.clone().into_os_string(),
         ])
-        .expect("erased-product executable should compile");
+        .expect("slice executable should compile");
         let status = Command::new(&output)
             .status()
-            .expect("erased-product executable should run");
+            .expect("slice executable should run");
         let _ = std::fs::remove_file(source);
         let _ = std::fs::remove_file(output);
         assert!(status.success());
@@ -3774,7 +3773,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "def sum: I32[4] -> I32 = (a, b, c, d) => a + b + c + d\n",
+                "def sum: (I32; 4) -> I32 = (a, b, c, d) => a + b + c + d\n",
                 "let mut calls = 0\n",
                 "def make_pair = () => { calls = calls + 1; (2, 3) }\n",
                 "let expanded = (1, ...make_pair (), 4)\n",
@@ -3955,7 +3954,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "let cells: I32[4] = (3; 4)\n",
+                "let cells: (I32; 4) = (3; 4)\n",
                 "let total = cells.0 + cells.1 + cells.2 + cells.3\n",
                 "exit (total - 12)\n",
             ),

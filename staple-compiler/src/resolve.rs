@@ -4695,7 +4695,7 @@ impl NameResolver {
                 self.diagnostics.push(Diagnostic::new(
                     named.syntax.span.clone(),
                     format!(
-                        "`{}` is a value; a repeated product count must be a type satisfying `Natural`",
+                        "`{}` is a value; an array length must be a type satisfying `Natural`",
                         named.name
                     ),
                 ));
@@ -4799,10 +4799,12 @@ impl NameResolver {
                     self.resolve_type_with(&resource.value_type, strict);
                 }
             }
-            Type::Repeated(repeated) => {
-                self.resolve_type_with(&repeated.element, strict);
-                if let Some(count) = &repeated.count {
-                    self.resolve_type_with(count, strict);
+            Type::Array(array) => {
+                self.resolve_type_with(&array.element, strict);
+                if strict {
+                    self.resolve_repeated_count(&array.count);
+                } else {
+                    self.resolve_type_with(&array.count, false);
                 }
             }
             Type::Splice(splice) => {
@@ -4990,11 +4992,9 @@ impl NameResolver {
                     self.validate_representation(&resource.value_type, required);
                 }
             }
-            Type::Repeated(repeated) => {
-                self.validate_representation(&repeated.element, required);
-                if let Some(count) = &repeated.count {
-                    self.validate_representation(count, required);
-                }
+            Type::Array(array) => {
+                self.validate_representation(&array.element, required);
+                self.validate_representation(&array.count, required);
             }
             Type::Inferred(_)
             | Type::NumberLiteral(_)

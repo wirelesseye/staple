@@ -1533,12 +1533,12 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
 }
 
 #[test]
-fn supports_repeated_spread_and_erased_product_references() {
+fn supports_repeated_spread_and_slice_references() {
     let source = concat!(
         "use std.slice.Slice\n",
-        "let explicit: I32[3] = (1, 2, 3)\n",
-        "let spread: (String, ...I32[2]) = (\"x\", 4, 5)\n",
-        "let fixed: Ref I32[3] = Ref explicit\n",
+        "let explicit: (I32; 3) = (1, 2, 3)\n",
+        "let spread: (String, ...(I32; 2)) = (\"x\", 4, 5)\n",
+        "let fixed: Ref (I32; 3) = Ref explicit\n",
         "let erased: Slice I32 = fixed\n",
         "let constructed: Slice I32 = Ref (6, 7)\n",
         "let singleton: Slice I32 = Ref 8\n",
@@ -1566,15 +1566,15 @@ fn supports_repeated_spread_and_erased_product_references() {
 fn from_ref_accepts_generic_arrays_and_is_first_class() {
     let module = type_check(concat!(
         "use std.slice.Slice\n",
-        "let fixed: Ref I32[3] = Ref (1, 2, 3)\n",
+        "let fixed: Ref (I32; 3) = Ref (1, 2, 3)\n",
         "let direct: Slice I32 = Slice.from_ref fixed\n",
         "let singleton: Slice I32 = Slice.from_ref (Ref 8)\n",
         "let empty: Slice I32 = Slice.from_ref (Ref ())\n",
-        "let operation: (Ref I32[3]) -> Slice I32 = Slice.from_ref\n",
+        "let operation: (Ref (I32; 3)) -> Slice I32 = Slice.from_ref\n",
         "let applied: Slice I32 = operation fixed\n",
-        "def coerce: <T, N where Natural N> Ref T[N] -> Slice T = value => value\n",
+        "def coerce: <T, N where Natural N> Ref (T; N) -> Slice T = value => value\n",
         "let coerced: Slice I32 = coerce fixed\n",
-        "def forward: <T, N where Natural N> Ref T[N] -> Slice T = value => Slice.from_ref value\n",
+        "def forward: <T, N where Natural N> Ref (T; N) -> Slice T = value => Slice.from_ref value\n",
         "let forwarded: Slice I32 = forward fixed\n",
     ));
     let context = Context::create();
@@ -1586,7 +1586,7 @@ fn from_ref_accepts_generic_arrays_and_is_first_class() {
 #[test]
 fn checks_nullary_calls_inside_argument_positions() {
     let module = type_check(concat!(
-        "def take: <N where Natural N> Ref I32[N] -> I32 = value => 0\n",
+        "def take: <N where Natural N> Ref (I32; N) -> I32 = value => 0\n",
         "let result: I32 = take (Ref ())\n",
     ));
     let context = Context::create();
@@ -1599,11 +1599,11 @@ fn checks_nullary_calls_inside_argument_positions() {
 fn supports_number_literal_types_as_generic_product_sizes() {
     let source = concat!(
         "type alias Three = 3\n",
-        "type alias Vector T N where Natural N = T[N]\n",
-        "let direct: I32[Three] = (1, 2, 3)\n",
+        "type alias Vector T N where Natural N = (T; N)\n",
+        "let direct: (I32; Three) = (1, 2, 3)\n",
         "let generic: Vector I32 Three = direct\n",
-        "def keep: <T, N where Natural N> move T[N] -> T[N] = move values => values\n",
-        "let inferred: I32[3] = keep (1, 2, 3)\n",
+        "def keep: <T, N where Natural N> move (T; N) -> (T; N) = move values => values\n",
+        "let inferred: (I32; 3) = keep (1, 2, 3)\n",
     );
     let module = type_check(source);
     let context = Context::create();
@@ -1616,7 +1616,7 @@ fn supports_number_literal_types_as_generic_product_sizes() {
 fn number_literal_types_are_natural_usize_refinements() {
     type_check(concat!(
         "type alias Three = 3\n",
-        "type alias Triple (T) = T[Three]\n",
+        "type alias Triple (T) = (T; Three)\n",
         "type alias NaturalIdentity (N) where Natural N = N\n",
         "type alias AlsoThree = NaturalIdentity Three\n",
         "let exact: 3 = 3\n",
@@ -1635,7 +1635,7 @@ fn number_literal_types_are_natural_usize_refinements() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "def invalid: <T, N> move T[N] -> T[N] = move values => values\n",
+            "def invalid: <T, N> move (T; N) -> (T; N) = move values => values\n",
         ))
         .expect_err_diagnostics("dependent sizes require a Natural trait bound");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -1657,10 +1657,10 @@ fn number_literal_types_are_natural_usize_refinements() {
 #[test]
 fn natural_count_parameters_drive_repeated_product_values() {
     let source = concat!(
-        "def repeat: <T, N where Copy T, Natural N> T -> N -> T[N] = value => n => (value; N)\n",
-        "let repeated: I32[3] = repeat 7 3\n",
+        "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
+        "let repeated: (I32; 3) = repeat 7 3\n",
         "type alias Count = 3\n",
-        "let local: I32[3] = (9; Count)\n",
+        "let local: (I32; 3) = (9; Count)\n",
     );
     let module = type_check(source);
     let context = Context::create();
@@ -1670,13 +1670,13 @@ fn natural_count_parameters_drive_repeated_product_values() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "def invalid: <T, N where Natural N> T -> N -> T[N] = value => n => (value; N)\n",
+            "def invalid: <T, N where Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
         ))
         .expect_err_diagnostics("symbolic repetition requires Copy elements");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("symbolic count requires a `Copy` element type")
+            .contains("symbolic length requires a `Copy` element type")
     }));
 }
 
@@ -1697,7 +1697,7 @@ fn natural_is_a_sealed_structural_trait() {
 #[test]
 fn spreads_fixed_product_values_and_call_arguments() {
     let source = concat!(
-        "def sum: I32[4] -> I32 = (a, b, c, d) => a + b + c + d\n",
+        "def sum: (I32; 4) -> I32 = (a, b, c, d) => a + b + c + d\n",
         "let pair = (left: 2, right: 3)\n",
         "let arguments = (2, 3)\n",
         "let expanded = (prefix: \"value\", ...pair, suffix: False)\n",
@@ -1715,7 +1715,7 @@ fn spreads_fixed_product_values_and_call_arguments() {
 #[test]
 fn repeated_product_values_expand_to_fixed_products() {
     let module = type_check(concat!(
-        "let zeros: I32[3] = (7; 3)\n",
+        "let zeros: (I32; 3) = (7; 3)\n",
         "let sum: I32 = zeros.0 + zeros.1 + zeros.2\n",
         "let one: I32 = (5; 1)\n",
         "let none = (0; 0)\n",
@@ -1756,12 +1756,12 @@ fn repeated_product_values_expand_to_fixed_products() {
 #[test]
 fn repeated_product_counts_must_be_types() {
     assert!(
-        parse("let cells: I32[3] = (1; width + 1)\n").is_err(),
-        "a repetition count is a type, not an expression"
+        parse("let cells: (I32; 3) = (1; width + 1)\n").is_err(),
+        "an array length is a type, not an expression"
     );
     assert!(
-        parse("let cells: I32[3] = (1; width)\n").is_ok(),
-        "a type name is a valid repetition count"
+        parse("let cells: (I32; 3) = (1; width)\n").is_ok(),
+        "a type name is a valid array length"
     );
 }
 
@@ -1769,8 +1769,8 @@ fn repeated_product_counts_must_be_types() {
 fn repeated_product_rejects_value_non_copy_and_oversized_counts() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     for source in [
-        "def make: I32 -> I32[2] = size => (0; size)\n",
-        "let n: 3 = 3\nlet local: I32[3] = (9; n)\n",
+        "def make: I32 -> (I32; 2) = size => (0; size)\n",
+        "let n: 3 = 3\nlet local: (I32; 3) = (9; n)\n",
     ] {
         let program = ProgramLoader::new()
             .with_standard_library_root(root.join("stdlib"))
@@ -1778,12 +1778,12 @@ fn repeated_product_rejects_value_non_copy_and_oversized_counts() {
             .expect("source should load");
         let diagnostics = NameResolver::new()
             .resolve_program(program)
-            .expect_err_diagnostics("a value cannot be a repeated product count");
+            .expect_err_diagnostics("a value cannot be an array length");
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic
                     .message
-                    .contains("a repeated product count must be a type satisfying `Natural`")
+                    .contains("an array length must be a type satisfying `Natural`")
             }),
             "unexpected diagnostics: {diagnostics:?}",
         );
@@ -1803,9 +1803,9 @@ fn repeated_product_rejects_value_non_copy_and_oversized_counts() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "type alias Text = String\nlet bad: I32[1] = (0; Text)\n",
+            "type alias Text = String\nlet bad: (I32; 1) = (0; Text)\n",
         ))
-        .expect_err_diagnostics("a non-Natural type cannot be a repetition count");
+        .expect_err_diagnostics("a non-Natural type cannot be an array length");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
@@ -1818,7 +1818,7 @@ fn repeated_product_rejects_value_non_copy_and_oversized_counts() {
     assert!(
         diagnostics
             .iter()
-            .any(|diagnostic| { diagnostic.message.contains("arity exceeds the limit") })
+            .any(|diagnostic| { diagnostic.message.contains("exceeds the limit") })
     );
 }
 
@@ -2273,7 +2273,7 @@ fn type_checks_and_lowers_mutable_places_and_ref_replace() {
         "value = 2\n",
         "let mut pair = (x: 3, y: 4)\n",
         "pair.x = value\n",
-        "let mut fixed: Ref I32[2] = Ref (5, 6)\n",
+        "let mut fixed: Ref (I32; 2) = Ref (5, 6)\n",
         "fixed.0 = pair.x\n",
         "let index: USize = 1\n",
         "fixed[index] = 7\n",
@@ -2345,11 +2345,11 @@ fn type_checks_the_two_binding_mutability_forms() {
 fn writes_through_a_ref_require_mut_on_a_named_root() {
     // A named `Ref`-typed binding needs `mut` to be written through.
     type_check(concat!(
-        "let mut cell: Ref I32[2] = Ref (1, 2)\n",
+        "let mut cell: Ref (I32; 2) = Ref (1, 2)\n",
         "cell.0 = 3\n",
     ));
     let diagnostics = TypeChecker::new()
-        .check(resolve("let cell: Ref I32[2] = Ref (1, 2)\ncell.0 = 3\n"))
+        .check(resolve("let cell: Ref (I32; 2) = Ref (1, 2)\ncell.0 = 3\n"))
         .expect_err_diagnostics("writing through a `Ref` requires `mut` on the binding");
     assert!(
         diagnostics
@@ -2866,12 +2866,12 @@ fn derives_trait_delegated_product_indexing() {
         "let selected: I32 | String = pair[position]\n",
         "let operation: ((I32, String), USize) -> I32 | String = Index.index\n",
         "let selected_again: I32 | String = operation (pair, position)\n",
-        "let mut updated: I32[3] = (1, 2, 3)\n",
+        "let mut updated: (I32; 3) = (1, 2, 3)\n",
         "updated[position] = 9\n",
-        "let mutate_by_value: (mut I32[3], USize, I32) -> () = MutateIndex.mutate_index\n",
+        "let mutate_by_value: (mut (I32; 3), USize, I32) -> () = MutateIndex.mutate_index\n",
         "mutate_by_value (updated, position, 10)\n",
-        "let mut fixed: Ref I32[3] = Ref updated\n",
-        "let mutate_operation: (mut Ref I32[3], USize, I32) -> () = MutateIndex.mutate_index\n",
+        "let mut fixed: Ref (I32; 3) = Ref updated\n",
+        "let mutate_operation: (mut Ref (I32; 3), USize, I32) -> () = MutateIndex.mutate_index\n",
         "mutate_operation (fixed, position, 6)\n",
         "fixed[position] = 7\n",
         "let mut erased: Slice I32 = fixed\n",
@@ -2905,7 +2905,8 @@ fn delegates_brackets_to_explicit_indexing_implementations() {
 
 #[test]
 fn allows_by_value_indexed_assignment_for_mut_bindings() {
-    let source = "let mut values: I32[2] = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n";
+    let source =
+        "let mut values: (I32; 2) = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n";
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -2917,7 +2918,7 @@ fn allows_by_value_indexed_assignment_for_mut_bindings() {
 fn rejects_by_value_indexed_assignment_without_mut_binding() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "let values: I32[2] = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n",
+            "let values: (I32; 2) = (1, 2)\nlet position: USize = 0\nvalues[position] = 3\n",
         ))
         .expect_err_diagnostics("by-value product assignment requires a `mut` binding");
     assert!(
@@ -2928,7 +2929,7 @@ fn rejects_by_value_indexed_assignment_without_mut_binding() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "let values: Ref I32[2] = Ref (1, 2)\nvalues[2] = 3\n",
+            "let values: Ref (I32; 2) = Ref (1, 2)\nvalues[2] = 3\n",
         ))
         .expect_err_diagnostics("known out-of-bounds MutateIndex must be rejected");
     assert!(
@@ -2942,9 +2943,9 @@ fn rejects_by_value_indexed_assignment_without_mut_binding() {
 fn derives_mutate_index_for_move_only_homogeneous_products() {
     let source = concat!(
         "use std.cinterop.CString\n",
-        "def mutate_by_value = (mut values: CString[2], position: USize, move replacement: CString) => { ",
+        "def mutate_by_value = (mut values: (CString; 2), position: USize, move replacement: CString) => { ",
         "values[position] = replacement; () }\n",
-        "def mutate = (mut values: Ref CString[2], position: USize, move replacement: CString) => { ",
+        "def mutate = (mut values: Ref (CString; 2), position: USize, move replacement: CString) => { ",
         "values[position] = replacement; () }\n",
     );
     let module = type_check(source);
@@ -2959,7 +2960,7 @@ fn derives_mutate_index_for_move_only_homogeneous_products() {
 fn rejects_overlapping_structural_indexing_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "impl Index I32[2] USize I32 {\n",
+            "impl Index (I32; 2) USize I32 {\n",
             "  def index = (values, position) => values.0\n",
             "}\n",
         )))
@@ -2978,14 +2979,14 @@ fn delegates_indexing_through_refs_to_the_payload() {
         "use std.slice.Slice\n",
         "def mixed_at: (Ref (I32, Bool), USize) -> I32 | Bool = (pair, position) => pair[position]\n",
         "def list_at: (Ref (List I32), USize) -> I32 = (list, position) => list[position]\n",
-        "let fixed: Ref I32[3] = Ref (1, 2, 3)\n",
+        "let fixed: Ref (I32; 3) = Ref (1, 2, 3)\n",
         "let values: Slice I32 = fixed\n",
         "def slice_at: (Ref (Slice I32), USize) -> I32 = (slice, position) => slice[position]\n",
         "type Keyed = (key: String, value: I32)\n",
         "impl Index Keyed String I32 { def index = (entry, key) => entry.value }\n",
         "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
-        "def nested_at: (Ref (Ref I32[3]), USize) -> I32 = (values, position) => values[position]\n",
-        "def fixed_at: (Ref I32[3], USize) -> I32 = (values, position) => values[position]\n",
+        "def nested_at: (Ref (Ref (I32; 3)), USize) -> I32 = (values, position) => values[position]\n",
+        "def fixed_at: (Ref (I32; 3), USize) -> I32 = (values, position) => values[position]\n",
         "def generic_at: <T where Index T USize I32> (Ref T, USize) -> I32 = (values, position) => values[position]\n",
         "let list = List.of (1, 2, 3)\n",
         "let value: I32 = generic_at (Ref list, 0)\n",
@@ -3004,8 +3005,8 @@ fn delegates_indexed_assignment_through_refs_to_the_payload() {
     let source = concat!(
         "use std.list.List\n",
         "def set_list = (mut list: Ref (List I32), position: USize, value: I32) => { list[position] = value }\n",
-        "def set_nested = (mut values: Ref (Ref I32[2]), position: USize, value: I32) => { values[position] = value }\n",
-        "def set_fixed = (mut values: Ref I32[2], position: USize, value: I32) => { values[position] = value }\n",
+        "def set_nested = (mut values: Ref (Ref (I32; 2)), position: USize, value: I32) => { values[position] = value }\n",
+        "def set_fixed = (mut values: Ref (I32; 2), position: USize, value: I32) => { values[position] = value }\n",
         "type Counter = I32\n",
         "impl MutateIndex Counter String I32 { def mutate_index = (mut counter, key, move value) => () }\n",
         "def set_keyed = (mut counter: Ref Counter, key: String, value: I32) => { counter[key] = value }\n",
@@ -3025,7 +3026,9 @@ fn delegates_indexed_assignment_through_refs_to_the_payload() {
 #[test]
 fn rejects_out_of_bounds_indices_known_through_a_ref() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("def invalid = (values: Ref I32[2]) => values[2]\n"))
+        .check(resolve(
+            "def invalid = (values: Ref (I32; 2)) => values[2]\n",
+        ))
         .expect_err_diagnostics("a known out-of-bounds Ref index must be rejected");
     assert!(
         diagnostics
@@ -3035,7 +3038,7 @@ fn rejects_out_of_bounds_indices_known_through_a_ref() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "def invalid = (values: Ref (Ref I32[2])) => values[2]\n",
+            "def invalid = (values: Ref (Ref (I32; 2))) => values[2]\n",
         ))
         .expect_err_diagnostics("a known out-of-bounds nested Ref index must be rejected");
     assert!(
@@ -3049,7 +3052,7 @@ fn rejects_out_of_bounds_indices_known_through_a_ref() {
 fn indexes_slices_through_the_standard_library_implementation() {
     let source = concat!(
         "use std.slice.Slice\n",
-        "let fixed: Ref I32[3] = Ref (1, 2, 3)\n",
+        "let fixed: Ref (I32; 3) = Ref (1, 2, 3)\n",
         "let mut values: Slice I32 = fixed\n",
         "let value: I32 = values[0]\n",
         "values[1] = 9\n",
@@ -3094,8 +3097,8 @@ fn auto_derefs_fields_through_nested_refs_and_slices() {
 #[test]
 fn derives_iterator_item_as_a_sum_of_product_elements() {
     type_check(concat!(
-        "let iterator: (I32[3], USize) = IntoIterator.into_iterator (1, 2, 3)\n",
-        "let homogeneous_step: IterStep ((I32[3], USize), I32) = Iterator.next iterator\n",
+        "let iterator: ((I32; 3), USize) = IntoIterator.into_iterator (1, 2, 3)\n",
+        "let homogeneous_step: IterStep (((I32; 3), USize), I32) = Iterator.next iterator\n",
         "let mixed: (I32, String, I32) = (1, \"two\", 3)\n",
         "let mixed_iterator: ((I32, String, I32), USize) = IntoIterator.into_iterator mixed\n",
         "let mixed_step: IterStep (((I32, String, I32), USize), I32 | String) = Iterator.next mixed_iterator\n",
@@ -3158,7 +3161,7 @@ fn rejects_structural_iteration_for_non_copy_products() {
 fn rejects_overlapping_structural_iterator_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "impl IntoIterator I32[2] (I32[2], USize) {\n",
+            "impl IntoIterator (I32; 2) ((I32; 2), USize) {\n",
             "  def into_iterator = value => (value, 0 satisfies USize)\n",
             "}\n",
         )))
@@ -3171,19 +3174,10 @@ fn rejects_overlapping_structural_iterator_implementations() {
 }
 
 #[test]
-fn rejects_erased_products_outside_refs_and_ref_destructuring() {
-    let diagnostics = TypeChecker::new()
-        .check(resolve("def invalid: I32[]\n"))
-        .expect_err_diagnostics("an erased product cannot be used by value");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("unsized type") })
-    );
-
+fn rejects_slice_ref_destructuring() {
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "use std.slice.Slice\nlet fixed: Ref I32[2] = Ref (1, 2)\nlet erased: Slice I32 = fixed\nlet Ref values = erased\n",
+            "use std.slice.Slice\nlet fixed: Ref (I32; 2) = Ref (1, 2)\nlet values: Slice I32 = fixed\nlet Ref payload = values\n",
         ))
         .expect_err_diagnostics("a slice cannot be destructured as a Ref");
     assert!(
@@ -3194,12 +3188,12 @@ fn rejects_erased_products_outside_refs_and_ref_destructuring() {
 }
 
 #[test]
-fn handles_product_repetition_edges_and_limits() {
-    type_check("let value: (...I32[0], ...I32[1], I32) = (1, 2)\n");
+fn handles_array_edges_and_limits() {
+    type_check("let value: (...(I32; 0), ...(I32; 1), I32) = (1, 2)\n");
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("def too_large: I32[65536]\n"))
-        .expect_err_diagnostics("oversized repeated products must be rejected");
+        .check(resolve("def too_large: (I32; 65536)\n"))
+        .expect_err_diagnostics("oversized arrays must be rejected");
     assert!(
         diagnostics
             .iter()
@@ -3208,7 +3202,7 @@ fn handles_product_repetition_edges_and_limits() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "let pair: I32[2] = (1, 2)\nlet invalid = pair[2]\n",
+            "let pair: (I32; 2) = (1, 2)\nlet invalid = pair[2]\n",
         ))
         .expect_err_diagnostics("known out-of-bounds indices must be rejected");
     assert!(
@@ -3219,49 +3213,14 @@ fn handles_product_repetition_edges_and_limits() {
 }
 
 #[test]
-fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
+fn aliases_complete_slice_references_and_reject_ffi() {
     type_check(concat!(
         "use std.slice.Slice\n",
         "type alias Ints = Slice I32\n",
-        "let fixed: Ref I32[2] = Ref (1, 2)\n",
+        "let fixed: Ref (I32; 2) = Ref (1, 2)\n",
         "let values: Ints = fixed\n",
         "let count: USize = Slice.length values\n",
     ));
-
-    type_check("type alias MySlice = I32[]\n");
-
-    let diagnostics = TypeChecker::new()
-        .check(resolve(concat!(
-            "type alias MySlice = I32[]\n",
-            "let fixed: Ref I32[2] = Ref (1, 2)\n",
-            "let values: Ref MySlice = fixed\n",
-        )))
-        .expect_err_diagnostics("aliasing an unsized array does not let it bypass `Slice`");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("use `Slice T` instead") })
-    );
-
-    let diagnostics = TypeChecker::new()
-        .check(resolve(
-            "type alias MySlice = I32[]\ndef invalid: MySlice\n",
-        ))
-        .expect_err_diagnostics("unsized aliases cannot be used by value");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("unsized type") })
-    );
-
-    let diagnostics = TypeChecker::new()
-        .check(resolve("extern \"c\" { invalid: Ref I32[] -> I32 }\n"))
-        .expect_err_diagnostics("`Ref I32[]` is rejected before an FFI-specific check even runs");
-    assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| { diagnostic.message.contains("use `Slice T` instead") })
-    );
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
@@ -3271,7 +3230,7 @@ fn aliases_complete_erased_references_and_unsized_types_but_rejects_ffi() {
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message
-            .contains("external binding types cannot contain erased products")
+            .contains("external binding types cannot contain `Slice` values")
     }));
 }
 
@@ -3281,10 +3240,10 @@ fn enforces_implicit_sized_and_supports_question_sized_parameters() {
         "use std.slice.Slice\n",
         "def preserve_slice: <T> Slice T -> Slice T = value => value\n",
         "def explicitly_sized: <T where ?Sized T, Sized T> Ref T -> Ref T = value => value\n",
-        "let fixed: Ref I32[2] = Ref (1, 2)\n",
+        "let fixed: Ref (I32; 2) = Ref (1, 2)\n",
         "let erased: Slice I32 = fixed\n",
         "let same: Slice I32 = preserve_slice erased\n",
-        "let same_fixed: Ref I32[2] = explicitly_sized fixed\n",
+        "let same_fixed: Ref (I32; 2) = explicitly_sized fixed\n",
     ));
 
     let diagnostics = TypeChecker::new()
@@ -3835,7 +3794,10 @@ fn supports_arbitrary_sized_sum_alternatives_and_typed_matches() {
 #[test]
 fn rejects_unsized_sum_alternatives_and_ambiguous_nominal_patterns() {
     for (source, expected) in [
-        ("def value: I32[] | String\n", "must be a sized type"),
+        (
+            "def value: <T where ?Sized T> () -> T | String = () => ()\n",
+            "must be a sized type",
+        ),
         (
             concat!(
                 "def inspect = value: Ok I32 | Ok String => match value {\n",
@@ -9723,12 +9685,12 @@ fn monomorphizes_curried_generic_function_layers() {
 fn a_default_bound_does_not_imply_default_for_a_product() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "def make_list: <T where Default T> () -> T[32] = () => {\n",
-            "  let list: T[32] = default ()\n",
+            "def make_list: <T where Default T> () -> (T; 32) = () => {\n",
+            "  let list: (T; 32) = default ()\n",
             "  list\n",
             "}\n",
         )))
-        .expect_err_diagnostics("Default T does not imply Default T[32]");
+        .expect_err_diagnostics("Default T does not imply Default (T; 32)");
     assert!(
         diagnostics
             .iter()

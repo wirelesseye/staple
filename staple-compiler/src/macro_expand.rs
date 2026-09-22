@@ -5004,14 +5004,14 @@ impl MacroExpander {
                 let Some(count) = count else {
                     self.diagnostics.push(Diagnostic::new(
                         repeated.count.syntax().span.clone(),
-                        "a repeated product count must be a compile-time integer type",
+                        "an array length must be a compile-time integer type",
                     ));
                     return None;
                 };
                 let Ok(count) = usize::try_from(count) else {
                     self.diagnostics.push(Diagnostic::new(
                         repeated.count.syntax().span.clone(),
-                        "a repeated product count must not be negative",
+                        "an array length must not be negative",
                     ));
                     return None;
                 };
@@ -8524,7 +8524,7 @@ fn compile_type(ty: &Type) -> CompileType {
             Box::new(compile_type(&function.parameter)),
             Box::new(compile_type(&function.result)),
         ),
-        Type::Sum(_) | Type::Application(_) | Type::EffectApplication(_) | Type::Repeated(_) => {
+        Type::Sum(_) | Type::Application(_) | Type::EffectApplication(_) | Type::Array(_) => {
             CompileType::Named(ty.to_string())
         }
     }
@@ -9616,9 +9616,8 @@ fn type_contains_syntax(ty: &Type) -> bool {
                     .iter()
                     .any(|resource| type_contains_syntax(&resource.value_type))
         }
-        Type::Repeated(repeated) => {
-            type_contains_syntax(&repeated.element)
-                || repeated.count.as_deref().is_some_and(type_contains_syntax)
+        Type::Array(array) => {
+            type_contains_syntax(&array.element) || type_contains_syntax(&array.count)
         }
         Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => {
             false
@@ -9667,12 +9666,9 @@ fn type_contains_unshadowed_syntax(ty: &Type, declared: &std::collections::HashS
                     .iter()
                     .any(|resource| type_contains_unshadowed_syntax(&resource.value_type, declared))
         }
-        Type::Repeated(repeated) => {
-            type_contains_unshadowed_syntax(&repeated.element, declared)
-                || repeated
-                    .count
-                    .as_deref()
-                    .is_some_and(|count| type_contains_unshadowed_syntax(count, declared))
+        Type::Array(array) => {
+            type_contains_unshadowed_syntax(&array.element, declared)
+                || type_contains_unshadowed_syntax(&array.count, declared)
         }
     }
 }
@@ -9758,12 +9754,9 @@ fn type_contains_named(ty: &Type, expected: &str) -> bool {
                     .iter()
                     .any(|resource| type_contains_named(&resource.value_type, expected))
         }
-        Type::Repeated(repeated) => {
-            type_contains_named(&repeated.element, expected)
-                || repeated
-                    .count
-                    .as_deref()
-                    .is_some_and(|count| type_contains_named(count, expected))
+        Type::Array(array) => {
+            type_contains_named(&array.element, expected)
+                || type_contains_named(&array.count, expected)
         }
         Type::Inferred(_) | Type::NumberLiteral(_) | Type::StringLiteral(_) | Type::Splice(_) => {
             false
@@ -11074,11 +11067,9 @@ fn substitute_type(
                 substitute_type(&mut resource.value_type, environment, diagnostics)?;
             }
         }
-        Type::Repeated(repeated) => {
-            substitute_type(&mut repeated.element, environment, diagnostics)?;
-            if let Some(count) = &mut repeated.count {
-                substitute_type(count, environment, diagnostics)?;
-            }
+        Type::Array(array) => {
+            substitute_type(&mut array.element, environment, diagnostics)?;
+            substitute_type(&mut array.count, environment, diagnostics)?;
         }
         Type::Named(named) => {
             if let Some(namespace) = &mut named.namespace {
@@ -12185,7 +12176,7 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
         Type::Function(ty) => &mut ty.syntax,
         Type::Application(ty) => &mut ty.syntax,
         Type::EffectApplication(ty) => &mut ty.syntax,
-        Type::Repeated(ty) => &mut ty.syntax,
+        Type::Array(ty) => &mut ty.syntax,
         Type::Splice(ty) => &mut ty.syntax,
     };
     expander.freshen_syntax(syntax, module, mark);
@@ -12226,11 +12217,9 @@ fn freshen_type(expander: &mut MacroExpander, ty: &mut Type, module: ModuleId, m
                 freshen_type(expander, &mut resource.value_type, module, mark);
             }
         }
-        Type::Repeated(repeated) => {
-            freshen_type(expander, &mut repeated.element, module, mark);
-            if let Some(count) = &mut repeated.count {
-                freshen_type(expander, count, module, mark);
-            }
+        Type::Array(array) => {
+            freshen_type(expander, &mut array.element, module, mark);
+            freshen_type(expander, &mut array.count, module, mark);
         }
         Type::Inferred(_)
         | Type::NumberLiteral(_)
