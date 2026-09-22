@@ -2784,7 +2784,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "  let mut value = initial\n",
         "  () => { let old = value; value = c_string \"next\"; drop old }\n",
         "}\n",
-        "def managed = (initial: CString, move next: CString) => {\n",
+        "def managed = (move initial: CString, move next: CString) => {\n",
         "  let mut reference = Ref initial\n",
         "  let old = Ref.replace reference next\n",
         "  drop old\n",
@@ -2991,7 +2991,7 @@ fn delegates_indexing_through_refs_to_the_payload() {
         "def fixed_at: (Ref (I32; 3), USize) -> I32 = (values, position) => values[position]\n",
         "def generic_at: <T where Index T USize I32> (Ref T, USize) -> I32 = (values, position) => values[position]\n",
         "let list = List.of (1, 2, 3)\n",
-        "let value: I32 = generic_at (Ref list, 0)\n",
+        "let value: I32 = generic_at (Ref (Clone.clone list), 0)\n",
         "let operation: (Ref (List I32), USize) -> I32 = Index.index\n",
     );
     let module = type_check(source);
@@ -3014,7 +3014,7 @@ fn delegates_indexed_assignment_through_refs_to_the_payload() {
         "def set_keyed = (mut counter: Ref Counter, key: String, value: I32) => { counter[key] = value }\n",
         "let list = List.of (1, 2, 3)\n",
         "let operation: (mut Ref (List I32), USize, I32) -> () = MutateIndex.mutate_index\n",
-        "let mut reference = Ref list\n",
+        "let mut reference = Ref (Clone.clone list)\n",
         "operation (reference, 0, 9)\n",
     );
     let module = type_check(source);

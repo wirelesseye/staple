@@ -2059,11 +2059,11 @@ def identity: <T> move T -> T = move value => value
 ```
 
 Constructs that consume a value outright — `drop`, a match expression's
-subject, string interpolation, and indexed assignment's replacement value —
-always require ownership. Capturing an ordinary non-`Copy` parameter in a
-curried closure is the exception: the closure keeps a shared borrow of that
-parameter. Capturing a `mut` parameter similarly keeps a mutable borrow;
-`mut` does not transfer ownership.
+subject, string interpolation, indexed assignment's replacement value, and a
+constructor call's arguments — always require ownership. Capturing an
+ordinary non-`Copy` parameter in a curried closure is the exception: the
+closure keeps a shared borrow of that parameter. Capturing a `mut` parameter
+similarly keeps a mutable borrow; `mut` does not transfer ownership.
 
 Borrowed partial applications are conservatively lexical. They may be called
 immediately or stored in an immutable local and called within that local's

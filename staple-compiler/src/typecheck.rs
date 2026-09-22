@@ -2994,7 +2994,7 @@ impl TypeChecker {
                     default: None,
                     parameter: Box::new(parameter),
                     mutations: Vec::new(),
-                    moves: Vec::new(),
+                    moves: vec![CheckedMutation::Whole],
                     effects: CheckedEffectSet::default(),
                     result: Box::new(result),
                 }),

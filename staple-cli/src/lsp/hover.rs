@@ -2712,8 +2712,8 @@ mod tests {
         assert!(
             entries.iter().any(|entry| {
                 &source[entry.range.clone()] == "Box"
-                    && entry.signature == "Box: <T> T -> Box T"
-                    && entry.instantiation.as_deref() == Some("Box: I32 -> Box I32")
+                    && entry.signature == "Box: <T> move T -> Box T"
+                    && entry.instantiation.as_deref() == Some("Box: move I32 -> Box I32")
             }),
             "constructor use-site hover missing: {entries:?}"
         );

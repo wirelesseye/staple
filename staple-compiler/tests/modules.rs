@@ -905,7 +905,7 @@ fn block_scoped_types_in_generic_functions_monomorphize_per_call_site() {
     fixture.write(
         "main.sta",
         concat!(
-            "def wrap: <T> T -> T = value => {\n",
+            "def wrap: <T> move T -> T = move value => {\n",
             "    type Boxed = ctor T\n",
             "    match Boxed value { Boxed inner => inner }\n",
             "}\n",
