@@ -3090,9 +3090,12 @@ expected `Slice` type to infer its element type. Literal and variable indexing
 perform runtime bounds checks.
 `Slice.get_ref: <T> Slice T * USize -> Ref T` borrows an element by position,
 trapping when out of bounds; it is the primitive behind the standard library's
-`Index`/`MutateIndex` implementations for slices. A `Slice T` is a sized view
-value, not a product: it cannot be spread or destructured, and it cannot cross
-a foreign ABI.
+`Index`/`MutateIndex` implementations for slices. Where `Copy T`, the standard
+library also implements `IntoIterator`/`Iterator` for `Slice T` through
+`SliceIter T`, so `for item in slice` yields owned copies. A slice is a
+copyable view, so it stays usable — and iterable again — after a loop. A
+`Slice T` is a sized view value, not a product: it cannot be spread or
+destructured, and it cannot cross a foreign ABI.
 
 `Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
 prefix. `Buffer.with_capacity` allocates space without constructing any `T`

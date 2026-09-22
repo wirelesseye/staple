@@ -3256,6 +3256,63 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
+    fn runs_slice_iteration() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        let source = std::env::temp_dir().join(format!("staple-compiler-slice-iter-{nonce}.sta"));
+        let output = std::env::temp_dir().join(format!("staple-compiler-slice-iter-{nonce}"));
+        std::fs::write(
+            &source,
+            concat!(
+                "use std.slice.Slice\n",
+                "extern \"c\" { exit: I32 -> () }\n",
+                "def run = () => {\n",
+                "let fixed: Ref (I32; 4) = Ref (10, 20, 30, 40)\n",
+                "let values: Slice I32 = fixed\n",
+                "let mut sum: I32 = 0\n",
+                "for value in values { sum = sum + value }\n",
+                "let mut again: I32 = 0\n",
+                "for value in values { again = again + value }\n",
+                "match sum == 100 {\n",
+                "  True() => match again == 100 {\n",
+                "    True() => exit 0,\n",
+                "    False() => exit 2,\n",
+                "  },\n",
+                "  False() => exit 1,\n",
+                "}\n",
+                "}\nrun ()\n",
+            ),
+        )
+        .expect("temporary slice iteration source should be writable");
+        let standard_library = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("stdlib");
+        run([
+            "--stdlib".into(),
+            standard_library.into_os_string(),
+            "--emit".into(),
+            "exe".into(),
+            "-o".into(),
+            output.clone().into_os_string(),
+            source.clone().into_os_string(),
+        ])
+        .expect("slice iteration executable should compile");
+        let status = Command::new(&output)
+            .status()
+            .expect("slice iteration executable should run");
+        let _ = std::fs::remove_file(source);
+        let _ = std::fs::remove_file(output);
+        assert!(
+            status.success(),
+            "slice iteration executable exited with {status}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
     fn runs_mutable_bindings_captures_and_refs() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

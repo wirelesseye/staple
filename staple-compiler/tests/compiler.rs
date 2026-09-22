@@ -3071,6 +3071,46 @@ fn indexes_slices_through_the_standard_library_implementation() {
 }
 
 #[test]
+fn iterates_slices_through_the_standard_library_implementations() {
+    let source = concat!(
+        "use std.slice.(Slice, SliceIter)\n",
+        "let fixed: Ref (I32; 3) = Ref (10, 20, 30)\n",
+        "let values: Slice I32 = fixed\n",
+        "let iterator: SliceIter I32 = IntoIterator.into_iterator values\n",
+        "let step: IterStep (SliceIter I32, I32) = Iterator.next iterator\n",
+        "def sum: Slice I32 -> I32 = slice => {\n",
+        "  let mut total = 0\n",
+        "  for value in slice { total = total + value }\n",
+        "  total\n",
+        "}\n",
+        "let total: I32 = sum values\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("slice iteration should use the standard-library implementation");
+}
+
+#[test]
+fn rejects_slice_iteration_for_non_copy_elements() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.slice.Slice\n",
+            "use std.cinterop.CString\n",
+            "def invalid: Slice CString -> () = values => {\n",
+            "  for value in values { () }\n",
+            "}\n",
+        )))
+        .expect_err_diagnostics("a slice of a move-only element cannot be iterated");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
+    );
+}
+
+#[test]
 fn rejects_explicit_indexing_implementations_for_ref_targets() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
