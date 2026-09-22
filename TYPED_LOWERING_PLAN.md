@@ -17,7 +17,7 @@ LLVM generation will consume lowered IR and will no longer infer types, select t
 - The initial validator rejects functions or implicit thunks that have no checked function type.
 - All CLI and compiler code-generation tests now pass through `Lowerer`.
 - `cargo check --workspace` and `cargo test --workspace` pass. The workspace test run covers 937 tests.
-- **Stage 2 is in progress.** Stage 2.1 and Stage 2.2 Steps 1-3 are complete. Lowering now has insertion-ordered semantic catalogs plus deterministic resolver/type-checker inventory APIs, and lowered module catalogs with per-module initializer roots. Stage 2.2 Step 4 is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
+- **Stage 2 is in progress.** Stage 2.1 and Stage 2.2 Steps 1-4 are complete. Lowering now has insertion-ordered semantic catalogs plus deterministic resolver/type-checker inventory APIs, lowered module catalogs with per-module initializer roots, and function templates for declared functions and implicit thunks. Stage 2.2 Step 5 is next. Stage 5 still removes the temporary legacy payload after migrating the backend.
 - The detailed Stage 2 implementation sequence is maintained in [STAGE_2_LOWERING_BREAKDOWN.md](STAGE_2_LOWERING_BREAKDOWN.md).
 
 ## Public Interfaces
@@ -70,6 +70,7 @@ Progress:
 - Stage 2.2 Step 1 added ordered module, function, symbol, type, trait, trait-method, and trait-implementation catalog foundations. Semantic IDs remain distinct from arena IDs, duplicate insertions diagnose instead of overwrite, and lookup maps are validated against their ordered entries.
 - Stage 2.2 Step 2 added narrow semantic-ID-ordered inventories for symbols, type parameters, types, traits, trait methods, implicit thunks, derived evaluators, checked trait metadata, and the selected standard/runtime semantic IDs. Compact non-expanding type representation templates remain part of Step 6; retaining fully expanded `CheckedType` representations was rejected because recursive standard-library metadata overflowed ordinary test-thread stacks when cloned or dropped.
 - Stage 2.2 Step 3 populated the module catalog in initialization order and allocated one empty block plus one initializer per module. Initializers now own ordered `RuntimeItemSource` roots for runtime top-level items, and the executable entry records IO/reactive resource metadata. Unknown, duplicate, and missing initialization-order IDs are lowering diagnostics.
+- Stage 2.2 Step 4 populated function templates for every declared function and implicit thunk with checked signatures, bounds, parameter symbols, captures and ownership flags, body origins, owning modules, and declared/thunk/derived/coroutine/resource-helper/extern/intrinsic classification.
 - The private legacy `TypedModule` payload is now boxed inside `LoweredModule`, reducing transitional stack-frame pressure without changing the public lowering boundary or backend behavior.
 
 > **Complex stage:** The AST and backend support many specialized constructs, including defaults, reactive bindings, structural indexing, ownership cleanup, and coroutines. This stage may need separate breakdown plans by expression family and runtime subsystem during implementation.

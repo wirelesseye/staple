@@ -4524,6 +4524,13 @@ impl NameResolver {
                 // not inherit the enclosing loop. It is not a function
                 // boundary for name resolution: outer locals it mentions are
                 // captured, exactly as for the implicit thunk it lowers to.
+                //
+                // `resolve_block` is called directly rather than through
+                // `resolve_expression`, so record the body block's module here
+                // for consumers (lowering) that map a thunk body back to its
+                // owning module.
+                self.syntax_modules
+                    .insert(coro.body.syntax.id, self.current_module);
                 let outer_loop_depth = self.loop_depth;
                 self.loop_depth = 0;
                 self.resolve_block(&coro.body);

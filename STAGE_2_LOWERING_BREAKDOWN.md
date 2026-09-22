@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and Stage 2.2 Steps 1-3 are complete. Stage 2.2 Step 4 is next.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and Stage 2.2 Steps 1-4 are complete. Stage 2.2 Step 5 is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -42,7 +42,7 @@ Completed:
 - Added unit coverage for empty arena validity, dense deterministic ID allocation, and dangling-reference diagnostics.
 - Verified with `cargo fmt --all -- --check`, focused lowering tests, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check`.
 
-## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Steps 1-3 Done)
+## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Steps 1-4 Done)
 
 The focused implementation sequence is maintained in [STAGE_2_2_METADATA_CATALOG_PLAN.md](STAGE_2_2_METADATA_CATALOG_PLAN.md).
 
@@ -72,6 +72,12 @@ Progress:
 - Every module now receives one empty `LoweredBlock` and one `LoweredInitializer`. Initializers record ordered `RuntimeItemSource` entries for runtime top-level items and entry IO/reactive `CheckedResource` metadata; declaration-only items remain outside the initializer.
 - Added focused coverage for multi-module initialization order, declaration-only modules, source-order runtime categories, companion parentage, file-module origins, entry IO metadata, repeated-lowering stability, and order diagnostics.
 - Verified Step 3 with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (951 tests), and `git diff --check`.
+- Step 4 populated one lowered function template for every declared function and implicit thunk: declared functions in resolver order, then thunks in ascending `FunctionId`.
+- Templates copy the checked function type, checked trait bounds, parameter style, recursively collected parameter symbols in source order, body origin/syntax, and owning module without cloning the body expression.
+- Captures retain independent borrowed, non-owning, and shared-cell requirements. Thunks carry orthogonal declared/implicit/derived/coroutine/effectful-helper/extern/intrinsic classification flags.
+- Coroutine body blocks now record their module during resolution so thunk bodies resolve their owning module.
+- Added focused coverage for catalog order and uniqueness, checked signature/bounds/parameters, capture ownership facts, derived and coroutine classification, and effectful callback classification.
+- Verified Step 4 with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (956 tests), and `git diff --check`.
 
 > **Complexity note:** The metadata currently lives across resolver, type-checker, ownership, reactive, and coroutine side tables. This substage may need a focused inventory plan before implementation begins.
 

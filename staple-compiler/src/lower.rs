@@ -7,16 +7,17 @@
 
 #![allow(dead_code)] // Stage 2 populates and consumes this schema incrementally.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
-use staple_syntax::{Diagnostic, Item, Span, SyntaxId};
+use staple_syntax::{Diagnostic, Item, Pattern, Span, SyntaxId};
 
 use crate::{
-    CheckedCoercion, CheckedEffectSet, CheckedResource, CheckedType, FunctionId, ModuleId,
-    SourceModule, SymbolId, TraitId, TraitMethodId, TypeId, TypedModule,
+    CheckedCoercion, CheckedEffectSet, CheckedFunctionType, CheckedResource, CheckedTraitBound,
+    CheckedType, FunctionId, ModuleId, ResolvedFunction, ResolvedModule, SourceModule, SymbolId,
+    TraitId, TraitMethodId, TypeId, TypedModule,
 };
 
 macro_rules! arena_id {
@@ -248,11 +249,48 @@ pub(crate) enum LoweredItemKind {
     Pattern(PatternId),
 }
 
+/// One capture of a function template, carrying the ownership facts code
+/// generation currently reads from the type checker.
+#[derive(Debug, Clone)]
+pub(crate) struct LoweredCapture {
+    pub symbol: SymbolId,
+    pub borrowed: bool,
+    pub non_owning: bool,
+    /// The capture must be reached through a shared cell (mutable storage,
+    /// derived binding, or initialization state) rather than by value.
+    pub requires_cell: bool,
+}
+
+/// Orthogonal function-template classifications. A thunk can be a derived
+/// evaluator and a resource helper at the same time, so these are explicit
+/// flags rather than a single enum.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct LoweredFunctionClass {
+    pub declared: bool,
+    pub implicit_thunk: bool,
+    pub derived_evaluator: bool,
+    pub coroutine_body: bool,
+    pub resource_helper: bool,
+    pub external: bool,
+    pub intrinsic: bool,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct LoweredFunction {
     pub origin: Origin,
     pub semantic_id: FunctionId,
+    pub name: String,
+    pub module: ModuleId,
+    pub binding_symbol: Option<SymbolId>,
+    pub signature: CheckedFunctionType,
+    pub bounds: Vec<CheckedTraitBound>,
+    pub parameter_style: staple_syntax::FunctionParameterStyle,
+    pub parameters: Vec<SymbolId>,
+    pub captures: Vec<LoweredCapture>,
+    pub body_origin: Origin,
+    pub body_syntax: SyntaxId,
     pub body: Option<BlockId>,
+    pub class: LoweredFunctionClass,
 }
 
 /// A top-level source item that belongs to a module initializer at runtime.
@@ -363,7 +401,126 @@ pub(crate) struct LoweredProgram {
 impl LoweredProgram {
     /// Copies deterministic declaration metadata out of checked compiler state.
     fn snapshot(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
-        self.snapshot_modules(module)
+        let mut diagnostics = self.snapshot_modules(module);
+        diagnostics.extend(self.snapshot_functions(module));
+        diagnostics
+    }
+
+    /// Inserts declared functions in resolver order, then implicit thunks in
+    /// stable semantic-ID order.
+    fn snapshot_functions(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
+        let derived_evaluators = module
+            .derived_evaluators_in_symbol_order()
+            .into_iter()
+            .map(|(_, function)| function)
+            .collect::<HashSet<_>>();
+        let mut diagnostics = Vec::new();
+        for function in module.functions() {
+            self.snapshot_function(
+                module,
+                function,
+                false,
+                &derived_evaluators,
+                &mut diagnostics,
+            );
+        }
+        for function in module.implicit_thunks_in_id_order() {
+            self.snapshot_function(
+                module,
+                function,
+                true,
+                &derived_evaluators,
+                &mut diagnostics,
+            );
+        }
+        diagnostics
+    }
+
+    fn snapshot_function(
+        &mut self,
+        module: &TypedModule,
+        function: &ResolvedFunction,
+        implicit_thunk: bool,
+        derived_evaluators: &HashSet<FunctionId>,
+        diagnostics: &mut Vec<Diagnostic>,
+    ) {
+        let resolved = module.resolved();
+        let body_syntax = function.body.syntax();
+        let origin = Origin {
+            syntax: body_syntax.id,
+            span: body_syntax.span.clone(),
+        };
+        let Some(signature) = module.type_of_function(function.id).cloned() else {
+            diagnostics.push(Diagnostic::new(
+                origin.span,
+                format!(
+                    "cannot lower function `{}` (function id {}) without a checked function type",
+                    function.name, function.id.0
+                ),
+            ));
+            return;
+        };
+        let Some(module_id) = resolved.module_for_syntax(body_syntax.id) else {
+            diagnostics.push(Diagnostic::new(
+                origin.span,
+                format!(
+                    "cannot lower function `{}` (function id {}) without an owning module",
+                    function.name, function.id.0
+                ),
+            ));
+            return;
+        };
+        let binding_symbol = function
+            .binding_syntax
+            .and_then(|syntax| resolved.symbol_for(syntax));
+        let derived_evaluator = derived_evaluators.contains(&function.id);
+        let coroutine_body = implicit_thunk && module.coroutine_plan(body_syntax.id).is_some();
+        let effectful = !signature.effects.resources.is_empty()
+            || signature.effects.state.is_some()
+            || signature.effects.variable.is_some();
+        let resource_helper = implicit_thunk && !derived_evaluator && !coroutine_body && effectful;
+        let class = LoweredFunctionClass {
+            declared: !implicit_thunk,
+            implicit_thunk,
+            derived_evaluator,
+            coroutine_body,
+            resource_helper,
+            external: binding_symbol.is_some_and(|symbol| resolved.is_external_symbol(symbol)),
+            intrinsic: binding_symbol
+                .is_some_and(|symbol| resolved.intrinsic_function(symbol).is_some()),
+        };
+        let captures = function
+            .captures
+            .iter()
+            .map(|symbol| LoweredCapture {
+                symbol: *symbol,
+                borrowed: module.is_borrowed_capture(function.id, *symbol),
+                non_owning: module.is_non_owning_symbol(*symbol),
+                requires_cell: capture_requires_cell(module, *symbol),
+            })
+            .collect();
+        let value = LoweredFunction {
+            origin: origin.clone(),
+            semantic_id: function.id,
+            name: function.name.clone(),
+            module: module_id,
+            binding_symbol,
+            signature,
+            bounds: module.bounds_of_function(function.id).to_vec(),
+            parameter_style: function.parameter_style,
+            parameters: parameter_symbols(resolved, &function.pattern),
+            captures,
+            body_origin: origin.clone(),
+            body_syntax: body_syntax.id,
+            body: None,
+            class,
+        };
+        if let Err(diagnostic) = self
+            .functions
+            .insert("function", function.id, origin, value)
+        {
+            diagnostics.push(diagnostic);
+        }
     }
 
     fn snapshot_modules(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
@@ -591,6 +748,42 @@ fn entry_resources(module: &TypedModule) -> Vec<LoweredEntryResource> {
         });
     }
     resources
+}
+
+fn capture_requires_cell(module: &TypedModule, symbol: SymbolId) -> bool {
+    module.resolved().requires_initialization_state(symbol)
+        || module.has_mutable_storage(symbol)
+        || module.is_derived_symbol(symbol)
+}
+
+/// Collects parameter symbols from a resolved parameter pattern in source
+/// order, matching how destructuring patterns bind symbols.
+fn parameter_symbols(module: &ResolvedModule, pattern: &Pattern) -> Vec<SymbolId> {
+    fn collect(module: &ResolvedModule, pattern: &Pattern, symbols: &mut Vec<SymbolId>) {
+        match pattern {
+            Pattern::Binding(binding) => {
+                if let Some(symbol) = module.symbol_for(binding.syntax.id) {
+                    symbols.push(symbol);
+                }
+            }
+            Pattern::At(at) => {
+                if let Some(symbol) = module.symbol_for(at.binding.syntax.id) {
+                    symbols.push(symbol);
+                }
+                collect(module, &at.pattern, symbols);
+            }
+            Pattern::Product(product) => {
+                for element in &product.elements {
+                    collect(module, element, symbols);
+                }
+            }
+            Pattern::Nominal(nominal) => collect(module, &nominal.argument, symbols),
+            Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => {}
+        }
+    }
+    let mut symbols = Vec::new();
+    collect(module, pattern, &mut symbols);
+    symbols
 }
 
 fn invalid_reference(origin: &Origin, owner: &str, target: &str, index: usize) -> Diagnostic {
@@ -1106,6 +1299,278 @@ mod tests {
                 .iter()
                 .any(|diagnostic| diagnostic.message.contains("`module1` is missing"))
         );
+    }
+
+    fn lowered_function<'a>(
+        program: &'a LoweredProgram,
+        name: &str,
+    ) -> (FunctionId, &'a LoweredFunction) {
+        program
+            .functions
+            .iter()
+            .find_map(|(_, key, function)| function.name.contains(name).then_some((key, function)))
+            .unwrap_or_else(|| panic!("`{name}` should have a lowered function"))
+    }
+
+    fn binding_symbol(module: &TypedModule, name: &str) -> SymbolId {
+        module
+            .syntax()
+            .items
+            .iter()
+            .find_map(|item| match item {
+                Item::Binding(binding) if binding.name == name => {
+                    module.symbol_for(binding.syntax.id)
+                }
+                _ => None,
+            })
+            .unwrap_or_else(|| panic!("`{name}` should have a symbol"))
+    }
+
+    #[test]
+    fn function_catalog_lists_declared_functions_before_implicit_thunks() {
+        let module = checked_program(concat!(
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "let mut count = 0\n",
+            "let first = evaluate { count = count + 1; count }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        assert!(program.validate().is_empty());
+
+        let expected = module
+            .functions()
+            .iter()
+            .map(|function| function.id)
+            .chain(
+                module
+                    .implicit_thunks_in_id_order()
+                    .into_iter()
+                    .map(|function| function.id),
+            )
+            .collect::<Vec<_>>();
+        let actual = program
+            .functions
+            .iter()
+            .map(|(_, key, _)| key)
+            .collect::<Vec<_>>();
+        assert_eq!(actual, expected);
+        assert_eq!(
+            actual.iter().collect::<HashSet<_>>().len(),
+            actual.len(),
+            "every function id should appear exactly once"
+        );
+        assert!(
+            actual.len() > module.functions().len(),
+            "the callback thunk should be lowered"
+        );
+
+        let declared = module.functions().len();
+        assert!(
+            program
+                .functions
+                .iter()
+                .take(declared)
+                .all(|(_, _, function)| function.class.declared)
+        );
+        assert!(
+            program
+                .functions
+                .iter()
+                .skip(declared)
+                .all(|(_, _, function)| function.class.implicit_thunk)
+        );
+    }
+
+    #[test]
+    fn function_templates_copy_checked_signatures_parameters_and_bounds() {
+        let module = checked_program(concat!(
+            "trait Increment T { increment: T -> T }\n",
+            "impl Increment I32 { def increment = value => value + 1 }\n",
+            "def increment_twice: <T where Increment T> T -> T = value => increment (increment value)\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+
+        let source = module
+            .functions()
+            .iter()
+            .find(|function| function.name.contains("increment_twice"))
+            .expect("declared function");
+        let (key, lowered) = lowered_function(&program, "increment_twice");
+        assert_eq!(key, source.id);
+        assert_eq!(
+            lowered.signature,
+            *module
+                .type_of_function(source.id)
+                .expect("checked signature")
+        );
+        assert_eq!(
+            lowered.bounds,
+            module.bounds_of_function(source.id).to_vec()
+        );
+        assert!(!lowered.bounds.is_empty());
+        assert_eq!(lowered.parameter_style, source.parameter_style);
+        assert_eq!(
+            lowered.binding_symbol,
+            source
+                .binding_syntax
+                .and_then(|syntax| module.resolved().symbol_for(syntax))
+        );
+        assert_eq!(
+            lowered.parameters,
+            parameter_symbols(module.resolved(), &source.pattern)
+        );
+        assert_eq!(lowered.body_syntax, source.body.syntax().id);
+        assert_eq!(lowered.body_origin.syntax, source.body.syntax().id);
+        assert!(lowered.body.is_none());
+        assert_eq!(
+            lowered.module,
+            module
+                .resolved()
+                .module_for_syntax(source.body.syntax().id)
+                .expect("owning module")
+        );
+        assert!(lowered.class.declared && !lowered.class.implicit_thunk);
+    }
+
+    #[test]
+    fn implicit_thunk_captures_match_transition_ownership_facts() {
+        let module = checked_program(concat!(
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "def run: () ->{state} I32 = () => {\n",
+            "  let mut count = 0\n",
+            "  evaluate { count = count + 1; count }\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+
+        let thunk = module
+            .implicit_thunks_in_id_order()
+            .into_iter()
+            .next()
+            .expect("a callback thunk");
+        let lowered = program
+            .functions
+            .get(thunk.id)
+            .expect("lowered implicit thunk");
+        assert!(lowered.class.implicit_thunk && !lowered.class.declared);
+        assert!(lowered.binding_symbol.is_none());
+        assert_eq!(lowered.captures.len(), thunk.captures.len());
+        for (capture, symbol) in lowered.captures.iter().zip(&thunk.captures) {
+            assert_eq!(capture.symbol, *symbol);
+            assert_eq!(
+                capture.borrowed,
+                module.is_borrowed_capture(thunk.id, *symbol)
+            );
+            assert_eq!(capture.non_owning, module.is_non_owning_symbol(*symbol));
+            assert_eq!(
+                capture.requires_cell,
+                capture_requires_cell(&module, *symbol)
+            );
+        }
+        assert!(
+            lowered
+                .captures
+                .iter()
+                .any(|capture| capture.requires_cell && module.has_mutable_storage(capture.symbol)),
+            "the mutable local `count` capture should require a shared cell"
+        );
+    }
+
+    #[test]
+    fn derived_evaluators_and_coroutine_bodies_are_classified() {
+        let module = checked_program(concat!(
+            "let signal count = 1\n",
+            "let doubled = count + count\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let doubled = binding_symbol(&module, "doubled");
+        let evaluator = module
+            .derived_evaluator(doubled)
+            .expect("derived evaluator thunk");
+        let lowered = program
+            .functions
+            .get(evaluator.id)
+            .expect("lowered derived evaluator");
+        assert!(lowered.class.derived_evaluator);
+        assert!(lowered.class.implicit_thunk);
+        assert!(!lowered.class.coroutine_body);
+        assert_eq!(
+            lowered
+                .captures
+                .iter()
+                .map(|capture| capture.symbol)
+                .collect::<Vec<_>>(),
+            evaluator.captures
+        );
+
+        let module = checked_program(concat!(
+            "use std.coroutine.*\n",
+            "def f: () -> Coroutine{} I32 = () => coro { 42 }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        let diagnostics = program.snapshot(&module);
+        assert!(diagnostics.is_empty(), "{diagnostics:?}");
+        let body = module
+            .implicit_thunks_in_id_order()
+            .into_iter()
+            .find(|function| module.coroutine_plan(function.body.syntax().id).is_some())
+            .expect("coroutine body thunk");
+        let lowered = program
+            .functions
+            .get(body.id)
+            .expect("lowered coroutine body");
+        assert!(lowered.class.coroutine_body);
+        assert!(lowered.class.implicit_thunk);
+        assert!(!lowered.class.derived_evaluator);
+        assert_eq!(lowered.body_syntax, body.body.syntax().id);
+    }
+
+    #[test]
+    fn callback_thunks_classify_effectful_resource_helpers() {
+        let module = checked_program(concat!(
+            "let signal count = 0\n",
+            "with Reactive = reactive_scope () {\n",
+            "  reaction { let current = count; () }\n",
+            "  count = 1\n",
+            "}\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let callback = module
+            .implicit_thunks_in_id_order()
+            .into_iter()
+            .find(|thunk| {
+                let class = program.functions.get(thunk.id).expect("thunk").class;
+                !class.derived_evaluator && !class.coroutine_body
+            })
+            .expect("the reaction callback should be an implicit thunk");
+        let lowered = program
+            .functions
+            .get(callback.id)
+            .expect("lowered implicit thunk");
+        assert!(lowered.class.resource_helper);
+        assert!(lowered.signature.effects.state.is_some());
+
+        let module = checked_program(concat!(
+            "def evaluate: <T, effect E> (() ->{E} T) ->{E} T = callback => callback ()\n",
+            "let answer = evaluate { 42 }\n",
+        ));
+        let mut program = LoweredProgram::default();
+        assert!(program.snapshot(&module).is_empty());
+        let pure = module
+            .implicit_thunks_in_id_order()
+            .into_iter()
+            .next()
+            .expect("the callback should be an implicit thunk");
+        let lowered = program
+            .functions
+            .get(pure.id)
+            .expect("lowered implicit thunk");
+        assert!(!lowered.class.resource_helper);
+        assert!(lowered.signature.effects == CheckedEffectSet::default());
     }
 
     #[test]

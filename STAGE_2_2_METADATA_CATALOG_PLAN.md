@@ -125,7 +125,7 @@ Completed:
 - Added focused tests covering multi-module initialization order, declaration-only modules, source-order runtime categories, companion parentage, file-module declaration origins, entry IO metadata, repeated-lowering stability, and the unknown/duplicate/missing order diagnostics.
 - Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (951 tests), and `git diff --check`.
 
-### Step 4 - Snapshot Function Templates and Implicit Thunks
+### Step 4 - Snapshot Function Templates and Implicit Thunks (Done)
 
 - Insert all resolved functions in their stable resolver order, then all implicit thunks in stable order.
 - Copy checked signature and bounds; failure to find either required checked data is a lowering diagnostic at the function origin.
@@ -138,6 +138,17 @@ Completed:
 Gate: every `FunctionId` from declared functions and implicit thunks appears exactly once; signatures, parameters, captures, ownership flags, and classifications match transition-time comparisons with `TypedModule`.
 
 After this step, update both plan files.
+
+Completed:
+
+- Added `LoweredFunction`, `LoweredCapture`, and orthogonal `LoweredFunctionClass` flags to the lowered schema.
+- Declared functions are inserted in resolver order, followed by implicit thunks in ascending `FunctionId`; duplicate semantic IDs remain diagnostics.
+- Function templates copy the checked `CheckedFunctionType`, checked trait bounds, parameter style, recursively collected parameter symbols in source order, and the owning module derived from the resolved body syntax.
+- Captures are copied in resolver order with independent `borrowed`, `non_owning`, and `requires_cell` facts; `requires_cell` follows code generation's initialization-state/mutable-storage/derived-binding rule.
+- Thunks classify as derived evaluators, coroutine bodies, effectful resource/reactive helpers, or ordinary implicit thunks. Extern and intrinsic flags come from the function's binding symbol.
+- Coroutine body blocks now record their owning module during resolution so thunk bodies can resolve it without cloning the body expression.
+- Added focused tests for catalog order and uniqueness, checked signatures/bounds/parameters, capture ownership facts, derived/coroutine classification, and effectful callback classification.
+- Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (956 tests), and `git diff --check`.
 
 ### Step 5 - Snapshot Symbols and Storage Classification
 
