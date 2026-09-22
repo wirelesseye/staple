@@ -13570,6 +13570,7 @@ fn pattern_parameter_moves(pattern: &Pattern) -> Vec<CheckedMutation> {
         Pattern::Binding(binding) if binding.moved => vec![CheckedMutation::Whole],
         Pattern::At(at) if at.binding.moved => vec![CheckedMutation::Whole],
         Pattern::Product(product) if product.moved => vec![CheckedMutation::Whole],
+        Pattern::Nominal(nominal) if nominal.moved => vec![CheckedMutation::Whole],
         Pattern::Product(product) => product
             .elements
             .iter()
@@ -13578,6 +13579,7 @@ fn pattern_parameter_moves(pattern: &Pattern) -> Vec<CheckedMutation> {
                 Pattern::Binding(binding) if binding.moved => Some(CheckedMutation::Element(index)),
                 Pattern::At(at) if at.binding.moved => Some(CheckedMutation::Element(index)),
                 Pattern::Product(product) if product.moved => Some(CheckedMutation::Element(index)),
+                Pattern::Nominal(nominal) if nominal.moved => Some(CheckedMutation::Element(index)),
                 _ => None,
             })
             .collect(),

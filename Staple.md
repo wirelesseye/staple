@@ -2021,30 +2021,27 @@ and an ownership transfer are different effects. `move` and `mut` never
 change the parameter's exposed type — it stays `T`, never `Ref T` — only its
 ownership and calling convention.
 
-Like `mut`, `move` may prefix a parenthesized product pattern to own the
-whole destructured parameter as one unit:
+Like `mut`, `move` may prefix a destructuring pattern to own the whole
+parameter as one unit, whether that pattern is a parenthesized product or a
+nominal destructure:
 
 ```staple
 def f4: <A, B> move (A, B) -> A = move (a, _) => a
+def unbox: <T> move Box T -> T = move Box (value) => value
 ```
 
 Every destructured binding is owned, exactly as if the whole parameter were
-bound and destructured in the body. This is the only way to destructure a
-parameter whose type is not itself a literal product — for example, an
-aliased pair `type Pair (A, B) = alias (A, B)` — directly in the pattern,
-since `move`/`mut` on the aliased type is necessarily a whole-parameter
-marker rather than one over individual elements.
+bound and destructured in the body. Prefixing a parenthesized product pattern
+is the way to own a parameter whose type is an alias of a product — for
+example, an aliased pair `type Pair (A, B) = alias (A, B)` — since `move`/`mut`
+on the aliased type is necessarily a whole-parameter marker rather than one
+over individual elements.
 
-A top-level nominal destructure — `Box value => ...` — has no parameter
-position that can carry a `mut` or `move` marker, so it is an ordinary
-borrow: its non-`Copy` fields are borrowed too, and moving one out is an
-error. To take ownership of a nominal parameter's fields, bind the whole
-parameter `move` and destructure it in the body, since a `match` subject is
-consumed:
-
-```staple
-def unbox: <T> move Box T -> T = move box => match box { Box value => value }
-```
+Without the marker, a nominal destructure — `Box value => ...` — is an
+ordinary borrow: its non-`Copy` fields are borrowed too, and moving one out is
+an error. Mark the whole pattern `move` to take ownership of its fields, or
+bind the parameter and destructure it in the body, since a `match` subject is
+consumed.
 
 `move` is always legal on a `Copy` parameter, where it is a no-op: copying
 and moving a `Copy` value are indistinguishable, so `move T` and plain `T`

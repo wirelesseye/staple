@@ -9616,7 +9616,7 @@ fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer
 fn destructures_contextually_typed_generic_nominal_patterns() {
     let module = type_check(concat!(
         "type Box T = ctor (value: T)\n",
-        "def unbox: <T> move Box T -> T = move box => match box { Box (value) => value }\n",
+        "def unbox: <T> move Box T -> T = move Box (value) => value\n",
         "let answer: I32 = unbox (Box (value: 42))\n",
         "let text: String = unbox (Box (value: \"hello\"))\n",
     ));
@@ -9641,6 +9641,21 @@ fn captures_values_bound_by_nominal_patterns() {
     CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("destructured leaves should be captured normally");
+}
+
+#[test]
+fn rejects_moving_fields_out_of_a_borrowed_nominal_destructure() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.list.(List, ListIter)\n",
+            "def invalid: ListIter I32 -> List I32 = ListIter (list, index) => list\n",
+        )))
+        .expect_err_diagnostics("a borrowed nominal destructure cannot move its fields out");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot move out of a borrowed value")
+    }));
 }
 
 #[test]

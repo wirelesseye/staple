@@ -380,7 +380,8 @@ fn render_pattern(pattern: &Pattern) -> String {
             )
         }
         Pattern::Nominal(nominal) => format!(
-            "{}{} {}",
+            "{}{}{} {}",
+            if nominal.moved { "move " } else { "" },
             nominal
                 .namespace
                 .as_ref()

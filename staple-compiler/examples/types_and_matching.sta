@@ -11,7 +11,7 @@ typegroup Switch {
 }
 use Switch.*
 
-def unbox: <T> move Box T -> T = move box => match box { Box value => value }
+def unbox: <T> move Box T -> T = move Box value => value
 
 def switch_number = switch: Switch => match switch {
     Switch.Enabled => 1,

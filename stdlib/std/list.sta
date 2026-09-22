@@ -191,16 +191,14 @@ pub type ListIter T = pub ctor (list: List T, index: USize)
 // Copy-T-gated, like `get`/`Index` — yields owned copies. A Ref-yielding
 // iterator for non-Copy element types is intentionally left for later.
 impl<T where Copy T> Iterator (ListIter T) T {
-    def next = move iterator => match iterator {
-        ListIter (list, index) => match index < List.length list {
-            // The bounds check just above already guarantees `index` is valid,
-            // so `get_unchecked` avoids a second, redundant one.
-            True() => Yield (
-                List.get_unchecked list index,
-                ListIter (list: list, index: index + 1),
-            ),
-            False() => Done (ListIter (list: list, index: index)),
-        },
+    def next = move ListIter (list, index) => match index < List.length list {
+        // The bounds check just above already guarantees `index` is valid,
+        // so `get_unchecked` avoids a second, redundant one.
+        True() => Yield (
+            List.get_unchecked list index,
+            ListIter (list: list, index: index + 1),
+        ),
+        False() => Done (ListIter (list: list, index: index)),
     }
 }
 

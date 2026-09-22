@@ -2616,7 +2616,7 @@ mod tests {
 
     #[test]
     fn generic_def_and_type_signatures_use_the_new_syntax() {
-        let source = "pub type Box T = pub ctor (value: T)\ndef unbox: <T> move Box T -> T = move box => match box { Box value => value }\n";
+        let source = "pub type Box T = pub ctor (value: T)\ndef unbox: <T> move Box T -> T = move Box value => value\n";
         let path = std::env::temp_dir().join("staple-hover-generic-signatures.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -2649,7 +2649,7 @@ mod tests {
     fn generic_function_use_site_leads_with_the_declared_type() {
         let source = concat!(
             "pub type Box T = pub ctor (value: T)\n",
-            "def unbox: <T> move Box T -> T = move box => match box { Box value => value }\n",
+            "def unbox: <T> move Box T -> T = move Box value => value\n",
             "unbox (Box (value: 1))\n",
         );
         let path = std::env::temp_dir().join("staple-hover-generic-use-site.sta");
