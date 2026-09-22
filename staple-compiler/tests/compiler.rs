@@ -2669,6 +2669,26 @@ fn parameter_markers_must_match_explicit_function_and_trait_effects() {
 }
 
 #[test]
+fn parameter_move_markers_must_match_explicit_function_and_trait_effects() {
+    for source in [
+        "def mismatch: move I32 -> () = value => ()\n",
+        concat!(
+            "trait Consume T { consume: move T -> () }\n",
+            "impl Consume I32 { def consume = value => () }\n",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("parameter `move` markers and declared ownership must match");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("parameter `move` markers declare")
+        }));
+    }
+}
+
+#[test]
 fn resource_inference_preserves_parameter_declared_mutation() {
     let module = type_check(concat!(
         "type Clock = ctor I32\n",
@@ -7571,7 +7591,7 @@ fn expands_standard_for_over_ranges_and_product_iterators() {
     let module = type_check(concat!(
         "pub type PairIterator = pub ctor (current: I32, end: I32)\n",
         "impl Iterator PairIterator (I32, I32) {\n",
-        "  def next = PairIterator (current, end) => match current < end {\n",
+        "  def next = move PairIterator (current, end) => match current < end {\n",
         "    True() => IterStep.Yield ((current, current + 10), PairIterator (current + 1, end)),\n",
         "    False() => IterStep.Done (PairIterator (current, end)),\n",
         "  }\n",

@@ -2016,10 +2016,12 @@ def f3 = (a: A, move b: B) => { ... }                  // same, from the binding
 
 When a function has an explicit annotation, its parameter markers must
 repeat and match the annotation's `move` targets exactly, the same as for
-`mut`. A parameter cannot be marked both `mut` and `move`: a mutable borrow
-and an ownership transfer are different effects. `move` and `mut` never
-change the parameter's exposed type — it stays `T`, never `Ref T` — only its
-ownership and calling convention.
+`mut`. A trait implementation's method is checked the same way against the
+trait's method declaration, even when the parameter's type is `Copy`. A
+parameter cannot be marked both `mut` and `move`: a mutable borrow and an
+ownership transfer are different effects. `move` and `mut` never change the
+parameter's exposed type — it stays `T`, never `Ref T` — only its ownership
+and calling convention.
 
 Like `mut`, `move` may prefix a destructuring pattern to own the whole
 parameter as one unit, whether that pattern is a parenthesized product or a
