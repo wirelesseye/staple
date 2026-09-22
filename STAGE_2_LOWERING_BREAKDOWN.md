@@ -125,9 +125,10 @@ Completed:
 - Type checking now records the resolved `MutateIndex` output type on indexed assignment targets and the checked type of a propagating binding's nominal root; compiler-synthesized implicit-thunk parameter patterns fall back to the checked signature parameter and the thunk body origin.
 - Expressions whose checking diverged record no type; lowering treats them as unreachable `Never` values, matching the checker's divergence handling.
 - Validation now checks every new pattern, place, item, and function-parameter-pattern reference. Repeated-lowering snapshots include expressions, patterns, places, blocks, and items.
+- Main-branch ownership updates are reflected in the snapshot: nominal destructuring patterns preserve their whole-pattern `move` marker, while consuming constructor and iterator contracts flow through the checked function signatures already stored by Stage 2.2/2.3.
 - Break/continue item kinds are implemented but populate once loop-body blocks lower in Stage 2.4, since loop bodies are expressions; match-arm patterns and `CheckedMatch` metadata likewise arrive with match-expression lowering in Stage 2.4.
 - Added focused coverage for every parameter pattern form, pattern-binding items (including at and propagation), all place operations, captured-cell and resource places, module binding/assignment/statement metadata, function body/result normalization, compile-time-only rejection, dangling-reference validation, and deterministic repeated lowering.
-- Verified with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (982 tests), and `git diff --check`.
+- Verified after the `main` merge with `cargo fmt --all -- --check`, focused nominal-pattern and slice-iteration tests, `cargo test --workspace` (989 tests), and `git diff --check`.
 
 ## Stage 2.4 - Lower Ordinary Expressions and Control Flow
 

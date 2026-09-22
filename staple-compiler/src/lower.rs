@@ -266,6 +266,8 @@ pub(crate) enum LoweredPatternKind {
     Nominal {
         target: Option<TypeId>,
         name: String,
+        /// Whether the whole nominal destructure transfers ownership.
+        moved: bool,
         argument: PatternId,
     },
     /// A string literal pattern; the literal is retained exactly as written.
@@ -1722,6 +1724,7 @@ impl LoweredProgram {
             Pattern::Nominal(nominal) => LoweredPatternKind::Nominal {
                 target: resolved.type_for_pattern(syntax.id),
                 name: nominal.name.clone(),
+                moved: nominal.moved,
                 argument: self.lower_pattern(module, &nominal.argument)?,
             },
             Pattern::StringLiteral(literal) => LoweredPatternKind::Literal {
@@ -4428,9 +4431,11 @@ mod tests {
     #[test]
     fn function_parameter_patterns_lower_every_source_form() {
         let module = checked_program(concat!(
+            "type TestOwned = ctor String\n",
             "def pair = (left: I32, right: I32) => left + right\n",
             "def wildcard = (_: I32) => 0\n",
             "def moved: move String -> String = move value => value\n",
+            "def moved_nominal: move TestOwned -> String = move TestOwned value => value\n",
             "def singleton: True -> I32 = True => 0\n",
             "def borrowed: Ref I32 -> I32 = (Ref inner) => inner\n",
             "def literal: \"literal\" -> I32 = \"literal\" => 0\n",
@@ -4484,6 +4489,24 @@ mod tests {
         };
         assert_eq!(pattern.value_type, CheckedType::String);
 
+        let (_, moved_nominal) = lowered_function(&program, "moved_nominal");
+        let pattern = lowered_pattern(&program, moved_nominal.parameter_pattern);
+        let LoweredPatternKind::Nominal {
+            moved: true,
+            argument,
+            ..
+        } = &pattern.kind
+        else {
+            panic!("a `move` nominal parameter should retain its ownership marker");
+        };
+        assert!(matches!(
+            lowered_pattern(&program, *argument).kind,
+            LoweredPatternKind::Binding {
+                symbol: Some(_),
+                ..
+            }
+        ));
+
         let (_, singleton) = lowered_function(&program, "singleton");
         let pattern = lowered_pattern(&program, singleton.parameter_pattern);
         let LoweredPatternKind::Binding {
@@ -4516,6 +4539,7 @@ mod tests {
         let LoweredPatternKind::Nominal {
             target: Some(target),
             name,
+            moved: false,
             argument,
         } = &pattern.kind
         else {

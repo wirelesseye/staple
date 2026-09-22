@@ -81,6 +81,7 @@ Progress:
 - Stage 2.3 allocates expression headers with checked type/effects/coercion/moved symbols for runtime-item payloads and place bases, lowering block expressions into item sequences plus a tail result; `Unlowered` kinds mark the families Stage 2.4 replaces. Compile-time-only source items are omitted, while unexpanded splices, operator expressions, and quote/splice nodes become lowering diagnostics.
 - Type checking now records `MutateIndex` output types on indexed assignment targets and propagating nominal root pattern types; compiler-synthesized implicit-thunk parameters fall back to the checked signature parameter and body origin, and diverged expressions lower as unreachable `Never` values.
 - Stage 2.3 validation checks every new pattern, place, item, and function-parameter-pattern reference, and repeated-lowering snapshots now include expressions, patterns, places, blocks, and items.
+- After merging the consuming-iterator and nominal-destructure ownership changes from `main`, nominal patterns retain their whole-pattern `move` marker in lowered IR. Existing checked function signatures continue to carry the updated constructor and iterator move contracts, so later specialization and cleanup stages do not need to rediscover those ownership decisions.
 
 > **Complex stage:** The AST and backend support many specialized constructs, including defaults, reactive bindings, structural indexing, ownership cleanup, and coroutines. This stage may need separate breakdown plans by expression family and runtime subsystem during implementation.
 
@@ -150,7 +151,7 @@ Progress:
 - Stage 2.1 focused tests cover empty deterministic arenas, dense insertion-ordered typed IDs, and dangling child detection. `cargo fmt --all -- --check`, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check` pass after the schema addition.
 - After Stage 2.2 Step 2, `cargo test --workspace` passes 943 tests, including the default-stack regression for block-scoped module initialization.
 - Stage 2.2 Steps 3-8 added focused lowering coverage for module/initializer catalogs, function templates and thunks, symbol storage classes, compact type/trait metadata, subsystem semantic IDs, validation, and repeated-lowering determinism.
-- Stage 2.3 added focused coverage for every function parameter pattern form, pattern-binding items (including at patterns and checked propagation), all assignment place operations, captured-cell and resource places, module binding/assignment/statement metadata, function body/result normalization, compile-time-only rejection, dangling pattern/place/item validation, and deterministic repeated lowering over the expanded arenas. The complete `cargo test --workspace` regression passes 982 tests after Stage 2.3.
+- Stage 2.3 added focused coverage for every function parameter pattern form, pattern-binding items (including at patterns and checked propagation), all assignment place operations, captured-cell and resource places, module binding/assignment/statement metadata, function body/result normalization, compile-time-only rejection, dangling pattern/place/item validation, and deterministic repeated lowering over the expanded arenas. After merging `main` and adding nominal-`move` transition coverage, the complete `cargo test --workspace` regression passes 989 tests.
 
 ### Remaining Verification
 

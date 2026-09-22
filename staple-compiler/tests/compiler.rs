@@ -3094,7 +3094,7 @@ fn iterates_slices_through_the_standard_library_implementations() {
     let module = type_check(source);
     let context = Context::create();
     CodeGenerator::new(&context)
-        .compile_module(&module)
+        .compile_module(&lower(&module))
         .expect("slice iteration should use the standard-library implementation");
 }
 
