@@ -13,11 +13,11 @@ pub type IterStep (Iter, Item) = alias
 /// A type that yields values one step at a time.
 pub trait Iterator Iter Item where Iter ~> Item {
     /// Advances the iterator by one step.
-    next: Iter -> IterStep (Iter, Item)
+    next: move Iter -> IterStep (Iter, Item)
 }
 
 /// A source that can be converted into an iterator.
 pub trait IntoIterator Source Iter where Source ~> Iter, Iterator Iter {
     /// Converts this source into its iterator.
-    into_iterator: Source -> Iter
+    into_iterator: move Source -> Iter
 }

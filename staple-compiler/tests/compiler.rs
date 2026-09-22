@@ -2790,7 +2790,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
         "  let mut value = initial\n",
         "  () => { let old = value; value = c_string \"next\"; drop old }\n",
         "}\n",
-        "def managed = (initial: CString, move next: CString) => {\n",
+        "def managed = (move initial: CString, move next: CString) => {\n",
         "  let mut reference = Ref initial\n",
         "  let old = Ref.replace reference next\n",
         "  drop old\n",
@@ -2997,7 +2997,7 @@ fn delegates_indexing_through_refs_to_the_payload() {
         "def fixed_at: (Ref (I32; 3), USize) -> I32 = (values, position) => values[position]\n",
         "def generic_at: <T where Index T USize I32> (Ref T, USize) -> I32 = (values, position) => values[position]\n",
         "let list = List.of (1, 2, 3)\n",
-        "let value: I32 = generic_at (Ref list, 0)\n",
+        "let value: I32 = generic_at (Ref (Clone.clone list), 0)\n",
         "let operation: (Ref (List I32), USize) -> I32 = Index.index\n",
     );
     let module = type_check(source);
@@ -3020,7 +3020,7 @@ fn delegates_indexed_assignment_through_refs_to_the_payload() {
         "def set_keyed = (mut counter: Ref Counter, key: String, value: I32) => { counter[key] = value }\n",
         "let list = List.of (1, 2, 3)\n",
         "let operation: (mut Ref (List I32), USize, I32) -> () = MutateIndex.mutate_index\n",
-        "let mut reference = Ref list\n",
+        "let mut reference = Ref (Clone.clone list)\n",
         "operation (reference, 0, 9)\n",
     );
     let module = type_check(source);
@@ -3074,6 +3074,46 @@ fn indexes_slices_through_the_standard_library_implementation() {
         .expect("slice indexing should use the standard-library implementation");
     assert!(!llvm.contains("structural_Index"));
     assert!(!llvm.contains("structural_MutateIndex"));
+}
+
+#[test]
+fn iterates_slices_through_the_standard_library_implementations() {
+    let source = concat!(
+        "use std.slice.(Slice, SliceIter)\n",
+        "let fixed: Ref (I32; 3) = Ref (10, 20, 30)\n",
+        "let values: Slice I32 = fixed\n",
+        "let iterator: SliceIter I32 = IntoIterator.into_iterator values\n",
+        "let step: IterStep (SliceIter I32, I32) = Iterator.next iterator\n",
+        "def sum: Slice I32 -> I32 = slice => {\n",
+        "  let mut total = 0\n",
+        "  for value in slice { total = total + value }\n",
+        "  total\n",
+        "}\n",
+        "let total: I32 = sum values\n",
+    );
+    let module = type_check(source);
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("slice iteration should use the standard-library implementation");
+}
+
+#[test]
+fn rejects_slice_iteration_for_non_copy_elements() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.slice.Slice\n",
+            "use std.cinterop.CString\n",
+            "def invalid: Slice CString -> () = values => {\n",
+            "  for value in values { () }\n",
+            "}\n",
+        )))
+        .expect_err_diagnostics("a slice of a move-only element cannot be iterated");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
+    );
 }
 
 #[test]
@@ -3170,7 +3210,7 @@ fn rejects_overlapping_structural_iterator_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "impl IntoIterator (I32; 2) ((I32; 2), USize) {\n",
-            "  def into_iterator = value => (value, 0 satisfies USize)\n",
+            "  def into_iterator = move value => (value, 0 satisfies USize)\n",
             "}\n",
         )))
         .expect_err_diagnostics("structural product IntoIterator cannot be overridden");
@@ -4838,6 +4878,32 @@ fn dispatches_generic_implementations_of_multi_parameter_functional_dependency_t
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
         .expect("a generic impl of a multi-parameter functional-dependency trait should dispatch and compile");
+}
+
+#[test]
+fn rejects_inferred_trait_obligations_whose_impl_bounds_do_not_hold() {
+    // Regression test: when a trait obligation had an inferred argument
+    // position, candidate implementations were selected by unifying their
+    // headers without checking their `where` bounds, so a `Copy`-gated impl
+    // could be chosen for a move-only argument. Code generation then failed
+    // with a confusing error located in the standard library.
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.cinterop.CString\n",
+            "trait Make T U where T ~> U { make: T -> U }\n",
+            "type Box T = ctor (value: T)\n",
+            "impl<T where Copy T> Make (Box T) T { def make = Box (value) => value }\n",
+            "def inferred: Box CString -> () = box => {\n",
+            "    let value = Make.make box\n",
+            "    ()\n",
+            "}\n",
+        )))
+        .expect_err_diagnostics("an inferred trait obligation must check its impl's bounds");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| { diagnostic.message.contains("no trait implementation") })
+    );
 }
 
 #[test]
@@ -7473,7 +7539,7 @@ fn expands_standard_for_over_ranges_and_product_iterators() {
         "    False() => IterStep.Done (PairIterator (current, end)),\n",
         "  }\n",
         "}\n",
-        "impl IntoIterator PairIterator PairIterator { def into_iterator = iterator => iterator }\n",
+        "impl IntoIterator PairIterator PairIterator { def into_iterator = move iterator => iterator }\n",
         "def run = () => {\n",
         "  let mut total = 0\n",
         "  for value in (0 ..= 4) {\n",
@@ -9624,7 +9690,7 @@ fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer
 fn destructures_contextually_typed_generic_nominal_patterns() {
     let module = type_check(concat!(
         "type Box T = ctor (value: T)\n",
-        "def unbox: <T> Box T -> T = Box (value) => value\n",
+        "def unbox: <T> move Box T -> T = move Box (value) => value\n",
         "let answer: I32 = unbox (Box (value: 42))\n",
         "let text: String = unbox (Box (value: \"hello\"))\n",
     ));
@@ -9649,6 +9715,21 @@ fn captures_values_bound_by_nominal_patterns() {
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
         .expect("destructured leaves should be captured normally");
+}
+
+#[test]
+fn rejects_moving_fields_out_of_a_borrowed_nominal_destructure() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.list.(List, ListIter)\n",
+            "def invalid: ListIter I32 -> List I32 = ListIter (list, index) => list\n",
+        )))
+        .expect_err_diagnostics("a borrowed nominal destructure cannot move its fields out");
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic
+            .message
+            .contains("cannot move out of a borrowed value")
+    }));
 }
 
 #[test]

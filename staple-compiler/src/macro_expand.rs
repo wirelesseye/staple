@@ -5619,6 +5619,7 @@ impl MacroExpander {
                         syntax: self.generated_syntax(module, span),
                         namespace: None,
                         name: name.name.clone(),
+                        moved: false,
                         argument: Box::new(argument.clone()),
                     },
                 ))))

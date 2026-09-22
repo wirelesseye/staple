@@ -1,6 +1,8 @@
 pub mod
 
 use std.core.index.(Index, MutateIndex)
+use std.iterator.(IntoIterator, Iterator)
+use std.iterator.IterStep.(Done, Yield)
 
 /// A borrowed view over a contiguous sequence of values.
 @recursive_constructor
@@ -30,4 +32,20 @@ impl<T> MutateIndex (Slice T) USize T {
         Ref.replace reference value
         ()
     }
+}
+
+pub type SliceIter T = pub ctor (slice: Slice T, index: USize)
+
+impl<T where Copy T> Iterator (SliceIter T) T {
+    def next = move SliceIter (slice, index) => match index < Slice.length slice {
+        True() => {
+            let Ref value = Slice.get_ref slice index
+            Yield (value, SliceIter (slice: slice, index: index + 1))
+        },
+        False() => Done (SliceIter (slice: slice, index: index)),
+    }
+}
+
+impl<T where Copy T> IntoIterator (Slice T) (SliceIter T) {
+    def into_iterator = move slice => SliceIter (slice: slice, index: 0)
 }

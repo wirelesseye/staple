@@ -128,5 +128,9 @@ pub struct NominalPattern {
     pub syntax: Syntax,
     pub namespace: Option<String>,
     pub name: String,
+    /// Whether the whole nominal destructure was marked `move` as a single
+    /// unit (e.g. `move Box (value) => ...`). Only meaningful at a function's
+    /// top-level parameter position.
+    pub moved: bool,
     pub argument: Box<Pattern>,
 }

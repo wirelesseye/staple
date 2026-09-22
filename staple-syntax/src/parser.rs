@@ -2026,7 +2026,9 @@ impl Grammar {
     /// whole destructured parameter as a single mutable/moved unit. That
     /// form only makes sense at a function's own parameter position, so it
     /// is not part of `parse_pattern` itself: a `let` or `match` pattern
-    /// still rejects `mut`/`move` before `(`.
+    /// still rejects `mut`/`move` before `(`. A `move`-marked nominal
+    /// destructure (`move Box (value) => ...`) is parsed by `parse_pattern`
+    /// and rejected outside parameter position by `pattern_has_move`.
     fn parse_top_level_parameter_pattern(&mut self) -> Result<Pattern, ParseError> {
         let checkpoint = self.position;
         let start = self.position;
@@ -2189,6 +2191,7 @@ impl Grammar {
                 syntax: self.syntax(start),
                 namespace,
                 name,
+                moved,
                 argument,
             }));
         }
@@ -2196,14 +2199,12 @@ impl Grammar {
             if mutable {
                 return Err(self.error("`mut` can only modify a binding pattern"));
             }
-            if moved {
-                return Err(self.error("`move` can only modify a binding pattern"));
-            }
             let argument = Box::new(self.parse_pattern()?);
             return Ok(Pattern::Nominal(NominalPattern {
                 syntax: self.syntax(start),
                 namespace,
                 name,
+                moved,
                 argument,
             }));
         }
@@ -4073,6 +4074,7 @@ fn pattern_element_marks_moved(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Binding(binding) => binding.moved,
         Pattern::At(at) => at.binding.moved,
+        Pattern::Nominal(nominal) => nominal.moved,
         _ => false,
     }
 }
@@ -4265,13 +4267,15 @@ fn pattern_has_move(pattern: &Pattern) -> bool {
         Pattern::Binding(binding) => binding.moved,
         Pattern::At(at) => at.binding.moved || pattern_has_move(&at.pattern),
         Pattern::Product(product) => product.elements.iter().any(pattern_has_move),
-        Pattern::Nominal(nominal) => pattern_has_move(&nominal.argument),
+        Pattern::Nominal(nominal) => nominal.moved || pattern_has_move(&nominal.argument),
         Pattern::Wildcard(_) | Pattern::StringLiteral(_) | Pattern::Splice(_) => false,
     }
 }
 
 /// The `move` counterpart of `parameter_has_nested_mutable`: only the whole
 /// parameter or one direct element of its top-level product may be marked.
+/// A nominal destructure may itself carry the marker, in which case only its
+/// argument is checked for a nested one.
 fn parameter_has_nested_move(pattern: &Pattern) -> bool {
     match pattern {
         Pattern::Binding(_) => false,
@@ -4279,8 +4283,10 @@ fn parameter_has_nested_move(pattern: &Pattern) -> bool {
         Pattern::Product(product) => product.elements.iter().any(|element| match element {
             Pattern::Binding(_) => false,
             Pattern::At(at) => pattern_has_move(&at.pattern),
+            Pattern::Nominal(nominal) if nominal.moved => pattern_has_move(&nominal.argument),
             other => pattern_has_move(other),
         }),
+        Pattern::Nominal(nominal) => pattern_has_move(&nominal.argument),
         other => pattern_has_move(other),
     }
 }

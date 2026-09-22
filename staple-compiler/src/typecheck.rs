@@ -3284,7 +3284,7 @@ impl TypeChecker {
                     default: None,
                     parameter: Box::new(parameter),
                     mutations: Vec::new(),
-                    moves: Vec::new(),
+                    moves: vec![CheckedMutation::Whole],
                     effects: CheckedEffectSet::default(),
                     result: Box::new(result),
                 }),
@@ -3747,7 +3747,16 @@ impl TypeChecker {
                         ),
                     ));
                 }
-                if parameter_moves != expected.moves {
+                if parameter_moves != expected.moves
+                    && !is_copy_type(
+                        &expected.parameter,
+                        self.copy_trait,
+                        self.drop_trait,
+                        self.io_type,
+                        &self.trait_implementations,
+                        &[],
+                    )
+                {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
                         format!(
@@ -10246,6 +10255,25 @@ impl TypeChecker {
                         if !unifies {
                             return None;
                         }
+                        let bounds_hold = implementation.bounds.iter().all(|bound| {
+                            let bound_arguments = bound
+                                .arguments
+                                .iter()
+                                .cloned()
+                                .map(|argument| substitute_type(argument, &substitutions))
+                                .collect::<Vec<_>>();
+                            // A bound that still mentions a type parameter or
+                            // an unresolved position cannot be decided here;
+                            // it is re-checked once the call is concrete.
+                            bound_arguments.iter().any(|argument| {
+                                contains_type_parameter(argument)
+                                    || contains_inferred_type(argument)
+                            }) || self
+                                .trait_obligation_available_exact(bound.trait_id, &bound_arguments)
+                        });
+                        if !bounds_hold {
+                            return None;
+                        }
                         Some(
                             implementation
                                 .arguments
@@ -13869,6 +13897,7 @@ fn pattern_parameter_moves(pattern: &Pattern) -> Vec<CheckedMutation> {
         Pattern::Binding(binding) if binding.moved => vec![CheckedMutation::Whole],
         Pattern::At(at) if at.binding.moved => vec![CheckedMutation::Whole],
         Pattern::Product(product) if product.moved => vec![CheckedMutation::Whole],
+        Pattern::Nominal(nominal) if nominal.moved => vec![CheckedMutation::Whole],
         Pattern::Product(product) => product
             .elements
             .iter()
@@ -13877,6 +13906,7 @@ fn pattern_parameter_moves(pattern: &Pattern) -> Vec<CheckedMutation> {
                 Pattern::Binding(binding) if binding.moved => Some(CheckedMutation::Element(index)),
                 Pattern::At(at) if at.binding.moved => Some(CheckedMutation::Element(index)),
                 Pattern::Product(product) if product.moved => Some(CheckedMutation::Element(index)),
+                Pattern::Nominal(nominal) if nominal.moved => Some(CheckedMutation::Element(index)),
                 _ => None,
             })
             .collect(),

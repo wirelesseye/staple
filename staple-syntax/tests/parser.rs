@@ -2212,6 +2212,56 @@ fn parses_public_representations_and_nominal_patterns() {
 }
 
 #[test]
+fn parses_moved_nominal_destructure_patterns() {
+    let source = concat!(
+        "pub type Box T = pub ctor (value: T)\n",
+        "def unbox: <T> move Box T -> T = move Box (value) => value\n",
+        "def pair: (move Box I32, I32) -> I32 = (move Box (value), other) => value\n",
+    );
+    let root = parse(source).expect("moved nominal patterns should parse");
+
+    let Item::Binding(binding) = unmodified_item(&root.items[1]) else {
+        panic!("expected function binding");
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("expected function expression");
+    };
+    let Pattern::Nominal(nominal) = &function.pattern else {
+        panic!("expected a nominal pattern");
+    };
+    assert!(nominal.moved);
+
+    let Item::Binding(binding) = unmodified_item(&root.items[2]) else {
+        panic!("expected function binding");
+    };
+    let Some(Expression::Function(function)) = &binding.value else {
+        panic!("expected function expression");
+    };
+    let Pattern::Product(product) = &function.pattern else {
+        panic!("expected a product pattern");
+    };
+    assert!(matches!(
+        &product.elements[0],
+        Pattern::Nominal(nominal) if nominal.moved
+    ));
+}
+
+#[test]
+fn rejects_move_outside_function_parameter_position() {
+    assert!(
+        parse("pub type Box T = pub ctor (value: T)\nlet move Box (value) = Box (value: 1)\n")
+            .is_err()
+    );
+    assert!(
+        parse(concat!(
+            "pub type Box T = pub ctor (value: T)\n",
+            "def f = value => match value { move Box (inner) => inner }\n",
+        ))
+        .is_err()
+    );
+}
+
+#[test]
 fn rejects_invalid_representation_and_pattern_visibility_syntax() {
     assert!(parse("pub(repr) type Number = ctor I32\n").is_err());
     assert!(parse("pub(repr(package)) type Number = ctor I32\n").is_err());

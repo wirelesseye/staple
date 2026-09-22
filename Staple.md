@@ -2021,19 +2021,27 @@ and an ownership transfer are different effects. `move` and `mut` never
 change the parameter's exposed type — it stays `T`, never `Ref T` — only its
 ownership and calling convention.
 
-Like `mut`, `move` may prefix a parenthesized product pattern to own the
-whole destructured parameter as one unit:
+Like `mut`, `move` may prefix a destructuring pattern to own the whole
+parameter as one unit, whether that pattern is a parenthesized product or a
+nominal destructure:
 
 ```staple
 def f4: <A, B> move (A, B) -> A = move (a, _) => a
+def unbox: <T> move Box T -> T = move Box (value) => value
 ```
 
 Every destructured binding is owned, exactly as if the whole parameter were
-bound and destructured in the body. This is the only way to destructure a
-parameter whose type is not itself a literal product — for example, an
-aliased pair `type Pair (A, B) = alias (A, B)` — directly in the pattern,
-since `move`/`mut` on the aliased type is necessarily a whole-parameter
-marker rather than one over individual elements.
+bound and destructured in the body. Prefixing a parenthesized product pattern
+is the way to own a parameter whose type is an alias of a product — for
+example, an aliased pair `type Pair (A, B) = alias (A, B)` — since `move`/`mut`
+on the aliased type is necessarily a whole-parameter marker rather than one
+over individual elements.
+
+Without the marker, a nominal destructure — `Box value => ...` — is an
+ordinary borrow: its non-`Copy` fields are borrowed too, and moving one out is
+an error. Mark the whole pattern `move` to take ownership of its fields, or
+bind the parameter and destructure it in the body, since a `match` subject is
+consumed.
 
 `move` is always legal on a `Copy` parameter, where it is a no-op: copying
 and moving a `Copy` value are indistinguishable, so `move T` and plain `T`
@@ -2048,11 +2056,11 @@ def identity: <T> move T -> T = move value => value
 ```
 
 Constructs that consume a value outright — `drop`, a match expression's
-subject, string interpolation, and indexed assignment's replacement value —
-always require ownership. Capturing an ordinary non-`Copy` parameter in a
-curried closure is the exception: the closure keeps a shared borrow of that
-parameter. Capturing a `mut` parameter similarly keeps a mutable borrow;
-`mut` does not transfer ownership.
+subject, string interpolation, indexed assignment's replacement value, and a
+constructor call's arguments — always require ownership. Capturing an
+ordinary non-`Copy` parameter in a curried closure is the exception: the
+closure keeps a shared borrow of that parameter. Capturing a `mut` parameter
+similarly keeps a mutable borrow; `mut` does not transfer ownership.
 
 Borrowed partial applications are conservatively lexical. They may be called
 immediately or stored in an immutable local and called within that local's
@@ -2875,19 +2883,24 @@ pub type IterStep (Iter, Item) = alias
     IterStep.Yield (Item, Iter)
 
 pub trait Iterator Iter Item where Iter ~> Item {
-    next: Iter -> IterStep (Iter, Item)
+    next: move Iter -> IterStep (Iter, Item)
 }
 
 pub trait IntoIterator Source Iter where Source ~> Iter, Iterator Iter {
-    into_iterator: Source -> Iter
+    into_iterator: move Source -> Iter
 }
 ```
 
 `IterStep.Done iterator` retains the terminal state, while
 `IterStep.Yield (item, iterator)` contains an item and the state used for the
-next call. `Done` and `Yield` remain inside the `IterStep` namespace. An
-`IntoIterator` implementation consumes its source and selects one default
-iterator type; wrapper types can provide alternative iteration modes.
+next call. `next` consumes the iterator it advances and returns the successor
+state inside the step. `Done` and `Yield` remain inside the `IterStep`
+namespace. An `IntoIterator` implementation consumes its source and selects
+one default iterator type; wrapper types can provide alternative iteration
+modes. The `move` marker makes that consumption explicit: a non-`Copy` source
+such as a `List T` is moved into the iterator, so the binding cannot be used
+again, while a `Copy` source such as a range is copied and remains usable.
+Clone a non-`Copy` source before iterating to keep the original.
 
 `for` is a prelude macro which accepts any `IntoIterator` source:
 
@@ -3077,9 +3090,12 @@ expected `Slice` type to infer its element type. Literal and variable indexing
 perform runtime bounds checks.
 `Slice.get_ref: <T> Slice T * USize -> Ref T` borrows an element by position,
 trapping when out of bounds; it is the primitive behind the standard library's
-`Index`/`MutateIndex` implementations for slices. A `Slice T` is a sized view
-value, not a product: it cannot be spread or destructured, and it cannot cross
-a foreign ABI.
+`Index`/`MutateIndex` implementations for slices. Where `Copy T`, the standard
+library also implements `IntoIterator`/`Iterator` for `Slice T` through
+`SliceIter T`, so `for item in slice` yields owned copies. A slice is a
+copyable view, so it stays usable — and iterable again — after a loop. A
+`Slice T` is a sized view value, not a product: it cannot be spread or
+destructured, and it cannot cross a foreign ABI.
 
 `Buffer T` is low-level, fixed-capacity contiguous storage with an initialized
 prefix. `Buffer.with_capacity` allocates space without constructing any `T`
@@ -3137,9 +3153,10 @@ trapping. `List.get_ref_unchecked` and `List.get_unchecked` are the
 trapping counterparts. `list[index]` and `list[index] = value` delegate to
 `Index`/`MutateIndex`, backed by `get_unchecked`/`get_ref_unchecked`, so
 bracket indexing keeps the trapping behavior it has elsewhere in the
-language; `for item in list` delegates to `IntoIterator`/`Iterator` and
-yields owned copies. Both bracket indexing and iteration therefore require
-`Copy T`, the same as `List.get`.
+language; `for item in list` consumes the list — `IntoIterator` moves its
+source — and yields owned copies. Iteration requires `Copy T`, the same as
+`List.get`; clone the list with `Clone.clone` first when it must remain
+usable.
 
 `List` is move-only like its underlying `Buffer`. Where `Clone T`, cloning a
 list clones every initialized element into independent storage and preserves
