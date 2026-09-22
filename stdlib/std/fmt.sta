@@ -7,7 +7,7 @@ use std.flow.while
 use std.syntax.*
 
 /// A growable UTF-8 output buffer used by formatting traits.
-pub type Formatter = Buffer U8
+pub type Formatter = ctor Buffer U8
 
 /// Formats a value for human-facing output.
 pub trait Display T {
@@ -79,7 +79,7 @@ def derived_singleton_debug_implementation: (String, Type) -> Item = (name, targ
 ///
 /// ```staple
 /// @derive_debug
-/// pub(repr) type UserId = I32
+/// pub type UserId = pub ctor I32
 ///
 /// @derive_debug
 /// type Enabled

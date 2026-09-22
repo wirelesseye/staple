@@ -103,6 +103,7 @@ pub(crate) enum MetaType {
     Modifier,
     ModifiedItem,
     TypeDeclarationItem,
+    TypeBody,
     UnstructuredItem,
     Visibility,
     MacroCallMetadata,
@@ -4748,6 +4749,7 @@ impl MacroExpander {
                     MetaType::Modifier => "a modifier".to_owned(),
                     MetaType::ModifiedItem => "a modified item".to_owned(),
                     MetaType::TypeDeclarationItem => "a type declaration item".to_owned(),
+                    MetaType::TypeBody => "a type declaration body".to_owned(),
                     MetaType::UnstructuredItem => "an unstructured item".to_owned(),
                     MetaType::Visibility => "visibility syntax".to_owned(),
                     MetaType::MacroCallMetadata => "macro-call metadata".to_owned(),
@@ -4906,8 +4908,6 @@ impl MacroExpander {
                     "Private" => Some(VisibilityKind::Private),
                     "Package" => Some(VisibilityKind::Package),
                     "Public" => Some(VisibilityKind::Public),
-                    "PublicReprPackage" => Some(VisibilityKind::PublicReprPackage),
-                    "PublicRepr" => Some(VisibilityKind::PublicRepr),
                     _ => None,
                 } {
                     return Some(Value::Syntax(SyntaxValue::Visibility(VisibilitySyntax {
@@ -7165,6 +7165,7 @@ fn meta_type(ty: &Type) -> Option<MetaType> {
             "Modifier" => Some(MetaType::Modifier),
             "ModifiedItem" => Some(MetaType::ModifiedItem),
             "TypeDeclarationItem" => Some(MetaType::TypeDeclarationItem),
+            "TypeBody" => Some(MetaType::TypeBody),
             "UnstructuredItem" => Some(MetaType::UnstructuredItem),
             "Visibility" => Some(MetaType::Visibility),
             "MacroCallMetadata" => Some(MetaType::MacroCallMetadata),
@@ -7416,6 +7417,7 @@ fn meta_type_matches(expected: &MetaType, argument: &Expression) -> bool {
         | MetaType::Modifier
         | MetaType::ModifiedItem
         | MetaType::TypeDeclarationItem
+        | MetaType::TypeBody
         | MetaType::UnstructuredItem
         | MetaType::Product(_)
         | MetaType::Optional(_)
@@ -7791,6 +7793,10 @@ fn match_syntax_fragment(
                 match_sequence_contents(syntax, 0, syntax.tokens().len(), element, next_syntax_id)?;
             return Some(Value::Sequence(values));
         }
+        MetaType::TypeBody => {
+            let body = staple_syntax::parse_type_body_fragment(syntax, next_syntax_id).ok()?;
+            return Some(type_body_value(&body));
+        }
         _ => {}
     }
     let expression = || {
@@ -7901,6 +7907,7 @@ fn match_syntax_fragment(
         MetaType::Syntax => SyntaxValue::Raw(syntax.clone()),
         MetaType::SyntaxNode => structural_syntax_value(syntax, next_syntax_id)?,
         MetaType::Product(_) | MetaType::Optional(_) | MetaType::Sequence(_) => unreachable!(),
+        MetaType::TypeBody => unreachable!("type bodies are matched before expression parsing"),
         MetaType::MacroCallMetadata => unreachable!(),
     };
     Some(Value::Syntax(syntax_value))
@@ -8363,6 +8370,7 @@ fn format_meta_signature(parameters: &[MetaType]) -> String {
             MetaType::Modifier => "Modifier".to_owned(),
             MetaType::ModifiedItem => "ModifiedItem".to_owned(),
             MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
+            MetaType::TypeBody => "TypeBody".to_owned(),
             MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
             MetaType::Visibility => "Visibility".to_owned(),
             MetaType::MacroCallMetadata => "MacroCallMetadata".to_owned(),
@@ -8451,6 +8459,7 @@ pub(crate) fn format_meta_type(meta: &MetaType) -> String {
         MetaType::Modifier => "Modifier".to_owned(),
         MetaType::ModifiedItem => "ModifiedItem".to_owned(),
         MetaType::TypeDeclarationItem => "TypeDeclarationItem".to_owned(),
+        MetaType::TypeBody => "TypeBody".to_owned(),
         MetaType::UnstructuredItem => "UnstructuredItem".to_owned(),
         MetaType::Visibility => "Visibility".to_owned(),
         MetaType::MacroCallMetadata => "MacroCallMetadata".to_owned(),
@@ -8597,6 +8606,7 @@ fn compile_constructor_type(name: &str, argument: CompileType) -> CompileType {
         "NominalPattern" => CompileType::Meta(MetaType::NominalPattern),
         "ModifiedItem" => CompileType::Meta(MetaType::ModifiedItem),
         "TypeDeclarationItem" => CompileType::Meta(MetaType::TypeDeclarationItem),
+        "TypeBody" => CompileType::Meta(MetaType::TypeBody),
         "UnstructuredItem" => CompileType::Meta(MetaType::UnstructuredItem),
         "Parenthesized" => CompileType::Meta(MetaType::Delimited(
             DelimiterKind::Parenthesized,
@@ -8828,6 +8838,18 @@ fn compile_constructor_representation(ty: &CompileType, name: &str) -> Option<Co
         | (CompileType::Meta(MetaType::Item), "TypeDeclarationItem") => Some(CompileType::Product(
             vec![CompileType::Named("TypeDeclarationKind".to_owned())],
         )),
+        (CompileType::Meta(MetaType::TypeBody), "AliasBody") => {
+            Some(CompileType::Meta(MetaType::Type))
+        }
+        (CompileType::Meta(MetaType::TypeBody), "ConstructorBody") => {
+            Some(CompileType::Product(vec![
+                CompileType::Meta(MetaType::Visibility),
+                CompileType::Meta(MetaType::Type),
+            ]))
+        }
+        (CompileType::Meta(MetaType::TypeBody), "OpaqueBody") => {
+            Some(CompileType::Product(Vec::new()))
+        }
         (CompileType::Meta(MetaType::Ident(_)), "Ident") => Some(CompileType::String),
         (CompileType::Meta(MetaType::CallExpr), "CallExpr") => Some(CompileType::Product(vec![
             CompileType::Meta(MetaType::Expr),
@@ -8875,11 +8897,16 @@ fn compile_coverage_pattern(pattern: &Pattern, ty: &CompileType) -> CompileCover
             let representation = compile_constructor_representation(ty, &nominal.name)
                 .unwrap_or(CompileType::Unknown);
             let argument = compile_coverage_pattern(&nominal.argument, &representation);
-            let arguments = match argument {
-                CompileCoveragePattern::Constructor(name, arguments) if name == "$product" => {
+            // A constructor whose payload is itself a product keeps that product
+            // as one argument; the coverage recursion then specializes its
+            // fields. Flattening it would disagree with the single payload
+            // argument `compile_type_constructors` reports.
+            let arguments = match (&representation, argument) {
+                (CompileType::Meta(MetaType::Product(_)), other) => vec![other],
+                (_, CompileCoveragePattern::Constructor(name, arguments)) if name == "$product" => {
                     arguments
                 }
-                other => vec![other],
+                (_, other) => vec![other],
             };
             CompileCoveragePattern::Constructor(nominal.name.clone(), arguments)
         }
@@ -8936,7 +8963,7 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         CompileType::Named(name) if name == "Optional" => {
             ["None", "Some"].iter().all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name)))
         }
-        CompileType::Meta(MetaType::Visibility) => ["Private", "Package", "Public", "PublicReprPackage", "PublicRepr"]
+        CompileType::Meta(MetaType::Visibility) => ["Private", "Package", "Public"]
             .iter()
             .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
         CompileType::Named(name) if name == "TypeDeclarationKind" => ["AliasDeclaration", "DistinctDeclaration", "SingletonDeclaration", "OpaqueDeclaration"]
@@ -8974,6 +9001,9 @@ fn compile_patterns_are_exhaustive(ty: &CompileType, patterns: &[&Pattern]) -> b
         }),
         CompileType::Meta(MetaType::ModifiedItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("ModifiedItem")),
         CompileType::Meta(MetaType::TypeDeclarationItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("TypeDeclarationItem")),
+        CompileType::Meta(MetaType::TypeBody) => ["AliasBody", "ConstructorBody", "OpaqueBody"]
+            .iter()
+            .all(|name| patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some(*name))),
         CompileType::Meta(MetaType::UnstructuredItem) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("UnstructuredItem")),
         CompileType::Meta(MetaType::Comma) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("Comma")),
         CompileType::Meta(MetaType::Equals) => patterns.iter().any(|pattern| compile_pattern_constructor_name(pattern) == Some("Equals")),
@@ -9167,8 +9197,6 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
             ("Private".to_owned(), Vec::new()),
             ("Package".to_owned(), Vec::new()),
             ("Public".to_owned(), Vec::new()),
-            ("PublicReprPackage".to_owned(), Vec::new()),
-            ("PublicRepr".to_owned(), Vec::new()),
         ],
         CompileType::Meta(MetaType::Item) => vec![
             (
@@ -9209,6 +9237,20 @@ fn compile_type_constructors(ty: &CompileType) -> Option<Vec<(String, Vec<Compil
                 CompileType::Meta(MetaType::Optional(Box::new(MetaType::Type))),
             ],
         )],
+        CompileType::Meta(MetaType::TypeBody) => vec![
+            (
+                "AliasBody".to_owned(),
+                vec![CompileType::Meta(MetaType::Type)],
+            ),
+            (
+                "ConstructorBody".to_owned(),
+                vec![
+                    CompileType::Meta(MetaType::Visibility),
+                    CompileType::Meta(MetaType::Type),
+                ],
+            ),
+            ("OpaqueBody".to_owned(), Vec::new()),
+        ],
         CompileType::Meta(MetaType::UnstructuredItem) => {
             vec![("UnstructuredItem".to_owned(), Vec::new())]
         }
@@ -10237,8 +10279,43 @@ fn bind_pattern(pattern: &Pattern, value: Value, environment: &mut Environment) 
     }
 }
 
+/// The structured compile-time value of one type declaration body.
+fn type_body_value(body: &staple_syntax::TypeBody) -> Value {
+    match body.kind {
+        staple_syntax::TypeBodyKind::Alias => Value::Nominal(
+            "AliasBody".to_owned(),
+            Box::new(Value::Syntax(SyntaxValue::Type(
+                body.underlying
+                    .clone()
+                    .expect("alias body has an underlying type"),
+            ))),
+        ),
+        staple_syntax::TypeBodyKind::Constructor => Value::Nominal(
+            "ConstructorBody".to_owned(),
+            Box::new(Value::Product(vec![
+                (
+                    None,
+                    Value::Syntax(SyntaxValue::Visibility(body.representation.clone())),
+                ),
+                (
+                    None,
+                    Value::Syntax(SyntaxValue::Type(
+                        body.underlying
+                            .clone()
+                            .expect("constructor body has an underlying type"),
+                    )),
+                ),
+            ])),
+        ),
+        staple_syntax::TypeBodyKind::Opaque => Value::Nominal(
+            "OpaqueBody".to_owned(),
+            Box::new(Value::Product(Vec::new())),
+        ),
+    }
+}
+
 fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> Value {
-    let kind = match declaration.kind {
+    let kind = match declaration.kind() {
         staple_syntax::TypeDeclarationKind::Alias => "AliasDeclaration",
         staple_syntax::TypeDeclarationKind::Distinct => "DistinctDeclaration",
         staple_syntax::TypeDeclarationKind::Singleton => "SingletonDeclaration",
@@ -10280,7 +10357,7 @@ fn type_declaration_item_value(declaration: &staple_syntax::TypeDeclaration) -> 
             argument: Box::new(argument),
         });
     }
-    let underlying = match &declaration.underlying {
+    let underlying = match declaration.underlying() {
         Some(ty) => Value::Nominal(
             "Some".to_owned(),
             Box::new(Value::Syntax(SyntaxValue::Type(ty.clone()))),
@@ -10375,8 +10452,6 @@ fn visibility_pattern_matches(name: &str, kind: VisibilityKind) -> bool {
         ("Private", VisibilityKind::Private)
             | ("Package", VisibilityKind::Package)
             | ("Public", VisibilityKind::Public)
-            | ("PublicReprPackage", VisibilityKind::PublicReprPackage)
-            | ("PublicRepr", VisibilityKind::PublicRepr)
     )
 }
 
@@ -10415,6 +10490,12 @@ fn meta_type_matches_value(expected: &MetaType, value: &Value) -> bool {
         }
         (MetaType::TypeDeclarationItem, Value::Syntax(SyntaxValue::Item(item))) => {
             matches!(item.as_ref(), Item::TypeDeclaration(_))
+        }
+        (MetaType::TypeBody, Value::Nominal(name, _)) => {
+            matches!(
+                name.as_str(),
+                "AliasBody" | "ConstructorBody" | "OpaqueBody"
+            )
         }
         (MetaType::UnstructuredItem, Value::Syntax(SyntaxValue::Item(item))) => {
             !matches!(item.as_ref(), Item::Modified(_) | Item::TypeDeclaration(_))
@@ -10707,7 +10788,11 @@ fn substitute_block_item(
             for bound in &mut declaration.default_bounds {
                 substitute_default_bound(bound, environment, diagnostics)?;
             }
-            if let Some(underlying) = &mut declaration.underlying {
+            if let Some(underlying) = declaration
+                .body
+                .as_mut()
+                .and_then(|body| body.underlying.as_mut())
+            {
                 substitute_type(underlying, environment, diagnostics)?;
             }
         }
@@ -10804,7 +10889,7 @@ fn block_item_supported(item: &Item) -> bool {
         Item::Submodule(submodule) => submodule.visibility == Visibility::Private,
         Item::TypeDeclaration(declaration) => {
             declaration.visibility == Visibility::Private
-                && declaration.representation_visibility == Visibility::Private
+                && declaration.representation_visibility() == Visibility::Private
         }
         Item::UseDeclaration(declaration) => declaration.visibility == Visibility::Private,
         Item::Modified(_)
@@ -11299,7 +11384,11 @@ fn substitute_item(
             for bound in &mut declaration.default_bounds {
                 substitute_default_bound(bound, environment, diagnostics)?;
             }
-            if let Some(underlying) = &mut declaration.underlying {
+            if let Some(underlying) = declaration
+                .body
+                .as_mut()
+                .and_then(|body| body.underlying.as_mut())
+            {
                 substitute_type(underlying, environment, diagnostics)?;
             }
         }
@@ -11310,6 +11399,9 @@ fn substitute_item(
                 environment,
                 diagnostics,
             )?;
+            if let Some(target) = &mut submodule.companion_target {
+                substitute_type(target, environment, diagnostics)?;
+            }
             substitute_item_list(&mut submodule.module.items, environment, diagnostics)?;
         }
         Item::UseDeclaration(declaration) => {
@@ -11338,80 +11430,22 @@ fn apply_visibility_to_item(
     if let Item::Modified(modified) = item {
         return apply_visibility_to_item(&mut modified.item, kind, span, diagnostics);
     }
-    let name_visibility = match kind {
+    let visibility = match kind {
         VisibilityKind::Private => Visibility::Private,
         VisibilityKind::Package => Visibility::Package,
-        VisibilityKind::Public | VisibilityKind::PublicReprPackage | VisibilityKind::PublicRepr => {
-            Visibility::Public
-        }
+        VisibilityKind::Public => Visibility::Public,
     };
-    let representation_visibility = match kind {
-        VisibilityKind::PublicReprPackage => Visibility::Package,
-        VisibilityKind::PublicRepr => Visibility::Public,
-        _ => Visibility::Private,
-    };
-    let representation_modifier = matches!(
-        kind,
-        VisibilityKind::PublicRepr | VisibilityKind::PublicReprPackage
-    );
     match item {
-        Item::ExternBlock(block) if !representation_modifier => block.visibility = name_visibility,
-        Item::Submodule(submodule) if !representation_modifier => {
-            submodule.visibility = name_visibility
-        }
-        Item::UseDeclaration(declaration) if !representation_modifier => {
-            declaration.visibility = name_visibility
-        }
-        Item::TypeDeclaration(declaration) => {
-            declaration.visibility = name_visibility;
-            declaration.representation_visibility = representation_visibility;
-            if representation_modifier
-                && !matches!(
-                    declaration.kind,
-                    staple_syntax::TypeDeclarationKind::Distinct
-                        | staple_syntax::TypeDeclarationKind::Singleton
-                )
-            {
-                diagnostics.push(Diagnostic::new(
-                    span,
-                    if kind == VisibilityKind::PublicRepr {
-                        "`PublicRepr` visibility requires a represented distinct type"
-                    } else {
-                        "`PublicReprPackage` visibility requires a represented distinct type"
-                    },
-                ));
-                return None;
-            }
-        }
-        Item::TraitDeclaration(declaration) if !representation_modifier => {
-            declaration.visibility = name_visibility
-        }
-        Item::Binding(binding) => {
-            if representation_modifier {
-                diagnostics.push(Diagnostic::new(
-                    span,
-                    if kind == VisibilityKind::PublicRepr {
-                        "`PublicRepr` visibility may only be applied to a represented distinct type"
-                    } else {
-                        "`PublicReprPackage` visibility may only be applied to a represented distinct type"
-                    },
-                ));
-                return None;
-            }
-            binding.visibility = name_visibility;
-        }
+        Item::ExternBlock(block) => block.visibility = visibility,
+        Item::Submodule(submodule) => submodule.visibility = visibility,
+        Item::UseDeclaration(declaration) => declaration.visibility = visibility,
+        Item::TypeDeclaration(declaration) => declaration.visibility = visibility,
+        Item::TraitDeclaration(declaration) => declaration.visibility = visibility,
+        Item::Binding(binding) => binding.visibility = visibility,
         _ => {
             diagnostics.push(Diagnostic::new(
                 span,
-                if representation_modifier {
-                    if kind == VisibilityKind::PublicRepr {
-                        "`PublicRepr` visibility may only be applied to a represented distinct type"
-                    } else {
-                        "`PublicReprPackage` visibility may only be applied to a represented distinct type"
-                    }
-                } else {
-                    "visibility may only be spliced onto `let`, `def`, `type`, `extern`, or `trait` declarations"
-                },
+                "visibility may only be spliced onto `let`, `def`, `type`, `extern`, or `trait` declarations",
             ));
             return None;
         }
@@ -11908,6 +11942,9 @@ fn freshen_block_item(expander: &mut MacroExpander, item: &mut Item, module: Mod
         Item::Submodule(submodule) => {
             expander.freshen_syntax(&mut submodule.syntax, module, mark);
             expander.freshen_syntax(&mut submodule.module.syntax, module, mark);
+            if let Some(target) = &mut submodule.companion_target {
+                freshen_type(expander, target, module, mark);
+            }
             for item in &mut submodule.module.items {
                 freshen_item(expander, item, module, mark);
             }
@@ -11932,7 +11969,11 @@ fn freshen_block_item(expander: &mut MacroExpander, item: &mut Item, module: Mod
             for bound in &mut declaration.default_bounds {
                 freshen_default_bound(expander, bound, module, mark);
             }
-            if let Some(underlying) = &mut declaration.underlying {
+            if let Some(underlying) = declaration
+                .body
+                .as_mut()
+                .and_then(|body| body.underlying.as_mut())
+            {
                 freshen_type(expander, underlying, module, mark);
             }
         }
@@ -12089,7 +12130,11 @@ fn freshen_item(expander: &mut MacroExpander, item: &mut Item, module: ModuleId,
             for bound in &mut declaration.default_bounds {
                 freshen_default_bound(expander, bound, module, mark);
             }
-            if let Some(underlying) = &mut declaration.underlying {
+            if let Some(underlying) = declaration
+                .body
+                .as_mut()
+                .and_then(|body| body.underlying.as_mut())
+            {
                 freshen_type(expander, underlying, module, mark);
             }
         }

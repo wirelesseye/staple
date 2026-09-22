@@ -3,7 +3,7 @@ use staple_compiler::{
     CheckedMutation, CheckedType, CodeGenerator, NameResolver, ProgramLoader,
     RecursiveConstruction, TypeChecker,
 };
-use staple_syntax::{Diagnostic, Item, parse};
+use staple_syntax::{Diagnostic, Item, Type, parse};
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -374,8 +374,8 @@ fn specializes_generic_effect_parameters() {
 fn checks_effect_parameterized_type_declarations() {
     type_check(concat!(
         "use std.io.(IO, println)\n",
-        "type alias Callback{E} = () ->{E} ()\n",
-        "type alias Handler{E} T = T ->{E} ()\n",
+        "type Callback{E} = alias () ->{E} ()\n",
+        "type Handler{E} T = alias T ->{E} ()\n",
         "let pure: Callback = () => ()\n",
         "let io: Callback{IO} = () => println \"hello\"\n",
         "let stateful: Handler{state} I32 = value => ()\n",
@@ -905,8 +905,8 @@ fn infers_open_effect_rows_and_checks_fixed_effects() {
 #[test]
 fn infers_checks_and_lowers_typed_resources() {
     let module = type_check(concat!(
-        "type Clock = (now: () -> I32)\n",
-        "type Logger = (write: I32 -> ())\n",
+        "type Clock = ctor (now: () -> I32)\n",
+        "type Logger = ctor (write: I32 -> ())\n",
         "def system_clock = Clock (now: () => 41)\n",
         "def logger = Logger (write: value => ())\n",
         "def read: () ->{Clock} I32 = () => (resource Clock).now ()\n",
@@ -1133,7 +1133,7 @@ fn rejects_invalid_resource_contracts_and_types() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Clock = (now: () -> I32)\n",
+            "type Clock = ctor (now: () -> I32)\n",
             "def need = () => (resource Clock).now ()\n",
             "def invalid: () ->{} I32 = () => need ()\n",
         )))
@@ -1149,8 +1149,8 @@ fn rejects_invalid_resource_contracts_and_types() {
 fn mutable_and_non_copy_resources_follow_parameter_ownership() {
     let module = type_check(concat!(
         "use std.cinterop.*\n",
-        "type Counter = (value: I32)\n",
-        "type Handle = CString\n",
+        "type Counter = ctor (value: I32)\n",
+        "type Handle = ctor CString\n",
         "def increment: () ->{mut Counter} () = () => {\n",
         "  (resource Counter).value = (resource Counter).value + 1\n",
         "}\n",
@@ -1180,7 +1180,7 @@ fn mutable_and_non_copy_resources_follow_parameter_ownership() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.cinterop.*\n",
-            "type Handle = CString\n",
+            "type Handle = ctor CString\n",
             "def take: move Handle -> () = move value => ()\n",
             "def invalid: () ->{Handle} () = () => take (resource Handle)\n",
         )))
@@ -1193,7 +1193,7 @@ fn mutable_and_non_copy_resources_follow_parameter_ownership() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Counter = (value: I32)\n",
+            "type Counter = ctor (value: I32)\n",
             "def increment: () ->{mut Counter} () = () => {\n",
             "  (resource Counter).value = 1\n",
             "}\n",
@@ -1209,7 +1209,7 @@ fn mutable_and_non_copy_resources_follow_parameter_ownership() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Counter = (value: I32)\n",
+            "type Counter = ctor (value: I32)\n",
             "let counter = Counter (value: 0)\n",
             "with mut Counter = counter { () }\n",
         )))
@@ -1272,10 +1272,10 @@ fn allows_io_at_entry_module_top_level_but_rejects_non_builtin_opaque_resources(
 #[test]
 fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
     let module = type_check(concat!(
-        "type Clock = I32\n",
-        "type alias CurrentClock = Clock\n",
-        "type Logger = I32\n",
-        "type Box T = (value: T)\n",
+        "type Clock = ctor I32\n",
+        "type CurrentClock = alias Clock\n",
+        "type Logger = ctor I32\n",
+        "type Box T = ctor (value: T)\n",
         "trait Observe T { observe: T ->{Clock} Clock }\n",
         "impl Observe I32 { def observe = value => resource CurrentClock }\n",
         "macro request = _: Ident \"clock\" => parse_quote { resource CurrentClock }\n",
@@ -1325,7 +1325,7 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Clock = I32\n",
+            "type Clock = ctor I32\n",
             "def need: () ->{Clock} Clock = () => resource Clock\n",
             "let incompatible: () -> Clock = need\n",
         )))
@@ -1337,11 +1337,11 @@ fn resources_obey_alias_exactness_macro_trait_and_boundary_rules() {
 
     for (source, expected) in [
         (
-            "type Clock = I32\nresource Clock\n",
+            "type Clock = ctor I32\nresource Clock\n",
             "top-level initialization requires resources",
         ),
         (
-            "type Clock = I32\nextern \"c\" { read: () ->{Clock} Clock }\n",
+            "type Clock = ctor I32\nextern \"c\" { read: () ->{Clock} Clock }\n",
             "external functions cannot require Staple resources",
         ),
     ] {
@@ -1402,7 +1402,9 @@ fn marks_compiler_owned_recursive_constructors() {
 #[test]
 fn rejects_a_recursive_type_that_omits_the_self_reference_arguments() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("type Node T = (value: T, next: Option Node)\n"))
+        .check(resolve(
+            "type Node T = ctor (value: T, next: Option Node)\n",
+        ))
         .expect_err_diagnostics("a bare generic self-reference is not a value type");
     assert!(
         diagnostics.iter().any(|diagnostic| {
@@ -1429,9 +1431,9 @@ fn rejects_a_bare_generic_type_constructor_used_as_a_value_type() {
 
 #[test]
 fn allows_a_recursive_type_guarded_by_a_recursive_constructor() {
-    type_check("type Node T = (value: T, next: Option (Ref (Node I32)))\n");
-    type_check("type List T = (head: T, tail: Option (Ref (List T)))\n");
-    type_check("type Chain = (head: I32, tail: Option (Ref Chain))\n");
+    type_check("type Node T = ctor (value: T, next: Option (Ref (Node I32)))\n");
+    type_check("type List T = ctor (head: T, tail: Option (Ref (List T)))\n");
+    type_check("type Chain = ctor (head: I32, tail: Option (Ref Chain))\n");
 }
 
 #[test]
@@ -1441,7 +1443,7 @@ fn constructs_a_recursive_value_through_its_own_indirection_arm() {
     // makes generic inference for `Ref` reconcile that placeholder against the
     // fully-resolved `Node`, which must not be reported as a conflict.
     type_check(concat!(
-        "type Node = () | (Ref Node)\n",
+        "type Node = ctor () | (Ref Node)\n",
         "let node1 = Node ()\n",
         "let node2 = Node (Ref node1)\n",
         "let node3 = Node (Ref node2)\n",
@@ -1451,7 +1453,7 @@ fn constructs_a_recursive_value_through_its_own_indirection_arm() {
 #[test]
 fn still_rejects_a_recursive_type_with_no_indirection() {
     TypeChecker::new()
-        .check(resolve("type Loop = (head: I32, tail: Loop)\n"))
+        .check(resolve("type Loop = ctor (head: I32, tail: Loop)\n"))
         .expect_err_diagnostics("a type that directly contains itself has no finite layout");
 }
 
@@ -1461,8 +1463,8 @@ fn recursive_constructor_guard_does_not_leak_into_a_nested_type() {
     // `Inner`'s own by-value self-reference.
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Inner = (here: I32, again: Inner)\n",
-            "type Outer = (inner: Option (Ref Inner))\n",
+            "type Inner = ctor (here: I32, again: Inner)\n",
+            "type Outer = ctor (inner: Option (Ref Inner))\n",
         )))
         .expect_err_diagnostics("a nested by-value cycle is still rejected");
     assert!(
@@ -1500,7 +1502,7 @@ fn string_contract_diagnostics(declaration: &str) -> Vec<String> {
     copy_directory(&root.join("stdlib"), &temporary);
     let production_string = include_str!("../../stdlib/std/string.sta");
     let production_body = production_string
-        .split_once("pub type String = Slice U8\n")
+        .split_once("pub type String = ctor Slice U8\n")
         .map(|(_, body)| body)
         .expect("production String module has its canonical declaration");
     std::fs::write(
@@ -1598,8 +1600,8 @@ fn checks_nullary_calls_inside_argument_positions() {
 #[test]
 fn supports_number_literal_types_as_generic_product_sizes() {
     let source = concat!(
-        "type alias Three = 3\n",
-        "type alias Vector T N where Natural N = (T; N)\n",
+        "type Three = alias 3\n",
+        "type Vector T N where Natural N = alias (T; N)\n",
         "let direct: (I32; Three) = (1, 2, 3)\n",
         "let generic: Vector I32 Three = direct\n",
         "def keep: <T, N where Natural N> move (T; N) -> (T; N) = move values => values\n",
@@ -1615,16 +1617,16 @@ fn supports_number_literal_types_as_generic_product_sizes() {
 #[test]
 fn number_literal_types_are_natural_usize_refinements() {
     type_check(concat!(
-        "type alias Three = 3\n",
-        "type alias Triple (T) = (T; Three)\n",
-        "type alias NaturalIdentity (N) where Natural N = N\n",
-        "type alias AlsoThree = NaturalIdentity Three\n",
+        "type Three = alias 3\n",
+        "type Triple (T) = alias (T; Three)\n",
+        "type NaturalIdentity (N) where Natural N = alias N\n",
+        "type AlsoThree = alias NaturalIdentity Three\n",
         "let exact: 3 = 3\n",
         "let widened: USize = exact\n",
     ));
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "type alias Bad (N) where Natural N = N\nlet invalid: Bad USize = 0\n",
+            "type Bad (N) where Natural N = alias N\nlet invalid: Bad USize = 0\n",
         ))
         .expect_err_diagnostics("USize must not implement Natural");
     assert!(
@@ -1659,7 +1661,7 @@ fn natural_count_parameters_drive_repeated_product_values() {
     let source = concat!(
         "def repeat: <T, N where Copy T, Natural N> T -> N -> (T; N) = value => n => (value; N)\n",
         "let repeated: (I32; 3) = repeat 7 3\n",
-        "type alias Count = 3\n",
+        "type Count = alias 3\n",
         "let local: (I32; 3) = (9; Count)\n",
     );
     let module = type_check(source);
@@ -1803,7 +1805,7 @@ fn repeated_product_rejects_value_non_copy_and_oversized_counts() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(
-            "type alias Text = String\nlet bad: (I32; 1) = (0; Text)\n",
+            "type Text = alias String\nlet bad: (I32; 1) = (0; Text)\n",
         ))
         .expect_err_diagnostics("a non-Natural type cannot be an array length");
     assert!(diagnostics.iter().any(|diagnostic| {
@@ -1980,7 +1982,7 @@ fn applies_arity_overloads_on_trait_methods() {
 #[test]
 fn applies_arity_overloads_on_companion_items() {
     let source = concat!(
-        "type Box = I32\n",
+        "type Box = ctor I32\n",
         "companion Box {\n",
         "  pub def make: I32 -> Box = value => Box value\n",
         "  pub def make: I32 * I32 -> Box = left * right => Box (left + right)\n",
@@ -1998,7 +2000,7 @@ fn applies_arity_overloads_on_companion_items() {
 #[test]
 fn preserves_product_field_defaults_through_aliases_and_type_spreads() {
     let source = concat!(
-        "type alias Point = (x: I32 = 1, y: I32 = 2)\n",
+        "type Point = alias (x: I32 = 1, y: I32 = 2)\n",
         "let point: Point = ()\n",
         "let extended: (...Point, z: I32 = 3) = ()\n",
         "let answer: I32 = point.x + extended.y + extended.z\n",
@@ -2221,7 +2223,7 @@ fn rejects_invalid_contextual_named_initializers_and_labels() {
             "duplicate product field name `a`",
         ),
         (
-            "type alias Pair = (a: I32, b: I32)\ndef value: (...Pair, a: I32)\n",
+            "type Pair = alias (a: I32, b: I32)\ndef value: (...Pair, a: I32)\n",
             "duplicate product field name `a`",
         ),
     ];
@@ -2318,7 +2320,7 @@ fn type_checks_the_two_binding_mutability_forms() {
     // effect covers the corresponding position. Match binders still use an
     // explicit `mut` pattern.
     type_check(concat!(
-        "type Box = I32\n",
+        "type Box = ctor I32\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
         "def field_write: mut Ref (x: I32, y: I32) -> () = mut value => { value.x = 1 }\n",
         "def matched = (value: Box) => match value { Box (mut inner) => { inner = 2; inner } }\n",
@@ -2518,7 +2520,7 @@ fn rejects_an_impl_member_that_mutates_beyond_its_trait_declaration() {
 #[test]
 fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
     let module = type_check(concat!(
-        "type MyInt = Ref I32\n",
+        "type MyInt = ctor Ref I32\n",
         "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
         "  let MyInt mut inner = my_int\n",
         "  Ref.replace inner value\n",
@@ -2533,7 +2535,7 @@ fn an_explicit_mut_effect_passes_through_a_ref_crossing_local_alias() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type MyInt = Ref I32\n",
+            "type MyInt = ctor Ref I32\n",
             "def mutate_my_int: (mut MyInt, I32) -> () = (mut my_int, value) => {\n",
             "  let MyInt mut inner = my_int\n",
             "  Ref.replace inner value\n",
@@ -2569,7 +2571,7 @@ fn llvm_parameter_count(llvm: &str, function: &str) -> usize {
 #[test]
 fn a_mut_effect_adds_no_hidden_parameter_to_the_abi() {
     let module = type_check(concat!(
-        "type Clock = I32\n",
+        "type Clock = ctor I32\n",
         "def f: mut Ref (I32, I32) -> () = mut p => { p.0 = 1 }\n",
         "def g: mut Ref (I32, I32) ->{Clock} () = mut p => { p.0 = 1 }\n",
     ));
@@ -2669,7 +2671,7 @@ fn parameter_markers_must_match_explicit_function_and_trait_effects() {
 #[test]
 fn resource_inference_preserves_parameter_declared_mutation() {
     let module = type_check(concat!(
-        "type Clock = I32\n",
+        "type Clock = ctor I32\n",
         "def use_both = (mut value: Clock) => { value = resource Clock }\n",
     ));
     let function = module
@@ -2800,7 +2802,7 @@ fn lowers_move_only_mutation_reinitialization_and_captured_cells() {
 #[test]
 fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
     type_check(concat!(
-        "type Box = I32\n",
+        "type Box = ctor I32\n",
         "type Empty\n",
         "def parameter = (value: I32) => { let mut value = value; value = value + 1; value }\n",
         "def matched = (value: Box | Empty) => match value { Box (mut inner) => { inner = 3; inner }, Empty() => 0 }\n",
@@ -2809,7 +2811,7 @@ fn supports_mutable_parameter_match_and_copy_ref_pattern_binders() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Resource = I32\n",
+            "type Resource = ctor I32\n",
             "impl Drop Resource { def drop = Resource value => () }\n",
             "def invalid = (value: Ref Resource) => { let Ref (mut inner) = value; inner }\n",
         )))
@@ -2890,7 +2892,7 @@ fn derives_trait_delegated_product_indexing() {
 #[test]
 fn delegates_brackets_to_explicit_indexing_implementations() {
     let source = concat!(
-        "type Target = I32\n",
+        "type Target = ctor I32\n",
         "impl Index Target String Target { def index = (target, position) => target }\n",
         "impl MutateIndex Target String Target { def mutate_index = (mut target, position, move value) => () }\n",
         "let selected: Target = (Target 4)[\"key\"]\n",
@@ -2982,7 +2984,7 @@ fn delegates_indexing_through_refs_to_the_payload() {
         "let fixed: Ref (I32; 3) = Ref (1, 2, 3)\n",
         "let values: Slice I32 = fixed\n",
         "def slice_at: (Ref (Slice I32), USize) -> I32 = (slice, position) => slice[position]\n",
-        "type Keyed = (key: String, value: I32)\n",
+        "type Keyed = ctor (key: String, value: I32)\n",
         "impl Index Keyed String I32 { def index = (entry, key) => entry.value }\n",
         "def keyed_at: (Ref Keyed, String) -> I32 = (entry, key) => entry[key]\n",
         "def nested_at: (Ref (Ref (I32; 3)), USize) -> I32 = (values, position) => values[position]\n",
@@ -3007,7 +3009,7 @@ fn delegates_indexed_assignment_through_refs_to_the_payload() {
         "def set_list = (mut list: Ref (List I32), position: USize, value: I32) => { list[position] = value }\n",
         "def set_nested = (mut values: Ref (Ref (I32; 2)), position: USize, value: I32) => { values[position] = value }\n",
         "def set_fixed = (mut values: Ref (I32; 2), position: USize, value: I32) => { values[position] = value }\n",
-        "type Counter = I32\n",
+        "type Counter = ctor I32\n",
         "impl MutateIndex Counter String I32 { def mutate_index = (mut counter, key, move value) => () }\n",
         "def set_keyed = (mut counter: Ref Counter, key: String, value: I32) => { counter[key] = value }\n",
         "let list = List.of (1, 2, 3)\n",
@@ -3072,7 +3074,7 @@ fn indexes_slices_through_the_standard_library_implementation() {
 fn rejects_explicit_indexing_implementations_for_ref_targets() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Target = I32\n",
+            "type Target = ctor I32\n",
             "impl Index Target String Target { def index = (target, position) => target }\n",
             "impl Index (Ref Target) String Target { def index = (target, position) => target }\n",
         )))
@@ -3216,7 +3218,7 @@ fn handles_array_edges_and_limits() {
 fn aliases_complete_slice_references_and_reject_ffi() {
     type_check(concat!(
         "use std.slice.Slice\n",
-        "type alias Ints = Slice I32\n",
+        "type Ints = alias Slice I32\n",
         "let fixed: Ref (I32; 2) = Ref (1, 2)\n",
         "let values: Ints = fixed\n",
         "let count: USize = Slice.length values\n",
@@ -3292,15 +3294,15 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
         "impl Default (I32, String) { def default = () => (0, \"\") }\n",
         "impl Default () { def default = () => () }\n",
         concat!(
-            "type Local = I32\n",
+            "type Local = ctor I32\n",
             "impl Default (Local, I32) { def default = () => (Local 0, 0) }\n",
         ),
         concat!(
-            "type Local = I32\n",
+            "type Local = ctor I32\n",
             "impl Default (Ref Local) { def default = () => loop {} }\n",
         ),
         concat!(
-            "type alias LocalAlias = I32\n",
+            "type LocalAlias = alias I32\n",
             "impl Default LocalAlias { def default = () => 0 }\n",
         ),
     ] {
@@ -3317,13 +3319,13 @@ fn enforces_trait_implementation_orphan_rules_without_a_manifest() {
     }
 
     type_check(concat!(
-        "type Local = I32\n",
+        "type Local = ctor I32\n",
         "impl Default Local { def default = () => Local 0 }\n",
         "impl !Copy Local {}\n",
         "let value: Local = default ()\n",
     ));
     type_check(concat!(
-        "type Generic T = T\n",
+        "type Generic T = ctor T\n",
         "impl Default (Generic I32) { def default = () => Generic 0 }\n",
         "let value: Generic I32 = default ()\n",
     ));
@@ -3431,8 +3433,8 @@ fn checks_general_satisfies_expressions_and_contextually_types_functions() {
 #[test]
 fn infers_and_lowers_nominal_sums_with_propagation() {
     let module = type_check(concat!(
-        "pub(repr) type Ok T = T\n",
-        "pub(repr) type IOError = String\n",
+        "pub type Ok T = pub ctor T\n",
+        "pub type IOError = pub ctor String\n",
         "def read: String -> Ok String | IOError = path => Ok(path)\n",
         "def parse = (path: String) => { let Ok(file)? = read(path); Ok(file) }\n",
         "parse \"input\"\n",
@@ -3462,7 +3464,7 @@ fn infers_and_lowers_nominal_sums_with_propagation() {
 #[test]
 fn exhaustively_matches_sum_values_and_destructures_payloads() {
     let module = type_check(concat!(
-        "pub(repr) type IOError = String\n",
+        "pub type IOError = pub ctor String\n",
         "def choose = result: Ok I32 | IOError => match result {\n",
         "  Ok value => value,\n",
         "  IOError _ => 0,\n",
@@ -3493,7 +3495,7 @@ fn exhaustively_matches_sum_values_and_destructures_payloads() {
 #[test]
 fn matches_singletons_and_joins_nominal_arm_results() {
     let module = type_check(concat!(
-        "pub(repr) type IOError = String\n",
+        "pub type IOError = pub ctor String\n",
         "def choose = value: Bool => match value {\n",
         "  True => Ok(1),\n",
         "  False => IOError(\"no\"),\n",
@@ -3523,7 +3525,7 @@ fn matches_singletons_and_joins_nominal_arm_results() {
 #[test]
 fn supports_match_catch_alls_wildcard_parameters_and_returning_arms() {
     let module = type_check(concat!(
-        "pub(repr) type IOError = String\n",
+        "pub type IOError = pub ctor String\n",
         "def preserve: (Ok I32 | IOError) -> Ok I32 | IOError = result => match result {\n",
         "  Ok value => Ok(value),\n",
         "  other => other,\n",
@@ -3551,7 +3553,7 @@ fn supports_match_catch_alls_wildcard_parameters_and_returning_arms() {
 #[test]
 fn matches_values_of_any_runtime_type() {
     let module = type_check(concat!(
-        "pub(repr) type Wrapped = I32\n",
+        "pub type Wrapped = pub ctor I32\n",
         "def integer = value: I32 => match value { number => number }\n",
         "def float = value: F64 => match value { _: F64 => value }\n",
         "def identity = value: I32 => value\n",
@@ -3602,7 +3604,7 @@ fn rejects_invalid_match_patterns_and_coverage() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub(repr) type IOError = String\n",
+            "pub type IOError = pub ctor String\n",
             "def invalid = result: Ok I32 | IOError => match result { Ok value => value, }\n",
             "invalid (Ok 1)\n",
         )))
@@ -3614,7 +3616,7 @@ fn rejects_invalid_match_patterns_and_coverage() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub(repr) type IOError = String\n",
+            "pub type IOError = pub ctor String\n",
             "def invalid = result: Ok I32 | IOError => match result {\n",
             "  Ok value => value,\n",
             "  Ok other => other,\n",
@@ -3707,9 +3709,9 @@ fn checks_product_match_coverage_and_reachability() {
 #[test]
 fn injects_and_widens_sum_values() {
     let module = type_check(concat!(
-        "pub(repr) type IOError = String\n",
-        "pub(repr) type ParseError = String\n",
-        "type alias Result T = Ok T | IOError\n",
+        "pub type IOError = pub ctor String\n",
+        "pub type ParseError = pub ctor String\n",
+        "type Result T = alias Ok T | IOError\n",
         "def small: () -> Ok I32 | IOError = () => Ok(1)\n",
         "let reordered: IOError | Ok I32 = small()\n",
         "let aliased: Result I32 = reordered\n",
@@ -3739,8 +3741,8 @@ fn injects_and_widens_sum_values() {
 #[test]
 fn propagates_each_residual_variant_and_joins_explicit_returns() {
     let module = type_check(concat!(
-        "pub(repr) type IOError = String\n",
-        "pub(repr) type ParseError = String\n",
+        "pub type IOError = pub ctor String\n",
+        "pub type ParseError = pub ctor String\n",
         "def fail: () -> Ok I32 | IOError = () => IOError(\"io\")\n",
         "def parse = () => { let Ok(value)? = fail(); return ParseError(\"parse\"); }\n",
         "parse()\n",
@@ -3824,7 +3826,7 @@ fn rejects_unsized_sum_alternatives_and_ambiguous_nominal_patterns() {
 fn rejects_invalid_propagation_and_sum_ffi() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub(repr) type IOError = String\n",
+            "pub type IOError = pub ctor String\n",
             "def invalid = () => { let Ok(value)? = Ok(1); Ok(value) }\n",
         )))
         .expect_err_diagnostics("propagation requires a sum");
@@ -3836,7 +3838,7 @@ fn rejects_invalid_propagation_and_sum_ffi() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub(repr) type IOError = String\n",
+            "pub type IOError = pub ctor String\n",
             "def read: () -> Ok I32 | IOError = () => Ok(1)\n",
             "def invalid: () -> Ok I32 = () => { let Ok(value)? = read(); Ok(value) }\n",
         )))
@@ -3849,7 +3851,7 @@ fn rejects_invalid_propagation_and_sum_ffi() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "pub(repr) type IOError = String\n",
+            "pub type IOError = pub ctor String\n",
             "extern \"c\" { invalid: () -> Ok I32 | IOError }\n",
         )))
         .expect_err_diagnostics("sum ABI should remain internal");
@@ -3867,7 +3869,7 @@ fn rejects_propagation_outside_functions_and_non_nominal_roots() {
         .with_standard_library_root(root.join("stdlib"))
         .load_source(
             concat!(
-                "pub(repr) type IOError = String\n",
+                "pub type IOError = pub ctor String\n",
                 "let Ok(value)? = Ok(1)\n",
                 "def invalid = () => { let (Ok(value), other)? = (Ok(1), 2); Ok(value) }\n",
             ),
@@ -4093,7 +4095,7 @@ fn binds_whole_copy_values_while_destructuring_them() {
 #[test]
 fn at_patterns_are_structural_in_matches_and_propagation() {
     let module = type_check(concat!(
-        "pub(repr) type IOError = String\n",
+        "pub type IOError = pub ctor String\n",
         "def read: () -> Ok I32 | IOError = () => Ok(42)\n",
         "def choose = pair: (Bool, I32) => match pair {\n",
         "  whole@(True(), value) => whole.1 + value,\n",
@@ -4151,7 +4153,7 @@ fn compile_time_at_patterns_bind_whole_syntax_values() {
 
 #[test]
 fn type_checks_transparent_aliases() {
-    type_check("type alias number = I32\nlet answer: number = 42\n");
+    type_check("type number = alias I32\nlet answer: number = 42\n");
 }
 
 #[test]
@@ -4293,7 +4295,9 @@ fn rejects_invalid_float_contexts_and_float_ord() {
 #[test]
 fn requires_only_the_core_ordering_methods() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("type Text = String\nimpl PartialOrd Text {}\n"))
+        .check(resolve(
+            "type Text = ctor String\nimpl PartialOrd Text {}\n",
+        ))
         .expect_err_diagnostics("partial_cmp is required");
     assert!(
         diagnostics
@@ -4302,7 +4306,7 @@ fn requires_only_the_core_ordering_methods() {
     );
 
     let diagnostics = TypeChecker::new()
-        .check(resolve("type Text = String\nimpl Ord Text {}\n"))
+        .check(resolve("type Text = ctor String\nimpl Ord Text {}\n"))
         .expect_err_diagnostics("cmp is required");
     assert!(
         diagnostics
@@ -4314,7 +4318,7 @@ fn requires_only_the_core_ordering_methods() {
 #[test]
 fn requires_only_the_core_equality_method() {
     let diagnostics = TypeChecker::new()
-        .check(resolve("type Text = String\nimpl Eq Text {}\n"))
+        .check(resolve("type Text = ctor String\nimpl Eq Text {}\n"))
         .expect_err_diagnostics("eq is required");
     assert!(
         diagnostics
@@ -4323,7 +4327,7 @@ fn requires_only_the_core_equality_method() {
     );
 
     let module = type_check(concat!(
-        "type Point = (x: I32, y: I32)\n",
+        "type Point = ctor (x: I32, y: I32)\n",
         "impl Eq Point { def eq = (left, right) => left.x == right.x && left.y == right.y }\n",
         "let a: Point = Point (x: 1, y: 2)\n",
         "let b: Point = Point (x: 1, y: 2)\n",
@@ -4448,7 +4452,7 @@ fn syntax_types_and_quote_require_an_explicit_import() {
 
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("type alias Captured = SyntaxNode\n", root)
+        .load_source("type Captured = alias SyntaxNode\n", root)
         .expect("source should load without importing syntax names");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
@@ -4588,7 +4592,7 @@ fn buffer_intrinsics_type_check_and_compile() {
 fn buffer_and_list_are_move_only_and_clone_their_elements() {
     let module = type_check(concat!(
         "use std.buffer.Buffer\nuse std.slice.Slice\n",
-        "type Resource = I32\n",
+        "type Resource = ctor I32\n",
         "impl !Copy Resource {}\n",
         "impl Clone Resource { def clone = Resource value => Resource value }\n",
         "def exercise: () -> () = () => {\n",
@@ -4652,7 +4656,7 @@ fn buffer_and_list_are_move_only_and_clone_their_elements() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.buffer.Buffer\n",
-            "type Resource = I32\n",
+            "type Resource = ctor I32\n",
             "impl !Copy Resource {}\n",
             "def invalid: Buffer Resource -> Buffer Resource = buffer => Clone.clone buffer\n",
         )))
@@ -4764,7 +4768,7 @@ fn companion_where_bound_resolves_independently_for_every_member() {
     // failed with "trait bound is not satisfied" even when the bound
     // plainly held.
     let module = type_check(concat!(
-        "pub(repr) type Box T = (value: T)\n",
+        "pub type Box T = pub ctor (value: T)\n",
         "companion<T where Copy T> Box T {\n",
         "    pub def first: Box T -> T = Box value => value\n",
         "    pub def second: Box T -> T = Box value => value\n",
@@ -4794,7 +4798,7 @@ fn macro_declared_inside_a_companion_resolves_as_type_dot_macro() {
     // without repeating the import inside the companion itself.
     let module = type_check(concat!(
         "use std.syntax.*\n",
-        "pub(repr) type Box T = (value: T)\n",
+        "pub type Box T = pub ctor (value: T)\n",
         "companion<T> Box T {\n",
         "    pub macro of = value: Expr => parse_quote { Box (value: $value) }\n",
         "}\n",
@@ -4898,7 +4902,7 @@ fn wrapping_a_curried_mut_effect_call_attributes_the_right_argument() {
 #[test]
 fn validates_the_standard_library_string_representation() {
     let valid_diagnostics = string_contract_diagnostics(concat!(
-        "pub type String = Slice U8\n",
+        "pub type String = ctor Slice U8\n",
         "def exposed_bytes: String -> Slice U8 = String value => value\n",
         "def matched_bytes: String -> Slice U8 = value => match value { String bytes => bytes, }\n",
     ));
@@ -4913,15 +4917,15 @@ fn validates_the_standard_library_string_representation() {
             "standard library type `String` must be a represented distinct type",
         ),
         (
-            "pub(repr) type String = Slice U8\n",
+            "pub type String = pub ctor Slice U8\n",
             "standard library type `String` must keep its representation private",
         ),
         (
-            "pub type String T = Slice U8\n",
+            "pub type String T = ctor Slice U8\n",
             "standard library type `String` must not accept compile-time arguments",
         ),
         (
-            "pub type String = Slice I8\n",
+            "pub type String = ctor Slice I8\n",
             "standard library type `String` must be represented by `Slice U8`, found `Slice I8`",
         ),
     ] {
@@ -5503,7 +5507,7 @@ fn block_modifiers_may_generate_supported_declarations() {
     let module = type_check(concat!(
         "mod helpers { pub def value: I32 = 42 }\n",
         "macro @declarations: Item -> Sequence Item = _ => parse_quote {\n",
-        "    type alias Local = I32\n",
+        "    type Local = alias I32\n",
         "    use helpers.value\n",
         "    mod local { pub def extra: I32 = 1 }\n",
         "    let generated: Local = value + local.extra\n",
@@ -5643,12 +5647,10 @@ fn expands_metadata_aware_macros_and_contextual_visibility_splices() {
         "    Private => parse_quote { 1 },\n",
         "    Package => parse_quote { 2 },\n",
         "    Public => parse_quote { 3 },\n",
-        "    PublicReprPackage => parse_quote { 4 },\n",
-        "    PublicRepr => parse_quote { 5 },\n",
         "}\n",
         "macro define_alias = metadata: MacroCallMetadata * ty: Type => {\n",
         "    let actual = normalize_visibility metadata.visibility\n",
-        "    parse_quote { $actual type alias Generated = $ty }\n",
+        "    parse_quote { $actual type Generated = alias $ty }\n",
         "}\n",
         "macro classify = before: Expr * vis: Visibility * after: Expr => {\n",
         "    let number = visibility_number vis\n",
@@ -5661,8 +5663,6 @@ fn expands_metadata_aware_macros_and_contextual_visibility_splices() {
         "let implicit: I32 = classify 10 20\n",
         "let public: I32 = classify 10 pub 20\n",
         "let package_vis: I32 = classify 10 pub(package) 20\n",
-        "let package_repr: I32 = classify 10 pub(repr(package)) 20\n",
-        "let represented: I32 = classify 10 pub(repr) 20\n",
         "let private_call: I32 = call_visibility\n",
         "let first_private: I32 = first_visibility 0\n",
         "let first_public: I32 = first_visibility pub 0\n",
@@ -5679,8 +5679,8 @@ fn expands_metadata_aware_macros_and_contextual_visibility_splices() {
 #[test]
 fn expands_standard_typegroup_into_module_variants_and_alias() {
     let module = type_check(concat!(
-        "pub(repr) typegroup Pattern {\n",
-        "    Literal String,\n",
+        "pub typegroup Pattern {\n",
+        "    Literal = pub ctor String,\n",
         "    Wildcard,\n",
         "}\n",
         "pub use Pattern.*\n",
@@ -5702,7 +5702,7 @@ fn typegroup_applies_call_modifiers_to_the_alias_and_entry_modifiers_to_variants
         "typegroup Tagged T {\n",
         "    ///outer\n",
         "    @doc(\"inner\")\n",
-        "    Marked T,\n",
+        "    Marked = ctor T,\n",
         "    Plain,\n",
         "}\n",
     ));
@@ -5788,7 +5788,7 @@ fn typegroup_alias_keeps_multi_line_doc_comment_order() {
 #[test]
 fn resolves_and_merges_type_companion_items() {
     type_check(concat!(
-        "type alias Animal = I32\n",
+        "type Animal = alias I32\n",
         "let offset: I32 = 1\n",
         "companion Animal { pub def move_to = animal: Animal => animal + offset }\n",
         "companion Animal { pub def stop = animal: Animal => animal }\n",
@@ -5796,7 +5796,7 @@ fn resolves_and_merges_type_companion_items() {
         "let stopped: Animal = Animal.stop moved\n",
     ));
     type_check(concat!(
-        "type alias Box T = (value: T)\n",
+        "type Box T = alias (value: T)\n",
         "companion<T> Box T { pub def box_identity: move Box T -> Box T = move box => box }\n",
         "let identity: Box I32 -> Box I32 = Box.box_identity\n",
     ));
@@ -5833,7 +5833,7 @@ fn typegroup_companion_merges_with_a_hand_written_companion_block() {
 #[test]
 fn type_checks_companion_method_call_syntax() {
     let module = type_check(concat!(
-        "type alias Animal = I32\n",
+        "type Animal = alias I32\n",
         "companion Animal { pub def move_to: Animal -> (F32, F32) -> Animal = animal => _ => animal }\n",
         "let animal: Animal = 1\n",
         "let moved: Animal = animal^move_to (1.0, 1.0)\n",
@@ -5851,7 +5851,7 @@ fn type_checks_companion_method_call_syntax() {
 #[test]
 fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
     let module = type_check(concat!(
-        "type alias Animal = I32\n",
+        "type Animal = alias I32\n",
         "companion Animal {\n",
         "    pub def move_to: Animal * (F32, F32) -> Animal = animal * _ => animal\n",
         "    pub def teleport: Animal * F32 * F32 -> Animal = animal * _ * _ => animal\n",
@@ -5875,7 +5875,7 @@ fn type_checks_method_call_syntax_for_juxtaposed_companion_methods() {
 fn rejects_incomplete_method_call_on_a_juxtaposed_companion_method() {
     TypeChecker::new()
         .check(resolve(concat!(
-            "type alias Animal = I32\n",
+            "type Animal = alias I32\n",
             "companion Animal {\n",
             "    pub def move_to: Animal * (F32, F32) -> Animal = animal * _ => animal\n",
             "}\n",
@@ -5890,21 +5890,21 @@ fn rejects_incomplete_method_call_on_a_juxtaposed_companion_method() {
 #[test]
 fn typegroup_supports_generic_groups_and_reexports_their_variants() {
     let module = type_check(concat!(
-        "pub(repr) typegroup Maybe T {\n",
+        "pub typegroup Maybe T {\n",
         "    Missing,\n",
-        "    Present T,\n",
+        "    Present = pub ctor T,\n",
         "}\n",
         "pub use Maybe.*\n",
         "let missing: Maybe I32 = Missing\n",
         "let present: Maybe I32 = Present 1\n",
         "let qualified: Maybe String = Maybe.Present \"value\"\n",
-        "pub(repr) typegroup Either (L, R,) {\n",
-        "    Left L,\n",
-        "    Right R,\n",
+        "pub typegroup Either (L, R,) {\n",
+        "    Left = pub ctor L,\n",
+        "    Right = pub ctor R,\n",
         "}\n",
-        "pub(repr) typegroup Mixed A (B, C) D {\n",
+        "pub typegroup Mixed A (B, C) D {\n",
         "    Empty,\n",
-        "    Value (A, B, C, D),\n",
+        "    Value = pub ctor (A, B, C, D),\n",
         "}\n",
         "let value: (I32, String, Bool, F64) = (1, \"two\", True, 4.0)\n",
         "let mixed: Mixed I32 (String, Bool) F64 = Mixed.Value value\n",
@@ -5913,6 +5913,59 @@ fn typegroup_supports_generic_groups_and_reexports_their_variants() {
     CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("generic typegroup variants and their reexports should compile");
+}
+
+#[test]
+fn typegroup_alias_variants_participate_in_the_generated_sum() {
+    let module = type_check(concat!(
+        "pub typegroup Example {\n",
+        "    Wrapped = pub ctor I32,\n",
+        "    Number = alias I32,\n",
+        "    Empty,\n",
+        "}\n",
+        "pub use Example.*\n",
+        "let wrapped: Example = Wrapped 1\n",
+        "let empty: Example = Empty\n",
+        "let number: Example.Number = 2\n",
+    ));
+    let alias = module
+        .resolved()
+        .syntax()
+        .items
+        .iter()
+        .find_map(|item| match item {
+            Item::TypeDeclaration(declaration) if declaration.name == "Example" => {
+                Some(declaration)
+            }
+            _ => None,
+        })
+        .expect("typegroup should generate its alias");
+    assert!(
+        alias
+            .underlying()
+            .is_some_and(|ty| matches!(ty, Type::Sum(_)))
+    );
+}
+
+#[test]
+fn typegroup_rejects_opaque_variants() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let program = ProgramLoader::new()
+        .with_standard_library_root(root.join("stdlib"))
+        .load_source(
+            &with_syntax_imports("typegroup Hidden { Secret = opaque, }\n"),
+            root,
+        )
+        .expect("source should parse");
+    let diagnostics = NameResolver::new()
+        .resolve_program(program)
+        .expect_err_diagnostics("opaque typegroup variants should be rejected");
+    assert!(
+        diagnostics.iter().any(|diagnostic| diagnostic
+            .message
+            .contains("opaque typegroup variants are unsupported")),
+        "expected an opaque-variant diagnostic, found {diagnostics:#?}",
+    );
 }
 
 #[test]
@@ -5957,10 +6010,8 @@ fn parse_quote_produces_visibility_result_type() {
         "    let none: Visibility = parse_quote { }\n",
         "    let package_vis: Visibility = parse_quote { pub(package) }\n",
         "    let pub_: Visibility = parse_quote { pub }\n",
-        "    let package_repr: Visibility = parse_quote { pub(repr(package)) }\n",
-        "    let repr: Visibility = parse_quote { pub(repr) }\n",
-        "    match (none, package_vis, pub_, package_repr, repr) {\n",
-        "        (Private, Package, Public, PublicReprPackage, PublicRepr) => parse_quote { 42 },\n",
+        "    match (none, package_vis, pub_) {\n",
+        "        (Private, Package, Public) => parse_quote { 42 },\n",
         "        _ => panic \"unexpected visibility values are unsupported\",\n",
         "    }\n",
         "}\n",
@@ -5969,7 +6020,7 @@ fn parse_quote_produces_visibility_result_type() {
     let context = Context::create();
     CodeGenerator::new(&context)
         .compile_module(&module)
-        .expect("private, public, and public-repr parse_quote results should construct");
+        .expect("private, package, and public parse_quote results should construct");
 }
 
 #[test]
@@ -6105,11 +6156,11 @@ fn typegroup_variants_require_an_explicit_reexport() {
 fn typegroup_supports_private_construction_compound_types_and_trailing_commas() {
     let module = type_check(concat!(
         "typegroup Local {\n",
-        "    Pair (I32, String),\n",
+        "    Pair = pub ctor (I32, String),\n",
         "    Empty,\n",
         "}\n",
-        "pub(repr) typegroup Generic {\n",
-        "    Wrapped Option I32,\n",
+        "pub typegroup Generic {\n",
+        "    Wrapped = pub ctor Option I32,\n",
         "}\n",
         "pub typegroup PublicGroup {\n",
         "    Unit,\n",
@@ -6123,11 +6174,6 @@ fn typegroup_supports_private_construction_compound_types_and_trailing_commas() 
     CodeGenerator::new(&context)
         .compile_module(&module)
         .expect("private and compound typegroups should compile");
-}
-
-#[test]
-fn public_repr_is_allowed_on_singleton_types() {
-    type_check("pub(repr) type Unit\nlet unit: Unit = Unit\n");
 }
 
 #[test]
@@ -6160,17 +6206,17 @@ fn rejects_empty_typegroups_and_top_level_optional_macro_parameters() {
 }
 
 #[test]
-fn public_repr_macro_call_can_generate_a_public_representation() {
+fn macro_call_metadata_can_generate_a_public_representation() {
     let module = type_check(concat!(
-        "macro define_box = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility type Box = I32 } }\n",
-        "pub(repr) define_box\n",
+        "macro define_box = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility type Box = pub ctor I32 } }\n",
+        "pub define_box\n",
         "let boxed: Box = Box 42\n",
     ));
     assert!(module.resolved().syntax().items.iter().any(|item| {
         matches!(item, Item::TypeDeclaration(declaration)
             if declaration.name == "Box"
                 && declaration.visibility == staple_syntax::Visibility::Public
-                && declaration.representation_visibility == staple_syntax::Visibility::Public)
+                && declaration.representation_visibility() == staple_syntax::Visibility::Public)
     }));
 }
 
@@ -6257,8 +6303,12 @@ fn diagnoses_invalid_metadata_macro_uses() {
             "macro `ordinary` has no overload whose first parameter is `MacroCallMetadata`",
         ),
         (
-            "macro invalid = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility type alias Generated = I32 } }\npub(repr) invalid\n",
-            "`PublicRepr` visibility requires a represented distinct type",
+            "macro invalid = metadata: MacroCallMetadata => { let visibility = metadata.visibility; parse_quote { $visibility let (left, right) = (1, 2) } }\npub invalid\n",
+            "visibility may only be spliced onto `let`, `def`, `type`, `extern`, or `trait` declarations",
+        ),
+        (
+            "type Number = pub ctor I32\n",
+            "representation visibility cannot exceed the type's visibility",
         ),
         (
             "let visibility = Private\n",
@@ -6332,15 +6382,15 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             "modifier name `@doc` is reserved by the compiler",
         ),
         (
-            "@doc\ntype Documented = I32\n",
+            "@doc\ntype Documented = ctor I32\n",
             "`@doc` requires a parenthesized string literal",
         ),
         (
-            "@doc(42)\ntype Documented = I32\n",
+            "@doc(42)\ntype Documented = ctor I32\n",
             "`@doc` requires a string literal argument",
         ),
         (
-            "@doc(\"bad\\q\")\ntype Documented = I32\n",
+            "@doc(\"bad\\q\")\ntype Documented = ctor I32\n",
             "unknown string escape `\\q`",
         ),
         (
@@ -6352,11 +6402,11 @@ fn diagnoses_invalid_modifier_definitions_and_applications() {
             "`@doc` may only modify a named declaration",
         ),
         (
-            "@recursive_constructor\ntype Box = I32\n",
+            "@recursive_constructor\ntype Box = ctor I32\n",
             "`@recursive_constructor` may only mark a compiler-owned recursive constructor",
         ),
         (
-            "@recursive_constructor(1)\ntype Box = I32\n",
+            "@recursive_constructor(1)\ntype Box = ctor I32\n",
             "`@recursive_constructor` does not accept an argument",
         ),
         (
@@ -7085,12 +7135,12 @@ fn top_level_macro_sequences_backtrack_for_visibility_and_fixed_suffixes() {
         "    name: Ident String * _: FatArrow * _: Braced Syntax => match (values, visibility) {\n",
         "        (Sequence (), Private) => quote { let $name: I32 = 40 },\n",
         "        (Sequence (first: Ident String, rest: Sequence Ident String), Public) => quote { let $name: I32 = 41 },\n",
-        "        (Sequence (first: Ident String, rest: Sequence Ident String), PublicRepr) => quote { let $name: I32 = 42 },\n",
+        "        (Sequence (first: Ident String, rest: Sequence Ident String), Package) => quote { let $name: I32 = 42 },\n",
         "        _ => quote { let $name: I32 = 43 },\n",
         "    }\n",
         "classify marker = private_value => {}\n",
         "classify marker alpha beta pub = public_value => {}\n",
-        "classify marker alpha pub(repr) = public_repr_value => {}\n",
+        "classify marker alpha pub(package) = package_value => {}\n",
     ));
     let context = Context::create();
     CodeGenerator::new(&context)
@@ -7408,7 +7458,7 @@ fn expands_standard_while_with_loop_control() {
 #[test]
 fn expands_standard_for_over_ranges_and_product_iterators() {
     let module = type_check(concat!(
-        "pub(repr) type PairIterator = (current: I32, end: I32)\n",
+        "pub type PairIterator = pub ctor (current: I32, end: I32)\n",
         "impl Iterator PairIterator (I32, I32) {\n",
         "  def next = PairIterator (current, end) => match current < end {\n",
         "    True() => IterStep.Yield ((current, current + 10), PairIterator (current + 1, end)),\n",
@@ -7639,7 +7689,7 @@ fn subtype_bound_union_elimination() {
 #[test]
 fn ident_rejects_non_string_spelling_types() {
     let module = resolve(concat!(
-        "type alias InvalidIdent = Ident I32\n",
+        "type InvalidIdent = alias Ident I32\n",
         "def invalid: InvalidIdent\n",
     ));
     let diagnostics = TypeChecker::new()
@@ -7653,7 +7703,7 @@ fn ident_rejects_non_string_spelling_types() {
 #[test]
 fn default_type_bound_fills_omitted_type_argument() {
     let module = type_check(concat!(
-        "type alias Box (T = String) = (value: T)\n",
+        "type Box (T = String) = alias (value: T)\n",
         "let boxed: Box = (value: \"hi\")\n",
         "let explicit: Box I32 = (value: 42)\n",
     ));
@@ -7666,7 +7716,7 @@ fn default_type_bound_fills_omitted_type_argument() {
 #[test]
 fn default_type_bound_rejects_mismatched_default_value() {
     let module = resolve(concat!(
-        "type alias Box (T = String) = (value: T)\n",
+        "type Box (T = String) = alias (value: T)\n",
         "let boxed: Box = (value: 42)\n",
     ));
     TypeChecker::new()
@@ -7677,7 +7727,7 @@ fn default_type_bound_rejects_mismatched_default_value() {
 #[test]
 fn default_type_bound_may_reference_an_earlier_parameter() {
     let module = type_check(concat!(
-        "type alias Pair A (B = A) = (A, B)\n",
+        "type Pair A (B = A) = alias (A, B)\n",
         "let same: Pair I32 = (1, 2)\n",
     ));
     let context = Context::create();
@@ -7689,7 +7739,7 @@ fn default_type_bound_may_reference_an_earlier_parameter() {
 #[test]
 fn default_type_bound_referencing_an_earlier_parameter_rejects_mismatch() {
     let module = resolve(concat!(
-        "type alias Pair A (B = A) = (A, B)\n",
+        "type Pair A (B = A) = alias (A, B)\n",
         "let bad: Pair I32 = (1, \"x\")\n",
     ));
     TypeChecker::new()
@@ -7700,7 +7750,7 @@ fn default_type_bound_referencing_an_earlier_parameter_rejects_mismatch() {
 #[test]
 fn default_type_bound_is_checked_against_subtype_bound() {
     let module = resolve(concat!(
-        "type alias Constrained (T = I32) where T <: String = T\n",
+        "type Constrained (T = I32) where T <: String = alias T\n",
         "def bad: Constrained\n",
     ));
     let diagnostics = TypeChecker::new()
@@ -7714,7 +7764,7 @@ fn default_type_bound_is_checked_against_subtype_bound() {
 #[test]
 fn default_type_bound_does_not_fire_when_a_later_parameter_lacks_one() {
     let module = resolve(concat!(
-        "type alias Weird (A = I32) B = (A, B)\n",
+        "type Weird (A = I32) B = alias (A, B)\n",
         "let bad: Weird = (1, 2)\n",
     ));
     let diagnostics = TypeChecker::new()
@@ -7747,7 +7797,7 @@ fn trait_default_type_bound_fills_missing_implementation_and_bound_arguments() {
 #[test]
 fn inline_default_type_bound_introduces_and_defaults_in_one_clause() {
     let module = type_check(concat!(
-        "type alias Pair A (B = A) = (A, B)\n",
+        "type Pair A (B = A) = alias (A, B)\n",
         "let same: Pair I32 = (1, 2)\n",
         "let overridden: Pair I32 String = (1, \"x\")\n",
     ));
@@ -7760,7 +7810,7 @@ fn inline_default_type_bound_introduces_and_defaults_in_one_clause() {
 #[test]
 fn inline_default_type_bound_combines_with_a_trailing_subtype_bound() {
     let module = type_check(concat!(
-        "type alias Ident2 (Spelling = String) where Spelling <: String = Spelling\n",
+        "type Ident2 (Spelling = String) where Spelling <: String = alias Spelling\n",
         "let literal: Ident2 = \"answer\"\n",
         "let widened: Ident2 String = \"answer\"\n",
     ));
@@ -7790,7 +7840,7 @@ fn rejects_duplicate_default_type_bound_for_the_same_parameter() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let program = ProgramLoader::new()
         .with_standard_library_root(root.join("stdlib"))
-        .load_source("type alias Bad (T = I32) (T = String) = T\n", root)
+        .load_source("type Bad (T = I32) (T = String) = alias T\n", root)
         .expect("source should parse");
     let diagnostics = NameResolver::new()
         .resolve_program(program)
@@ -8197,7 +8247,7 @@ fn compares_refs_through_the_standard_library_eq_implementation() {
         "let different: Bool = a != c\n",
         "let generic: Bool = refs_equal (a, b)\n",
         "let nested: Bool = Ref (Ref 3) == Ref (Ref 3)\n",
-        "type Bag = Buffer I32\n",
+        "type Bag = ctor Buffer I32\n",
         "impl Eq Bag {\n",
         "  def eq = (left, right) => Buffer.capacity left.* == Buffer.capacity right.*\n",
         "}\n",
@@ -8231,7 +8281,7 @@ fn rejects_ref_equality_when_the_payload_is_not_eq() {
 #[test]
 fn preserves_literal_nominal_ref_container_semantics() {
     let module = type_check(concat!(
-        "type RefPoint = Ref (x: I32, y: I32)\n",
+        "type RefPoint = ctor Ref (x: I32, y: I32)\n",
         "let point: RefPoint = RefPoint (Ref (x: 3, y: 4))\n",
         "let x: I32 = point.x\n",
         "let RefPoint (Ref (captured_x, captured_y)) = point\n",
@@ -8509,9 +8559,9 @@ fn compiles_logical_not_via_not_trait() {
 #[test]
 fn prefix_operators_dispatch_to_user_defined_impls() {
     let module = type_check(concat!(
-        "type Vec2 = (x: I32, y: I32)\n",
+        "type Vec2 = ctor (x: I32, y: I32)\n",
         "impl Neg Vec2 { def negate = (Vec2 (x, y)) => Vec2 (x: 0 - x, y: 0 - y) }\n",
-        "type Flag = (raised: Bool)\n",
+        "type Flag = ctor (raised: Bool)\n",
         "impl Not Flag { def not = (Flag (raised)) => Flag (raised: !raised) }\n",
         "let here: Vec2 = Vec2 (x: 3, y: 4)\n",
         "let away: Vec2 = -here\n",
@@ -8570,7 +8620,7 @@ fn decodes_source_string_literals_before_llvm_generation() {
 #[test]
 fn type_checks_generic_aliases_and_functions() {
     let module = type_check(concat!(
-        "type alias Pair (A, B) = (A, B)\n",
+        "type Pair (A, B) = alias (A, B)\n",
         "def identity: <T> move T -> T = move x => x\n",
         "let pair: Pair (String, I32) = (\"answer\", 42)\n",
         "let answer: I32 = identity 42\n",
@@ -8637,7 +8687,7 @@ fn provides_to_string_for_prelude_scalar_types() {
 fn provides_formatter_display_debug_and_structural_product_debug() {
     let module = type_check(concat!(
         "use std.fmt.Formatter\n",
-        "type Point = (x: I32, y: I32)\n",
+        "type Point = ctor (x: I32, y: I32)\n",
         "impl Debug Point {\n",
         "  def fmt = (Point (x, y), mut formatter) => {\n",
         "    Formatter.write formatter \"Point \"\n",
@@ -8686,9 +8736,9 @@ fn provides_structural_debug_for_sum_types() {
 fn derives_debug_for_nominal_representations() {
     let module = type_check(concat!(
         "use std.fmt.*\n",
-        "@derive_debug\ntype Point = (x: I32, y: I32)\n",
-        "@derive_debug\ntype Choice = I32 | String\n",
-        "@derive_debug\ntype Box T = T\n",
+        "@derive_debug\ntype Point = ctor (x: I32, y: I32)\n",
+        "@derive_debug\ntype Choice = ctor I32 | String\n",
+        "@derive_debug\ntype Box T = ctor T\n",
         "let point_debug: String = Formatter.debug (Point (x: 3, y: 4))\n",
         "let choice_debug: String = Formatter.debug (Choice (42 satisfies I32 | String))\n",
         "let box_debug: String = Formatter.debug (Box 7)\n",
@@ -8756,7 +8806,7 @@ fn exposes_type_declarations_as_structured_items() {
         "  UnstructuredItem() => item,\n",
         "  _ => panic \"inspect_item item is unsupported\",\n",
         "}\n",
-        "@inspect_item\ntype Pair T = (T, T)\n",
+        "@inspect_item\ntype Pair T = ctor (T, T)\n",
         "@inspect_item\ndef answer = () => 42\n",
         "let pair = Pair (1, 2)\nlet result = answer ()\n",
     ));
@@ -8770,7 +8820,7 @@ fn exposes_type_declarations_as_structured_items() {
 fn type_checks_and_generates_string_templates() {
     let module = type_check(concat!(
         "use std.fmt.Formatter\n",
-        "type Label = String\n",
+        "type Label = ctor String\n",
         "impl Display Label {\n",
         "  def fmt = (Label value, mut formatter) => Formatter.write formatter value\n",
         "}\n",
@@ -8796,7 +8846,7 @@ fn string_templates_require_the_selected_formatting_trait() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.fmt.Formatter\n",
-            "type Secret = I32\n",
+            "type Secret = ctor I32\n",
             "let secret = Secret 1\n",
             "let message = \"$secret\"\n",
         )))
@@ -8813,7 +8863,7 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.fmt.Formatter\n",
-            "type Secret = I32\n",
+            "type Secret = ctor I32\n",
             "let secret = Secret 1\n",
             "let product = (secret,)\n",
             "let text = Formatter.debug product\n",
@@ -8828,7 +8878,7 @@ fn structural_debug_requires_debug_elements_and_does_not_expose_nominal_represen
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "use std.fmt.Formatter\n",
-            "type Secret = I32\n",
+            "type Secret = ctor I32\n",
             "let secret = Secret 1\n",
             "let text = Formatter.debug secret\n",
         )))
@@ -9071,7 +9121,7 @@ fn rejects_invalid_functional_dependency_declarations() {
 #[test]
 fn preserves_applied_types_as_unary_trait_arguments() {
     let module = type_check(concat!(
-        "type Box T = (value: T)\n",
+        "type Box T = ctor (value: T)\n",
         "trait Echo T { echo: T -> T }\n",
         "impl Echo Box I32 { def echo = value => value }\n",
         "def echo_box: <T where Echo Box T> (Box T) -> Box T = value => Echo.echo value\n",
@@ -9214,7 +9264,7 @@ fn rejects_invalid_traits_implementations_and_unpropagated_bounds() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
             "trait Increment T { increment: T -> T }\n",
-            "type alias Number = I32\n",
+            "type Number = alias I32\n",
             "impl Increment I32 { def increment = value => value }\n",
             "impl Increment Number { def increment = value => value }\n",
         )))
@@ -9403,8 +9453,8 @@ fn requires_qualification_for_ambiguous_trait_methods() {
 #[test]
 fn constructs_distinct_and_generic_distinct_values() {
     let module = type_check(concat!(
-        "type UserId = I32\n",
-        "type Box T = (value: T)\n",
+        "type UserId = ctor I32\n",
+        "type Box T = ctor (value: T)\n",
         "let user: UserId = UserId 42\n",
         "let boxed: Box I32 = Box (value: 42)\n",
     ));
@@ -9487,8 +9537,8 @@ fn contextually_specializes_first_class_generic_functions() {
 #[test]
 fn contextually_specializes_first_class_constructors() {
     let module = type_check(concat!(
-        "type UserId = I32\n",
-        "type Box T = (value: T)\n",
+        "type UserId = ctor I32\n",
+        "type Box T = ctor (value: T)\n",
         "let make_user: I32 -> UserId = UserId\n",
         "let make_box: (value: I32) -> Box I32 = Box\n",
         "let user: UserId = make_user 42\n",
@@ -9503,8 +9553,8 @@ fn contextually_specializes_first_class_constructors() {
 #[test]
 fn destructures_nominal_values_in_lets_and_functions() {
     let module = type_check(concat!(
-        "type UserId = I32\n",
-        "type PairIds = (UserId, UserId)\n",
+        "type UserId = ctor I32\n",
+        "type PairIds = ctor (UserId, UserId)\n",
         "let user: UserId = UserId 42\n",
         "let UserId raw = user\n",
         "let pair: PairIds = PairIds (UserId 1, UserId 2)\n",
@@ -9522,9 +9572,9 @@ fn destructures_nominal_values_in_lets_and_functions() {
 #[test]
 fn accesses_visible_nominal_representations_explicitly_and_by_shortcut() {
     let module = type_check(concat!(
-        "type User = (name: String, age: I32)\n",
-        "type Inner = (name: String, tag: I32)\n",
-        "type Outer = Inner\n",
+        "type User = ctor (name: String, age: I32)\n",
+        "type Inner = ctor (name: String, tag: I32)\n",
+        "type Outer = ctor Inner\n",
         "let mut user = User (name: \"Ada\", age: 42)\n",
         "let inner: (name: String, age: I32) = user.*\n",
         "let name: String = user.*.name\n",
@@ -9543,8 +9593,8 @@ fn accesses_visible_nominal_representations_explicitly_and_by_shortcut() {
 fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Inner = (name: String, tag: I32)\n",
-            "type Outer = Inner\n",
+            "type Inner = ctor (name: String, tag: I32)\n",
+            "type Outer = ctor Inner\n",
             "let outer = Outer (Inner (name: \"Ada\", tag: 1))\n",
             "let invalid: String = outer.name\n",
             "let also_invalid = (42).*\n",
@@ -9565,7 +9615,7 @@ fn representation_access_requires_a_nominal_value_and_unwraps_one_shortcut_layer
 #[test]
 fn destructures_contextually_typed_generic_nominal_patterns() {
     let module = type_check(concat!(
-        "type Box T = (value: T)\n",
+        "type Box T = ctor (value: T)\n",
         "def unbox: <T> Box T -> T = Box (value) => value\n",
         "let answer: I32 = unbox (Box (value: 42))\n",
         "let text: String = unbox (Box (value: \"hello\"))\n",
@@ -9579,7 +9629,7 @@ fn destructures_contextually_typed_generic_nominal_patterns() {
 #[test]
 fn captures_values_bound_by_nominal_patterns() {
     let module = type_check(concat!(
-        "type UserId = I32\n",
+        "type UserId = ctor I32\n",
         "def capture: UserId -> (() -> I32) = user => {\n",
         "  let UserId id = user\n",
         "  () => id\n",
@@ -9596,7 +9646,7 @@ fn captures_values_bound_by_nominal_patterns() {
 #[test]
 fn rejects_non_nominal_and_mismatched_nominal_patterns() {
     let syntax = parse(concat!(
-        "type alias Number = I32\n",
+        "type Number = alias I32\n",
         "let Number value = 42\n",
     ))
     .expect("source should parse");
@@ -9611,8 +9661,8 @@ fn rejects_non_nominal_and_mismatched_nominal_patterns() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Left = I32\n",
-            "type Right = I32\n",
+            "type Left = ctor I32\n",
+            "type Right = ctor I32\n",
             "let right: Right = Right 42\n",
             "let Left value = right\n",
         )))
@@ -9658,7 +9708,7 @@ fn monomorphizes_generic_closures_with_captures() {
 fn infers_product_and_result_only_compile_time_parameters() {
     let module = type_check(concat!(
         "def first: <A, B> (move A, B) -> A = (move a, b) => a\n",
-        "type Phantom T = I32\n",
+        "type Phantom T = ctor I32\n",
         "def make: <T> I32 -> Phantom T = x => Phantom x\n",
         "let answer: I32 = first (42, \"ignored\")\n",
         "let contextual: Phantom String = make 7\n",
@@ -9971,7 +10021,7 @@ fn emits_a_native_object_file() {
 #[test]
 fn infers_copy_and_enforces_affine_moves() {
     type_check(concat!(
-        "type Point = (I32, I32)\n",
+        "type Point = ctor (I32, I32)\n",
         "def copied = () => { let point = Point (1, 2); let other = point; point; other }\n",
     ));
 
@@ -10005,7 +10055,7 @@ fn infers_copy_and_enforces_affine_moves() {
 #[test]
 fn borrowed_curried_closures_are_lexically_scoped() {
     let module = type_check(concat!(
-        "type MyString = String\n",
+        "type MyString = ctor String\n",
         "impl !Copy MyString {}\n",
         "companion MyString {\n",
         "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -10024,7 +10074,7 @@ fn borrowed_curried_closures_are_lexically_scoped() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type MyString = String\n",
+            "type MyString = ctor String\n",
             "impl !Copy MyString {}\n",
             "companion MyString {\n",
             "  pub def concat = a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -10042,7 +10092,7 @@ fn borrowed_curried_closures_are_lexically_scoped() {
 #[test]
 fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
     let mutable = type_check(concat!(
-        "type MyString = String\n",
+        "type MyString = ctor String\n",
         "impl !Copy MyString {}\n",
         "companion MyString {\n",
         "  pub def concat = mut a: MyString => b: MyString => MyString (a.* + b.*)\n",
@@ -10059,19 +10109,19 @@ fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
 
     for source in [
         concat!(
-            "type MyString = String\nimpl !Copy MyString {}\n",
+            "type MyString = ctor String\nimpl !Copy MyString {}\n",
             "companion MyString { pub def concat = a: MyString => b: MyString => MyString (a.* + b.*) }\n",
             "def consume = f: (MyString -> MyString) => ()\n",
             "def invalid = value: MyString => consume (MyString.concat value)\n",
         ),
         concat!(
-            "type MyString = String\nimpl !Copy MyString {}\n",
+            "type MyString = ctor String\nimpl !Copy MyString {}\n",
             "companion MyString { pub def concat = a: MyString => b: MyString => MyString (a.* + b.*) }\n",
             "def take = move value: MyString => ()\n",
             "def invalid = move value: MyString => { let append = MyString.concat value; take value }\n",
         ),
         concat!(
-            "type MyString = String\nimpl !Copy MyString {}\n",
+            "type MyString = ctor String\nimpl !Copy MyString {}\n",
             "companion MyString { pub def concat = a: MyString => b: MyString => MyString (a.* + b.*) }\n",
             "def invalid = value: MyString => { let concat = MyString.concat; concat value }\n",
         ),
@@ -10087,14 +10137,14 @@ fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
     }
 
     type_check(concat!(
-        "type MyString = String\nimpl !Copy MyString {}\n",
+        "type MyString = ctor String\nimpl !Copy MyString {}\n",
         "companion MyString { pub def concat = move a: MyString => b: MyString => MyString (a.* + b.*) }\n",
         "def make = move value: MyString => MyString.concat value\n",
     ));
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type MyString = String\nimpl !Copy MyString {}\n",
+            "type MyString = ctor String\nimpl !Copy MyString {}\n",
             "def combine = (left: MyString, right: MyString) => tail: MyString => MyString (left.* + right.* + tail.*)\n",
             "def take = move value: MyString => ()\n",
             "def invalid = (move left: MyString, move right: MyString) => {\n",
@@ -10114,7 +10164,7 @@ fn borrowed_curried_closures_enforce_escape_and_borrow_conflicts() {
 fn exposes_copy_but_rejects_explicit_implementations() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Value = I32\n",
+            "type Value = ctor I32\n",
             "impl Copy Value {}\n",
         )))
         .expect_err_diagnostics("Copy implementations must be inferred");
@@ -10129,7 +10179,7 @@ fn exposes_copy_but_rejects_explicit_implementations() {
 fn negative_copy_impl_opts_a_nominal_type_out_of_copy_without_drop() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Handle = I32\n",
+            "type Handle = ctor I32\n",
             "impl !Copy Handle {}\n",
             "def invalid = (move value: Handle) => { let moved = value; value }\n",
         )))
@@ -10143,7 +10193,7 @@ fn negative_copy_impl_opts_a_nominal_type_out_of_copy_without_drop() {
     // Declaring `!Copy` alone does not require a `drop` method or add
     // destructor glue: the type is move-only but not finalized.
     type_check(concat!(
-        "type Handle = I32\n",
+        "type Handle = ctor I32\n",
         "impl !Copy Handle {}\n",
         "def make = () => Handle 1\n",
     ));
@@ -10153,7 +10203,7 @@ fn negative_copy_impl_opts_a_nominal_type_out_of_copy_without_drop() {
 fn rejects_negative_impl_for_traits_other_than_copy() {
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Handle = I32\n",
+            "type Handle = ctor I32\n",
             "impl !Drop Handle {}\n",
         )))
         .expect_err_diagnostics("only `Copy` can be negated");
@@ -10179,7 +10229,7 @@ fn rejects_negative_copy_impl_for_non_nominal_types() {
 #[test]
 fn lowers_custom_drop_and_gc_finalizer_glue() {
     let module = type_check(concat!(
-        "type Resource = I32\n",
+        "type Resource = ctor I32\n",
         "impl Drop Resource { def drop = Resource value => () }\n",
         "def release = () => { let resource = Resource 7; drop resource }\n",
         "def managed = () => Ref (Resource 9)\n",
@@ -10309,7 +10359,7 @@ fn moves_resources_into_managed_closures_and_borrows_ref_payloads() {
 #[test]
 fn lowers_path_sensitive_drop_flags() {
     let module = type_check(concat!(
-        "type Resource = I32\n",
+        "type Resource = ctor I32\n",
         "impl Drop Resource { def drop = Resource value => () }\n",
         "def conditional = (flag: Bool, move resource: Resource) => match flag {\n",
         "  True() => { drop resource; () },\n",
@@ -10327,7 +10377,7 @@ fn lowers_path_sensitive_drop_flags() {
 #[test]
 fn supports_contextual_string_literal_types_and_widening() {
     let module = type_check(concat!(
-        "type alias Answer = \"yes\" | \"no\"\n",
+        "type Answer = alias \"yes\" | \"no\"\n",
         "def inferred = () => \"yes\"\n",
         "def narrow: () -> Answer = () => \"yes\"\n",
         "let answer: Answer = narrow()\n",
@@ -10381,7 +10431,7 @@ fn rejects_invalid_string_literal_narrowing() {
 #[test]
 fn matches_literal_sets_strings_and_mixed_nominal_unions() {
     let module = type_check(concat!(
-        "type Some = String\n",
+        "type Some = ctor String\n",
         "def pure: (\"yes\" | \"no\") -> String = value => match value {\n",
         "  \"yes\" => \"affirmative\",\n",
         "  \"no\" => \"negative\",\n",
@@ -10722,7 +10772,7 @@ fn checks_reachability_correctly_after_a_top_level_loop_with_break() {
 #[test]
 fn checks_ownership_across_loop_exits_and_back_edges() {
     let module = type_check(concat!(
-        "type Resource = I32\n",
+        "type Resource = ctor I32\n",
         "impl Drop Resource { def drop = Resource _ => () }\n",
         "def choose: Bool -> Resource = condition => loop {\n",
         "  let value = Resource 1\n",
@@ -10741,7 +10791,7 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
 
     let diagnostics = TypeChecker::new()
         .check(resolve(concat!(
-            "type Resource = I32\n",
+            "type Resource = ctor I32\n",
             "impl Drop Resource { def drop = Resource _ => () }\n",
             "def invalid = (move value: Resource) => loop {\n",
             "  let consumed = value\n",
@@ -10759,7 +10809,7 @@ fn checks_ownership_across_loop_exits_and_back_edges() {
 #[test]
 fn pub_repr_type_constructor_satisfies_its_own_subtype_bound() {
     let module = type_check(concat!(
-        "pub(repr) type Ident2 Spelling where Spelling <: String = Spelling\n",
+        "pub type Ident2 Spelling where Spelling <: String = pub ctor Spelling\n",
         "let literal: Ident2 String = Ident2 \"answer\"\n",
     ));
     let context = Context::create();
@@ -10965,7 +11015,7 @@ fn every_copy_type_gets_a_blanket_clone_implementation() {
 #[test]
 fn a_non_copy_type_can_implement_clone_manually() {
     let module = type_check(concat!(
-        "type Resource = I32\n",
+        "type Resource = ctor I32\n",
         "impl Drop Resource { def drop = Resource value => () }\n",
         "impl Clone Resource { def clone = Resource value => Resource value }\n",
         "def duplicate: Resource -> Resource = resource => Clone.clone resource\n",

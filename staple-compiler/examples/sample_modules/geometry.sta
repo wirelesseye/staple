@@ -1,7 +1,7 @@
 pub mod
 
 // Public representation exports its constructor and nominal pattern.
-pub(repr) type Point = (x: I32, y: I32)
+pub type Point = pub ctor (x: I32, y: I32)
 
 pub def origin = () => Point (x: 0, y: 0)
 pub def translate = (Point (x, y), dx: I32, dy: I32) => Point (x: x + dx, y: y + dy)

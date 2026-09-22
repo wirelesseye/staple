@@ -68,11 +68,19 @@
         },
         {
           "name": "meta.type.definition.staple",
-          "match": "\\b(type)\\s+(?:(alias)\\s+)?((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
+          "match": "\\b(type)\\s+((?:_|\\p{Alphabetic})(?:_|\\p{Alphabetic}|\\p{Number})*)",
           "captures": {
             "1": { "name": "storage.type.staple" },
-            "2": { "name": "storage.modifier.alias.staple" },
-            "3": { "name": "entity.name.type.staple" }
+            "2": { "name": "entity.name.type.staple" }
+          }
+        },
+        {
+          "name": "meta.type.body.staple",
+          "match": "=\\s*(?:(pub)(?:\\((package)\\))?\\s+)?(alias|ctor|opaque)\\b",
+          "captures": {
+            "1": { "name": "storage.modifier.staple" },
+            "2": { "name": "storage.modifier.staple" },
+            "3": { "name": "storage.modifier.staple" }
           }
         },
         {
@@ -139,7 +147,7 @@
         },
         {
           "name": "storage.modifier.staple",
-          "match": "\\b(?:alias|move|mut|opaque|pub|repr)\\b"
+          "match": "\\b(?:move|mut|pub)\\b"
         },
         {
           "name": "keyword.operator.expression.staple",

@@ -131,15 +131,15 @@ macro @duplicate: Item -> Sequence Item = _ => parse_quote {
 @duplicate
 def duplicated_original = () => 0
 
-// MacroCallMetadata receives ordered modifiers and Private, Public, Package,
-// or representation visibility from the call prefix.
+// MacroCallMetadata receives ordered modifiers and Private, Public, or Package
+// visibility from the call prefix.
 macro define_alias: MacroCallMetadata * Ident String * Type -> Item =
     metadata *
     name *
     ty =>
     {
         let visibility = metadata.visibility
-        parse_quote { $visibility type alias $name = $ty }
+        parse_quote { $visibility type $name = alias $ty }
     }
 
 pub define_alias PublicAnswer I32

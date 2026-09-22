@@ -670,10 +670,10 @@ impl ResolvedModule {
 
     pub fn representation_visible_from(&self, id: TypeId, module: ModuleId) -> bool {
         let declaration = &self.type_declarations[&id];
-        let visibility = if declaration.kind == staple_syntax::TypeDeclarationKind::Singleton {
+        let visibility = if declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton {
             declaration.visibility
         } else {
-            declaration.representation_visibility
+            declaration.representation_visibility()
         };
         if visibility == Visibility::Public {
             return true;
@@ -916,7 +916,7 @@ fn item_uses_package_visibility(item: &Item) -> bool {
     match item {
         Item::ExternBlock(item) => is_package(item.visibility),
         Item::TypeDeclaration(item) => {
-            is_package(item.visibility) || is_package(item.representation_visibility)
+            is_package(item.visibility) || is_package(item.representation_visibility())
         }
         Item::MacroDeclaration(item) => is_package(item.visibility),
         Item::TraitDeclaration(item) => is_package(item.visibility),
@@ -925,11 +925,9 @@ fn item_uses_package_visibility(item: &Item) -> bool {
         Item::UseDeclaration(item) => is_package(item.visibility),
         Item::Modified(item) => item_uses_package_visibility(&item.item),
         Item::VisibilitySplice(item) => item_uses_package_visibility(&item.item),
-        Item::VisibilityMacroInvocation(item) => matches!(
-            item.visibility.kind,
-            staple_syntax::VisibilityKind::Package
-                | staple_syntax::VisibilityKind::PublicReprPackage
-        ),
+        Item::VisibilityMacroInvocation(item) => {
+            item.visibility.kind == staple_syntax::VisibilityKind::Package
+        }
         _ => false,
     }
 }
@@ -1557,6 +1555,10 @@ impl NameResolver {
             "OpaqueDeclaration",
             "TypeDeclarationKind",
             "TypeDeclarationItem",
+            "TypeBody",
+            "AliasBody",
+            "ConstructorBody",
+            "OpaqueBody",
             "Modifier",
             "ModifiedItem",
             "UnstructuredItem",
@@ -1984,13 +1986,13 @@ impl NameResolver {
             ));
         }
         if builtin == BuiltinType::String {
-            if declaration.kind != staple_syntax::TypeDeclarationKind::Distinct {
+            if declaration.kind() != staple_syntax::TypeDeclarationKind::Distinct {
                 self.diagnostics.push(Diagnostic::new(
                     declaration.syntax.span.clone(),
                     "standard library type `String` must be a represented distinct type",
                 ));
             }
-            if declaration.representation_visibility != Visibility::Private {
+            if declaration.representation_visibility() != Visibility::Private {
                 self.diagnostics.push(Diagnostic::new(
                     declaration.syntax.span.clone(),
                     "standard library type `String` must keep its representation private",
@@ -2004,19 +2006,19 @@ impl NameResolver {
             }
         } else if builtin != BuiltinType::Syntax {
             let valid_kind = if builtin == BuiltinType::Ref {
-                declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
-                    && declaration.representation_visibility == Visibility::Public
+                declaration.kind() == staple_syntax::TypeDeclarationKind::Distinct
+                    && declaration.representation_visibility() == Visibility::Public
             } else if builtin == BuiltinType::Slice {
-                declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
-                    && declaration.representation_visibility == Visibility::Private
+                declaration.kind() == staple_syntax::TypeDeclarationKind::Distinct
+                    && declaration.representation_visibility() == Visibility::Private
             } else if matches!(builtin, BuiltinType::Completed | BuiltinType::Cancelled) {
                 // `await Task` yields `Completed T | Cancelled`, a sum the body
                 // can `match`; both alternatives are represented distinct types
                 // (`Completed T` wraps `T`, `Cancelled` wraps `()`).
-                declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
-                    && declaration.representation_visibility == Visibility::Public
+                declaration.kind() == staple_syntax::TypeDeclarationKind::Distinct
+                    && declaration.representation_visibility() == Visibility::Public
             } else {
-                declaration.kind == staple_syntax::TypeDeclarationKind::Opaque
+                declaration.kind() == staple_syntax::TypeDeclarationKind::Opaque
             };
             if !valid_kind {
                 self.diagnostics.push(Diagnostic::new(
@@ -2093,7 +2095,7 @@ impl NameResolver {
             BuiltinType::Ref => Some(RecursiveConstruction::ManagedReference),
             BuiltinType::Slice => Some(RecursiveConstruction::Slice),
             BuiltinType::Syntax
-                if declaration.kind == staple_syntax::TypeDeclarationKind::Distinct =>
+                if declaration.kind() == staple_syntax::TypeDeclarationKind::Distinct =>
             {
                 Some(RecursiveConstruction::Syntax)
             }
@@ -2342,9 +2344,9 @@ impl NameResolver {
         }
         self.type_declarations.insert(id, declaration.clone());
         self.type_modules.insert(id, module);
-        if (declaration.kind == staple_syntax::TypeDeclarationKind::Distinct
-            && declaration.underlying.is_some())
-            || declaration.kind == staple_syntax::TypeDeclarationKind::Singleton
+        if (declaration.kind() == staple_syntax::TypeDeclarationKind::Distinct
+            && declaration.underlying().is_some())
+            || declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton
         {
             let symbol = SymbolId(self.next_symbol_id);
             self.next_symbol_id += 1;
@@ -2353,16 +2355,16 @@ impl NameResolver {
             if top_level {
                 self.module_values[module.0].insert(declaration.name.clone(), symbol);
             }
-            if declaration.kind == staple_syntax::TypeDeclarationKind::Singleton {
+            if declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton {
                 self.singleton_values.insert(symbol, id);
             } else {
                 self.constructors.insert(symbol, id);
             }
             let constructor_visibility =
-                if declaration.kind == staple_syntax::TypeDeclarationKind::Singleton {
+                if declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton {
                     declaration.visibility
                 } else {
-                    declaration.representation_visibility
+                    declaration.representation_visibility()
                 };
             if constructor_visibility != Visibility::Private {
                 self.insert_visible_value(
@@ -2680,10 +2682,10 @@ impl NameResolver {
 
     fn representation_visible(&self, id: TypeId, from: ModuleId) -> bool {
         let declaration = &self.type_declarations[&id];
-        let visibility = if declaration.kind == staple_syntax::TypeDeclarationKind::Singleton {
+        let visibility = if declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton {
             declaration.visibility
         } else {
-            declaration.representation_visibility
+            declaration.representation_visibility()
         };
         let Some(defining) = self.type_modules.get(&id).copied() else {
             return false;
@@ -3265,6 +3267,16 @@ impl NameResolver {
 
     fn resolve_type_declaration_body(&mut self, declaration: &TypeDeclaration) {
         self.push_type_parameter_scope();
+        if declaration.representation_visibility() != Visibility::Private
+            && !declaration
+                .visibility
+                .meets(declaration.representation_visibility())
+        {
+            self.diagnostics.push(Diagnostic::new(
+                declaration.syntax.span.clone(),
+                "representation visibility cannot exceed the type's visibility",
+            ));
+        }
         for parameter in &declaration.type_parameters {
             self.declare_type_parameter_pattern(parameter);
         }
@@ -3314,10 +3326,10 @@ impl NameResolver {
             }
             self.resolve_type(&bound.default);
         }
-        if let Some(underlying) = &declaration.underlying {
+        if let Some(underlying) = declaration.underlying() {
             self.resolve_type(underlying);
-            if declaration.representation_visibility != Visibility::Private {
-                self.validate_representation(underlying, declaration.representation_visibility);
+            if declaration.representation_visibility() != Visibility::Private {
+                self.validate_representation(underlying, declaration.representation_visibility());
             }
         }
         self.pop_type_parameter_scope();
@@ -5183,10 +5195,10 @@ impl NameResolver {
             Pattern::Nominal(pattern) => {
                 if let Some(id) = self.named_types.get(&pattern.syntax.id).copied() {
                     let declaration = &self.type_declarations[&id];
-                    let represented = (declaration.kind
+                    let represented = (declaration.kind()
                         == staple_syntax::TypeDeclarationKind::Distinct
-                        && declaration.underlying.is_some())
-                        || declaration.kind == staple_syntax::TypeDeclarationKind::Singleton;
+                        && declaration.underlying().is_some())
+                        || declaration.kind() == staple_syntax::TypeDeclarationKind::Singleton;
                     if !represented {
                         self.diagnostics.push(Diagnostic::new(
                             pattern.syntax.span.clone(),
@@ -5698,6 +5710,9 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         "TypeDeclarationItem" => Some(
             "(kind: TypeDeclarationKind, name: Ident String, name_spelling: String, declared_type: Type, type_parameters: Sequence (Ident String), underlying: Optional Type) -> TypeDeclarationItem",
         ),
+        "AliasBody" => Some("Type -> AliasBody Type"),
+        "ConstructorBody" => Some("(Visibility, Type) -> ConstructorBody (Visibility, Type)"),
+        "OpaqueBody" => Some("OpaqueBody"),
         "ModifiedItem" => Some("(modifiers: Sequence Modifier, item: Item) -> ModifiedItem"),
         "Syntax"
         | "SyntaxNode"
@@ -5706,6 +5721,7 @@ fn compile_time_builtin_signature(name: &str) -> Option<&str> {
         | "Type"
         | "Pattern"
         | "Item"
+        | "TypeBody"
         | "UnstructuredItem"
         | "Modifier"
         | "TypeDeclarationKind"
@@ -5782,6 +5798,10 @@ fn compile_expression_type(expression: &Expression, scope: &CompileTimeScope) ->
                     | "Modifier"
                     | "ModifiedItem"
                     | "TypeDeclarationItem"
+                    | "TypeBody"
+                    | "AliasBody"
+                    | "ConstructorBody"
+                    | "OpaqueBody"
                     | "UnstructuredItem"
                     | "TypeDeclarationKind"
                     | "AliasDeclaration"

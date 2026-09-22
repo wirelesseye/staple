@@ -88,8 +88,6 @@ pub fn lex(source: &str) -> Vec<SyntaxToken> {
                 "trait" => TokenKind::Trait,
                 "impl" => TokenKind::Impl,
                 "match" => TokenKind::Match,
-                "alias" => TokenKind::Alias,
-                "opaque" => TokenKind::Opaque,
                 "where" => TokenKind::Where,
                 "_" => TokenKind::Underscore,
                 _ => TokenKind::Identifier,

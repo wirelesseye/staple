@@ -4,7 +4,7 @@ use std.core.index.(Index, MutateIndex)
 
 /// A borrowed view over a contiguous sequence of values.
 @recursive_constructor
-pub type Slice T = T
+pub type Slice T = ctor T
 
 def __slice_get_ref: <T> (Slice T, USize) -> Ref T = (slice, position) => __slice_get_ref (slice, position)
 

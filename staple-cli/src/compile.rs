@@ -1002,12 +1002,12 @@ mod tests {
             "declaration-splices",
             concat!(
                 "use std.syntax.(parse_quote, Ident, Type, Item)\n",
-                "macro make_alias: Ident String * Type -> Item = name * ty => parse_quote { type alias $name = $ty }\n",
+                "macro make_alias: Ident String * Type -> Item = name * ty => parse_quote { type $name = alias $ty }\n",
                 "make_alias Generated I32\n",
             ),
         );
-        assert!(expanded.contains("type alias Generated = I32"));
-        assert_eq!(expanded.matches("type alias $name = $ty").count(), 1);
+        assert!(expanded.contains("type Generated = alias I32"));
+        assert_eq!(expanded.matches("type $name = alias $ty").count(), 1);
         staple_syntax::parse(&expanded).expect("expanded declaration should parse");
         assert_eq!(staple_syntax::format_source(&expanded).unwrap(), expanded);
     }
@@ -2759,7 +2759,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "type Clock = (now: () -> I32)\n",
+                "type Clock = ctor (now: () -> I32)\n",
                 "def clock = value: I32 => Clock (now: () => value)\n",
                 "def read = () => (resource Clock).now ()\n",
                 "def derive = () => clock (read () + 1)\n",
@@ -2769,7 +2769,7 @@ mod tests {
                 "let derived = with Clock = outer { with Clock = derive () { read () } }\n",
                 "let reader = with Clock = outer { make_reader () }\n",
                 "let later = with Clock = inner { reader () }\n",
-                "type Config = (x: I32)\n",
+                "type Config = ctor (x: I32)\n",
                 "def read_config = () => (resource Config).x\n",
                 "def update_config: () ->{mut Config} () = () => { (resource Config).x = 9 }\n",
                 "let mut config = Config (x: 1)\n",
@@ -3266,7 +3266,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "type Resource = I32\n",
+                "type Resource = ctor I32\n",
                 "def release = () => { let mut resource = Resource 1; resource = Resource 2 }\n",
                 "def abandon = () => { let mut resource = Resource 4; let update = () => { resource = Resource 5 }; update () }\n",
                 "def churn: I32 -> () = n => match n == 0 { True() => (), False() => { Ref n; churn (n - 1) } }\n",
@@ -3995,7 +3995,7 @@ mod tests {
             &source,
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
-                "type Resource = I32\n",
+                "type Resource = ctor I32\n",
                 "impl Drop Resource {\n",
                 "  def drop = Resource value => exit value\n",
                 "}\n",
@@ -4046,7 +4046,7 @@ mod tests {
             concat!(
                 "extern \"c\" { exit: I32 -> () }\n",
                 "use std.cinterop.(CString)\n",
-                "type Some = String\n",
+                "type Some = ctor String\n",
                 "def roundtrip: String -> String = value => CString.to_string (CString.from_string value)\n",
                 "def return_unicode = () => roundtrip \"hé\"\n",
                 "def capture = (value: String) => () => value\n",

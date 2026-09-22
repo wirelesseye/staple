@@ -97,8 +97,17 @@ pub enum VisibilityKind {
     Private,
     Package,
     Public,
-    PublicReprPackage,
-    PublicRepr,
+}
+
+impl VisibilityKind {
+    /// The item visibility this syntax kind stands for.
+    pub fn visibility(self) -> Visibility {
+        match self {
+            Self::Private => Visibility::Private,
+            Self::Package => Visibility::Package,
+            Self::Public => Visibility::Public,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -254,6 +263,30 @@ pub enum TypeDeclarationKind {
     Opaque,
 }
 
+/// The kind of a type declaration body written after `=`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeBodyKind {
+    Alias,
+    Constructor,
+    Opaque,
+}
+
+/// The body of a type declaration written after `=`: `alias T`, `ctor T`,
+/// `pub ctor T`, `pub(package) ctor T`, or `opaque`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TypeBody {
+    /// The whole body, including any representation-visibility prefix.
+    pub syntax: Syntax,
+    /// The contextual `alias`, `ctor`, or `opaque` marker.
+    pub marker_syntax: Syntax,
+    pub kind: TypeBodyKind,
+    /// Representation visibility for `ctor` bodies, including the `pub` or
+    /// `pub(package)` prefix syntax when one is written.
+    pub representation: VisibilitySyntax,
+    /// The underlying type for `alias` and `ctor` bodies.
+    pub underlying: Option<Type>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeDeclaration {
     pub syntax: Syntax,
@@ -261,14 +294,40 @@ pub struct TypeDeclaration {
     pub docs: Vec<String>,
     pub recursive_constructor: bool,
     pub visibility: Visibility,
-    pub representation_visibility: Visibility,
-    pub kind: TypeDeclarationKind,
+    /// The declaration body after `=`; absent for singleton declarations.
+    pub body: Option<TypeBody>,
     pub name: String,
     pub type_parameters: Vec<TypeParameterPattern>,
     pub trait_bounds: Vec<TraitBound>,
     pub subtype_bounds: Vec<SubtypeBound>,
     pub default_bounds: Vec<DefaultTypeBound>,
-    pub underlying: Option<Type>,
+}
+
+impl TypeDeclaration {
+    /// The declaration's overall kind, including bodyless singletons.
+    pub fn kind(&self) -> TypeDeclarationKind {
+        match &self.body {
+            None => TypeDeclarationKind::Singleton,
+            Some(body) => match body.kind {
+                TypeBodyKind::Alias => TypeDeclarationKind::Alias,
+                TypeBodyKind::Constructor => TypeDeclarationKind::Distinct,
+                TypeBodyKind::Opaque => TypeDeclarationKind::Opaque,
+            },
+        }
+    }
+
+    /// The representation visibility, or `Private` for bodies that cannot
+    /// expose a representation.
+    pub fn representation_visibility(&self) -> Visibility {
+        self.body.as_ref().map_or(Visibility::Private, |body| {
+            body.representation.kind.visibility()
+        })
+    }
+
+    /// The underlying type of an alias or constructor body.
+    pub fn underlying(&self) -> Option<&Type> {
+        self.body.as_ref().and_then(|body| body.underlying.as_ref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

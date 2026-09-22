@@ -128,12 +128,7 @@ fn lexical_kind(kind: TokenKind) -> Option<u32> {
         // Storage modifiers (`storage.modifier` in the TextMate grammar):
         // classified distinctly from control/declaration keywords so a theme
         // can colour them the same way it does under syntax highlighting.
-        TokenKind::Pub
-        | TokenKind::Mut
-        | TokenKind::Move
-        | TokenKind::Signal
-        | TokenKind::Alias
-        | TokenKind::Opaque => Some(MODIFIER),
+        TokenKind::Pub | TokenKind::Mut | TokenKind::Move | TokenKind::Signal => Some(MODIFIER),
         // Control / declaration / import keywords (`use`, `def`, `let`,
         // `match`, `return`, `package`, ...) are deliberately *not* emitted
         // as semantic tokens. They are fully covered by the TextMate grammar,
@@ -364,13 +359,14 @@ impl<'a> Classifier<'a> {
             }
             Item::TypeDeclaration(value) => {
                 self.mark_declaration(&value.syntax, &value.name, TYPE, None, resolved);
+                self.type_declaration_marker(value);
                 for parameter in &value.type_parameters {
                     self.type_parameter(parameter, resolved);
                 }
                 for bound in &value.trait_bounds {
                     self.trait_bound(bound, resolved);
                 }
-                if let Some(ty) = &value.underlying {
+                if let Some(ty) = value.underlying() {
                     self.ty(ty, resolved);
                 }
             }
@@ -492,13 +488,14 @@ impl<'a> Classifier<'a> {
             }
             Item::TypeDeclaration(value) => {
                 self.mark_declaration(&value.syntax, &value.name, TYPE, None, resolved);
+                self.type_declaration_marker(value);
                 for parameter in &value.type_parameters {
                     self.type_parameter(parameter, resolved);
                 }
                 for bound in &value.trait_bounds {
                     self.trait_bound(bound, resolved);
                 }
-                if let Some(ty) = &value.underlying {
+                if let Some(ty) = value.underlying() {
                     self.ty(ty, resolved);
                 }
             }
@@ -949,14 +946,24 @@ impl<'a> Classifier<'a> {
 
     fn visibility(&mut self, visibility: &VisibilitySyntax) {
         self.mark_first(&visibility.syntax, "pub", MODIFIER, 0, 1);
-        if matches!(
-            visibility.kind,
-            VisibilityKind::PublicRepr | VisibilityKind::PublicReprPackage
-        ) {
-            self.mark_last(&visibility.syntax, "repr", MODIFIER, 0, 1);
-        }
         // `package` in `pub package` is a keyword the TextMate grammar
         // highlights; see the note in `lexical_kind`.
+    }
+
+    /// Marks the contextual `alias`, `ctor`, or `opaque` marker of a type
+    /// declaration body. These are ordinary identifiers, so they need an
+    /// explicit semantic token to match the TextMate grammar's modifier
+    /// highlighting.
+    fn type_declaration_marker(&mut self, declaration: &TypeDeclaration) {
+        let Some(body) = &declaration.body else {
+            return;
+        };
+        let text = match body.kind {
+            TypeBodyKind::Alias => "alias",
+            TypeBodyKind::Constructor => "ctor",
+            TypeBodyKind::Opaque => "opaque",
+        };
+        self.mark_first(&body.marker_syntax, text, MODIFIER, 0, 1);
     }
 
     fn pattern(&mut self, pattern: &Pattern, kind: u32, resolved: Option<&ResolvedModule>) {
@@ -1470,12 +1477,12 @@ mod tests {
     fn classifies_core_ast_roles() {
         let source = concat!(
             "use tools\n",
-            "type alias Item = I32\n",
+            "type Item = alias I32\n",
             "trait Show T { show: T -> String }\n",
             "macro identity = value => parse_quote { $value }\n",
             "def project: <T> T -> T = value => (field: value).field\n",
             "mod child { def nested = () => 1 }\n",
-            "type Clock = I32\n",
+            "type Clock = ctor I32\n",
             "def read: () ->{Clock} Clock = () => resource Clock\n",
             "with Clock = Clock 1 { read () }\n",
             "let signal counter = 0\n",
@@ -1508,6 +1515,32 @@ mod tests {
                 "unexpected {absent:?} in {labels:?}"
             );
         }
+    }
+
+    #[test]
+    fn classifies_contextual_type_body_markers_as_modifiers() {
+        let source = concat!(
+            "type Alias = alias I32\n",
+            "type Nominal = pub ctor I32\n",
+            "type Hidden = opaque\n",
+            "type Marker\n",
+        );
+        let module = parse(source).unwrap();
+        let labels = labels(source, &tokens(source, Some(&module), None, None));
+        for expected in [
+            ("alias", MODIFIER),
+            ("ctor", MODIFIER),
+            ("opaque", MODIFIER),
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "missing {expected:?} in {labels:?}"
+            );
+        }
+        assert!(
+            !labels.contains(&("Marker", MODIFIER)),
+            "a singleton name is not a body marker: {labels:?}"
+        );
     }
 
     #[test]
@@ -1835,7 +1868,7 @@ mod tests {
                 "pub mod\n",
                 "pub let value = 1\n",
                 "pub def callable = () => 1\n",
-                "pub type alias Number = I32\n",
+                "pub type Number = alias I32\n",
                 "pub trait Printable T {}\n",
                 "pub macro identity = value => parse_quote { $value }\n",
             ),
@@ -2080,7 +2113,7 @@ mod tests {
     #[test]
     fn classifies_bare_trait_function() {
         let source = concat!(
-            "type Wrapper = I32\n",
+            "type Wrapper = ctor I32\n",
             "impl ToString Wrapper { def to_string = value => \"\" }\n",
             "def f: Wrapper -> String = to_string\n",
         );
@@ -2113,7 +2146,7 @@ mod tests {
     #[test]
     fn classifies_companion_qualified_access() {
         let source = concat!(
-            "type Box = I32\n",
+            "type Box = ctor I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",

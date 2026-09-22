@@ -948,7 +948,7 @@ impl Collector<'_> {
         for bound in &declaration.trait_bounds {
             self.trait_bound(bound);
         }
-        if let Some(underlying) = &declaration.underlying {
+        if let Some(underlying) = declaration.underlying() {
             self.ty(underlying);
         }
     }
@@ -1037,13 +1037,8 @@ impl Collector<'_> {
         let from_module = resolved
             .module_for_syntax(from_syntax)
             .unwrap_or_else(|| resolved.program().entry());
-        let representation_is_visible = declaration.kind == TypeDeclarationKind::Alias
+        let representation_is_visible = declaration.kind() == TypeDeclarationKind::Alias
             || resolved.representation_visible_from(id, from_module);
-        let alias = if declaration.kind == TypeDeclarationKind::Alias {
-            " alias"
-        } else {
-            ""
-        };
         let (effect_parameter, ordinary_parameters) =
             match declaration.type_parameters.split_first() {
                 Some((TypeParameterPattern::Effect(binding), rest)) => {
@@ -1058,12 +1053,17 @@ impl Collector<'_> {
             &[],
         );
         let head = format!(
-            "type{alias} {}{effect_parameter}{parameters}{where_clause}",
+            "type {}{effect_parameter}{parameters}{where_clause}",
             declaration.name
         );
         // A singleton type has no representation to reveal.
-        if declaration.kind == TypeDeclarationKind::Singleton {
+        if declaration.kind() == TypeDeclarationKind::Singleton {
             return Some(head);
+        }
+        // An opaque declaration has no representation by construction; the
+        // marker itself is the whole body and is visible everywhere.
+        if declaration.kind() == TypeDeclarationKind::Opaque {
+            return Some(format!("{head} = opaque"));
         }
         // The representation exists but isn't reachable from the hovering
         // module, so stand in an elision for it rather than dropping the `=`.
@@ -1071,15 +1071,23 @@ impl Collector<'_> {
             return Some(format!("{head} = /* … */"));
         }
         let representation = declaration
-            .underlying
-            .as_ref()
+            .underlying()
             .map(|ty| ty.to_string())
-            .unwrap_or_else(|| match declaration.kind {
+            .unwrap_or_else(|| match declaration.kind() {
                 TypeDeclarationKind::Opaque => "opaque".to_owned(),
                 TypeDeclarationKind::Singleton => "()".to_owned(),
                 TypeDeclarationKind::Alias | TypeDeclarationKind::Distinct => "...".to_owned(),
             });
-        Some(format!("{head} = {representation}"))
+        let marker = match declaration.kind() {
+            TypeDeclarationKind::Alias => "alias ",
+            TypeDeclarationKind::Distinct => match declaration.representation_visibility() {
+                Visibility::Public => "pub ctor ",
+                Visibility::Package => "pub(package) ctor ",
+                Visibility::Private => "ctor ",
+            },
+            TypeDeclarationKind::Opaque | TypeDeclarationKind::Singleton => "",
+        };
+        Some(format!("{head} = {marker}{representation}"))
     }
 
     /// Hovers over the namespace/type segments of a resolved qualified
@@ -2392,7 +2400,7 @@ mod tests {
     fn qualified_companion_access_hovers_the_owning_type() {
         let source = concat!(
             "///A boxed integer.\n",
-            "type Box = I32\n",
+            "type Box = ctor I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",
@@ -2420,7 +2428,7 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!("no hover entry for the qualified `Box` reference: {entries:?}")
             });
-        assert_eq!(entry.signature, "type Box = I32");
+        assert_eq!(entry.signature, "type Box = ctor I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
     }
 
@@ -2428,7 +2436,7 @@ mod tests {
     fn companion_header_hovers_the_type_declaration() {
         let source = concat!(
             "///A boxed integer.\n",
-            "type Box = I32\n",
+            "type Box = ctor I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",
@@ -2455,7 +2463,7 @@ mod tests {
             .unwrap_or_else(|| {
                 panic!("no hover entry for the `companion Box` header: {entries:?}")
             });
-        assert_eq!(entry.signature, "type Box = I32");
+        assert_eq!(entry.signature, "type Box = ctor I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
     }
 
@@ -2463,7 +2471,7 @@ mod tests {
     fn use_glob_path_segment_hovers_the_companion_type() {
         let source = concat!(
             "///A boxed integer.\n",
-            "type Box = I32\n",
+            "type Box = ctor I32\n",
             "companion Box {\n",
             "    pub type Inner\n",
             "}\n",
@@ -2489,7 +2497,7 @@ mod tests {
             .iter()
             .find(|entry| entry.range.start == segment && &source[entry.range.clone()] == "Box")
             .unwrap_or_else(|| panic!("no hover entry for `Box` in `use Box.*`: {entries:?}"));
-        assert_eq!(entry.signature, "type Box = I32");
+        assert_eq!(entry.signature, "type Box = ctor I32");
         assert_eq!(entry.documentation, vec!["A boxed integer.".to_owned()]);
     }
 
@@ -2525,7 +2533,7 @@ mod tests {
                 panic!("no hover entry for `Switch` in `use Switch.*`: {entries:?}")
             });
         assert!(
-            entry.signature.starts_with("type alias Switch = "),
+            entry.signature.starts_with("type Switch = alias "),
             "unexpected `use Switch.*` segment signature: {entry:?}"
         );
     }
@@ -2562,7 +2570,7 @@ mod tests {
                 panic!("no hover entry for the `companion Switch` header: {entries:?}")
             });
         assert!(
-            entry.signature.starts_with("type alias Switch = "),
+            entry.signature.starts_with("type Switch = alias "),
             "unexpected companion header signature: {entry:?}"
         );
     }
@@ -2608,8 +2616,7 @@ mod tests {
 
     #[test]
     fn generic_def_and_type_signatures_use_the_new_syntax() {
-        let source =
-            "pub(repr) type Box T = (value: T)\ndef unbox: <T> Box T -> T = Box value => value\n";
+        let source = "pub type Box T = pub ctor (value: T)\ndef unbox: <T> Box T -> T = Box value => value\n";
         let path = std::env::temp_dir().join("staple-hover-generic-signatures.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -2626,7 +2633,7 @@ mod tests {
         let entries = entries(&module, &typed);
 
         for (name, signature) in [
-            ("Box", "type Box T = (value: T)"),
+            ("Box", "type Box T = pub ctor (value: T)"),
             ("unbox", "def unbox: <T> Box T -> T"),
         ] {
             assert!(
@@ -2641,7 +2648,7 @@ mod tests {
     #[test]
     fn generic_function_use_site_leads_with_the_declared_type() {
         let source = concat!(
-            "pub(repr) type Box T = (value: T)\n",
+            "pub type Box T = pub ctor (value: T)\n",
             "def unbox: <T> Box T -> T = Box value => value\n",
             "unbox (Box (value: 1))\n",
         );
@@ -2684,7 +2691,7 @@ mod tests {
 
     #[test]
     fn generic_type_constructor_use_site_leads_with_the_declared_type() {
-        let source = concat!("pub(repr) type Box T = T\n", "let box = Box 32\n",);
+        let source = concat!("pub type Box T = pub ctor T\n", "let box = Box 32\n",);
         let path = std::env::temp_dir().join("staple-hover-generic-constructor-use-site.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -2837,7 +2844,7 @@ mod tests {
         let source = concat!(
             "@doc(\"Line 1\")\n",
             "///Line 2\n",
-            "pub type alias MyType = I32\n",
+            "pub type MyType = alias I32\n",
             "/// Value docs\n",
             "def value: MyType = 1\n",
             "value\n",
@@ -2882,7 +2889,7 @@ mod tests {
 
     #[test]
     fn displays_inferred_resource_contracts() {
-        let source = "type Clock = I32\ndef read = () => resource Clock\n";
+        let source = "type Clock = ctor I32\ndef read = () => resource Clock\n";
         let path = std::env::temp_dir().join("staple-hover-resources.sta");
         let program = ProgramLoader::new()
             .with_standard_library_root(
@@ -3027,22 +3034,22 @@ mod tests {
         let entries = entries(&module, &typed);
 
         for expected in [
-            ("visibility", "visibility: Visibility"),
             (
                 "entries",
-                "entries: Sequence (Sequence Modifier, Ident String, Optional Type)",
+                "entries: Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody))",
             ),
             (
                 "first",
-                "first: (Sequence Modifier, Ident String, Optional Type)",
+                "first: (Sequence Modifier, Ident String, Optional (Equals, TypeBody))",
             ),
             (
                 "rest",
-                "rest: Sequence (Sequence Modifier, Ident String, Optional Type)",
+                "rest: Sequence (Sequence Modifier, Ident String, Optional (Equals, TypeBody))",
             ),
             ("modifiers", "modifiers: Sequence Modifier"),
             ("variant", "variant: Ident String"),
-            ("underlying", "underlying: Type"),
+            ("body", "body: TypeBody"),
+            ("parameters", "parameters: Syntax"),
         ] {
             assert!(
                 entries.iter().any(|entry| {
@@ -3055,7 +3062,7 @@ mod tests {
         assert!(!entries.iter().any(|entry| {
             matches!(
                 &source[entry.range.clone()],
-                "first" | "rest" | "modifiers" | "variant" | "underlying"
+                "first" | "rest" | "modifiers" | "variant" | "body"
             ) && entry.signature.ends_with(": SyntaxNode")
         }));
     }
@@ -3355,7 +3362,7 @@ mod tests {
                 "/// A callable.\n",
                 "pub def callable = () => 1\n",
                 "/// A number alias.\n",
-                "pub type alias Number = I32\n",
+                "pub type Number = alias I32\n",
                 "/// A printable trait.\n",
                 "pub trait Printable T {}\n",
                 "/// An identity macro.\n",
@@ -3388,7 +3395,7 @@ mod tests {
         for expected in [
             ("dependency", "mod dependency", "Dependency module."),
             ("value", "let value: I32", " A value."),
-            ("Number", "type alias Number = I32", " A number alias."),
+            ("Number", "type Number = alias I32", " A number alias."),
             ("Printable", "trait Printable T", " A printable trait."),
             (
                 "identity",
@@ -3515,7 +3522,7 @@ mod tests {
             root.join("geometry.sta"),
             concat!(
                 "pub mod\n",
-                "pub(repr) type Point = (x: I32, y: I32)\n",
+                "pub type Point = pub ctor (x: I32, y: I32)\n",
                 "pub def origin = () => Point (x: 0, y: 0)\n",
             ),
         )
@@ -3558,8 +3565,8 @@ mod tests {
     #[test]
     fn formats_local_type_declarations_and_references() {
         let source = concat!(
-            "type Box T = (value: T)\n",
-            "type alias Pair (A, B) = (A, B)\n",
+            "type Box T = ctor (value: T)\n",
+            "type Pair (A, B) = alias (A, B)\n",
             "def keep: Box I32 -> Box I32 = value => value\n",
             "def pair: Pair (I32, I32) -> Pair (I32, I32) = value => value\n",
         );
@@ -3579,11 +3586,12 @@ mod tests {
         let entries = entries(&module, &typed);
 
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Box" && entry.signature == "type Box T = (value: T)"
+            &source[entry.range.clone()] == "Box"
+                && entry.signature == "type Box T = ctor (value: T)"
         }));
         assert!(entries.iter().any(|entry| {
             &source[entry.range.clone()] == "Pair"
-                && entry.signature == "type alias Pair (A, B) = (A, B)"
+                && entry.signature == "type Pair (A, B) = alias (A, B)"
         }));
     }
 
@@ -3629,18 +3637,20 @@ mod tests {
             root.join("dependency.sta"),
             concat!(
                 "pub mod\n",
-                "pub type Hidden = I32\n",
-                "pub type HiddenGeneric T = T\n",
-                "pub(repr) type Visible = I32\n",
-                "pub type alias Alias = I32\n",
+                "pub type Hidden = ctor I32\n",
+                "pub type HiddenGeneric T = ctor T\n",
+                "pub type Visible = pub ctor I32\n",
+                "pub type Secret = opaque\n",
+                "pub type Alias = alias I32\n",
             ),
         )
         .unwrap();
         let source = concat!(
-            "use dependency.(Hidden, HiddenGeneric, Visible, Alias)\n",
+            "use dependency.(Hidden, HiddenGeneric, Visible, Secret, Alias)\n",
             "def hidden: Hidden -> Hidden = value => value\n",
             "def hidden_generic: HiddenGeneric I32 -> HiddenGeneric I32 = value => value\n",
             "def visible: Visible -> Visible = value => value\n",
+            "def secret: Secret -> Secret\n",
             "def alias_value: Alias -> Alias = value => value\n",
         );
         let path = root.join("main.sta");
@@ -3666,10 +3676,15 @@ mod tests {
                 && entry.signature == "type HiddenGeneric T = /* … */"
         }));
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Visible" && entry.signature == "type Visible = I32"
+            &source[entry.range.clone()] == "Visible"
+                && entry.signature == "type Visible = pub ctor I32"
         }));
         assert!(entries.iter().any(|entry| {
-            &source[entry.range.clone()] == "Alias" && entry.signature == "type alias Alias = I32"
+            &source[entry.range.clone()] == "Visible"
+                && entry.signature == "type Visible = pub ctor I32"
+        }));
+        assert!(entries.iter().any(|entry| {
+            &source[entry.range.clone()] == "Secret" && entry.signature == "type Secret = opaque"
         }));
 
         std::fs::remove_dir_all(root).unwrap();
@@ -3718,7 +3733,7 @@ mod tests {
             entries.iter().any(|entry| {
                 entry.range.start < 801
                     && &source[entry.range.clone()] == "Expr"
-                    && entry.signature.starts_with("type alias Expr")
+                    && entry.signature.starts_with("type Expr = alias")
             }),
             "{signatures:?}"
         );

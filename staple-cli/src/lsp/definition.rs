@@ -518,7 +518,7 @@ impl Collector<'_> {
                 for bound in &value.trait_bounds {
                     self.trait_bound(bound);
                 }
-                if let Some(underlying) = &value.underlying {
+                if let Some(underlying) = value.underlying() {
                     self.ty(underlying);
                 }
             }
@@ -792,7 +792,7 @@ impl Collector<'_> {
                 for bound in &value.trait_bounds {
                     self.trait_bound(bound);
                 }
-                if let Some(underlying) = &value.underlying {
+                if let Some(underlying) = value.underlying() {
                     self.ty(underlying);
                 }
             }
@@ -1189,7 +1189,7 @@ mod tests {
     #[test]
     fn indexes_local_values_types_and_trait_members() {
         let source = concat!(
-            "type Wrapper T = (value: T)\n",
+            "type Wrapper T = ctor (value: T)\n",
             "trait Identity T { identity: T -> T }\n",
             "impl Identity I32 { def identity = value => value }\n",
             "def wrap: <T> move T -> Wrapper T = move value => Wrapper (value: value)\n",
@@ -1224,7 +1224,7 @@ mod tests {
     #[test]
     fn qualified_companion_access_targets_the_type_declaration() {
         let source = concat!(
-            "type Box = I32\n",
+            "type Box = ctor I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",
@@ -1274,7 +1274,7 @@ mod tests {
     #[test]
     fn use_glob_path_segment_targets_the_companion_type() {
         let source = concat!(
-            "type Box = I32\n",
+            "type Box = ctor I32\n",
             "companion Box {\n",
             "    pub type Inner\n",
             "}\n",
@@ -1323,7 +1323,7 @@ mod tests {
     #[test]
     fn companion_header_targets_the_type_declaration() {
         let source = concat!(
-            "type Box = I32\n",
+            "type Box = ctor I32\n",
             "companion Box {\n",
             "    pub def create = () => 1\n",
             "}\n",
@@ -1524,7 +1524,7 @@ mod tests {
             &dependency,
             concat!(
                 "pub mod\n",
-                "pub(repr) type Point = (x: I32, y: I32)\n",
+                "pub type Point = pub ctor (x: I32, y: I32)\n",
                 "pub def origin = () => Point (x: 0, y: 0)\n",
             ),
         )
@@ -1953,7 +1953,7 @@ mod tests {
             "use std.io.println\n",
             "use package.utils.add\n",
             "\n",
-            "pub type Foo = ()\n",
+            "pub type Foo = ctor ()\n",
             "\n",
             "companion Foo {\n",
             "    def a = x: I32 => {}\n",

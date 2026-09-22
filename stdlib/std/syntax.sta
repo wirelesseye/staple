@@ -5,27 +5,27 @@ pub mod
 /// through `UnstructuredExpr` without exposing fields.
 /// An identifier syntax node, optionally constrained to one spelling.
 @recursive_constructor
-pub(repr) type Ident (Spelling = String) where Spelling <: String = Spelling
+pub type Ident (Spelling = String) where Spelling <: String = pub ctor Spelling
 /// A structured call expression syntax node.
 @recursive_constructor
-pub(repr) type CallExpr = (
+pub type CallExpr = pub ctor (
     callee: Expr,
     argument: Expr,
 )
 /// A string-literal expression constructed from a compile-time string.
 @recursive_constructor
-pub(repr) type StringExpr = String
+pub type StringExpr = pub ctor String
 /// A sequence of syntax values.
 @recursive_constructor
-pub(repr) type Sequence Element =
+pub type Sequence Element = pub ctor
     () |
     (first: Element, rest: Sequence Element)
 /// An optional syntax value.
 @recursive_constructor
-pub(repr) type Optional Element = None | Some Element
+pub type Optional Element = pub ctor None | Some Element
 /// A separated syntax sequence with its separator and trailing state.
 @recursive_constructor
-pub(repr) type Separated Element Separator = (
+pub type Separated Element Separator = pub ctor (
     separator: Separator,
     elements: Sequence Element,
     trailing: Bool,
@@ -38,40 +38,40 @@ pub type Equals
 pub type FatArrow
 /// A parenthesized syntax fragment.
 @recursive_constructor
-pub(repr) type Parenthesized Contents = Contents
+pub type Parenthesized Contents = pub ctor Contents
 /// A bracketed syntax fragment.
 @recursive_constructor
-pub(repr) type Bracketed Contents = Contents
+pub type Bracketed Contents = pub ctor Contents
 /// A braced syntax fragment.
 @recursive_constructor
-pub(repr) type Braced Contents = Contents
+pub type Braced Contents = pub ctor Contents
 /// An expression syntax node without structured fields.
 pub type UnstructuredExpr = opaque
 /// The syntax category for expressions.
-pub type alias Expr = Ident String | CallExpr | StringExpr | UnstructuredExpr
+pub type Expr = alias Ident String | CallExpr | StringExpr | UnstructuredExpr
 
 /// The syntax category for types.
 pub type Type = opaque
 /// A binding pattern constructed from an identifier.
 @recursive_constructor
-pub(repr) type BindingPattern = Ident String
+pub type BindingPattern = pub ctor Ident String
 /// A nominal destructuring pattern.
 @recursive_constructor
-pub(repr) type NominalPattern = (name: Ident String, argument: Pattern)
+pub type NominalPattern = pub ctor (name: Ident String, argument: Pattern)
 /// A pattern whose structure is not exposed yet.
 pub type UnstructuredPattern = opaque
 /// The syntax category for patterns.
-pub type alias Pattern = BindingPattern | NominalPattern | UnstructuredPattern
+pub type Pattern = alias BindingPattern | NominalPattern | UnstructuredPattern
 /// The kind of a type declaration.
 pub type AliasDeclaration
 pub type DistinctDeclaration
 pub type SingletonDeclaration
 pub type OpaqueDeclaration
-pub type alias TypeDeclarationKind = AliasDeclaration | DistinctDeclaration | SingletonDeclaration | OpaqueDeclaration
+pub type TypeDeclarationKind = alias AliasDeclaration | DistinctDeclaration | SingletonDeclaration | OpaqueDeclaration
 /// An inspectable type declaration item. Type parameters are exposed by name;
 /// their original declaration syntax remains part of the lossless item value.
 @recursive_constructor
-pub(repr) type TypeDeclarationItem = (
+pub type TypeDeclarationItem = pub ctor (
     kind: TypeDeclarationKind,
     name: Ident String,
     name_spelling: String,
@@ -79,6 +79,16 @@ pub(repr) type TypeDeclarationItem = (
     type_parameters: Sequence (Ident String),
     underlying: Optional Type,
 )
+/// An `alias` type declaration body.
+@recursive_constructor
+pub type AliasBody Element = ctor Element
+/// A `ctor` type declaration body with its representation visibility.
+@recursive_constructor
+pub type ConstructorBody Representation Element = ctor (Representation, Element)
+/// An `opaque` type declaration body.
+pub type OpaqueBody
+/// The body of a type declaration written after `=`.
+pub type TypeBody = alias AliasBody Type | ConstructorBody Visibility Type | OpaqueBody
 /// An item whose structure is not exposed yet.
 pub type UnstructuredItem = opaque
 /// A lossless modifier invocation whose structure is intentionally opaque.
@@ -86,16 +96,16 @@ pub type Modifier = opaque
 /// An item carrying modifiers that have not yet been applied. Modifiers are
 /// ordered outermost first.
 @recursive_constructor
-pub(repr) type ModifiedItem = (
+pub type ModifiedItem = pub ctor (
     modifiers: Sequence Modifier,
     item: Item,
 )
 /// The syntax category for items.
-pub type alias Item = ModifiedItem | TypeDeclarationItem | UnstructuredItem
+pub type Item = alias ModifiedItem | TypeDeclarationItem | UnstructuredItem
 
 /// Compiler-owned metadata supplied to a function-style macro invocation.
 /// Modifiers are ordered outermost first.
-pub type MacroCallMetadata = (
+pub type MacroCallMetadata = ctor (
     modifiers: Sequence Modifier,
     visibility: Visibility,
 )
@@ -105,18 +115,14 @@ pub type Private
 pub type Package
 /// Public visibility syntax.
 pub type Public
-/// Public visibility with package-scoped representation access.
-pub type PublicReprPackage
-/// Public visibility with representation access.
-pub type PublicRepr
 /// The syntax category for visibility markers.
-pub type alias Visibility = Private | Package | Public | PublicReprPackage | PublicRepr
+pub type Visibility = alias Private | Package | Public
 /// An arbitrary lossless syntax fragment. `SyntaxNode` is exactly one structural
 /// node; delimiter nodes retain their complete opaque contents.
 /// An opaque lossless syntax fragment.
 pub type Syntax = opaque
 /// Exactly one structural syntax node.
-pub type alias SyntaxNode = Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
+pub type SyntaxNode = alias Expr | Type | Pattern | Item | Visibility | Comma | Equals | FatArrow | Parenthesized Syntax | Bracketed Syntax | Braced Syntax
 
 /// Produces opaque syntax from a braced quotation without reparsing it.
 ///

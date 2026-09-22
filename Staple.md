@@ -91,7 +91,7 @@ macro choose = condition * then * else => parse_quote {
 
 Typed parameters constrain the grammar accepted at an invocation. `Ident` is a
 generic syntax type whose argument constrains its spelling, declared as
-`pub(repr) type Ident (Spelling = String) where Spelling <: String = Spelling`.
+`pub type Ident (Spelling = String) where Spelling <: String = pub ctor Spelling`.
 `Ident` and `Ident String` both accept any identifier — `Spelling` defaults to
 `String` (see [Default type parameters](#default-type-parameters)) — and
 `Ident "else"` accepts exactly the identifier `else`, because every string
@@ -379,13 +379,13 @@ and remain lossless but opaque. `BindingPattern` and `NominalPattern` provide
 the structured pattern construction needed by declaration modifiers.
 
 Visibility is also compiler-owned syntax. Its atomic variants are `Private`,
-`Package`, `Public`, `PublicReprPackage`, and `PublicRepr`. They can be matched
-and passed through compile-time helpers accepting `Visibility`, but cannot
-survive expansion as runtime values. `MacroCallMetadata` is a compiler-owned
-product permitted only as the first parameter of a function-style macro:
+`Package`, and `Public`. They can be matched and passed through compile-time
+helpers accepting `Visibility`, but cannot survive expansion as runtime values.
+`MacroCallMetadata` is a compiler-owned product permitted only as the first
+parameter of a function-style macro:
 
 ```staple
-pub type MacroCallMetadata = (
+pub type MacroCallMetadata = ctor (
     modifiers: Sequence Modifier,
     visibility: Visibility,
 )
@@ -397,19 +397,19 @@ macro define_alias =
     ty: Type =>
     {
         let visibility = metadata.visibility
-        parse_quote { $visibility type alias Generated = $ty }
+        parse_quote { $visibility type Generated = alias $ty }
     }
 
 pub define_alias I32
 ```
 
 The metadata contains the ordered `Sequence Modifier` prefix and the supplied
-visibility. `pub`, `pub(package)`, `pub(repr(package))`, and `pub(repr)` before
-the macro name supply the corresponding visibility; an unprefixed call supplies
-`Private`, and no-prefix calls receive an empty modifier sequence. A prefixed
-call is parsed in module-item grammar, but its macro may return either an item
-or an expression. Normal syntax placement rules still reject type, pattern, or
-visibility results that have no valid placement.
+visibility. `pub` and `pub(package)` before the macro name supply the
+corresponding visibility; an unprefixed call supplies `Private`, and no-prefix
+calls receive an empty modifier sequence. A prefixed call is parsed in
+module-item grammar, but its macro may return either an item or an expression.
+Normal syntax placement rules still reject type, pattern, or visibility results
+that have no valid placement.
 
 An ordinary `Visibility` parameter may appear in any position. At that
 position each visibility form consumes one source atom; if none is present,
@@ -423,7 +423,7 @@ macro configure =
 
 configure value I32
 configure value pub I32
-configure value pub(repr) I32
+configure value pub(package) I32
 ```
 
 Metadata-aware overload matching ranks candidates by source atoms consumed,
@@ -434,15 +434,14 @@ only overloads beginning with `MacroCallMetadata`.
 
 `Visibility` is also a `parse_quote` result type, following the same
 absence-means-`Private` convention: `parse_quote { }: Visibility` yields
-`Private`, while `pub`, `pub(package)`, `pub(repr(package))`, and
-`pub(repr)` yield `Public`, `Package`, `PublicReprPackage`, and `PublicRepr`.
+`Private`, while `pub` and `pub(package)` yield `Public` and `Package`.
 
 Inside an item quotation, a visibility value may be spliced immediately before
-a declaration. `Private` emits no prefix, `Package` emits `pub(package)`,
-`Public` emits `pub`, `PublicReprPackage` emits `pub(repr(package))`, and
-`PublicRepr` emits `pub(repr)`. Existing declaration rules are checked after
-substitution. Representation visibility is valid on represented distinct types
-and on singleton types, where it is a no-op.
+a declaration. `Private` emits no prefix, `Package` emits `pub(package)`, and
+`Public` emits `pub`. Existing declaration rules are checked after
+substitution. Representation visibility is written in the type body itself:
+`= pub ctor T` exposes the constructor to importers, and
+`= pub(package) ctor T` keeps it package-scoped.
 Modifiers surrounding a metadata-aware call belong to the metadata value and
 are not automatically applied after the call has produced its result.
 
@@ -731,7 +730,7 @@ declared with `pub mod`:
 
 ```staple
 pub mod api {
-    pub type alias Number = I32
+    pub type Number = alias I32
     pub let answer: Number = 42
 }
 ```
@@ -742,7 +741,7 @@ Named types and type aliases may have companion items. A companion behaves as
 the type's namespace, so its public members are selected through the type name:
 
 ```staple
-type Animal = ...
+type Animal = ctor ...
 
 companion Animal {
     pub def move_to = animal: Animal => position: (F32, F32) => animal
@@ -803,7 +802,7 @@ A parent can re-export public items from a child, including a private child:
 ```staple
 mod implementation {
     pub def format = value => value
-    pub type alias Number = I32
+    pub type Number = alias I32
 }
 
 pub use implementation.format
@@ -818,7 +817,7 @@ Top-level declarations are private by default. `pub` exports a binding or type:
 
 ```staple
 pub def format = (value: I32) => value
-pub type alias Number = I32
+pub type Number = alias I32
 ```
 
 `pub extern` exports every binding declared by that external block.
@@ -1279,7 +1278,7 @@ The length is a compile-time type. Non-negative integer type literals such as
 `0`, `3`, and `42` are singleton subtypes of `USize` and automatically satisfy
 the sealed prelude trait `Natural`. An alias or a parameter constrained by that
 trait may be used as a length, for example
-`type alias Vector T N where Natural N = (T; N)`. The length must resolve to one
+`type Vector T N where Natural N = alias (T; N)`. The length must resolve to one
 singleton literal before code generation. Number literal types use the `USize`
 runtime representation, so an exact value annotation such as `let three: 3 = 3`
 is valid and widens to `USize`; an unconstrained `let three = 3` still infers
@@ -1300,7 +1299,7 @@ integer type literal, a type alias, or a compile-time parameter constrained by
 `Natural` may be used, for example:
 
 ```staple
-type alias Count = 3
+type Count = alias 3
 let cells: (I32; Count) = (0; Count)
 
 def repeat: <T, N where Natural N> T -> (T; N) = value => (value; N)
@@ -1535,7 +1534,7 @@ Nominal patterns use the generated constructor name followed by a nested
 pattern. They are irrefutable and add no runtime check or wrapper:
 
 ```staple
-type UserId = I32
+type UserId = ctor I32
 def unwrap: UserId -> I32 = UserId value => value
 
 let user: UserId = UserId 42
@@ -1646,11 +1645,11 @@ There is no separate resource declaration: any fully concrete, sized nominal
 type may be used. For example:
 
 ```staple
-type Clock = (
+type Clock = ctor (
     now: () -> I32,
 )
 
-type Logger = (
+type Logger = ctor (
     write: String -> (),
 )
 ```
@@ -1981,7 +1980,7 @@ write through it, and the caller keeps ownership and its value remains usable
 after the call:
 
 ```staple
-type File = I32
+type File = ctor I32
 impl Drop File {
     def drop = File descriptor => close descriptor
 }
@@ -2032,7 +2031,7 @@ def f4: <A, B> move (A, B) -> A = move (a, _) => a
 Every destructured binding is owned, exactly as if the whole parameter were
 bound and destructured in the body. This is the only way to destructure a
 parameter whose type is not itself a literal product — for example, an
-aliased pair `type alias Pair (A, B) = (A, B)` — directly in the pattern,
+aliased pair `type Pair (A, B) = alias (A, B)` — directly in the pattern,
 since `move`/`mut` on the aliased type is necessarily a whole-parameter
 marker rather than one over individual elements.
 
@@ -2312,8 +2311,8 @@ calling `string_identity "foo"` infers `T` as the literal type `"foo"`, not
 enforced — `string_identity 1` is rejected, since `I32` is not a subtype of
 `String`. `Ident`'s spelling parameter (see [Metaprogramming](#metaprogramming))
 is bounded this way, combined with a default (see [Default type
-parameters](#default-type-parameters)): `pub(repr) type Ident (Spelling =
-String) where Spelling <: String = Spelling`.
+parameters](#default-type-parameters)): `pub type Ident (Spelling = String)
+where Spelling <: String = pub ctor Spelling`.
 
 ### Default type parameters
 
@@ -2324,8 +2323,8 @@ be parenthesized to disambiguate the `=` from the trailing `=` that precedes
 a type's body or the `{` that opens a trait's member block:
 
 ```staple
-type Box (T = String) = (value: T)
-type alias Pair A (B = A) = (A, B)
+type Box (T = String) = ctor (value: T)
+type Pair A (B = A) = alias (A, B)
 trait Increment (T = I32) { increment: T -> T }
 ```
 
@@ -2333,8 +2332,8 @@ The default is part of that one parameter's own parentheses; it is not a
 separate clause. It may be combined with a subtype or trait bound in the
 `where` clause, as in `Ident`'s spelling parameter (see
 [Metaprogramming](#metaprogramming)), which declares a default together with a
-subtype bound: `pub(repr) type Ident (Spelling = String) where Spelling <:
-String = Spelling`. Only a plain named parameter can carry a default — a
+subtype bound: `pub type Ident (Spelling = String) where Spelling <:
+String = pub ctor Spelling`. Only a plain named parameter can carry a default — a
 product or splice pattern in the parameter position is a parse error if
 followed by `=`.
 
@@ -2867,11 +2866,11 @@ with every step. `Iter` functionally determines `Item`:
 
 ```staple
 pub mod IterStep {
-    pub(repr) type Done Iter = Iter
-    pub(repr) type Yield (Item, Iter) = (Item, Iter)
+    pub type Done Iter = pub ctor Iter
+    pub type Yield (Item, Iter) = pub ctor (Item, Iter)
 }
 
-pub type alias IterStep (Iter, Item) =
+pub type IterStep (Iter, Item) = alias
     IterStep.Done Iter |
     IterStep.Yield (Item, Iter)
 
@@ -2989,7 +2988,7 @@ Manual implementations append text with `Formatter.write` and may delegate
 nested values directly to either formatting trait:
 
 ```staple
-type Point = (x: I32, y: I32)
+type Point = ctor (x: I32, y: I32)
 
 impl Debug Point {
     def fmt = (Point (x, y), formatter) => {
@@ -3016,7 +3015,7 @@ Two strings can be concatenated with `+`; this dispatches through the standard
 `Add String` implementation and returns a newly allocated `String`.
 
 `Ref T` is a garbage-collected reference to a value of type `T`. Its standard
-declaration is `pub(repr) type Ref T where ?Sized T = T`, so its payload may be
+declaration is `pub type Ref T where ?Sized T = pub ctor T`, so its payload may be
 sized or unsized while the reference value itself always has a known
 representation.
 Constructing `Ref value` copies or moves `value` into a managed allocation;
@@ -3049,7 +3048,7 @@ let previous = Ref.replace value 20
 nominal type. For example, this declaration retains both constructor layers:
 
 ```staple
-type RefPoint = Ref (x: I32, y: I32)
+type RefPoint = ctor Ref (x: I32, y: I32)
 let point = RefPoint (Ref (x: 10, y: 20))
 let RefPoint (Ref (x, y)) = point
 ```
@@ -3180,12 +3179,12 @@ trait Drop T {
     drop: T -> ()
 }
 
-type File = I32
+type File = ctor I32
 impl Drop File {
     def drop = File descriptor => close descriptor
 }
 
-type Handle = I32
+type Handle = ctor I32
 impl !Copy Handle {}
 ```
 
@@ -3209,7 +3208,7 @@ A non-`Copy` type has no implicit `Clone`; implement it manually to allow
 explicit duplication:
 
 ```staple
-type Handle = I32
+type Handle = ctor I32
 impl !Copy Handle {}
 impl Clone Handle {
     def clone = Handle descriptor => Handle descriptor
@@ -3325,8 +3324,8 @@ let state: Ready = Ready
 
 Singleton values have the zero-sized representation `()` but remain nominally
 distinct from `()` and from every other singleton type. A public singleton
-exports its value together with its type; `pub(repr)` is neither needed nor
-accepted. A private singleton keeps both names private.
+exports its value together with its type; a private singleton keeps both names
+private.
 
 The unique value is not a function and cannot be called. In a match pattern,
 its bare name selects the singleton without binding a variable:
@@ -3355,7 +3354,7 @@ The standard-library `Bool` type is defined entirely in these terms:
 ```staple
 pub type True
 pub type False
-pub type alias Bool = True | False
+pub type Bool = alias True | False
 ```
 
 `True` and `False` are the two values of `Bool`; `Bool` itself adds no nominal
@@ -3367,8 +3366,8 @@ wrapper or compiler-specific type identity.
 with the same runtime representation as its underlying type:
 
 ```staple
-type UserId = I32
-type OrderId = I32
+type UserId = ctor I32
+type OrderId = ctor I32
 ```
 
 `UserId`, `OrderId`, and `I32` are distinct types and are not implicitly
@@ -3389,7 +3388,7 @@ A represented nominal value can expose one layer of its inner representation
 with `.*` when that representation is visible in the current scope:
 
 ```staple
-type User = (name: String, age: I32)
+type User = ctor (name: String, age: I32)
 let user = User (name: "Ada", age: 42)
 let inner = user.*
 inner.name
@@ -3402,28 +3401,29 @@ unwrap nested nominal types; use one `.*` for each visible layer, as in
 `outer.*.*.name`. Both explicit and shortcut forms are rejected when the
 representation is private in the current scope.
 
-`pub(repr)` exposes the representation and generated constructor as part of the
-module interface:
+`= pub ctor T` exposes the representation and generated constructor as part of
+the module interface:
 
 ```staple
-pub(repr) type Box T = (value: T)
+pub type Box T = pub ctor (value: T)
 ```
 
 Importers may construct `Box` values and use `Box pattern` to destructure them,
 including through namespace, selected, renamed, or glob imports. Every named
 type directly referenced by a public representation must also be public.
-`pub(repr)` is rejected on aliases and opaque declarations.
+Representation visibility is rejected on aliases and opaque declarations, which
+have no constructor.
 
 Packages add a middle visibility level between private and public:
 
 ```staple
 pub(package) def internal_helper = 42
-pub(repr(package)) type Shared = (value: I32)
+pub type Shared = pub(package) ctor (value: I32)
 ```
 
 `pub(package)` names are available from any module with the same canonical
-package identity. `pub(repr(package))` makes the type name public while
-allowing representation access only inside that package. A package-visible
+package identity. `= pub(package) ctor T` keeps representation access inside
+that package while the type name stays public. A package-visible
 re-export uses `pub(package) use`; ordinary `pub use` cannot promote a
 package-visible declaration into an external interface. Package visibility is
 rejected when run without a package manifest. Thus visibility forms
@@ -3436,9 +3436,9 @@ compile-time parameters directly after the type name, juxtaposed rather than
 bracketed as with generic functions:
 
 ```staple
-type Box T = (value: T)
-type HashMap (K, V) = (key: K, value: V)
-type alias Pair (A, B) = (A, B)
+type Box T = ctor (value: T)
+type HashMap (K, V) = ctor (key: K, value: V)
+type Pair (A, B) = alias (A, B)
 ```
 
 They may also bind one effect-row parameter in braces immediately after the
@@ -3446,8 +3446,8 @@ type name. The effect parameter precedes any ordinary compile-time parameters
 and may be used in effect sets within the representation:
 
 ```staple
-type alias Callback{E} = () ->{E} ()
-type alias Handler{E} T = T ->{E} ()
+type Callback{E} = alias () ->{E} ()
+type Handler{E} T = alias T ->{E} ()
 ```
 
 Declaration braces must contain exactly one new effect-variable name. They are
@@ -3493,21 +3493,20 @@ own ordinary arguments, as `Node T` or `Node I32`, never a bare `Node`.
 A represented type may refer to itself, directly or mutually, only where the
 reference passes through a managed indirection — `Ref`, `Slice`, or a
 `Syntax` value — so that every instance has a finite layout. A representation
-that would contain itself by value (`type Loop = (head: I32, tail: Loop)`) is
+that would contain itself by value (`type Loop = ctor (head: I32, tail: Loop)`) is
 rejected as a cyclic definition; routing the back-edge through `Ref`
-(`type Loop = (head: I32, tail: Option (Ref Loop))`) is well-founded and
+(`type Loop = ctor (head: I32, tail: Option (Ref Loop))`) is well-founded and
 accepted.
 
 Product types and values may have a trailing comma.
 
-#### `type alias`
+#### `alias`
 
-`type alias` gives another name to an
-existing type without creating a new type. The alias and its underlying type
-are interchangeable:
+A body beginning with `alias` gives another name to an existing type without
+creating a new type. The alias and its underlying type are interchangeable:
 
 ```staple
-type alias Person = (
+type Person = alias (
     name: String,
     age: I32,
 )
@@ -3531,7 +3530,7 @@ types independently and combine them wherever a type is accepted. `Ok` is a
 public represented type from `std.core`:
 
 ```staple
-pub(repr) type Ok T = T
+pub type Ok T = pub ctor T
 ```
 
 Every alternative must be a sized value type. Primitive, product,
@@ -3592,8 +3591,8 @@ The right-hand expression must have a sum type containing exactly one
 alternative with the pattern's nominal constructor. It is evaluated once. On
 the selected tag, the payload is destructured and execution continues. Any
 other tag returns immediately and is widened into the enclosing result type.
-The selected representation must be visible under the ordinary `pub(repr)`
-rules.
+The selected representation must be visible under the ordinary
+representation-visibility rules.
 
 When the function result is omitted, the compiler joins its trailing value,
 reachable explicit returns, and every propagated alternative. The example
@@ -3607,8 +3606,8 @@ anywhere inside an `extern` binding type.
 The prelude supplies a `typegroup` macro that conveniently generates sum types:
 
 ```staple
-pub(repr) typegroup Pattern {
-    Literal String,
+pub typegroup Pattern {
+    Literal = pub ctor String,
     Wildcard,
 }
 ```
@@ -3618,22 +3617,24 @@ same juxtaposed syntax as generic type declarations. Product parameter patterns
 and multiple parameter atoms may be mixed freely:
 
 ```staple
-pub(repr) typegroup Result T E {
-    Ok T,
-    Err E,
+pub typegroup Result T E {
+    Ok = pub ctor T,
+    Err = pub ctor E,
 }
 
-pub(repr) typegroup Mixed A (B, C) D {
+pub typegroup Mixed A (B, C) D {
     Empty,
-    Value (A, B, C, D),
+    Value = pub ctor (A, B, C, D),
 }
 ```
 
-It generates a same-named inline module containing the nominal variants and a
-same-named parent-module alias whose alternatives are the qualified variants.
-Private groups use a private module and alias while keeping child variants
-public-representation inside that private boundary. `pub` groups expose opaque
-variants, and `pub(repr)` groups expose their representations.
+Each entry becomes a public declaration in the group's companion module. A bare
+name is a singleton variant, and `= ctor T`, `= pub ctor T`,
+`= pub(package) ctor T`, and `= alias T` follow the ordinary type declaration
+body grammar. Every non-opaque variant is also an alternative of the generated
+group alias. `= opaque` entries are rejected, because an opaque type cannot be a
+sum alternative. The group's own visibility controls the alias, while
+representation visibility is written explicitly on each constructor variant.
 
 ## Foreign declarations
 

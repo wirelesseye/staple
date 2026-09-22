@@ -20,6 +20,7 @@ const KEYWORDS: &[&str] = &[
     "break",
     "const",
     "continue",
+    "ctor",
     "def",
     "extern",
     "impl",
@@ -35,7 +36,6 @@ const KEYWORDS: &[&str] = &[
     "parse_quote",
     "pub",
     "quote",
-    "repr",
     "resource",
     "return",
     "satisfies",
@@ -1603,7 +1603,7 @@ mod tests {
     #[test]
     fn completes_bare_trait_function() {
         let source = concat!(
-            "type Wrapper = I32\n",
+            "type Wrapper = ctor I32\n",
             "impl ToString Wrapper { def to_string = value => \"\" }\n",
             "def f: Wrapper -> String = to_string\n",
         );
@@ -1640,7 +1640,7 @@ mod tests {
             concat!(
                 "pub mod\n",
                 "pub def callable = () => 1\n",
-                "pub type alias Number = I32\n",
+                "pub type Number = alias I32\n",
                 "pub trait Printable T {}\n",
                 "pub macro identity = value => parse_quote { $value }\n",
             ),
@@ -2013,7 +2013,7 @@ mod tests {
         std::fs::write(root.join("src/root.sta"), "pub mod\n").unwrap();
         std::fs::write(
             root.join("src/helpers.sta"),
-            "pub mod\n\n/// Greets.\npub def greet = () => 0\npub type Widget = ()\nlet secret = 1\n",
+            "pub mod\n\n/// Greets.\npub def greet = () => 0\npub type Widget = ctor ()\nlet secret = 1\n",
         )
         .unwrap();
         let source = "pub mod\n\ndef main = () => 0\n";

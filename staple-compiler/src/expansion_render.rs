@@ -215,19 +215,8 @@ fn render_binding(program: &Program, binding: &staple_syntax::Binding) -> String
 
 fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> String {
     let mut out = String::new();
-    if declaration.representation_visibility == Visibility::Private {
-        out.push_str(visibility_prefix(declaration.visibility));
-    } else {
-        out.push_str(match declaration.representation_visibility {
-            Visibility::Public => "pub(repr) ",
-            Visibility::Package => "pub(repr(package)) ",
-            Visibility::Private => "",
-        });
-    }
+    out.push_str(visibility_prefix(declaration.visibility));
     out.push_str("type ");
-    if declaration.kind == staple_syntax::TypeDeclarationKind::Alias {
-        out.push_str("alias ");
-    }
     out.push_str(&declaration.name);
     let mut parameters = declaration.type_parameters.iter();
     if let Some(staple_syntax::TypeParameterPattern::Effect(binding)) = parameters.next() {
@@ -262,11 +251,21 @@ fn render_type_declaration(declaration: &staple_syntax::TypeDeclaration) -> Stri
         out.push_str(" where ");
         out.push_str(&constraints);
     }
-    match declaration.kind {
-        staple_syntax::TypeDeclarationKind::Alias
-        | staple_syntax::TypeDeclarationKind::Distinct => {
-            if let Some(underlying) = &declaration.underlying {
+    match declaration.kind() {
+        staple_syntax::TypeDeclarationKind::Alias => {
+            if let Some(underlying) = declaration.underlying() {
+                out.push_str(" = alias ");
+                out.push_str(&underlying.to_string());
+            }
+        }
+        staple_syntax::TypeDeclarationKind::Distinct => {
+            if let Some(underlying) = declaration.underlying() {
                 out.push_str(" = ");
+                out.push_str(match declaration.representation_visibility() {
+                    Visibility::Public => "pub ctor ",
+                    Visibility::Package => "pub(package) ctor ",
+                    Visibility::Private => "ctor ",
+                });
                 out.push_str(&underlying.to_string());
             }
         }

@@ -142,6 +142,17 @@ pub fn parse_type_template_fragment(
     })
 }
 
+/// Reinterprets one macro argument's original tokens as exactly one type
+/// declaration body (`alias T`, `ctor T`, `pub ctor T`, or `opaque`).
+pub fn parse_type_body_fragment(
+    syntax: &Syntax,
+    next_syntax_id: &mut usize,
+) -> Result<TypeBody, ParseError> {
+    parse_fragment(syntax, false, next_syntax_id, |grammar| {
+        grammar.parse_type_body()
+    })
+}
+
 /// Reinterprets one macro argument's original tokens as exactly one pattern.
 pub fn parse_pattern_fragment(
     syntax: &Syntax,
@@ -387,10 +398,7 @@ impl Grammar {
             modifiers.push(self.parse_modifier_invocation()?);
         }
         let visibility = if self.eat(TokenKind::Pub) {
-            let (visibility, representation, _) = self.parse_visibility_after_pub()?;
-            if representation != Visibility::Private {
-                return Err(self.error("representation visibility cannot modify a module"));
-            }
+            let (visibility, _) = self.parse_visibility_after_pub()?;
             visibility
         } else {
             Visibility::Private
@@ -488,19 +496,11 @@ impl Grammar {
                 item,
             }));
         }
-        let (visibility, representation_visibility, _) = if self.eat(TokenKind::Pub) {
+        let (visibility, _) = if self.eat(TokenKind::Pub) {
             self.parse_visibility_after_pub()?
         } else {
-            (
-                Visibility::Private,
-                Visibility::Private,
-                VisibilityKind::Private,
-            )
+            (Visibility::Private, VisibilityKind::Private)
         };
-        if representation_visibility != Visibility::Private && self.peek() != Some(TokenKind::Type)
-        {
-            return Err(self.error("representation visibility may only modify a type declaration"));
-        }
         let item = match self.peek() {
             Some(TokenKind::Extern) => self
                 .parse_extern_block(visibility, item_start)
@@ -515,7 +515,7 @@ impl Grammar {
                 .parse_trait_implementation(item_start)
                 .map(Item::TraitImplementation),
             Some(TokenKind::Impl) => Err(self.error("trait implementations cannot be public")),
-            _ => self.parse_item_with_visibility(visibility, representation_visibility, item_start),
+            _ => self.parse_item_with_visibility(visibility, item_start),
         };
         self.newline_terminates_expression = previous;
         item
@@ -545,7 +545,7 @@ impl Grammar {
         }
         let visibility_start = self.next_non_trivia(self.position);
         let visibility_kind = if self.eat(TokenKind::Pub) {
-            let (_, _, kind) = self.parse_visibility_after_pub()?;
+            let (_, kind) = self.parse_visibility_after_pub()?;
             kind
         } else {
             VisibilityKind::Private
@@ -576,40 +576,22 @@ impl Grammar {
         Ok(Some((modifiers, visibility, expression)))
     }
 
-    fn parse_visibility_after_pub(
-        &mut self,
-    ) -> Result<(Visibility, Visibility, VisibilityKind), ParseError> {
+    /// Parses the `pub` visibility modifier after its keyword: either a bare
+    /// `pub` or a package-scoped `pub(package)`.
+    fn parse_visibility_after_pub(&mut self) -> Result<(Visibility, VisibilityKind), ParseError> {
         if !self.eat(TokenKind::LParen) {
-            return Ok((
-                Visibility::Public,
-                Visibility::Private,
-                VisibilityKind::Public,
-            ));
+            return Ok((Visibility::Public, VisibilityKind::Public));
         }
         if self.eat(TokenKind::Package) {
             self.expect(TokenKind::RParen, "expected `)` after `package`")?;
-            return Ok((
-                Visibility::Package,
-                Visibility::Private,
-                VisibilityKind::Package,
+            return Ok((Visibility::Package, VisibilityKind::Package));
+        }
+        if self.peek_text("repr") {
+            return Err(self.error(
+                "`pub(repr)` was removed; write representation visibility in the type body, as `type Name = pub ctor Type`",
             ));
         }
-        let modifier = self.expect(
-            TokenKind::Identifier,
-            "expected `package` or `repr` in visibility modifier",
-        )?;
-        if modifier.text != "repr" {
-            return Err(self.error("expected `package` or `repr` in visibility modifier"));
-        }
-        let (representation, kind) = if self.eat(TokenKind::LParen) {
-            self.expect(TokenKind::Package, "expected `package` after `repr(`")?;
-            self.expect(TokenKind::RParen, "expected `)` after `package`")?;
-            (Visibility::Package, VisibilityKind::PublicReprPackage)
-        } else {
-            (Visibility::Public, VisibilityKind::PublicRepr)
-        };
-        self.expect(TokenKind::RParen, "expected `)` after visibility modifier")?;
-        Ok((Visibility::Public, representation, kind))
+        Err(self.error("expected `package` or `)` in visibility modifier"))
     }
 
     fn parse_modifier_invocation(&mut self) -> Result<ModifierInvocation, ParseError> {
@@ -1256,14 +1238,13 @@ impl Grammar {
         ) {
             return Err(self.error("unsupported item in block expression"));
         }
-        self.parse_item_with_visibility(Visibility::Private, Visibility::Private, item_start)
+        self.parse_item_with_visibility(Visibility::Private, item_start)
     }
 
     /// Parses an item form shared by source files and block expressions.
     fn parse_item_with_visibility(
         &mut self,
         visibility: Visibility,
-        representation_visibility: Visibility,
         start: usize,
     ) -> Result<Item, ParseError> {
         match self.peek() {
@@ -1289,7 +1270,7 @@ impl Grammar {
             }
             Some(TokenKind::Companion) => Err(self.error("companion blocks cannot be public")),
             Some(TokenKind::Type) => self
-                .parse_type_declaration(visibility, representation_visibility, start)
+                .parse_type_declaration(visibility, start)
                 .map(Item::TypeDeclaration),
             Some(TokenKind::Use) => self
                 .parse_use_declaration(visibility, start)
@@ -1548,19 +1529,16 @@ impl Grammar {
         })
     }
 
-    /// Parses a distinct or alias type declaration.
+    /// Parses a distinct, alias, singleton, or opaque type declaration.
+    ///
+    /// The contextual markers `alias`, `ctor`, and `opaque` are recognized
+    /// only directly after `=`; elsewhere they are ordinary identifiers.
     fn parse_type_declaration(
         &mut self,
         visibility: Visibility,
-        representation_visibility: Visibility,
         start: usize,
     ) -> Result<TypeDeclaration, ParseError> {
         self.expect(TokenKind::Type, "expected `type`")?;
-        let kind = if self.eat(TokenKind::Alias) {
-            TypeDeclarationKind::Alias
-        } else {
-            TypeDeclarationKind::Distinct
-        };
         let name_start = self.position;
         let name = self.parse_quoted_identifier("expected type name")?;
         let name_syntax = self.syntax(name_start);
@@ -1592,54 +1570,103 @@ impl Grammar {
         let (trait_bounds, subtype_bounds, _) =
             self.parse_where_clause(&mut type_parameters, false)?;
         let has_body = self.eat(TokenKind::Equals);
-        if !has_body && kind == TypeDeclarationKind::Alias {
-            return Err(self.error("expected `=` after type alias name"));
-        }
         if !has_body && !type_parameters.is_empty() {
             return Err(self.error("singleton types cannot have compile-time parameters"));
         }
-        let (kind, underlying) = if !has_body {
-            (TypeDeclarationKind::Singleton, None)
-        } else if self.eat(TokenKind::Opaque) {
-            if kind == TypeDeclarationKind::Alias {
-                return Err(self.error("type aliases cannot be opaque"));
-            }
-            (TypeDeclarationKind::Opaque, None)
+        let body = if has_body {
+            Some(self.parse_type_body()?)
         } else {
-            let previous = self.newline_terminates_type;
-            let previous_any = self.any_newline_terminates_type;
-            self.newline_terminates_type = true;
-            self.any_newline_terminates_type = true;
-            let underlying = self.parse_type();
-            self.newline_terminates_type = previous;
-            self.any_newline_terminates_type = previous_any;
-            (kind, Some(underlying?))
+            None
         };
-        if representation_visibility != Visibility::Private
-            && !matches!(
-                kind,
-                TypeDeclarationKind::Distinct | TypeDeclarationKind::Singleton
-            )
-        {
-            return Err(
-                self.error("representation visibility requires a represented distinct type")
-            );
-        }
         Ok(TypeDeclaration {
             syntax: self.syntax(start),
             name_syntax,
             docs: Vec::new(),
             recursive_constructor: false,
             visibility,
-            representation_visibility,
-            kind,
+            body,
             name,
             type_parameters,
             trait_bounds,
             subtype_bounds,
             default_bounds,
-            underlying,
         })
+    }
+
+    /// Parses a type declaration body after `=`: `alias T`, `ctor T`,
+    /// `pub ctor T`, `pub(package) ctor T`, or `opaque`.
+    fn parse_type_body(&mut self) -> Result<TypeBody, ParseError> {
+        let start = self.position;
+        if self.peek_text("opaque") {
+            let marker_syntax = self.parse_contextual_marker();
+            return Ok(TypeBody {
+                syntax: self.syntax(start),
+                marker_syntax,
+                kind: TypeBodyKind::Opaque,
+                representation: VisibilitySyntax {
+                    syntax: Syntax::compiler(),
+                    kind: VisibilityKind::Private,
+                },
+                underlying: None,
+            });
+        }
+        let representation_start = self.position;
+        let representation = if self.eat(TokenKind::Pub) {
+            let (_, kind) = self.parse_visibility_after_pub()?;
+            VisibilitySyntax {
+                syntax: self.syntax(representation_start),
+                kind,
+            }
+        } else {
+            VisibilitySyntax {
+                syntax: Syntax::compiler(),
+                kind: VisibilityKind::Private,
+            }
+        };
+        let kind = if self.peek_text("ctor") {
+            TypeBodyKind::Constructor
+        } else if self.peek_text("alias") {
+            if representation.kind != VisibilityKind::Private {
+                return Err(self.error(
+                    "representation visibility requires `ctor`; a type alias cannot expose a representation",
+                ));
+            }
+            TypeBodyKind::Alias
+        } else if representation.kind != VisibilityKind::Private {
+            return Err(self.error("expected `ctor` after representation visibility"));
+        } else {
+            return Err(self.error("expected `alias`, `ctor`, or `opaque` after `=`"));
+        };
+        let marker_syntax = self.parse_contextual_marker();
+        let underlying = self.parse_type_declaration_body()?;
+        Ok(TypeBody {
+            syntax: self.syntax(start),
+            marker_syntax,
+            kind,
+            representation,
+            underlying: Some(underlying),
+        })
+    }
+
+    /// Parses the underlying type of a type declaration body, stopping at a
+    /// newline so a following item is not consumed.
+    fn parse_type_declaration_body(&mut self) -> Result<Type, ParseError> {
+        let previous = self.newline_terminates_type;
+        let previous_any = self.any_newline_terminates_type;
+        self.newline_terminates_type = true;
+        self.any_newline_terminates_type = true;
+        let underlying = self.parse_type();
+        self.newline_terminates_type = previous;
+        self.any_newline_terminates_type = previous_any;
+        underlying
+    }
+
+    /// Consumes a contextual `alias`, `ctor`, or `opaque` marker and returns
+    /// its syntax.
+    fn parse_contextual_marker(&mut self) -> Syntax {
+        let start = self.position;
+        self.bump_token().expect("peeked contextual type marker");
+        self.syntax(start)
     }
 
     /// Parses a `let` or `def` binding with optional type and value.
@@ -3183,7 +3210,7 @@ impl Grammar {
             Some(TokenKind::Pub) => {
                 let start = self.position;
                 self.expect(TokenKind::Pub, "expected `pub`")?;
-                let (_, _, kind) = self.parse_visibility_after_pub()?;
+                let (_, kind) = self.parse_visibility_after_pub()?;
                 Ok(Expression::VisibilityArgument(VisibilitySyntax {
                     syntax: self.syntax(start),
                     kind,

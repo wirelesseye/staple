@@ -4,13 +4,13 @@ use std.iterator.(IntoIterator, Iterator)
 use std.iterator.IterStep.(Done, Yield)
 
 /// A half-open range from `current` up to, but excluding, `end`.
-pub(repr) type Range T = (
+pub type Range T = pub ctor (
     current: T,
     end: T,
 )
 
 /// A range that includes its final `end` value.
-pub(repr) type RangeInclusive T = (
+pub type RangeInclusive T = pub ctor (
     current: T,
     end: T,
     finished: Bool,

@@ -3,7 +3,7 @@ pub mod
 use std.slice.(Slice)
 
 /// A UTF-8 byte slice used as Staple's string type.
-pub type String = Slice U8
+pub type String = ctor Slice U8
 
 extern "staple-intrinsic" {
     __string_add: (String, String) -> String

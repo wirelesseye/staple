@@ -1,12 +1,12 @@
 pub mod
 
 companion IterStep {
-    pub(repr) type Done Iter = Iter
-    pub(repr) type Yield (Item, Iter) = (Item, Iter)
+    pub type Done Iter = pub ctor Iter
+    pub type Yield (Item, Iter) = pub ctor (Item, Iter)
 }
 
 /// One step of an iterator: either completion or an item and next iterator.
-pub type alias IterStep (Iter, Item) =
+pub type IterStep (Iter, Item) = alias
     IterStep.Done Iter |
     IterStep.Yield (Item, Iter)
 

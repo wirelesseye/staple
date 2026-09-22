@@ -1,7 +1,7 @@
 // Generic aliases/functions, traits, implementations, bounds, and static dispatch.
 use std.io.println
 
-type alias Pair (A, B) = (A, B)
+type Pair (A, B) = alias (A, B)
 
 trait Label T {
     label: T -> String

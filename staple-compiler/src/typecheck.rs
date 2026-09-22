@@ -2015,7 +2015,7 @@ impl TypeChecker {
         else {
             return;
         };
-        let Some(underlying) = declaration.underlying.clone() else {
+        let Some(underlying) = declaration.underlying().cloned() else {
             return;
         };
         let span = declaration.syntax.span.clone();
@@ -2953,7 +2953,7 @@ impl TypeChecker {
                 continue;
             }
             let declaration = self.type_declarations[id].clone();
-            let Some(underlying) = declaration.underlying.as_ref() else {
+            let Some(underlying) = declaration.underlying() else {
                 continue;
             };
             // The constructor's arguments are the declaration's own type
@@ -8268,7 +8268,7 @@ impl TypeChecker {
                     if let Some(Type::Product(product)) = self
                         .type_declarations
                         .get(&id)
-                        .and_then(|declaration| declaration.underlying.as_ref())
+                        .and_then(|declaration| declaration.underlying())
                         && let [element] = product.elements.as_slice()
                         && matches!(&access.accessor, Accessor::Name(field) if element.name.as_deref() == Some(field))
                     {
@@ -10208,7 +10208,7 @@ impl TypeChecker {
                 };
                 self.type_declarations
                     .get(id)
-                    .and_then(|declaration| declaration.underlying.as_ref())
+                    .and_then(|declaration| declaration.underlying())
                     .and_then(|underlying| source_type_id(module, underlying))
             }
             Expression::Product(product)
@@ -11322,7 +11322,7 @@ impl TypeChecker {
         arguments: &[CheckedType],
     ) -> Option<CheckedType> {
         if self.recursive_construction_depth == 0
-            || declaration.kind != TypeDeclarationKind::Distinct
+            || declaration.kind() != TypeDeclarationKind::Distinct
         {
             return None;
         }
@@ -11440,14 +11440,14 @@ impl TypeChecker {
             }
             None => {}
         }
-        if declaration.kind == TypeDeclarationKind::Opaque {
+        if declaration.kind() == TypeDeclarationKind::Opaque {
             return CheckedType::Opaque {
                 id,
                 name: display_name,
                 arguments,
             };
         }
-        if declaration.kind == TypeDeclarationKind::Singleton {
+        if declaration.kind() == TypeDeclarationKind::Singleton {
             return CheckedType::Distinct {
                 id,
                 name: display_name,
@@ -11492,23 +11492,21 @@ impl TypeChecker {
         // *this* type's own self-reference; only one entered while resolving
         // this representation does.
         let outer_recursive_depth = std::mem::take(&mut self.recursive_construction_depth);
-        let template = self.resolve_source_type(
-            module,
-            declaration.underlying.as_ref().expect("represented type"),
-        );
+        let template =
+            self.resolve_source_type(module, declaration.underlying().expect("represented type"));
         self.recursive_construction_depth = outer_recursive_depth;
         self.active_function_bounds.pop();
         self.active_subtype_bounds.pop();
         self.resolving_named_types.remove(&id);
         let representation = substitute_type(template, &substitutions);
-        if declaration.kind == TypeDeclarationKind::Distinct && !representation.is_sized() {
+        if declaration.kind() == TypeDeclarationKind::Distinct && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 "distinct type representations must be sized",
             ));
             return CheckedType::Error;
         }
-        match declaration.kind {
+        match declaration.kind() {
             TypeDeclarationKind::Alias => representation,
             TypeDeclarationKind::Distinct => CheckedType::Distinct {
                 id,
@@ -11863,7 +11861,7 @@ impl TypeChecker {
                 arguments: Vec::new(),
             };
         }
-        if declaration.kind == TypeDeclarationKind::Opaque {
+        if declaration.kind() == TypeDeclarationKind::Opaque {
             let value_type = CheckedType::Opaque {
                 id,
                 name: display_name,
@@ -11872,7 +11870,7 @@ impl TypeChecker {
             self.resolved_named_types.insert(id, value_type.clone());
             return value_type;
         }
-        if declaration.kind == TypeDeclarationKind::Singleton {
+        if declaration.kind() == TypeDeclarationKind::Singleton {
             let value_type = CheckedType::Distinct {
                 id,
                 name: display_name,
@@ -11898,20 +11896,19 @@ impl TypeChecker {
         let representation = self.resolve_source_type(
             module,
             declaration
-                .underlying
-                .as_ref()
+                .underlying()
                 .expect("non-opaque type declaration has an underlying type"),
         );
         self.recursive_construction_depth = outer_recursive_depth;
         self.resolving_named_types.remove(&id);
-        if declaration.kind == TypeDeclarationKind::Distinct && !representation.is_sized() {
+        if declaration.kind() == TypeDeclarationKind::Distinct && !representation.is_sized() {
             self.diagnostics.push(Diagnostic::new(
                 declaration.syntax.span.clone(),
                 "distinct type representations must be sized",
             ));
             return CheckedType::Error;
         }
-        let value_type = match declaration.kind {
+        let value_type = match declaration.kind() {
             TypeDeclarationKind::Alias => representation,
             TypeDeclarationKind::Distinct => CheckedType::Distinct {
                 id,

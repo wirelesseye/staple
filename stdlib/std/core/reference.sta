@@ -4,7 +4,7 @@ use std.core.cmp.(Eq)
 
 /// A managed mutable reference to a value.
 @recursive_constructor
-pub(repr) type Ref T where ?Sized T = T
+pub type Ref T where ?Sized T = pub ctor T
 
 companion<T> Ref T {
     /// Replaces the referenced value and returns the old value.

@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn token_formatting_does_not_require_standalone_parseable_source() {
-        let source = "type alias $name=$ty\n";
+        let source = "type $name = alias $ty\n";
         assert!(format_source(source).is_err());
         let before = lex(source)
             .into_iter()
@@ -415,7 +415,7 @@ mod tests {
             .map(|token| (token.kind, token.text))
             .collect::<Vec<_>>();
         assert_eq!(before, after);
-        assert_eq!(formatted, "type alias $name = $ty\n");
+        assert_eq!(formatted, "type $name = alias $ty\n");
         assert!(before.iter().any(|(kind, _)| *kind == TokenKind::Dollar));
     }
 }

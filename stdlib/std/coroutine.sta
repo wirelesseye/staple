@@ -18,11 +18,11 @@ pub type Task T = opaque
 
 /// The result of `await`-ing a `Task` that ran to completion; wraps the value
 /// the task produced.
-pub(repr) type Completed T = T
+pub type Completed T = pub ctor T
 
 /// The result of `await`-ing a `Task` whose execution was cancelled before it
 /// produced a value.
-pub(repr) type Cancelled = ()
+pub type Cancelled = pub ctor ()
 
 /// Runs a coroutine to completion on the current thread and yields its result,
 /// incorporating its deferred effects.

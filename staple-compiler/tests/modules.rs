@@ -203,7 +203,7 @@ fn imports_public_values_and_types_through_all_use_forms() {
     fixture.write(
         "math.sta",
         concat!(
-            "pub type alias Number = I32\n",
+            "pub type Number = alias I32\n",
             "pub def add: (I32, I32) -> I32 = (a: I32, b: I32) => a\n",
             "pub let forty = 40\n",
             "let hidden = 2\n",
@@ -262,7 +262,7 @@ fn reexports_public_items_through_selected_renamed_glob_and_chained_uses() {
     fixture.write(
         "origin.sta",
         concat!(
-            "pub type alias Number = I32\n",
+            "pub type Number = alias I32\n",
             "pub let value: Number = 42\n",
             "pub macro reveal = item => parse_quote { $item }\n",
         ),
@@ -343,7 +343,7 @@ fn selected_imports_bind_and_reexport_each_alias() {
     fixture.write(
         "library.sta",
         concat!(
-            "pub type alias Number = I32\n",
+            "pub type Number = alias I32\n",
             "pub def add_two: Number -> Number = value => value + 2\n",
             "pub let answer: Number = 42\n",
         ),
@@ -488,7 +488,7 @@ fn dotted_import_combines_a_type_with_its_companion() {
     let fixture = Fixture::new();
     fixture.write(
         "library.sta",
-        "pub type alias User = I32\ncompanion User { pub let id: I32 = 42 }\n",
+        "pub type User = alias I32\ncompanion User { pub let id: I32 = 42 }\n",
     );
     fixture.write(
         "main.sta",
@@ -503,7 +503,7 @@ fn dotted_import_combines_a_type_with_its_companion() {
 #[test]
 fn discovers_companions_in_otherwise_unreachable_files() {
     let fixture = Fixture::new();
-    fixture.write("animals.sta", "pub type alias Animal = I32\n");
+    fixture.write("animals.sta", "pub type Animal = alias I32\n");
     fixture.write(
         "animal_extensions.sta",
         "companion Animal { pub def move_to: Animal -> Animal = animal => animal }\n",
@@ -521,7 +521,7 @@ fn discovers_companions_in_otherwise_unreachable_files() {
 #[test]
 fn dotted_import_combines_a_type_with_a_same_named_file_module() {
     let fixture = Fixture::new();
-    fixture.write("library.sta", "pub type alias User = I32\n");
+    fixture.write("library.sta", "pub type User = alias I32\n");
     fixture.write("library/User.sta", "pub let id: I32 = 42\n");
     fixture.write(
         "main.sta",
@@ -538,7 +538,7 @@ fn dotted_import_preserves_a_reexported_type_and_companion_pair() {
     let fixture = Fixture::new();
     fixture.write(
         "library.sta",
-        "pub type alias User = I32\ncompanion User { pub let id: I32 = 42 }\n",
+        "pub type User = alias I32\ncompanion User { pub let id: I32 = 42 }\n",
     );
     fixture.write("facade.sta", "pub use library.User\n");
     fixture.write(
@@ -785,7 +785,7 @@ fn block_scoped_type_declarations_are_usable_within_their_block() {
         "main.sta",
         concat!(
             "let result: I32 = {\n",
-            "    type Wrapped = I32\n",
+            "    type Wrapped = ctor I32\n",
             "    let value: Wrapped = Wrapped 42\n",
             "    match value { Wrapped inner => inner }\n",
             "}\n",
@@ -804,7 +804,7 @@ fn block_scoped_type_names_are_not_visible_outside_their_block() {
         "main.sta",
         concat!(
             "{\n",
-            "    type Wrapped = I32\n",
+            "    type Wrapped = ctor I32\n",
             "    let value: Wrapped = Wrapped 42\n",
             "}\n",
             "let leaked: Wrapped = Wrapped 1\n",
@@ -823,9 +823,9 @@ fn block_scoped_types_shadow_module_level_types_of_the_same_name() {
     fixture.write(
         "main.sta",
         concat!(
-            "type Wrapped = I32\n",
+            "type Wrapped = ctor I32\n",
             "let result: Bool = {\n",
-            "    type Wrapped = Bool\n",
+            "    type Wrapped = ctor Bool\n",
             "    let value: Wrapped = Wrapped True\n",
             "    match value { Wrapped inner => inner }\n",
             "}\n",
@@ -843,9 +843,9 @@ fn block_scoped_type_constructors_do_not_enter_macro_definition_scope() {
     fixture.write(
         "main.sta",
         concat!(
-            "type Wrapped = I32\n",
+            "type Wrapped = ctor I32\n",
             "macro make = _: Expr => parse_quote { Wrapped 42 }\n",
-            "{ type Wrapped = Bool; () }\n",
+            "{ type Wrapped = ctor Bool; () }\n",
             "let result: Wrapped = make ()\n",
         ),
     );
@@ -862,12 +862,12 @@ fn sibling_blocks_may_reuse_the_same_type_name() {
         "main.sta",
         concat!(
             "let a: I32 = {\n",
-            "    type Wrapped = I32\n",
+            "    type Wrapped = ctor I32\n",
             "    let value: Wrapped = Wrapped 1\n",
             "    match value { Wrapped inner => inner }\n",
             "}\n",
             "let b: Bool = {\n",
-            "    type Wrapped = Bool\n",
+            "    type Wrapped = ctor Bool\n",
             "    let value: Wrapped = Wrapped True\n",
             "    match value { Wrapped inner => inner }\n",
             "}\n",
@@ -886,8 +886,8 @@ fn duplicate_type_names_in_the_same_block_are_rejected() {
         "main.sta",
         concat!(
             "let x: I32 = {\n",
-            "    type Foo = I32\n",
-            "    type Foo = Bool\n",
+            "    type Foo = ctor I32\n",
+            "    type Foo = ctor Bool\n",
             "    0\n",
             "}\n",
         ),
@@ -906,7 +906,7 @@ fn block_scoped_types_in_generic_functions_monomorphize_per_call_site() {
         "main.sta",
         concat!(
             "def wrap: <T> T -> T = value => {\n",
-            "    type Boxed = T\n",
+            "    type Boxed = ctor T\n",
             "    match Boxed value { Boxed inner => inner }\n",
             "}\n",
             "wrap 1\n",
@@ -1086,12 +1086,12 @@ fn duplicate_imports_in_the_same_block_are_rejected() {
 #[test]
 fn block_scoped_type_and_use_of_the_same_name_are_rejected_type_first() {
     let fixture = Fixture::new();
-    fixture.write("library.sta", "pub type alias Foo = Bool\n");
+    fixture.write("library.sta", "pub type Foo = alias Bool\n");
     fixture.write(
         "main.sta",
         concat!(
             "let x: I32 = {\n",
-            "    type Foo = I32\n",
+            "    type Foo = ctor I32\n",
             "    use library.(Foo)\n",
             "    0\n",
             "}\n",
@@ -1107,13 +1107,13 @@ fn block_scoped_type_and_use_of_the_same_name_are_rejected_type_first() {
 #[test]
 fn block_scoped_type_and_use_of_the_same_name_are_rejected_use_first() {
     let fixture = Fixture::new();
-    fixture.write("library.sta", "pub type alias Foo = Bool\n");
+    fixture.write("library.sta", "pub type Foo = alias Bool\n");
     fixture.write(
         "main.sta",
         concat!(
             "let x: I32 = {\n",
             "    use library.(Foo)\n",
-            "    type Foo = I32\n",
+            "    type Foo = ctor I32\n",
             "    0\n",
             "}\n",
         ),
@@ -1189,7 +1189,7 @@ fn inline_glob_reexports_types_traits_and_macros() {
         concat!(
             "mod child {\n",
             "    use std.syntax.(parse_quote)\n",
-            "    pub type alias Number = I32\n",
+            "    pub type Number = alias I32\n",
             "    pub trait Identity T { identity: T -> T }\n",
             "    pub macro reveal = item => parse_quote { $item }\n",
             "    pub mod Variant { pub type Ready }\n",
@@ -1430,7 +1430,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
     fixture.write(
         "values.sta",
         concat!(
-            "pub type UserId = I32\n",
+            "pub type UserId = ctor I32\n",
             "pub def identity: <T> move T -> T = move x => x\n",
         ),
     );
@@ -1460,7 +1460,7 @@ fn monomorphizes_imported_generic_functions_but_keeps_constructors_private() {
 #[test]
 fn exports_constructors_and_destructors_for_public_representations() {
     let fixture = Fixture::new();
-    fixture.write("boxes.sta", "pub(repr) type Box T = (value: T)\n");
+    fixture.write("boxes.sta", "pub type Box T = pub ctor (value: T)\n");
     fixture.write(
         "main.sta",
         concat!(
@@ -1551,8 +1551,8 @@ fn composes_sum_variants_across_modules() {
     fixture.write(
         "errors.sta",
         concat!(
-            "pub(repr) type IOError = String\n",
-            "pub(repr) type ParseError = String\n",
+            "pub type IOError = pub ctor String\n",
+            "pub type ParseError = pub ctor String\n",
             "pub def read: String -> Ok String | IOError = path => Ok(path)\n",
         ),
     );
@@ -1574,7 +1574,10 @@ fn rejects_private_components_of_public_representations() {
     let fixture = Fixture::new();
     fixture.write(
         "main.sta",
-        concat!("type Hidden = I32\n", "pub(repr) type Exposed = Hidden\n",),
+        concat!(
+            "type Hidden = ctor I32\n",
+            "pub type Exposed = pub ctor Hidden\n",
+        ),
     );
     let error = fixture
         .compile()
@@ -1588,7 +1591,7 @@ fn rejects_destructuring_an_imported_private_representation() {
     fixture.write(
         "ids.sta",
         concat!(
-            "pub type UserId = I32\n",
+            "pub type UserId = ctor I32\n",
             "pub def make: I32 -> UserId = UserId\n",
         ),
     );
@@ -1608,7 +1611,7 @@ fn enforces_representation_visibility_for_explicit_and_shortcut_access() {
     private.write(
         "users.sta",
         concat!(
-            "pub type User = (name: String)\n",
+            "pub type User = ctor (name: String)\n",
             "pub def make: String -> User = name => User (name)\n",
         ),
     );
@@ -1630,7 +1633,7 @@ fn enforces_representation_visibility_for_explicit_and_shortcut_access() {
     );
 
     let public = Fixture::new();
-    public.write("users.sta", "pub(repr) type User = (name: String)\n");
+    public.write("users.sta", "pub type User = pub ctor (name: String)\n");
     public.write(
         "main.sta",
         concat!(
@@ -1662,7 +1665,7 @@ fn destructures_a_private_representation_from_the_defining_module_including_its_
     fixture.write(
         "main.sta",
         concat!(
-            "pub type Wrapped = I32\n",
+            "pub type Wrapped = ctor I32\n",
             "companion Wrapped {\n",
             "    pub def unwrap: Wrapped -> I32 = value => {\n",
             "        let Wrapped inner = value\n",
@@ -1693,7 +1696,7 @@ fn companion_accesses_a_private_submodule_namespace_of_its_defining_module() {
     fixture.write(
         "main.sta",
         concat!(
-            "pub type Wrapped = I32\n",
+            "pub type Wrapped = ctor I32\n",
             "mod helpers {\n",
             "    pub def helper: I32 -> I32 = x => x + 1\n",
             "}\n",
@@ -1810,7 +1813,7 @@ fn uses_root_qualified_package_items_without_imports() {
     );
     fixture.write(
         "src/models.sta",
-        "pub type alias Answer = I32\npub let answer: Answer = 42\n",
+        "pub type Answer = alias I32\npub let answer: Answer = 42\n",
     );
 
     fixture
@@ -2131,7 +2134,7 @@ fn generated_type_and_pattern_splices_keep_caller_hygiene() {
         concat!(
             "use helpers.(define_alias, destructure)\n",
             "destructure ((left, right)) (40, 2)\n",
-            "type alias Local = I32;\n",
+            "type Local = alias I32;\n",
             "define_alias Local\n",
             "let alias_value: Generated = 1\n",
             "let result: I32 = alias_value + left + right\n",
@@ -2140,7 +2143,7 @@ fn generated_type_and_pattern_splices_keep_caller_hygiene() {
     fixture.write(
         "helpers.sta",
         concat!(
-            "pub macro define_alias = ty: Type => parse_quote { type alias Generated = $ty }\n",
+            "pub macro define_alias = ty: Type => parse_quote { type Generated = alias $ty }\n",
             "pub macro destructure = pattern: Pattern * value: Expr => parse_quote { let $pattern = $value }\n",
         ),
     );
@@ -2275,7 +2278,7 @@ fn imports_resource_types_and_resource_bearing_functions() {
     fixture.write(
         "clocks.sta",
         concat!(
-            "pub type Clock = I32\n",
+            "pub type Clock = ctor I32\n",
             "pub def system_clock = () => Clock 42\n",
             "pub def read: () ->{Clock} Clock = () => resource Clock\n",
         ),
@@ -2348,7 +2351,7 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
         "lib/src/root.sta",
         concat!(
             "pub trait Convert From To { convert: From -> To }\n",
-            "pub(repr) type External = I32\n",
+            "pub type External = pub ctor I32\n",
             "impl Convert External I32 { def convert = value => value.* }\n",
         ),
     );
@@ -2397,7 +2400,7 @@ fn enforces_trait_implementation_orphan_rules_across_packages() {
         "app/src/main.sta",
         concat!(
             "use lib.Convert\n",
-            "type Local = I32\n",
+            "type Local = ctor I32\n",
             "impl Convert I32 Local { def convert = value => Local value }\n",
             "let converted: Local = Convert.convert 42\n",
         ),
@@ -2542,7 +2545,7 @@ fn package_representation_is_usable_locally_but_not_by_a_dependency() {
     );
     fixture.write(
         "lib/src/root.sta",
-        "pub(repr(package)) type Shared = I32\nlet local: Shared = Shared 1\n",
+        "pub type Shared = pub(package) ctor I32\nlet local: Shared = Shared 1\n",
     );
     fs::write(
         fixture.root.join("app/staple.kdl"),
