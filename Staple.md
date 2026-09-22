@@ -2886,7 +2886,7 @@ pub type IterStep (Iter, Item) = alias
     IterStep.Yield (Item, Iter)
 
 pub trait Iterator Iter Item where Iter ~> Item {
-    next: Iter -> IterStep (Iter, Item)
+    next: move Iter -> IterStep (Iter, Item)
 }
 
 pub trait IntoIterator Source Iter where Source ~> Iter, Iterator Iter {
@@ -2896,13 +2896,14 @@ pub trait IntoIterator Source Iter where Source ~> Iter, Iterator Iter {
 
 `IterStep.Done iterator` retains the terminal state, while
 `IterStep.Yield (item, iterator)` contains an item and the state used for the
-next call. `Done` and `Yield` remain inside the `IterStep` namespace. An
-`IntoIterator` implementation consumes its source and selects one default
-iterator type; wrapper types can provide alternative iteration modes. The
-`move` marker makes that consumption explicit: a non-`Copy` source such as a
-`List T` is moved into the iterator, so the binding cannot be used again,
-while a `Copy` source such as a range is copied and remains usable. Clone a
-non-`Copy` source before iterating to keep the original.
+next call. `next` consumes the iterator it advances and returns the successor
+state inside the step. `Done` and `Yield` remain inside the `IterStep`
+namespace. An `IntoIterator` implementation consumes its source and selects
+one default iterator type; wrapper types can provide alternative iteration
+modes. The `move` marker makes that consumption explicit: a non-`Copy` source
+such as a `List T` is moved into the iterator, so the binding cannot be used
+again, while a `Copy` source such as a range is copied and remains usable.
+Clone a non-`Copy` source before iterating to keep the original.
 
 `for` is a prelude macro which accepts any `IntoIterator` source:
 

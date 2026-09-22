@@ -3449,7 +3449,16 @@ impl TypeChecker {
                         ),
                     ));
                 }
-                if parameter_moves != expected.moves {
+                if parameter_moves != expected.moves
+                    && !is_copy_type(
+                        &expected.parameter,
+                        self.copy_trait,
+                        self.drop_trait,
+                        self.io_type,
+                        &self.trait_implementations,
+                        &[],
+                    )
+                {
                     self.diagnostics.push(Diagnostic::new(
                         function.pattern.syntax().span.clone(),
                         format!(
