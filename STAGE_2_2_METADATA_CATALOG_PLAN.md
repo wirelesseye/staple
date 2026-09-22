@@ -203,7 +203,7 @@ Completed:
 - Added focused tests for type catalog ordering and template compactness, trait parameters/dependencies/methods/defaults, and implementation arguments/bounds/negation.
 - Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (965 tests), and `git diff --check`.
 
-### Step 7 - Snapshot Standard and Runtime Subsystem Identities
+### Step 7 - Snapshot Standard and Runtime Subsystem Identities (Done)
 
 - Populate `LoweredSemanticIds` from type-checker-owned selections rather than looking up names again.
 - Include all standard traits and runtime types currently consulted by code generation, even when absent in `no_prelude` or library-only programs.
@@ -213,6 +213,15 @@ Completed:
 Gate: ordinary, `no_prelude`, library-only, reactive, resource, and coroutine fixtures all lower without name-based semantic rediscovery.
 
 After this step, update both plan files.
+
+Completed:
+
+- Added `LoweredSemanticIds` with the standard trait slots (`Natural`, `Sized`, `Copy`, `Drop`, `Default`, `Debug`, `Display`, `Index`, `MutateIndex`, `IntoIterator`, `Iterator`), runtime type slots (IO, Reactive, Coroutine, Task, Completed, Cancelled, Tasks, Scheduler, Wait, Resolver, CompletionToken), canonical IO/reactive resources, string representation, and the entry-reactive requirement.
+- Populated every slot from the type checker's own selections; lowering performs no name-based rediscovery.
+- `no_prelude` and library-only programs keep whichever IDs the checker selected, with absent subsystems remaining `None`.
+- Validation rejects present semantic IDs without matching trait/type catalog records and checks that IO/reactive resources agree with their selected type IDs.
+- Added focused tests for ordinary, coroutine-imported, and `no_prelude` fixtures, the reactive entry requirement, and invalid semantic IDs.
+- Verified with formatting, workspace checking, focused lowering tests, `cargo test --workspace` (969 tests), and `git diff --check`.
 
 ### Step 8 - Complete Validation and Transition Comparisons
 

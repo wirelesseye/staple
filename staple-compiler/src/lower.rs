@@ -450,6 +450,39 @@ pub(crate) struct LoweredTraitImplementationMetadata {
     pub methods: Vec<(TraitMethodId, FunctionId)>,
 }
 
+/// Type-checker-owned standard and runtime subsystem identities. Optional
+/// slots are absent in library-only or `no_prelude` programs, and every
+/// present ID must resolve to the matching catalog family.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct LoweredSemanticIds {
+    pub natural_trait: Option<TraitId>,
+    pub sized_trait: Option<TraitId>,
+    pub copy_trait: Option<TraitId>,
+    pub drop_trait: Option<TraitId>,
+    pub default_trait: Option<TraitId>,
+    pub debug_trait: Option<TraitId>,
+    pub display_trait: Option<TraitId>,
+    pub index_trait: Option<TraitId>,
+    pub mutate_index_trait: Option<TraitId>,
+    pub into_iterator_trait: Option<TraitId>,
+    pub iterator_trait: Option<TraitId>,
+    pub io_type: Option<TypeId>,
+    pub reactive_type: Option<TypeId>,
+    pub coroutine_type: Option<TypeId>,
+    pub task_type: Option<TypeId>,
+    pub completed_type: Option<TypeId>,
+    pub cancelled_type: Option<TypeId>,
+    pub tasks_type: Option<TypeId>,
+    pub scheduler_type: Option<TypeId>,
+    pub wait_type: Option<TypeId>,
+    pub resolver_type: Option<TypeId>,
+    pub completion_token_type: Option<TypeId>,
+    pub io_resource: Option<CheckedResource>,
+    pub reactive_resource: Option<CheckedResource>,
+    pub string_representation: Option<CheckedType>,
+    pub entry_reactive_required: bool,
+}
+
 /// The complete owned Stage 2 representation. Arena order is insertion order,
 /// which lowering defines to be deterministic program/source order.
 #[derive(Debug, Clone, Default)]
@@ -466,6 +499,7 @@ pub(crate) struct LoweredProgram {
     trait_methods: Catalog<TraitMethodId, LoweredTraitMethodMetadata, LoweredTraitMethodId>,
     trait_implementations: Arena<LoweredTraitImplementationMetadata, LoweredTraitImplementationId>,
     initializers: Arena<LoweredInitializer, InitializerId>,
+    semantic_ids: LoweredSemanticIds,
 }
 
 impl LoweredProgram {
@@ -476,7 +510,44 @@ impl LoweredProgram {
         diagnostics.extend(self.snapshot_symbols(module));
         diagnostics.extend(self.snapshot_types(module));
         diagnostics.extend(self.snapshot_traits(module));
+        diagnostics.extend(self.snapshot_semantic_ids(module));
         diagnostics
+    }
+
+    /// Copies type-checker-owned standard and runtime subsystem identities.
+    /// No name lookup happens here; absent prelude or library-only programs
+    /// keep whichever IDs the checker selected.
+    fn snapshot_semantic_ids(&mut self, module: &TypedModule) -> Vec<Diagnostic> {
+        let ids = module.semantic_ids();
+        self.semantic_ids = LoweredSemanticIds {
+            natural_trait: ids.natural_trait,
+            sized_trait: ids.sized_trait,
+            copy_trait: ids.copy_trait,
+            drop_trait: ids.drop_trait,
+            default_trait: ids.default_trait,
+            debug_trait: ids.debug_trait,
+            display_trait: ids.display_trait,
+            index_trait: ids.index_trait,
+            mutate_index_trait: ids.mutate_index_trait,
+            into_iterator_trait: ids.into_iterator_trait,
+            iterator_trait: ids.iterator_trait,
+            io_type: ids.io_type,
+            reactive_type: ids.reactive_type,
+            coroutine_type: ids.coroutine_type,
+            task_type: ids.task_type,
+            completed_type: ids.completed_type,
+            cancelled_type: ids.cancelled_type,
+            tasks_type: ids.tasks_type,
+            scheduler_type: ids.scheduler_type,
+            wait_type: ids.wait_type,
+            resolver_type: ids.resolver_type,
+            completion_token_type: ids.completion_token_type,
+            io_resource: module.io_resource(),
+            reactive_resource: module.reactive_resource(),
+            string_representation: module.string_representation().cloned(),
+            entry_reactive_required: module.entry_reactive_required(),
+        };
+        Vec::new()
     }
 
     /// Inserts type metadata in ascending `TypeId`, retaining origin, module,
@@ -1064,8 +1135,81 @@ impl LoweredProgram {
                 ));
             }
         }
+        diagnostics.extend(validate_semantic_ids(
+            &self.semantic_ids,
+            &self.types,
+            &self.traits,
+        ));
         diagnostics
     }
+}
+
+/// Checks that every present standard/runtime ID resolves to the matching
+/// catalog family and that resource selections agree with their type IDs.
+fn validate_semantic_ids(
+    ids: &LoweredSemanticIds,
+    types: &Catalog<TypeId, LoweredTypeMetadata, LoweredTypeId>,
+    traits: &Catalog<TraitId, LoweredTraitMetadata, LoweredTraitId>,
+) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
+    for (slot, id) in [
+        ("natural", ids.natural_trait),
+        ("sized", ids.sized_trait),
+        ("copy", ids.copy_trait),
+        ("drop", ids.drop_trait),
+        ("default", ids.default_trait),
+        ("debug", ids.debug_trait),
+        ("display", ids.display_trait),
+        ("index", ids.index_trait),
+        ("mutate_index", ids.mutate_index_trait),
+        ("into_iterator", ids.into_iterator_trait),
+        ("iterator", ids.iterator_trait),
+    ] {
+        if let Some(id) = id
+            && traits.get(id).is_none()
+        {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("lowered semantic {slot} trait {id:?} has no trait catalog record"),
+            ));
+        }
+    }
+    for (slot, id) in [
+        ("io", ids.io_type),
+        ("reactive", ids.reactive_type),
+        ("coroutine", ids.coroutine_type),
+        ("task", ids.task_type),
+        ("completed", ids.completed_type),
+        ("cancelled", ids.cancelled_type),
+        ("tasks", ids.tasks_type),
+        ("scheduler", ids.scheduler_type),
+        ("wait", ids.wait_type),
+        ("resolver", ids.resolver_type),
+        ("completion token", ids.completion_token_type),
+    ] {
+        if let Some(id) = id
+            && types.get(id).is_none()
+        {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("lowered semantic {slot} type {id:?} has no type catalog record"),
+            ));
+        }
+    }
+    for (slot, resource, expected) in [
+        ("io", &ids.io_resource, ids.io_type),
+        ("reactive", &ids.reactive_resource, ids.reactive_type),
+    ] {
+        if let Some(resource) = resource
+            && nominal_type_id(&resource.value_type) != expected
+        {
+            diagnostics.push(Diagnostic::new(
+                Span::Compiler,
+                format!("lowered semantic {slot} resource does not match its selected type id"),
+            ));
+        }
+    }
+    diagnostics
 }
 
 /// Checks that the initialization order lists every loaded module exactly
@@ -1204,6 +1348,15 @@ fn pattern_symbols(module: &ResolvedModule, pattern: &Pattern) -> Vec<SymbolId> 
     let mut symbols = Vec::new();
     collect(module, pattern, &mut symbols);
     symbols
+}
+
+fn nominal_type_id(value_type: &CheckedType) -> Option<TypeId> {
+    match value_type {
+        CheckedType::TypeConstructor { id, .. }
+        | CheckedType::Opaque { id, .. }
+        | CheckedType::Distinct { id, .. } => Some(*id),
+        _ => None,
+    }
 }
 
 /// Compile-time-only symbols stay out of the runtime catalog: `const`
@@ -2563,6 +2716,120 @@ mod tests {
             CheckedType::Distinct { .. }
         ));
         assert!(negative.methods.is_empty());
+    }
+
+    #[test]
+    fn semantic_ids_capture_standard_traits_and_runtime_types() {
+        let program = snapshot("let answer: I32 = 42\n");
+        let ids = &program.semantic_ids;
+        for (slot, trait_id) in [
+            ("natural", ids.natural_trait),
+            ("sized", ids.sized_trait),
+            ("copy", ids.copy_trait),
+            ("drop", ids.drop_trait),
+            ("default", ids.default_trait),
+            ("debug", ids.debug_trait),
+            ("display", ids.display_trait),
+            ("index", ids.index_trait),
+            ("mutate_index", ids.mutate_index_trait),
+            ("into_iterator", ids.into_iterator_trait),
+            ("iterator", ids.iterator_trait),
+        ] {
+            let trait_id = trait_id.unwrap_or_else(|| panic!("`{slot}` trait should be selected"));
+            assert!(
+                program.traits.get(trait_id).is_some(),
+                "`{slot}` trait should have a catalog record"
+            );
+        }
+        for (slot, type_id) in [("io", ids.io_type), ("reactive", ids.reactive_type)] {
+            let type_id = type_id.unwrap_or_else(|| panic!("`{slot}` type should be selected"));
+            assert!(
+                program.types.get(type_id).is_some(),
+                "`{slot}` type should have a catalog record"
+            );
+        }
+        assert!(ids.string_representation.is_some());
+        assert!(ids.io_resource.is_some());
+        assert!(ids.reactive_resource.is_some());
+        assert!(!ids.entry_reactive_required);
+        assert!(program.validate().is_empty());
+
+        let program = snapshot(concat!("use std.coroutine.*\n", "let answer: I32 = 42\n",));
+        let ids = &program.semantic_ids;
+        for (slot, type_id) in [
+            ("coroutine", ids.coroutine_type),
+            ("task", ids.task_type),
+            ("completed", ids.completed_type),
+            ("cancelled", ids.cancelled_type),
+            ("tasks", ids.tasks_type),
+            ("scheduler", ids.scheduler_type),
+            ("wait", ids.wait_type),
+            ("resolver", ids.resolver_type),
+            ("completion token", ids.completion_token_type),
+        ] {
+            let type_id = type_id.unwrap_or_else(|| panic!("`{slot}` type should be selected"));
+            assert!(
+                program.types.get(type_id).is_some(),
+                "`{slot}` type should have a catalog record"
+            );
+        }
+        assert!(program.validate().is_empty());
+    }
+
+    #[test]
+    fn entry_reactive_requirement_is_recorded() {
+        let program = snapshot(concat!(
+            "let signal count = 0\n",
+            "reaction { let current = count; () }\n",
+            "count = 1\n",
+        ));
+        let ids = &program.semantic_ids;
+        assert!(ids.entry_reactive_required);
+        assert!(ids.reactive_resource.is_some());
+        assert_eq!(
+            nominal_type_id(&ids.reactive_resource.as_ref().unwrap().value_type),
+            ids.reactive_type
+        );
+        let (entry_id, _) = entry_module(&program);
+        let entry = program
+            .initializers
+            .get(program.modules.get(entry_id).unwrap().initializer)
+            .expect("entry initializer");
+        assert!(
+            entry
+                .resources
+                .iter()
+                .any(|resource| resource.kind == LoweredEntryResourceKind::Reactive)
+        );
+    }
+
+    #[test]
+    fn no_prelude_programs_keep_standard_semantic_ids() {
+        let program = snapshot("@no_prelude\npub mod\nlet answer: I32 = 1 + 2\n");
+        let ids = &program.semantic_ids;
+        assert!(ids.copy_trait.is_some());
+        assert!(ids.io_type.is_some());
+        assert!(ids.io_resource.is_some());
+        assert!(program.validate().is_empty());
+    }
+
+    #[test]
+    fn validator_rejects_semantic_ids_without_catalog_records() {
+        let mut program = LoweredProgram::default();
+        program.semantic_ids.copy_trait = Some(TraitId(3));
+        program.semantic_ids.io_type = Some(TypeId(4));
+        let diagnostics = program.validate();
+        assert_eq!(diagnostics.len(), 2);
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("copy trait TraitId(3)"))
+        );
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains("io type TypeId(4)"))
+        );
     }
 
     #[test]

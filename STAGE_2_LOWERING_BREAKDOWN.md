@@ -2,7 +2,7 @@
 
 ## Status and Goal
 
-**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and Stage 2.2 Steps 1-6 are complete. Stage 2.2 Step 7 is next.
+**Status:** In progress. Stage 1 is complete in commit `83b4872`; Stage 2.1 and Stage 2.2 Steps 1-7 are complete. Stage 2.2 Step 8 is next.
 
 Stage 2 will construct a complete, owned, typed IR for every runtime-relevant part of a successfully checked program. The existing LLVM backend will continue using the private legacy `TypedModule` bridge during this stage; Stage 5 will migrate the backend and remove that bridge.
 
@@ -42,7 +42,7 @@ Completed:
 - Added unit coverage for empty arena validity, dense deterministic ID allocation, and dangling-reference diagnostics.
 - Verified with `cargo fmt --all -- --check`, focused lowering tests, `cargo check --workspace`, `cargo test --workspace` (940 tests), and `git diff --check`.
 
-## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Steps 1-6 Done)
+## Stage 2.2 - Snapshot Modules, Functions, Symbols, and Type Metadata (In Progress: Steps 1-7 Done)
 
 The focused implementation sequence is maintained in [STAGE_2_2_METADATA_CATALOG_PLAN.md](STAGE_2_2_METADATA_CATALOG_PLAN.md).
 
@@ -91,6 +91,11 @@ Progress:
 - A first placement of template collection before checking perturbed the `resolved_named_types` memo and suppressed cyclic-type diagnostics; the final placement preserves acceptance behavior exactly.
 - Added focused coverage for type ordering/template compactness, trait parameters/dependencies/methods/defaults, and implementation data including negation.
 - Verified Step 6 with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (965 tests), and `git diff --check`.
+- Step 7 populated `LoweredSemanticIds` from type-checker-owned selections: standard traits, runtime subsystem types, canonical IO/reactive resources, string representation, and the entry-reactive requirement.
+- Absent subsystems remain `None` for `no_prelude` or library-only programs; no lowering code looks any name up again.
+- Validation now rejects semantic IDs without matching catalog records and checks IO/reactive resources against their selected type IDs.
+- Added focused coverage for ordinary and coroutine-imported programs, `no_prelude`, the reactive entry requirement, and invalid semantic IDs.
+- Verified Step 7 with `cargo fmt --all -- --check`, `cargo check --workspace`, focused lowering tests, `cargo test --workspace` (969 tests), and `git diff --check`.
 
 > **Complexity note:** The metadata currently lives across resolver, type-checker, ownership, reactive, and coroutine side tables. This substage may need a focused inventory plan before implementation begins.
 
