@@ -37,15 +37,35 @@ impl<T> MutateIndex (Slice T) USize T {
 pub type SliceIter T = pub ctor (slice: Slice T, index: USize)
 
 impl<T where Copy T> Iterator (SliceIter T) T {
-    def next = move SliceIter (slice, index) => match index < Slice.length slice {
-        True() => {
-            let Ref value = Slice.get_ref slice index
-            Yield (value, SliceIter (slice: slice, index: index + 1))
-        },
-        False() => Done (SliceIter (slice: slice, index: index)),
+    def next = move SliceIter (slice, index) => if (index < Slice.length slice) {
+        let Ref value = Slice.get_ref slice index
+        Yield (value, SliceIter (slice: slice, index: index + 1))
+    } else {
+        Done (SliceIter (slice: slice, index: index))
     }
 }
 
 impl<T where Copy T> IntoIterator (Slice T) (SliceIter T) {
     def into_iterator = move slice => SliceIter (slice: slice, index: 0)
+}
+
+impl<T where Eq T> Eq (Slice T) {
+    def eq = (left, right) => {
+        let length = Slice.length left
+        if (length == Slice.length right) {
+            let mut index: USize = 0
+            let mut equal: Bool = True
+            while (index < length) {
+                if (Eq.eq (Slice.get_ref left index, Slice.get_ref right index)) {
+                    index = index + 1
+                } else {
+                    equal = False
+                    break
+                }
+            }
+            equal
+        } else {
+            False
+        }
+    }
 }

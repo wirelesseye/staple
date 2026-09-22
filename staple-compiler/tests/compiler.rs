@@ -2675,6 +2675,26 @@ fn parameter_markers_must_match_explicit_function_and_trait_effects() {
 }
 
 #[test]
+fn parameter_move_markers_must_match_explicit_function_and_trait_effects() {
+    for source in [
+        "def mismatch: move I32 -> () = value => ()\n",
+        concat!(
+            "trait Consume T { consume: move T -> () }\n",
+            "impl Consume I32 { def consume = value => () }\n",
+        ),
+    ] {
+        let diagnostics = TypeChecker::new()
+            .check(resolve(source))
+            .expect_err_diagnostics("parameter `move` markers and declared ownership must match");
+        assert!(diagnostics.iter().any(|diagnostic| {
+            diagnostic
+                .message
+                .contains("parameter `move` markers declare")
+        }));
+    }
+}
+
+#[test]
 fn resource_inference_preserves_parameter_declared_mutation() {
     let module = type_check(concat!(
         "type Clock = ctor I32\n",
@@ -3096,6 +3116,51 @@ fn iterates_slices_through_the_standard_library_implementations() {
     CodeGenerator::new(&context)
         .compile_module(&lower(&module))
         .expect("slice iteration should use the standard-library implementation");
+}
+
+#[test]
+fn compares_slices_and_strings_through_the_standard_library_eq_implementations() {
+    let module = type_check(concat!(
+        "use std.slice.Slice\n",
+        "let first: Ref (I32; 3) = Ref (1, 2, 3)\n",
+        "let same: Ref (I32; 3) = Ref (1, 2, 3)\n",
+        "let different: Ref (I32; 3) = Ref (1, 2, 4)\n",
+        "let shorter: Ref (I32; 2) = Ref (1, 2)\n",
+        "let left: Slice I32 = first\n",
+        "let right: Slice I32 = same\n",
+        "let other: Slice I32 = different\n",
+        "let short: Slice I32 = shorter\n",
+        "let same_values: Bool = left == right\n",
+        "let different_values: Bool = left != other\n",
+        "let different_lengths: Bool = left != short\n",
+        "def generic_equal: <T where Eq T> (Slice T, Slice T) -> Bool = (x, y) => x == y\n",
+        "let generic: Bool = generic_equal (left, right)\n",
+        "let first_text: String = \"staple\"\n",
+        "let second_text: String = \"staple\"\n",
+        "let other_text: String = \"staples\"\n",
+        "let same_text: Bool = first_text == second_text\n",
+        "let different_text: Bool = first_text != other_text\n",
+    ));
+    let context = Context::create();
+    CodeGenerator::new(&context)
+        .compile_module(&module)
+        .expect("slice and string equality should use the standard-library implementations");
+}
+
+#[test]
+fn rejects_slice_equality_when_the_element_is_not_eq() {
+    let diagnostics = TypeChecker::new()
+        .check(resolve(concat!(
+            "use std.slice.Slice\n",
+            "use std.cinterop.CString\n",
+            "def invalid: (Slice CString, Slice CString) -> Bool = (left, right) => left == right\n",
+        )))
+        .expect_err_diagnostics("a slice of a non-Eq element must not be comparable");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.message.contains("no trait implementation"))
+    );
 }
 
 #[test]
@@ -7534,7 +7599,7 @@ fn expands_standard_for_over_ranges_and_product_iterators() {
     let module = type_check(concat!(
         "pub type PairIterator = pub ctor (current: I32, end: I32)\n",
         "impl Iterator PairIterator (I32, I32) {\n",
-        "  def next = PairIterator (current, end) => match current < end {\n",
+        "  def next = move PairIterator (current, end) => match current < end {\n",
         "    True() => IterStep.Yield ((current, current + 10), PairIterator (current + 1, end)),\n",
         "    False() => IterStep.Done (PairIterator (current, end)),\n",
         "  }\n",

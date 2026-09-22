@@ -34,3 +34,7 @@ companion String {
 impl Add String {
     def add = (left, right) => __string_add (left, right)
 }
+
+impl Eq String {
+    def eq = (left, right) => Eq.eq (String.bytes left, String.bytes right)
+}
