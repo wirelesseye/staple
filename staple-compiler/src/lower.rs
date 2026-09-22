@@ -1777,7 +1777,8 @@ impl LoweredProgram {
             .cloned()
             .unwrap_or_default();
         let coercion = module.coercion_for(syntax.id).cloned();
-        let moved_symbols = module.moved_symbols(syntax.id).collect();
+        let mut moved_symbols = module.moved_symbols(syntax.id).collect::<Vec<_>>();
+        moved_symbols.sort_by_key(|symbol| symbol.0);
         let kind = match expression {
             Expression::Block(block) => {
                 LoweredExpressionKind::Block(self.lower_block(module, block)?)
